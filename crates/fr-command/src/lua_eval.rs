@@ -2768,6 +2768,16 @@ impl<'a> LuaState<'a> {
         }
         globals.insert("cjson".to_string(), LuaValue::Table(cjson_table));
 
+        // cmsgpack library bundled with Redis' Lua sandbox.
+        let cmsgpack_table = LuaTable::new();
+        for name in &["pack", "unpack", "unpack_one", "unpack_limit"] {
+            cmsgpack_table.set(
+                LuaValue::Str(name.as_bytes().to_vec()),
+                LuaValue::RustFunction(format!("cmsgpack.{name}")),
+            );
+        }
+        globals.insert("cmsgpack".to_string(), LuaValue::Table(cmsgpack_table));
+
         // (frankenredis-vgnsc) Standard Lua 5.1 globals also exposed in
         // Redis 7.2.4's sandbox: _VERSION constant, rawequal /
         // gcinfo / collectgarbage function entries. fr's tree-walking
@@ -7874,6 +7884,51 @@ impl<'a> LuaState<'a> {
                 };
                 Ok(vec![val])
             }
+            "cmsgpack.pack" => {
+                let inv = self.current_invocation_name.as_deref();
+                if args.is_empty() {
+                    return Err(lua_format_argerror(
+                        inv,
+                        "pack",
+                        0,
+                        "MessagePack pack needs input.",
+                    ));
+                }
+                let mut out = Vec::new();
+                for value in args.iter() {
+                    cmsgpack_pack_value(value, &mut out, 0).map_err(|e| {
+                        if inv.is_some() {
+                            format!("user_script:1: {e}")
+                        } else {
+                            e
+                        }
+                    })?;
+                }
+                Ok(vec![LuaValue::Str(out)])
+            }
+            "cmsgpack.unpack" => {
+                let inv = self.current_invocation_name.as_deref();
+                let data = lua_check_string(inv, args, 0, "unpack")?;
+                cmsgpack_unpack_values(&data, 0, usize::MAX, false)
+            }
+            "cmsgpack.unpack_one" => {
+                let inv = self.current_invocation_name.as_deref();
+                let data = lua_check_string(inv, args, 0, "unpack_one")?;
+                let offset = lua_optional_integer_arg(inv, 2, args.get(1), 0)?;
+                cmsgpack_unpack_with_offset(&data, offset, 1)
+            }
+            "cmsgpack.unpack_limit" => {
+                let inv = self.current_invocation_name.as_deref();
+                let data = lua_check_string(inv, args, 0, "unpack_limit")?;
+                let limit = match args.get(1) {
+                    Some(value) => lua_required_integer_arg(inv, 2, value)?,
+                    None => {
+                        return Err(lua_bad_number_arg(inv, 2, None));
+                    }
+                };
+                let offset = lua_optional_integer_arg(inv, 3, args.get(2), 0)?;
+                cmsgpack_unpack_with_offset(&data, offset, limit)
+            }
             // (frankenredis-u24vv) `_G` metatable handlers. These are
             // never user-callable directly; they fire when scripts
             // read/write missing keys on `_G`, mirroring the protected
@@ -9907,7 +9962,339 @@ fn lua_fmt_g(n: f64, prec: usize, upper: bool) -> String {
     }
 }
 
-// ── cjson helpers ───────────────────────────────────────────────────────
+// ── cmsgpack / cjson helpers ────────────────────────────────────────────
+
+fn cmsgpack_pack_value(value: &LuaValue, out: &mut Vec<u8>, depth: usize) -> Result<(), String> {
+    if depth >= 16 {
+        out.push(0xc0);
+        return Ok(());
+    }
+    match value {
+        LuaValue::Nil
+        | LuaValue::Function(_)
+        | LuaValue::RustFunction(_)
+        | LuaValue::Coroutine(_)
+        | LuaValue::WrappedCoroutine(_) => out.push(0xc0),
+        LuaValue::Bool(false) => out.push(0xc2),
+        LuaValue::Bool(true) => out.push(0xc3),
+        LuaValue::Number(n) => cmsgpack_pack_number(*n, out),
+        LuaValue::Str(bytes) => cmsgpack_pack_bytes(bytes, out),
+        LuaValue::Table(table) => cmsgpack_pack_table(table, out, depth + 1)?,
+    }
+    Ok(())
+}
+
+fn cmsgpack_pack_number(n: f64, out: &mut Vec<u8>) {
+    if n.is_finite()
+        && n.fract() == 0.0
+        && n >= i64::MIN as f64
+        && n <= i64::MAX as f64
+    {
+        cmsgpack_pack_int(n as i64, out);
+    } else {
+        out.push(0xcb);
+        out.extend_from_slice(&n.to_bits().to_be_bytes());
+    }
+}
+
+fn cmsgpack_pack_int(n: i64, out: &mut Vec<u8>) {
+    if (0..=0x7f).contains(&n) {
+        out.push(n as u8);
+    } else if (-32..=-1).contains(&n) {
+        out.push(n as i8 as u8);
+    } else if (i8::MIN as i64..=i8::MAX as i64).contains(&n) {
+        out.push(0xd0);
+        out.push(n as i8 as u8);
+    } else if (i16::MIN as i64..=i16::MAX as i64).contains(&n) {
+        out.push(0xd1);
+        out.extend_from_slice(&(n as i16).to_be_bytes());
+    } else if (i32::MIN as i64..=i32::MAX as i64).contains(&n) {
+        out.push(0xd2);
+        out.extend_from_slice(&(n as i32).to_be_bytes());
+    } else {
+        out.push(0xd3);
+        out.extend_from_slice(&n.to_be_bytes());
+    }
+}
+
+fn cmsgpack_pack_len(prefix_fix: u8, op16: u8, op32: u8, len: usize, out: &mut Vec<u8>) {
+    if len <= 15 && (prefix_fix == 0x90 || prefix_fix == 0x80) {
+        out.push(prefix_fix | len as u8);
+    } else if len <= u16::MAX as usize {
+        out.push(op16);
+        out.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        out.push(op32);
+        out.extend_from_slice(&(len as u32).to_be_bytes());
+    }
+}
+
+fn cmsgpack_pack_bytes(bytes: &[u8], out: &mut Vec<u8>) {
+    let len = bytes.len();
+    if len <= 31 {
+        out.push(0xa0 | len as u8);
+    } else if len <= u8::MAX as usize {
+        out.push(0xd9);
+        out.push(len as u8);
+    } else if len <= u16::MAX as usize {
+        out.push(0xda);
+        out.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        out.push(0xdb);
+        out.extend_from_slice(&(len as u32).to_be_bytes());
+    }
+    out.extend_from_slice(bytes);
+}
+
+fn cmsgpack_pack_table(table: &LuaTable, out: &mut Vec<u8>, depth: usize) -> Result<(), String> {
+    let (array_values, map_pairs) = cmsgpack_table_shape(table);
+    if let Some(values) = array_values {
+        cmsgpack_pack_len(0x90, 0xdc, 0xdd, values.len(), out);
+        for value in values {
+            cmsgpack_pack_value(&value, out, depth)?;
+        }
+    } else {
+        cmsgpack_pack_len(0x80, 0xde, 0xdf, map_pairs.len(), out);
+        for (key, value) in map_pairs {
+            cmsgpack_pack_value(&key, out, depth)?;
+            cmsgpack_pack_value(&value, out, depth)?;
+        }
+    }
+    Ok(())
+}
+
+fn cmsgpack_table_shape(table: &LuaTable) -> (Option<Vec<LuaValue>>, Vec<(LuaValue, LuaValue)>) {
+    let inner = table.inner.borrow();
+    let mut numeric_values: std::collections::HashMap<i64, LuaValue> =
+        std::collections::HashMap::new();
+    let mut count = 0_i64;
+    let mut max = 0_i64;
+    let mut all_positive_integer_keys = true;
+
+    for (idx, value) in inner.array.iter().enumerate() {
+        if matches!(value, LuaValue::Nil) {
+            continue;
+        }
+        let key = (idx + 1) as i64;
+        numeric_values.insert(key, value.clone());
+        count += 1;
+        max = max.max(key);
+    }
+    let hash_pairs = inner.hash_pairs();
+    drop(inner);
+
+    for (key, value) in &hash_pairs {
+        match key {
+            LuaValue::Number(n)
+                if n.is_finite()
+                    && *n > 0.0
+                    && *n == (*n as i64) as f64 =>
+            {
+                let key = *n as i64;
+                numeric_values.insert(key, value.clone());
+                count += 1;
+                max = max.max(key);
+            }
+            _ => {
+                all_positive_integer_keys = false;
+                break;
+            }
+        }
+    }
+
+    if all_positive_integer_keys && max == count {
+        let mut values = Vec::with_capacity(max as usize);
+        for idx in 1..=max {
+            values.push(
+                numeric_values
+                    .remove(&idx)
+                    .unwrap_or(LuaValue::Nil),
+            );
+        }
+        return (Some(values), Vec::new());
+    }
+
+    let inner = table.inner.borrow();
+    let mut pairs = Vec::new();
+    for (idx, value) in inner.array.iter().enumerate() {
+        if !matches!(value, LuaValue::Nil) {
+            pairs.push((LuaValue::Number((idx + 1) as f64), value.clone()));
+        }
+    }
+    drop(inner);
+    pairs.extend(hash_pairs);
+    (None, pairs)
+}
+
+fn cmsgpack_unpack_values(
+    data: &[u8],
+    offset: usize,
+    limit: usize,
+    include_offset: bool,
+) -> Result<Vec<LuaValue>, String> {
+    let mut cursor = MsgpackCursor::new(data, offset)?;
+    let mut values = Vec::new();
+    while !cursor.is_eof() && values.len() < limit {
+        values.push(cursor.decode_value()?);
+    }
+    if include_offset {
+        let next = if cursor.is_eof() { -1.0 } else { cursor.pos as f64 };
+        values.insert(0, LuaValue::Number(next));
+    }
+    Ok(values)
+}
+
+fn cmsgpack_unpack_with_offset(
+    data: &[u8],
+    offset: i64,
+    limit: i64,
+) -> Result<Vec<LuaValue>, String> {
+    if offset < 0 || limit < 0 {
+        return Err(format!(
+            "Invalid request to unpack with offset of {offset} and limit of {}.",
+            data.len()
+        ));
+    }
+    let offset = offset as usize;
+    if offset > data.len() {
+        return Err(format!(
+            "Start offset {offset} greater than input length {}.",
+            data.len()
+        ));
+    }
+    cmsgpack_unpack_values(data, offset, limit as usize, true)
+}
+
+struct MsgpackCursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> MsgpackCursor<'a> {
+    fn new(data: &'a [u8], offset: usize) -> Result<Self, String> {
+        if offset > data.len() {
+            return Err(format!(
+                "Start offset {offset} greater than input length {}.",
+                data.len()
+            ));
+        }
+        Ok(Self { data, pos: offset })
+    }
+
+    fn is_eof(&self) -> bool {
+        self.pos >= self.data.len()
+    }
+
+    fn read_u8(&mut self) -> Result<u8, String> {
+        let Some(value) = self.data.get(self.pos).copied() else {
+            return Err("Missing bytes in input.".to_string());
+        };
+        self.pos += 1;
+        Ok(value)
+    }
+
+    fn read_exact(&mut self, len: usize) -> Result<&'a [u8], String> {
+        let end = self.pos.saturating_add(len);
+        let Some(slice) = self.data.get(self.pos..end) else {
+            return Err("Missing bytes in input.".to_string());
+        };
+        self.pos = end;
+        Ok(slice)
+    }
+
+    fn read_u16(&mut self) -> Result<u16, String> {
+        let bytes = self.read_exact(2)?;
+        Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn read_u32(&mut self) -> Result<u32, String> {
+        let bytes = self.read_exact(4)?;
+        Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn read_u64(&mut self) -> Result<u64, String> {
+        let bytes = self.read_exact(8)?;
+        Ok(u64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+
+    fn decode_value(&mut self) -> Result<LuaValue, String> {
+        let tag = self.read_u8()?;
+        match tag {
+            0x00..=0x7f => Ok(LuaValue::Number(tag as f64)),
+            0xe0..=0xff => Ok(LuaValue::Number((tag as i8) as f64)),
+            0xc0 => Ok(LuaValue::Nil),
+            0xc2 => Ok(LuaValue::Bool(false)),
+            0xc3 => Ok(LuaValue::Bool(true)),
+            0xcc => Ok(LuaValue::Number(self.read_u8()? as f64)),
+            0xcd => Ok(LuaValue::Number(self.read_u16()? as f64)),
+            0xce => Ok(LuaValue::Number(self.read_u32()? as f64)),
+            0xcf => Ok(LuaValue::Number(self.read_u64()? as f64)),
+            0xd0 => Ok(LuaValue::Number((self.read_u8()? as i8) as f64)),
+            0xd1 => Ok(LuaValue::Number((self.read_u16()? as i16) as f64)),
+            0xd2 => Ok(LuaValue::Number((self.read_u32()? as i32) as f64)),
+            0xd3 => Ok(LuaValue::Number((self.read_u64()? as i64) as f64)),
+            0xca => Ok(LuaValue::Number(f32::from_bits(self.read_u32()?) as f64)),
+            0xcb => Ok(LuaValue::Number(f64::from_bits(self.read_u64()?))),
+            0xd9 => {
+                let len = self.read_u8()? as usize;
+                self.decode_bytes(len)
+            }
+            0xda => {
+                let len = self.read_u16()? as usize;
+                self.decode_bytes(len)
+            }
+            0xdb => {
+                let len = self.read_u32()? as usize;
+                self.decode_bytes(len)
+            }
+            0xdc => {
+                let len = self.read_u16()? as usize;
+                self.decode_array(len)
+            }
+            0xdd => {
+                let len = self.read_u32()? as usize;
+                self.decode_array(len)
+            }
+            0xde => {
+                let len = self.read_u16()? as usize;
+                self.decode_map(len)
+            }
+            0xdf => {
+                let len = self.read_u32()? as usize;
+                self.decode_map(len)
+            }
+            tag if (tag & 0xe0) == 0xa0 => self.decode_bytes((tag & 0x1f) as usize),
+            tag if (tag & 0xf0) == 0x90 => self.decode_array((tag & 0x0f) as usize),
+            tag if (tag & 0xf0) == 0x80 => self.decode_map((tag & 0x0f) as usize),
+            _ => Err("Bad data format in input.".to_string()),
+        }
+    }
+
+    fn decode_bytes(&mut self, len: usize) -> Result<LuaValue, String> {
+        Ok(LuaValue::Str(self.read_exact(len)?.to_vec()))
+    }
+
+    fn decode_array(&mut self, len: usize) -> Result<LuaValue, String> {
+        let table = LuaTable::new();
+        for _ in 0..len {
+            table.inner.borrow_mut().array.push(self.decode_value()?);
+        }
+        Ok(LuaValue::Table(table))
+    }
+
+    fn decode_map(&mut self, len: usize) -> Result<LuaValue, String> {
+        let table = LuaTable::new();
+        for _ in 0..len {
+            let key = self.decode_value()?;
+            let value = self.decode_value()?;
+            table.set(key, value);
+        }
+        Ok(LuaValue::Table(table))
+    }
+}
 
 fn json_escape_bytes(bytes: &[u8]) -> String {
     let s = String::from_utf8_lossy(bytes);
@@ -14068,6 +14455,69 @@ mod tests {
         )
         .expect("valid nested json still decodes");
         assert_eq!(frame, RespFrame::BulkString(Some(b"/".to_vec())));
+    }
+
+    #[test]
+    fn lua_cmsgpack_pack_unpack_roundtrips_7gtvz() {
+        // (frankenredis-7gtvz) Redis exposes bundled lua-cmsgpack in
+        // the Lua sandbox. Pin the public table plus core MessagePack
+        // stream, array, map, and offset-unpack behavior.
+        let mut store = Store::new();
+
+        let frame = eval_script(
+            b"return type(cmsgpack)..':'..type(cmsgpack.pack)..':'..type(cmsgpack.unpack)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"table:function:function".to_vec()))
+        );
+
+        let frame = eval_script(
+            b"return string.byte(cmsgpack.pack(1), 1)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::Integer(1));
+
+        let frame = eval_script(
+            b"local t=cmsgpack.unpack(cmsgpack.pack({1,2,3})); return cjson.encode(t)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"[1,2,3]".to_vec())));
+
+        let frame = eval_script(
+            b"local m=cmsgpack.unpack(cmsgpack.pack({a='x', b=2})); return m.a..':'..m.b",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"x:2".to_vec())));
+
+        let frame = eval_script(
+            b"local a,b,c=cmsgpack.unpack(cmsgpack.pack(1,'x',true)); return tostring(a)..':'..b..':'..tostring(c)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"1:x:true".to_vec())));
+
+        let frame = eval_script(
+            b"local off,v=cmsgpack.unpack_one(cmsgpack.pack(1,2)); return tostring(off)..':'..tostring(v)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"1:1".to_vec())));
+
+        let frame = eval_script(
+            b"local ok,e=pcall(cmsgpack.unpack, string.char(0xc1)); return tostring(e)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"Bad data format in input.".to_vec()))
+        );
     }
 
     #[test]
