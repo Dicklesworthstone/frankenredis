@@ -10128,8 +10128,14 @@ fn cmsgpack_pack_number(n: f64, out: &mut Vec<u8>) {
     {
         cmsgpack_pack_int(n as i64, out);
     } else {
-        out.push(0xcb);
-        out.extend_from_slice(&n.to_bits().to_be_bytes());
+        let f = n as f32;
+        if n == f as f64 {
+            out.push(0xca);
+            out.extend_from_slice(&f.to_bits().to_be_bytes());
+        } else {
+            out.push(0xcb);
+            out.extend_from_slice(&n.to_bits().to_be_bytes());
+        }
     }
 }
 
@@ -15084,6 +15090,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"207:9".to_vec())));
+
+        let frame = eval_script(
+            b"local a=cmsgpack.pack(1.5); local b=cmsgpack.pack(1.1); local c=cmsgpack.pack(math.huge); return tostring(string.byte(a,1))..':'..tostring(#a)..':'..tostring(string.byte(b,1))..':'..tostring(#b)..':'..tostring(string.byte(c,1))..':'..tostring(#c)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"202:5:203:9:202:5".to_vec()))
+        );
 
         let frame = eval_script(
             b"local t=cmsgpack.unpack(cmsgpack.pack({1,2,3})); return cjson.encode(t)",
