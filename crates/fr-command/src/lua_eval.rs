@@ -31,10 +31,53 @@ pub enum LuaValue {
     WrappedCoroutine(LuaCoroutine),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug)]
 pub enum LuaUserdata {
     CjsonNull,
+    Proxy(LuaProxy),
 }
+
+#[derive(Clone, Debug)]
+pub struct LuaProxy {
+    identity: u64,
+    metatable: Option<LuaTable>,
+}
+
+impl LuaProxy {
+    fn new(metatable: Option<LuaTable>) -> Self {
+        Self {
+            identity: next_userdata_identity(),
+            metatable,
+        }
+    }
+}
+
+fn next_userdata_identity() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+impl std::hash::Hash for LuaUserdata {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            LuaUserdata::CjsonNull => "cjson-null".hash(state),
+            LuaUserdata::Proxy(proxy) => proxy.identity.hash(state),
+        }
+    }
+}
+
+impl PartialEq for LuaUserdata {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (LuaUserdata::CjsonNull, LuaUserdata::CjsonNull) => true,
+            (LuaUserdata::Proxy(a), LuaUserdata::Proxy(b)) => a.identity == b.identity,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for LuaUserdata {}
 
 #[derive(Clone, Debug)]
 pub struct LuaTable {
@@ -768,6 +811,9 @@ impl LuaValue {
                 format!("function: 0x{addr:014x}").into_bytes()
             }
             LuaValue::Userdata(LuaUserdata::CjsonNull) => b"userdata: (nil)".to_vec(),
+            LuaValue::Userdata(LuaUserdata::Proxy(proxy)) => {
+                format!("userdata: 0x{:014x}", proxy.identity).into_bytes()
+            }
             LuaValue::Coroutine(co) => {
                 let addr = Rc::as_ptr(&co.inner) as usize;
                 format!("thread: 0x{addr:014x}").into_bytes()
@@ -2670,6 +2716,7 @@ impl<'a> LuaState<'a> {
             // handler is kept for any internal callers but is not bound.
             "setmetatable",
             "getmetatable",
+            "newproxy",
             "getfenv",
             "setfenv",
             "assert",
@@ -5355,25 +5402,31 @@ impl<'a> LuaState<'a> {
                         ));
                     }
                 };
-                if let LuaValue::Table(t) = &val {
-                    let handler = {
+                let handler = match &val {
+                    LuaValue::Table(t) => {
                         let inner = t.inner.borrow();
                         inner
                             .metatable
                             .as_ref()
                             .map(|mt| mt.get(&LuaValue::Str(b"__tostring".to_vec())))
                             .unwrap_or(LuaValue::Nil)
-                    };
-                    if !matches!(handler, LuaValue::Nil) {
-                        let mut meta_args = vec![val.clone()];
-                        let results = self.call_function(
-                            &handler,
-                            &mut meta_args,
-                            env,
-                            &mut Vec::new(),
-                        )?;
-                        return Ok(vec![results.into_iter().next().unwrap_or(LuaValue::Nil)]);
                     }
+                    LuaValue::Userdata(LuaUserdata::Proxy(proxy)) => proxy
+                        .metatable
+                        .as_ref()
+                        .map(|mt| mt.get(&LuaValue::Str(b"__tostring".to_vec())))
+                        .unwrap_or(LuaValue::Nil),
+                    _ => LuaValue::Nil,
+                };
+                if !matches!(handler, LuaValue::Nil) {
+                    let mut meta_args = vec![val.clone()];
+                    let results = self.call_function(
+                        &handler,
+                        &mut meta_args,
+                        env,
+                        &mut Vec::new(),
+                    )?;
+                    return Ok(vec![results.into_iter().next().unwrap_or(LuaValue::Nil)]);
                 }
                 Ok(vec![LuaValue::Str(val.to_display_string())])
             }
@@ -6161,6 +6214,32 @@ impl<'a> LuaState<'a> {
                 }
                 Ok(vec![table])
             }
+            "newproxy" => {
+                let metatable = match args.first() {
+                    None | Some(LuaValue::Nil) | Some(LuaValue::Bool(false)) => None,
+                    Some(LuaValue::Bool(true)) => Some(LuaTable::new()),
+                    Some(LuaValue::Userdata(LuaUserdata::Proxy(proxy))) => {
+                        let Some(mt) = &proxy.metatable else {
+                            return Err(self.format_builtin_argerror(
+                                "newproxy",
+                                1,
+                                "boolean or proxy expected",
+                            ));
+                        };
+                        Some(mt.clone())
+                    }
+                    _ => {
+                        return Err(self.format_builtin_argerror(
+                            "newproxy",
+                            1,
+                            "boolean or proxy expected",
+                        ));
+                    }
+                };
+                Ok(vec![LuaValue::Userdata(LuaUserdata::Proxy(LuaProxy::new(
+                    metatable,
+                )))])
+            }
             "getmetatable" => {
                 // (frankenredis-nf29w) Lua 5.1 luaB_getmetatable calls
                 // luaL_checkany so a zero-arg call raises
@@ -6195,6 +6274,20 @@ impl<'a> LuaState<'a> {
                             None => Ok(vec![LuaValue::Nil]),
                         }
                     }
+                    LuaValue::Userdata(LuaUserdata::Proxy(proxy)) => match &proxy.metatable {
+                        Some(mt) => {
+                            let masked = mt
+                                .inner
+                                .borrow()
+                                .get(&LuaValue::Str(b"__metatable".to_vec()));
+                            if matches!(masked, LuaValue::Nil) {
+                                Ok(vec![LuaValue::Table(mt.clone())])
+                            } else {
+                                Ok(vec![masked])
+                            }
+                        }
+                        None => Ok(vec![LuaValue::Nil]),
+                    },
                     _ => Ok(vec![LuaValue::Nil]),
                 }
             }
@@ -10638,6 +10731,9 @@ fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
             Err("Cannot serialise function: type not supported".to_string())
         }
         LuaValue::Userdata(LuaUserdata::CjsonNull) => Ok("null".to_string()),
+        LuaValue::Userdata(LuaUserdata::Proxy(_)) => {
+            Err("Cannot serialise userdata: type not supported".to_string())
+        }
         LuaValue::Coroutine(_) | LuaValue::WrappedCoroutine(_) => {
             Err("Cannot serialise thread: type not supported".to_string())
         }
@@ -14573,6 +14669,50 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"{\"a\":null}".to_vec())));
+    }
+
+    #[test]
+    fn lua_newproxy_userdata_metatable_surface_2wn7j() {
+        // (frankenredis-2wn7j) Redis exposes Lua 5.1's newproxy helper.
+        // It creates userdata proxies, optionally with a fresh metatable
+        // or with the metatable copied from an existing valid proxy.
+        let mut store = Store::new();
+
+        let frame = eval_script(
+            b"return type(newproxy)..':'..type(newproxy())..':'..tostring(getmetatable(newproxy()) == nil)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"function:userdata:true".to_vec()))
+        );
+
+        let frame = eval_script(
+            b"local u=newproxy(true); local mt=getmetatable(u); rawset(mt, 'answer', 42); return type(mt)..':'..tostring(getmetatable(u).answer)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"table:42".to_vec())));
+
+        let frame = eval_script(
+            b"local u=newproxy(true); rawset(getmetatable(u), '__tostring', function() return 'proxy' end); local v=newproxy(u); return tostring(v)..':'..tostring(u==v)..':'..tostring(getmetatable(u)==getmetatable(v))",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"proxy:false:true".to_vec())));
+
+        let frame = eval_script(
+            b"local ok,e=pcall(newproxy, {}); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #1 to '?' (boolean or proxy expected)".to_vec()
+            ))
+        );
     }
 
     #[test]
