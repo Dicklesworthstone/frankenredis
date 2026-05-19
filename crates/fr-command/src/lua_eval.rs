@@ -10134,17 +10134,31 @@ fn cmsgpack_pack_number(n: f64, out: &mut Vec<u8>) {
 }
 
 fn cmsgpack_pack_int(n: i64, out: &mut Vec<u8>) {
-    if (0..=0x7f).contains(&n) {
-        out.push(n as u8);
+    if n >= 0 {
+        if n <= 0x7f {
+            out.push(n as u8);
+        } else if n <= u8::MAX as i64 {
+            out.push(0xcc);
+            out.push(n as u8);
+        } else if n <= u16::MAX as i64 {
+            out.push(0xcd);
+            out.extend_from_slice(&(n as u16).to_be_bytes());
+        } else if n <= u32::MAX as i64 {
+            out.push(0xce);
+            out.extend_from_slice(&(n as u32).to_be_bytes());
+        } else {
+            out.push(0xcf);
+            out.extend_from_slice(&(n as u64).to_be_bytes());
+        }
     } else if (-32..=-1).contains(&n) {
         out.push(n as i8 as u8);
-    } else if (i8::MIN as i64..=i8::MAX as i64).contains(&n) {
+    } else if n >= i8::MIN as i64 {
         out.push(0xd0);
         out.push(n as i8 as u8);
-    } else if (i16::MIN as i64..=i16::MAX as i64).contains(&n) {
+    } else if n >= i16::MIN as i64 {
         out.push(0xd1);
         out.extend_from_slice(&(n as i16).to_be_bytes());
-    } else if (i32::MIN as i64..=i32::MAX as i64).contains(&n) {
+    } else if n >= i32::MIN as i64 {
         out.push(0xd2);
         out.extend_from_slice(&(n as i32).to_be_bytes());
     } else {
@@ -15037,6 +15051,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::Integer(1));
+
+        let frame = eval_script(
+            b"local p=cmsgpack.pack(128); local a,b=string.byte(p,1,2); return tostring(a)..':'..tostring(b)..':'..tostring(#p)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"204:128:2".to_vec())));
+
+        let frame = eval_script(
+            b"local p=cmsgpack.pack(65536); local a,b,c,d,e=string.byte(p,1,5); return tostring(a)..':'..tostring(b)..':'..tostring(c)..':'..tostring(d)..':'..tostring(e)..':'..tostring(#p)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"206:0:1:0:0:5".to_vec()))
+        );
+
+        let frame = eval_script(
+            b"local p=cmsgpack.pack(4294967296); return tostring(string.byte(p,1))..':'..tostring(#p)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"207:9".to_vec())));
 
         let frame = eval_script(
             b"local t=cmsgpack.unpack(cmsgpack.pack({1,2,3})); return cjson.encode(t)",
