@@ -10929,9 +10929,9 @@ fn lua_struct_get_integer(bytes: &[u8], endian: LuaStructEndian, is_signed: bool
 }
 
 fn lua_struct_number_to_size(n: f64) -> usize {
-    if !n.is_finite() || n <= 0.0 {
+    if !n.is_finite() || n == 0.0 {
         0
-    } else if n >= usize::MAX as f64 {
+    } else if n < 0.0 || n >= usize::MAX as f64 {
         usize::MAX
     } else {
         n as usize
@@ -15135,6 +15135,18 @@ mod tests {
             frame,
             RespFrame::BulkString(Some(
                 b"false:bad argument #1 to '?' (option 's' has no fixed size)".to_vec()
+            ))
+        );
+
+        let frame = eval_script(
+            b"local ok,e=pcall(struct.unpack, 'bc0', string.char(255)); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #2 to '?' (data string too short)".to_vec()
             ))
         );
     }
