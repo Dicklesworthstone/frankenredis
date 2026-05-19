@@ -9422,7 +9422,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<(), StoreError> {
         let mut merged = vec![0u8; HLL_REGISTERS];
-        let mut dest_encoding = HllEncoding::Sparse;
+        let mut saw_dense_input = false;
 
         // Include dest if it already holds an HLL, and preserve its TTL
         self.drop_if_expired(dest, now_ms);
@@ -9431,7 +9431,7 @@ impl Store {
             match &entry.value {
                 Value::String(data) => {
                     let (encoding, registers) = hll_parse(data)?;
-                    dest_encoding = encoding;
+                    saw_dense_input |= encoding == HllEncoding::Dense;
                     for i in 0..HLL_REGISTERS {
                         merged[i] = merged[i].max(registers[i]);
                     }
@@ -9446,7 +9446,8 @@ impl Store {
             if let Some(entry) = self.entries.get(src) {
                 match &entry.value {
                     Value::String(data) => {
-                        let registers = hll_parse_registers(data)?;
+                        let (encoding, registers) = hll_parse(data)?;
+                        saw_dense_input |= encoding == HllEncoding::Dense;
                         for i in 0..HLL_REGISTERS {
                             merged[i] = merged[i].max(registers[i]);
                         }
@@ -9456,12 +9457,12 @@ impl Store {
             }
         }
 
-        let dest_encoding = match dest_encoding {
-            HllEncoding::Dense => HllEncoding::Dense,
-            HllEncoding::Sparse if hll_sparse_should_promote(&merged, self.hll_sparse_max_bytes) => {
-                HllEncoding::Dense
-            }
-            HllEncoding::Sparse => HllEncoding::Sparse,
+        let dest_encoding = if saw_dense_input
+            || hll_sparse_should_promote(&merged, self.hll_sparse_max_bytes)
+        {
+            HllEncoding::Dense
+        } else {
+            HllEncoding::Sparse
         };
         let data = hll_encode(&merged, dest_encoding);
         let mut entry = Entry::new(Value::String(data), existing_ttl, now_ms);
@@ -20112,6 +20113,34 @@ mod tests {
         store.pfmerge(b"merged", &[b"h1", b"h2"], 0).unwrap();
         let count = store.pfcount(&[b"merged"], 0).unwrap();
         assert!((90..=110).contains(&count), "count={count}, expected ~100");
+    }
+
+    #[test]
+    fn pfmerge_uses_dense_encoding_when_any_source_is_dense() {
+        let mut store = Store::new();
+        store.pfadd(b"dense_src", &[b"a".to_vec()], 0).unwrap();
+        assert_eq!(
+            store.hll_debug_todense(b"dense_src", 0).unwrap(),
+            Some(true)
+        );
+        store.pfadd(b"sparse_src", &[b"b".to_vec()], 0).unwrap();
+        assert_eq!(
+            store.hll_debug_encoding(b"dense_src", 0).unwrap(),
+            Some("dense")
+        );
+        assert_eq!(
+            store.hll_debug_encoding(b"sparse_src", 0).unwrap(),
+            Some("sparse")
+        );
+
+        store
+            .pfmerge(b"merged", &[b"sparse_src", b"dense_src"], 0)
+            .unwrap();
+
+        assert_eq!(
+            store.hll_debug_encoding(b"merged", 0).unwrap(),
+            Some("dense")
+        );
     }
 
     #[test]
