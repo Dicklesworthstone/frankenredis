@@ -2,12 +2,13 @@
 //! connect via TCP, send RESP commands, and verify responses.
 //! Tests the actual networking stack including RESP framing.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -318,6 +319,99 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
     path
 }
 
+/// Counting semaphore bounding how many tests may hold spawned server
+/// processes at the same time.
+///
+/// `cargo test` runs all of this binary's tests on parallel libtest
+/// threads. Each test spawns 1-4 child server processes (frankenredis
+/// and/or legacy redis). On a contended host — e.g. a workspace test run
+/// sharing the box with other builds — dozens of tests * up to 4 servers
+/// oversubscribes the CPU badly enough that blocking / pub-sub /
+/// replication interactions miss their timing windows: a starved server
+/// fails to deliver a pushed reply inside the 20s read deadline, or a
+/// peer connection is reset. That is the residual flake behind
+/// frankenredis-vcv8o (the earlier `reserve_port` rewrite already removed
+/// the distinct port-collision class).
+///
+/// Capping concurrency makes the suite deterministic: only a bounded
+/// number of tests run their server-bound work at once, the rest block at
+/// their first `ManagedChild::spawn`.
+struct ServerSlots {
+    available: Mutex<usize>,
+    released: Condvar,
+}
+
+impl ServerSlots {
+    fn acquire(&self) {
+        let mut available = self.available.lock().expect("server-slot mutex poisoned");
+        while *available == 0 {
+            available = self
+                .released
+                .wait(available)
+                .expect("server-slot condvar poisoned");
+        }
+        *available -= 1;
+    }
+
+    fn release(&self) {
+        let mut available = self.available.lock().expect("server-slot mutex poisoned");
+        *available += 1;
+        self.released.notify_one();
+    }
+}
+
+fn server_slots() -> &'static ServerSlots {
+    static SLOTS: OnceLock<ServerSlots> = OnceLock::new();
+    SLOTS.get_or_init(|| {
+        let parallelism = thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(4);
+        // Keep the suite parallel enough to stay fast, but far below the
+        // point where test threads plus their servers oversubscribe the
+        // host. The flake was only ever observed above ~16-way real
+        // concurrency; a cap of <=6 server-bound tests stays well clear.
+        let cap = (parallelism / 8).clamp(2, 6);
+        ServerSlots {
+            available: Mutex::new(cap),
+            released: Condvar::new(),
+        }
+    })
+}
+
+thread_local! {
+    /// Number of live `ManagedChild` server processes the currently
+    /// running test still holds.
+    static LIVE_SERVERS: Cell<usize> = const { Cell::new(0) };
+    /// Whether this test thread currently holds a `ServerSlots` permit.
+    static HOLDS_SLOT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Take a server slot for the current test unless it already holds one.
+///
+/// A test thread holds at most ONE slot no matter how many servers it
+/// spawns — the slot is taken as its first server starts and handed back
+/// once its last server is dropped. Because no thread ever waits for a
+/// slot while holding one, the cap cannot deadlock even for tests that
+/// spawn several servers at once (e.g. replication-chain tests).
+fn enter_server_slot() {
+    HOLDS_SLOT.with(|holds| {
+        if !holds.get() {
+            server_slots().acquire();
+            holds.set(true);
+        }
+    });
+}
+
+/// Hand this test's server slot back once its last server has been dropped.
+fn leave_server_slot() {
+    HOLDS_SLOT.with(|holds| {
+        if holds.get() {
+            server_slots().release();
+            holds.set(false);
+        }
+    });
+}
+
 struct ManagedChild {
     child: Child,
     log_path: Option<PathBuf>,
@@ -325,7 +419,22 @@ struct ManagedChild {
 
 impl ManagedChild {
     fn spawn(mut command: Command, log_path: Option<PathBuf>) -> Self {
-        let child = command.spawn().expect("spawn child process");
+        // Block before spawning so the cap bounds live processes, not just
+        // post-spawn work.
+        enter_server_slot();
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                // No `ManagedChild` will exist to release the slot on
+                // drop; hand it back here so a spawn failure cannot leak
+                // a permit. Other live servers on this thread keep it.
+                if LIVE_SERVERS.with(Cell::get) == 0 {
+                    leave_server_slot();
+                }
+                panic!("spawn child process: {err}");
+            }
+        };
+        LIVE_SERVERS.with(|live| live.set(live.get() + 1));
         Self { child, log_path }
     }
 
@@ -340,6 +449,15 @@ impl Drop for ManagedChild {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // Release this test's server slot once its last server is gone.
+        let remaining = LIVE_SERVERS.with(|live| {
+            let next = live.get().saturating_sub(1);
+            live.set(next);
+            next
+        });
+        if remaining == 0 {
+            leave_server_slot();
+        }
     }
 }
 
