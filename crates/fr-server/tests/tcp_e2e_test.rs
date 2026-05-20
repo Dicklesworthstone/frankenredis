@@ -2783,9 +2783,13 @@ fn tcp_config_file_applies_aclfile_startup_load() {
     let _server = spawn_frankenredis_config_only(port, config_path_str);
     let mut client = connect_client(port);
 
+    // The aclfile declares `user default on nopass`, so the default user
+    // needs no authentication — an unauthenticated PING succeeds. The proof
+    // that the aclfile was loaded at startup is the `alice` user and its
+    // restricted ACL exercised below.
     assert_eq!(
         send_command(&mut client, &[b"PING"]),
-        RespFrame::Error("NOAUTH Authentication required.".to_string())
+        RespFrame::SimpleString("PONG".to_string())
     );
     assert_eq!(
         send_command(&mut client, &[b"AUTH", b"default", b"anything"]),
