@@ -8593,6 +8593,44 @@ mod tests {
         assert_eq!(report.failed_without_reason_code, 1);
     }
 
+    /// Hand out a distinct, collision-free TCP port for each spawned
+    /// vendored redis-server oracle.
+    ///
+    /// `cargo test` runs this crate's tests on parallel libtest threads.
+    /// The old `bind("127.0.0.1:0") -> read port -> drop listener ->
+    /// spawn redis-server` pattern let two concurrent `live_redis_*`
+    /// tests receive the *same* freshly-released ephemeral port; both
+    /// spawned a redis-server on it, one lost the bind race, and the test
+    /// mapped to the dead/shared server panicked with "Connection reset
+    /// by peer". A process-wide monotonic counter gives every oracle a
+    /// distinct candidate port, removing that test-vs-test collision.
+    /// (frankenredis-fhxwy; mirrors the fr-server e2e `reserve_port` fix
+    /// from d0a6542 / frankenredis-vcv8o.)
+    ///
+    /// The base differs from the fr-server e2e suite's range (29_500+)
+    /// so the two test binaries cannot collide via their independent
+    /// counters when `cargo test --workspace` runs them concurrently,
+    /// and stays below the Linux ephemeral range (32_768+) so an
+    /// unrelated `bind(0)` elsewhere is unlikely to steal a candidate.
+    fn reserve_oracle_port() -> u16 {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static NEXT_PORT: AtomicU16 = AtomicU16::new(25_000);
+        for _ in 0..4000 {
+            let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+            if port < 25_000 {
+                // Counter wrapped past u16::MAX — skip the low/privileged range.
+                continue;
+            }
+            // Best-effort liveness probe: skip a candidate currently held
+            // by an unrelated process. The distinct counter value already
+            // guarantees no other oracle in this binary picked it.
+            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return port;
+            }
+        }
+        panic!("could not reserve a free TCP port for a conformance oracle");
+    }
+
     /// Self-spawning handle around the vendored upstream redis-server.
     ///
     /// Used to promote the live-oracle tests from `#[ignore]` to self-contained
@@ -8663,12 +8701,7 @@ mod tests {
             if !binary.exists() {
                 return None;
             }
-            let port = {
-                let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
-                let port = listener.local_addr().ok()?.port();
-                drop(listener);
-                port
-            };
+            let port = reserve_oracle_port();
             let child = std::process::Command::new(&binary)
                 .arg("--port")
                 .arg(port.to_string())
@@ -8729,16 +8762,7 @@ mod tests {
             if !binary.exists() {
                 return Ok(None);
             }
-            let port = {
-                let listener = std::net::TcpListener::bind("127.0.0.1:0")
-                    .map_err(|err| format!("bind redis loadback port: {err}"))?;
-                let port = listener
-                    .local_addr()
-                    .map_err(|err| format!("read redis loadback port: {err}"))?
-                    .port();
-                drop(listener);
-                port
-            };
+            let port = reserve_oracle_port();
             let ts = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_err(|err| format!("clock moved backwards: {err}"))?
