@@ -14,7 +14,7 @@
       }
     },
     {
-      "name": "hello_auth_without_config_is_rejected",
+      "name": "hello_auth_with_nopass_default_succeeds",
       "now_ms": 1,
       "argv": [
         "HELLO",
@@ -24,8 +24,64 @@
         "secret"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?"
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "server"
+          },
+          {
+            "kind": "bulk",
+            "value": "redis"
+          },
+          {
+            "kind": "bulk",
+            "value": "version"
+          },
+          {
+            "kind": "bulk",
+            "value": "7.2.4"
+          },
+          {
+            "kind": "bulk",
+            "value": "proto"
+          },
+          {
+            "kind": "integer",
+            "value": 3
+          },
+          {
+            "kind": "bulk",
+            "value": "id"
+          },
+          {
+            "kind": "any_integer"
+          },
+          {
+            "kind": "bulk",
+            "value": "mode"
+          },
+          {
+            "kind": "bulk",
+            "value": "standalone"
+          },
+          {
+            "kind": "bulk",
+            "value": "role"
+          },
+          {
+            "kind": "bulk",
+            "value": "master"
+          },
+          {
+            "kind": "bulk",
+            "value": "modules"
+          },
+          {
+            "kind": "array",
+            "value": []
+          }
+        ]
       }
     },
     {
@@ -51,7 +107,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR syntax error"
+        "value": "ERR Syntax error in HELLO option 'AUTH'"
       }
     },
     {
@@ -96,7 +152,7 @@
           },
           {
             "kind": "integer",
-            "value": 2
+            "value": 3
           },
           {
             "kind": "bulk",

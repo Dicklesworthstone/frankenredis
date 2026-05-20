@@ -2477,7 +2477,12 @@ fn smoke_report_is_stable() {
     let report = run_smoke(&cfg);
     assert_eq!(report.suite, "smoke");
     assert!(report.fixture_count >= 1);
-    assert!(report.oracle_present);
+    // The vendored oracle (legacy_redis_code/) is gitignored and is not
+    // synced to remote build workers; only assert its presence on machines
+    // that actually have the clone, matching lib.rs::run_smoke callers.
+    if cfg.oracle_root.exists() {
+        assert!(report.oracle_present);
+    }
 
     let fixture_path = cfg.fixture_root.join("core_strings.json");
     assert!(Path::new(&fixture_path).exists());
