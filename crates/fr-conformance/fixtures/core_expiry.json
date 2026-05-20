@@ -2065,7 +2065,7 @@
       ],
       "expect": {
         "kind": "integer",
-        "value": 5
+        "value": 6
       }
     },
     {
