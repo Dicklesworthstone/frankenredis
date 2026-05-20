@@ -9384,6 +9384,11 @@ impl Store {
             };
             let data = hll_encode(&registers, encoding);
             let mut entry = Entry::new(Value::String(data), expires_at, now_ms);
+            // Upstream hyperloglog.c builds the HLL via createHLLObject /
+            // createObject(OBJ_STRING,…), so OBJECT ENCODING reports `raw`
+            // regardless of the payload size — a low-cardinality sparse HLL
+            // is well under the 44-byte embstr threshold. (br-frankenredis-bitopenc)
+            entry.force_raw_encoding = true;
             entry.touch_write(now_ms);
             self.internal_entries_insert(key.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
@@ -9466,6 +9471,8 @@ impl Store {
         };
         let data = hll_encode(&merged, dest_encoding);
         let mut entry = Entry::new(Value::String(data), existing_ttl, now_ms);
+        // PFMERGE's destination is a raw-encoded HLL string, same as pfadd.
+        entry.force_raw_encoding = true;
         entry.touch_write(now_ms);
         self.internal_entries_insert(dest.to_vec(), entry);
         self.dirty = self.dirty.saturating_add(1);
@@ -20075,6 +20082,30 @@ mod tests {
         assert_eq!(store.hll_debug_encoding(b"hll", 0).unwrap(), Some("sparse"));
         let count = store.pfcount(&[b"hll"], 0).unwrap();
         assert!((90..=110).contains(&count), "count={count}, expected ~100");
+        // OBJECT ENCODING must report `raw` even though the sparse payload is
+        // far below the 44-byte embstr threshold — upstream HLL objects are
+        // always raw-encoded.
+        assert_eq!(store.object_encoding(b"hll", 0), Some("raw"));
+    }
+
+    #[test]
+    fn hll_object_encoding_is_raw_for_tiny_sparse_hll() {
+        // A near-empty HLL has a sparse payload of only a few bytes; upstream
+        // still reports `raw` because createHLLObject never goes through the
+        // embstr/int encoding shortcut. Covers both pfadd and pfmerge.
+        let mut store = Store::new();
+        assert!(store.pfadd(b"tiny", &[b"a".to_vec()], 0).unwrap());
+        let data = store.get(b"tiny", 0).unwrap().unwrap();
+        assert!(
+            data.len() <= 44,
+            "tiny sparse HLL should be within the embstr size range, len={}",
+            data.len()
+        );
+        assert_eq!(store.object_encoding(b"tiny", 0), Some("raw"));
+
+        assert!(store.pfadd(b"src", &[b"x".to_vec()], 0).unwrap());
+        store.pfmerge(b"dst", &[b"src"], 0).unwrap();
+        assert_eq!(store.object_encoding(b"dst", 0), Some("raw"));
     }
 
     #[test]
