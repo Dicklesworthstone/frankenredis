@@ -253,11 +253,29 @@ impl BufferedTcpClient {
 }
 
 fn reserve_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
+    use std::sync::atomic::{AtomicU16, Ordering};
+    // A monotonic counter hands every test (across all parallel test
+    // threads in this binary) a distinct candidate port. The old
+    // `bind("127.0.0.1:0")` approach could assign two concurrent tests the
+    // *same* freshly-released ephemeral port — both then spawned servers
+    // that fought over it, so one died and the peer's reads panicked in
+    // `read_response`. A never-repeating counter removes the test-vs-test
+    // collision entirely. (frankenredis-vcv8o)
+    static NEXT_PORT: AtomicU16 = AtomicU16::new(29_500);
+    for _ in 0..4000 {
+        let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+        if port < 29_500 {
+            // Counter wrapped past u16::MAX — skip the low/privileged range.
+            continue;
+        }
+        // Best-effort liveness probe: skip a candidate currently held by an
+        // unrelated process. The distinct counter value already guarantees
+        // no other test in this binary picked the same port.
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    panic!("could not reserve a free TCP port for the e2e test");
 }
 
 fn wait_until(timeout: Duration, mut check: impl FnMut() -> bool, message: &str) {
