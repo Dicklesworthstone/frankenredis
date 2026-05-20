@@ -27631,6 +27631,92 @@ mod tests {
     }
 
     #[test]
+    fn acl_key_selectors_survive_acl_save_and_load_round_trip() {
+        // The `%R~` / `%W~` / `%RW~` selector syntax must survive a full
+        // ACL SAVE -> file -> ACL LOAD cycle: `acl_save_line` emits the
+        // decorated tokens and `load_acl_rules` re-parses them through the
+        // shared `apply_setuser_rules` path. Enforcement must still honour
+        // the read/write split after the reload. (frankenredis-y40p3)
+        let mut rt = Runtime::default_strict();
+        let acl_path = unique_temp_path("fr_runtime_acl_key_selectors", "acl");
+        rt.set_acl_file_path(acl_path.clone());
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"sel", b"on", b"nopass", b"-@all", b"+get", b"+set",
+                    b"~obj*", b"%R~r*", b"%W~w*", b"%RW~rw*",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"SAVE"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let saved = std::fs::read_to_string(&acl_path).expect("ACL SAVE should write acl file");
+        assert!(
+            saved.contains("resetkeys ~obj* %R~r* %W~w* ~rw*"),
+            "saved ACL file should preserve decorated key selectors, got: {saved}"
+        );
+
+        // Drop the user, then reload it from the saved file.
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"DELUSER", b"sel"]), 2),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"LOAD"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // GETUSER on the reloaded user renders the same selector tokens.
+        let getuser = rt.execute_frame(command(&[b"ACL", b"GETUSER", b"sel"]), 4);
+        let RespFrame::Array(Some(entries)) = getuser else {
+            unreachable!("expected ACL GETUSER to return an array");
+        };
+        let keys_idx = entries
+            .iter()
+            .position(|e| e == &RespFrame::BulkString(Some(b"keys".to_vec())))
+            .expect("GETUSER reply must contain a 'keys' field");
+        assert_eq!(
+            entries[keys_idx + 1],
+            RespFrame::BulkString(Some(b"~obj* %R~r* %W~w* ~rw*".to_vec())),
+            "reloaded user must keep its read/write selector decoration"
+        );
+
+        // Enforcement still honours the read/write split after the reload.
+        let dryrun = |rt: &mut Runtime, args: &[&[u8]], id: u64| {
+            let mut argv: Vec<&[u8]> = vec![b"ACL", b"DRYRUN", b"sel"];
+            argv.extend_from_slice(args);
+            rt.execute_frame(command(&argv), id)
+        };
+        let ok = RespFrame::SimpleString("OK".to_string());
+        assert_eq!(dryrun(&mut rt, &[b"GET", b"r1"], 5), ok);
+        assert_eq!(
+            dryrun(&mut rt, &[b"SET", b"r1", b"v"], 6),
+            RespFrame::BulkString(Some(
+                b"User sel has no permissions to access the 'r1' key".to_vec(),
+            ))
+        );
+        assert_eq!(dryrun(&mut rt, &[b"SET", b"w1", b"v"], 7), ok);
+        assert_eq!(
+            dryrun(&mut rt, &[b"GET", b"w1"], 8),
+            RespFrame::BulkString(Some(
+                b"User sel has no permissions to access the 'w1' key".to_vec(),
+            ))
+        );
+        // The `%RW~rw*` selector grants both directions; `~obj*` likewise.
+        assert_eq!(dryrun(&mut rt, &[b"GET", b"rw1"], 9), ok);
+        assert_eq!(dryrun(&mut rt, &[b"SET", b"rw1", b"v"], 10), ok);
+        assert_eq!(dryrun(&mut rt, &[b"GET", b"obj1"], 11), ok);
+
+        let _ = std::fs::remove_file(&acl_path);
+    }
+
+    #[test]
     fn acl_key_selectors_round_trip_through_getuser_and_list() {
         let mut rt = Runtime::default_strict();
 
