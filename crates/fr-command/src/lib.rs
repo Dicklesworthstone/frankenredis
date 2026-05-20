@@ -24584,6 +24584,73 @@ mod tests {
     }
 
     #[test]
+    fn acl_dispatch_enforces_read_write_key_selector_split() {
+        // (frankenredis-y40p3) The dispatch-side ACL gate — the path that
+        // covers Lua-invoked `redis.call` — must honour `%R~` / `%W~` key
+        // selectors: a read-only selector never satisfies a write command
+        // and vice versa, even when the command itself is allowed.
+        use fr_store::{AclKeyPattern, DispatchAclPermissions, DispatchClientContext};
+        let mut store = Store::new();
+
+        let allowed: std::collections::HashSet<String> =
+            ["get", "set"].into_iter().map(String::from).collect();
+        store.dispatch_client_ctx = DispatchClientContext {
+            authenticated_user: b"sel".to_vec(),
+            acl_permissions: Some(DispatchAclPermissions {
+                all_commands: false,
+                allowed_commands: allowed,
+                denied_commands: Default::default(),
+                allowed_categories: Default::default(),
+                denied_categories: Default::default(),
+                key_patterns: vec![
+                    AclKeyPattern {
+                        pattern: b"r*".to_vec(),
+                        read: true,
+                        write: false,
+                    },
+                    AclKeyPattern {
+                        pattern: b"w*".to_vec(),
+                        read: false,
+                        write: true,
+                    },
+                ],
+                all_keys: false,
+                channel_patterns: vec![],
+                all_channels: false,
+            }),
+            ..Default::default()
+        };
+
+        let expect_key_denied = |store: &mut Store, argv: &[&[u8]]| {
+            let owned: Vec<Vec<u8>> = argv.iter().map(|a| a.to_vec()).collect();
+            match dispatch_argv(&owned, store, 0).expect_err("key access must be denied") {
+                CommandError::Custom(msg) => assert!(
+                    msg.contains("NOPERM No permissions to access a key"),
+                    "expected NOPERM key error, got {msg}"
+                ),
+                other => panic!("expected NOPERM key error, got {other:?}"),
+            }
+        };
+
+        // GET on a read-only selector succeeds; SET on it is denied even
+        // though `+set` is granted at the command level.
+        let r = dispatch_argv(&[b"GET".to_vec(), b"r1".to_vec()], &mut store, 0)
+            .expect("GET on %R selector allowed");
+        assert!(matches!(r, RespFrame::BulkString(None)));
+        expect_key_denied(&mut store, &[b"SET", b"r1", b"v"]);
+
+        // SET on a write-only selector succeeds; GET on it is denied.
+        let r = dispatch_argv(
+            &[b"SET".to_vec(), b"w1".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("SET on %W selector allowed");
+        assert!(matches!(r, RespFrame::SimpleString(ref s) if s == "OK"));
+        expect_key_denied(&mut store, &[b"GET", b"w1"]);
+    }
+
+    #[test]
     fn command_info_emits_subcommands_for_all_container_parents_94zpo() {
         // (frankenredis-94zpo) Pre-fix: COMMAND INFO for container
         // commands like CLUSTER/CLIENT/CONFIG/etc. emitted an empty
