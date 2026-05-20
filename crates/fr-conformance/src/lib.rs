@@ -8631,6 +8631,79 @@ mod tests {
         panic!("could not reserve a free TCP port for a conformance oracle");
     }
 
+    /// Spawn a vendored redis-server, retrying on a lost port-bind race
+    /// until it is actually serving.
+    ///
+    /// `build` is invoked once per attempt with a freshly reserved
+    /// candidate port and a per-attempt log-file path; it must return a
+    /// fully configured `Command` that passes that path to `--logfile`.
+    /// Returns the live child and the port it bound, or `None` once
+    /// every attempt has failed.
+    ///
+    /// `reserve_oracle_port` hands out a port distinct from every other
+    /// oracle *in this process*, but cannot prevent a collision with a
+    /// redis-server spawned by another process on the same host — a
+    /// second concurrent `cargo test` run, the fr-server e2e suite, an
+    /// unrelated service. The loser of that race sees redis-server abort
+    /// during startup (`bind: Address already in use`); worse, its
+    /// readiness probe can still TCP-connect to the *winner's* server on
+    /// the shared port, so the test proceeds against a server it does
+    /// not own and gets its connection reset when the winner is torn
+    /// down. Retrying with a fresh port until our *own* child logs
+    /// "Ready to accept connections" removes that whole failure mode —
+    /// the log line (server.c:7333) is written only by the child we
+    /// spawned, to a log file only it holds, so it cannot be confused
+    /// with another process answering on the same port. (frankenredis-fhxwy)
+    fn spawn_redis_with_retry(
+        tmp_dir: &std::path::Path,
+        mut build: impl FnMut(u16, &std::path::Path) -> std::process::Command,
+    ) -> Option<(std::process::Child, u16)> {
+        const MAX_ATTEMPTS: usize = 10;
+        for _ in 0..MAX_ATTEMPTS {
+            let port = reserve_oracle_port();
+            let log_path = tmp_dir.join(format!("redis-oracle-{port}.log"));
+            let Ok(mut child) = build(port, &log_path).spawn() else {
+                // Could not fork/exec redis-server at all — an
+                // environment fault, not a port race; retrying a fresh
+                // port will not help.
+                return None;
+            };
+
+            // redis-server writes "Ready to accept connections" to its
+            // --logfile only once it has bound `port` and entered its
+            // serve loop. Polling that line — rather than a bare TCP
+            // connect, which could land on a different process holding
+            // the same port — confirms our own child owns the port.
+            // Boot can take a few seconds when loading a dump.rdb, so
+            // allow 6s before giving up on this attempt.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+            let ready = loop {
+                if std::fs::read_to_string(&log_path)
+                    .is_ok_and(|log| log.contains("Ready to accept connections"))
+                {
+                    break true;
+                }
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    // redis-server exited during startup — almost always
+                    // a lost port-bind race. Reap it and try a fresh port.
+                    let _ = child.wait();
+                    break false;
+                }
+                if std::time::Instant::now() >= deadline {
+                    // Alive but never became ready — kill and retry.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            };
+            if ready {
+                return Some((child, port));
+            }
+        }
+        None
+    }
+
     /// Self-spawning handle around the vendored upstream redis-server.
     ///
     /// Used to promote the live-oracle tests from `#[ignore]` to self-contained
@@ -8701,53 +8774,42 @@ mod tests {
             if !binary.exists() {
                 return None;
             }
-            let port = reserve_oracle_port();
-            let child = std::process::Command::new(&binary)
-                .arg("--port")
-                .arg(port.to_string())
-                .arg("--bind")
-                .arg("127.0.0.1")
-                .arg("--dir")
-                .arg(tmp_dir)
-                .arg("--appendonly")
-                .arg(if appendonly { "yes" } else { "no" })
-                .arg("--save")
-                .arg("") // disable RDB snapshots so we don't litter artifacts
-                .arg("--daemonize")
-                .arg("no")
-                .arg("--protected-mode")
-                .arg("no")
-                // DEBUG commands are disabled by default in Redis 7;
-                // our runtime accepts them unconditionally. Enable
-                // them on the vendored oracle so core_debug cases
-                // actually run instead of all returning the
-                // enable-debug-command lockout error.
-                // (br-frankenredis-me3i)
-                .arg("--enable-debug-command")
-                .arg("yes")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .ok()?;
-            // Wait for the port to accept connections. Boot can take
-            // longer when redis is loading a re-emitted dump.rdb at
-            // startup; bump the deadline to 6s to absorb that.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
-            while std::time::Instant::now() < deadline {
-                if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                    return Some(Self {
-                        child,
-                        port,
-                        _tmp_dir: tmp_dir.to_path_buf(),
-                    });
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            // Didn't accept in time — kill the stray process and report missing.
-            let mut child = child;
-            let _ = child.kill();
-            let _ = child.wait();
-            None
+            let (child, port) = spawn_redis_with_retry(tmp_dir, |port, log_path| {
+                let mut command = std::process::Command::new(&binary);
+                command
+                    .arg("--port")
+                    .arg(port.to_string())
+                    .arg("--bind")
+                    .arg("127.0.0.1")
+                    .arg("--dir")
+                    .arg(tmp_dir)
+                    .arg("--logfile")
+                    .arg(log_path)
+                    .arg("--appendonly")
+                    .arg(if appendonly { "yes" } else { "no" })
+                    .arg("--save")
+                    .arg("") // disable RDB snapshots so we don't litter artifacts
+                    .arg("--daemonize")
+                    .arg("no")
+                    .arg("--protected-mode")
+                    .arg("no")
+                    // DEBUG commands are disabled by default in Redis 7;
+                    // our runtime accepts them unconditionally. Enable
+                    // them on the vendored oracle so core_debug cases
+                    // actually run instead of all returning the
+                    // enable-debug-command lockout error.
+                    // (br-frankenredis-me3i)
+                    .arg("--enable-debug-command")
+                    .arg("yes")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                command
+            })?;
+            Some(Self {
+                child,
+                port,
+                _tmp_dir: tmp_dir.to_path_buf(),
+            })
         }
 
         fn spawn_with_dump(
@@ -8762,59 +8824,54 @@ mod tests {
             if !binary.exists() {
                 return Ok(None);
             }
-            let port = reserve_oracle_port();
             let ts = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_err(|err| format!("clock moved backwards: {err}"))?
                 .as_nanos();
-            let tmp_dir =
-                std::env::temp_dir().join(format!("fr_live_oracle_loadback_{context}_{ts}_{port}"));
+            let tmp_dir = std::env::temp_dir().join(format!(
+                "fr_live_oracle_loadback_{context}_{ts}_{}",
+                std::process::id()
+            ));
             fs::create_dir_all(&tmp_dir)
                 .map_err(|err| format!("create redis loadback dir {}: {err}", tmp_dir.display()))?;
             fs::write(tmp_dir.join("dump.rdb"), dump)
                 .map_err(|err| format!("write redis loadback dump.rdb: {err}"))?;
 
-            let child = std::process::Command::new(&binary)
-                .arg("--port")
-                .arg(port.to_string())
-                .arg("--bind")
-                .arg("127.0.0.1")
-                .arg("--dir")
-                .arg(&tmp_dir)
-                .arg("--dbfilename")
-                .arg("dump.rdb")
-                .arg("--appendonly")
-                .arg("no")
-                .arg("--save")
-                .arg("")
-                .arg("--daemonize")
-                .arg("no")
-                .arg("--protected-mode")
-                .arg("no")
-                .arg("--enable-debug-command")
-                .arg("yes")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .map_err(|err| format!("spawn vendored redis-server for {context}: {err}"))?;
-
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-            let mut child = child;
-            while std::time::Instant::now() < deadline {
-                if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                    return Ok(Some(Self {
-                        child,
-                        port,
-                        _tmp_dir: tmp_dir,
-                    }));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-            Err(format!(
-                "vendored redis-server did not load re-emitted dump.rdb for {context}"
-            ))
+            let (child, port) = spawn_redis_with_retry(&tmp_dir, |port, log_path| {
+                let mut command = std::process::Command::new(&binary);
+                command
+                    .arg("--port")
+                    .arg(port.to_string())
+                    .arg("--bind")
+                    .arg("127.0.0.1")
+                    .arg("--dir")
+                    .arg(&tmp_dir)
+                    .arg("--logfile")
+                    .arg(log_path)
+                    .arg("--dbfilename")
+                    .arg("dump.rdb")
+                    .arg("--appendonly")
+                    .arg("no")
+                    .arg("--save")
+                    .arg("")
+                    .arg("--daemonize")
+                    .arg("no")
+                    .arg("--protected-mode")
+                    .arg("no")
+                    .arg("--enable-debug-command")
+                    .arg("yes")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                command
+            })
+            .ok_or_else(|| {
+                format!("vendored redis-server did not load re-emitted dump.rdb for {context}")
+            })?;
+            Ok(Some(Self {
+                child,
+                port,
+                _tmp_dir: tmp_dir,
+            }))
         }
 
         fn oracle_config(&self) -> LiveOracleConfig {
