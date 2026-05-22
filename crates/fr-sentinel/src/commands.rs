@@ -1804,6 +1804,25 @@ mod tests {
     }
 
     #[test]
+    fn sentinel_monitor_duplicate_master_error_matches_upstream() {
+        let mut state = SentinelState::new();
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"1"],
+        );
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.2", b"6380", b"2"],
+        );
+        assert_eq!(
+            result,
+            RespFrame::Error("ERR Duplicate master name.".into())
+        );
+    }
+
+    #[test]
     fn sentinel_monitor_malformed_port_returns_invalid_port() {
         let mut state = SentinelState::new();
         let result = dispatch_sentinel_command(

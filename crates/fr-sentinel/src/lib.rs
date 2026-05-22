@@ -405,7 +405,7 @@ impl SentinelState {
     ) -> Result<(), &'static str> {
         let name = name.into();
         if self.masters.contains_key(&name) {
-            return Err("ERR Duplicated master name");
+            return Err("ERR Duplicate master name.");
         }
         if quorum == 0 {
             return Err("ERR Quorum must be 1 or greater.");
