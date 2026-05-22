@@ -7923,29 +7923,42 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(Vec::new());
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    let len = zs.len() as i64;
-                    let s = normalize_index(start, len);
-                    let e = normalize_index(stop, len);
-                    if s > e || s >= len || e < 0 {
-                        return Ok(Vec::new());
-                    }
-                    let s_idx = s.max(0) as usize;
-                    let e_idx = e.min(len - 1) as usize;
-                    let count = e_idx - s_idx + 1;
-                    let result: Vec<Vec<u8>> = zs
-                        .iter_asc()
-                        .skip(s_idx)
-                        .take(count)
-                        .map(|(m, _)| m.clone())
-                        .collect();
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let len = zs.len() as i64;
+                        let s = normalize_index(start, len);
+                        let e = normalize_index(stop, len);
+                        if s > e || s >= len || e < 0 {
+                            return Ok(Vec::new());
+                        }
+                        let s_idx = s.max(0) as usize;
+                        let e_idx = e.min(len - 1) as usize;
+                        let count = e_idx - s_idx + 1;
+                        let result: Vec<Vec<u8>> = zs
+                            .iter_asc()
+                            .skip(s_idx)
+                            .take(count)
+                            .map(|(m, _)| m.clone())
+                            .collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -7961,29 +7974,42 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(Vec::new());
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    let len = zs.len() as i64;
-                    let s = normalize_index(start, len);
-                    let e = normalize_index(stop, len);
-                    if s > e || s >= len || e < 0 {
-                        return Ok(Vec::new());
-                    }
-                    let s_idx = s.max(0) as usize;
-                    let e_idx = e.min(len - 1) as usize;
-                    let count = e_idx - s_idx + 1;
-                    let result: Vec<Vec<u8>> = zs
-                        .iter_desc()
-                        .skip(s_idx)
-                        .take(count)
-                        .map(|(m, _)| m.clone())
-                        .collect();
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let len = zs.len() as i64;
+                        let s = normalize_index(start, len);
+                        let e = normalize_index(stop, len);
+                        if s > e || s >= len || e < 0 {
+                            return Ok(Vec::new());
+                        }
+                        let s_idx = s.max(0) as usize;
+                        let e_idx = e.min(len - 1) as usize;
+                        let count = e_idx - s_idx + 1;
+                        let result: Vec<Vec<u8>> = zs
+                            .iter_desc()
+                            .skip(s_idx)
+                            .take(count)
+                            .map(|(m, _)| m.clone())
+                            .collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -8003,28 +8029,41 @@ impl Store {
         if score_bound_value(min) > score_bound_value(max) {
             return Ok(Vec::new());
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    let lower = match min {
-                        ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
-                        ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
-                    };
-                    let upper = match max {
-                        ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
-                        ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
-                    };
-
-                    let result: Vec<Vec<u8>> = zs
-                        .ordered
-                        .range((lower, upper))
-                        .filter_map(|(sm, _)| sm.member.as_actual().cloned())
-                        .collect();
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let lower = match min {
+                            ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
+                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
+                        };
+                        let upper = match max {
+                            ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
+                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
+                        };
+
+                        let result: Vec<Vec<u8>> = zs
+                            .ordered
+                            .range((lower, upper))
+                            .filter_map(|(sm, _)| sm.member.as_actual().cloned())
+                            .collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -8046,32 +8085,45 @@ impl Store {
         if score_bound_value(min) > score_bound_value(max) {
             return Ok(Vec::new());
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    let lower = match min {
-                        ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
-                        ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
-                    };
-                    let upper = match max {
-                        ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
-                        ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
-                    };
-
-                    let result: Vec<(Vec<u8>, f64)> = zs
-                        .ordered
-                        .range((lower, upper))
-                        .filter_map(|(sm, _)| {
-                            sm.member
-                                .as_actual()
-                                .map(|member| (member.clone(), sm.score))
-                        })
-                        .collect();
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let lower = match min {
+                            ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
+                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
+                        };
+                        let upper = match max {
+                            ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
+                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
+                        };
+
+                        let result: Vec<(Vec<u8>, f64)> = zs
+                            .ordered
+                            .range((lower, upper))
+                            .filter_map(|(sm, _)| {
+                                sm.member
+                                    .as_actual()
+                                    .map(|member| (member.clone(), sm.score))
+                            })
+                            .collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -8407,29 +8459,42 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    let len = zs.len() as i64;
-                    let s = normalize_index(start, len);
-                    let e = normalize_index(stop, len);
-                    if s > e || s >= len || e < 0 {
-                        return Ok(Vec::new());
-                    }
-                    let s_idx = s.max(0) as usize;
-                    let e_idx = e.min(len - 1) as usize;
-                    let count = e_idx - s_idx + 1;
-                    let result: Vec<(Vec<u8>, f64)> = zs
-                        .iter_asc()
-                        .skip(s_idx)
-                        .take(count)
-                        .map(|(m, &s)| (m.clone(), s))
-                        .collect();
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let len = zs.len() as i64;
+                        let s = normalize_index(start, len);
+                        let e = normalize_index(stop, len);
+                        if s > e || s >= len || e < 0 {
+                            return Ok(Vec::new());
+                        }
+                        let s_idx = s.max(0) as usize;
+                        let e_idx = e.min(len - 1) as usize;
+                        let count = e_idx - s_idx + 1;
+                        let result: Vec<(Vec<u8>, f64)> = zs
+                            .iter_asc()
+                            .skip(s_idx)
+                            .take(count)
+                            .map(|(m, &s)| (m.clone(), s))
+                            .collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -8442,29 +8507,42 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    let len = zs.len() as i64;
-                    let s = normalize_index(start, len);
-                    let e = normalize_index(stop, len);
-                    if s > e || s >= len || e < 0 {
-                        return Ok(Vec::new());
-                    }
-                    let s_idx = s.max(0) as usize;
-                    let e_idx = e.min(len - 1) as usize;
-                    let count = e_idx - s_idx + 1;
-                    let result: Vec<(Vec<u8>, f64)> = zs
-                        .iter_desc()
-                        .skip(s_idx)
-                        .take(count)
-                        .map(|(m, &s)| (m.clone(), s))
-                        .collect();
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let len = zs.len() as i64;
+                        let s = normalize_index(start, len);
+                        let e = normalize_index(stop, len);
+                        if s > e || s >= len || e < 0 {
+                            return Ok(Vec::new());
+                        }
+                        let s_idx = s.max(0) as usize;
+                        let e_idx = e.min(len - 1) as usize;
+                        let count = e_idx - s_idx + 1;
+                        let result: Vec<(Vec<u8>, f64)> = zs
+                            .iter_desc()
+                            .skip(s_idx)
+                            .take(count)
+                            .map(|(m, &s)| (m.clone(), s))
+                            .collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -8477,23 +8555,36 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    let lower = Included(ScoreMember::min_for_score(min));
-                    let upper = Included(ScoreMember::max_for_score(max));
-
-                    let result: Vec<Vec<u8>> = zs
-                        .ordered
-                        .range((lower, upper))
-                        .rev()
-                        .filter_map(|(sm, _)| sm.member.as_actual().cloned())
-                        .collect();
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let lower = Included(ScoreMember::min_for_score(min));
+                        let upper = Included(ScoreMember::max_for_score(max));
+
+                        let result: Vec<Vec<u8>> = zs
+                            .ordered
+                            .range((lower, upper))
+                            .rev()
+                            .filter_map(|(sm, _)| sm.member.as_actual().cloned())
+                            .collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -8507,19 +8598,32 @@ impl Store {
     ) -> Result<Vec<Vec<u8>>, StoreError> {
         validate_lex_range_bounds(min, max)?;
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    let result: Vec<Vec<u8>> = zs
-                        .iter_asc()
-                        .filter(|(m, _)| lex_in_range(m, min, max))
-                        .map(|(m, _)| m.clone())
-                        .collect();
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let result: Vec<Vec<u8>> = zs
+                            .iter_asc()
+                            .filter(|(m, _)| lex_in_range(m, min, max))
+                            .map(|(m, _)| m.clone())
+                            .collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -8538,27 +8642,40 @@ impl Store {
         if min > max {
             return Ok(Vec::new());
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    let lower = Included(ScoreMember::min_for_score(min));
-                    let upper = Included(ScoreMember::max_for_score(max));
-
-                    let result: Vec<(Vec<u8>, f64)> = zs
-                        .ordered
-                        .range((lower, upper))
-                        .rev()
-                        .filter_map(|(sm, _)| {
-                            sm.member
-                                .as_actual()
-                                .map(|member| (member.clone(), sm.score))
-                        })
-                        .collect();
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let lower = Included(ScoreMember::min_for_score(min));
+                        let upper = Included(ScoreMember::max_for_score(max));
+
+                        let result: Vec<(Vec<u8>, f64)> = zs
+                            .ordered
+                            .range((lower, upper))
+                            .rev()
+                            .filter_map(|(sm, _)| {
+                                sm.member
+                                    .as_actual()
+                                    .map(|member| (member.clone(), sm.score))
+                            })
+                            .collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -8572,19 +8689,32 @@ impl Store {
     ) -> Result<Vec<Vec<u8>>, StoreError> {
         validate_lex_range_bounds(min, max)?;
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    let result: Vec<Vec<u8>> = zs
-                        .iter_desc()
-                        .filter(|(m, _)| lex_in_range(m, min, max))
-                        .map(|(m, _)| m.clone())
-                        .collect();
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let result: Vec<Vec<u8>> = zs
+                            .iter_desc()
+                            .filter(|(m, _)| lex_in_range(m, min, max))
+                            .map(|(m, _)| m.clone())
+                            .collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(Vec::new()),
         }
     }
