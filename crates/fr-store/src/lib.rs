@@ -4841,7 +4841,18 @@ impl Store {
 
     pub fn hdel(&mut self, key: &[u8], fields: &[&[u8]], now_ms: u64) -> Result<u64, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         let Some(result) = self.with_mutated_entry(key, |entry| {
+            if lfu_tracking_enabled {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+            }
             let Value::Hash(m) = &mut entry.value else {
                 return Err(StoreError::WrongType);
             };
@@ -19146,6 +19157,34 @@ mod tests {
         match store.object_freq(b"h", 1) {
             Some(6) => {}
             other => return Err(format!("HINCRBYFLOAT LFU mismatch: {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn hdel_existing_hash_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .hset(b"h", b"f1".to_vec(), b"v1".to_vec(), 0)
+            .map_err(|err| format!("hset f1 failed: {err:?}"))?;
+        store
+            .hset(b"h", b"f2".to_vec(), b"v2".to_vec(), 0)
+            .map_err(|err| format!("hset f2 failed: {err:?}"))?;
+
+        match store.object_freq(b"h", 0) {
+            Some(6) => {}
+            other => return Err(format!("hash LFU after two HSETs: {other:?}")),
+        }
+        store.entries.get_mut(b"h".as_slice()).unwrap().lfu_freq = LFU_INIT_VAL;
+        let removed = store
+            .hdel(b"h", &[b"f1"], 1)
+            .map_err(|err| format!("hdel failed: {err:?}"))?;
+        assert_eq!(removed, 1, "HDEL should remove the field");
+        match store.object_freq(b"h", 1) {
+            Some(6) => {}
+            other => return Err(format!("HDEL LFU mismatch: {other:?}")),
         }
         Ok(())
     }
