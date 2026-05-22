@@ -15,6 +15,7 @@ const RDB_TYPE_SET: u8 = 2;
 const RDB_TYPE_ZSET: u8 = 3;
 const RDB_TYPE_HASH: u8 = 4;
 const RDB_TYPE_ZSET_2: u8 = 5;
+const RDB_TYPE_LIST_ZIPLIST: u8 = 10;
 const RDB_TYPE_SET_INTSET: u8 = 11;
 const RDB_TYPE_HASH_LISTPACK: u8 = 16;
 const RDB_TYPE_ZSET_LISTPACK: u8 = 17;
@@ -12206,6 +12207,18 @@ impl Store {
                 restored_stream_groups = Some(restore_stream_groups(groups));
                 Value::Stream(entries)
             }
+            RDB_TYPE_LIST_ZIPLIST => {
+                let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                cursor += consumed;
+                let mut list = VecDeque::new();
+                for item in decode_ziplist_strings(&ziplist)? {
+                    list.push_back(item);
+                }
+                if list.is_empty() {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
+                Value::List(list)
+            }
             RDB_TYPE_LIST_QUICKLIST_2 => {
                 let (node_count, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
@@ -13178,6 +13191,204 @@ fn decode_listpack_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
                 .collect::<Vec<_>>()
         })
         .map_err(|_| StoreError::InvalidDumpPayload)
+}
+
+fn decode_ziplist_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
+    const ZIPLIST_HEADER_SIZE: usize = 10;
+    const ZIP_END: u8 = 0xFF;
+
+    if data.len() < ZIPLIST_HEADER_SIZE + 1 {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    if data.last().copied() != Some(ZIP_END) {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+
+    let zlbytes = read_ziplist_u32_le(data, 0)?;
+    if zlbytes != data.len() {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    let tail_offset = read_ziplist_u32_le(data, 4)?;
+    let zllen = read_ziplist_u16_le(data, 8)?;
+
+    let end = data.len() - 1;
+    let mut cursor = ZIPLIST_HEADER_SIZE;
+    let mut prev_entry_len = 0usize;
+    let mut last_entry_start = None;
+    let mut entries = Vec::new();
+    while cursor < end {
+        let entry_start = cursor;
+        let encoded_prev_len = decode_ziplist_prevlen(data, &mut cursor, end)?;
+        if encoded_prev_len != prev_entry_len {
+            return Err(StoreError::InvalidDumpPayload);
+        }
+        entries.push(decode_ziplist_entry(data, &mut cursor, end)?);
+        prev_entry_len = cursor
+            .checked_sub(entry_start)
+            .ok_or(StoreError::InvalidDumpPayload)?;
+        last_entry_start = Some(entry_start);
+    }
+
+    let expected_tail = last_entry_start.unwrap_or(ZIPLIST_HEADER_SIZE);
+    if tail_offset != expected_tail {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    if zllen != u16::MAX && usize::from(zllen) != entries.len() {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+
+    Ok(entries)
+}
+
+fn read_ziplist_u16_le(data: &[u8], offset: usize) -> Result<u16, StoreError> {
+    let bytes: [u8; 2] = data
+        .get(offset..offset.saturating_add(2))
+        .ok_or(StoreError::InvalidDumpPayload)?
+        .try_into()
+        .map_err(|_| StoreError::InvalidDumpPayload)?;
+    Ok(u16::from_le_bytes(bytes))
+}
+
+fn read_ziplist_u32_le(data: &[u8], offset: usize) -> Result<usize, StoreError> {
+    let bytes: [u8; 4] = data
+        .get(offset..offset.saturating_add(4))
+        .ok_or(StoreError::InvalidDumpPayload)?
+        .try_into()
+        .map_err(|_| StoreError::InvalidDumpPayload)?;
+    usize::try_from(u32::from_le_bytes(bytes)).map_err(|_| StoreError::InvalidDumpPayload)
+}
+
+fn decode_ziplist_prevlen(
+    data: &[u8],
+    cursor: &mut usize,
+    end: usize,
+) -> Result<usize, StoreError> {
+    const ZIP_BIG_PREVLEN: u8 = 0xFE;
+
+    let marker = ziplist_take(data, cursor, 1, end)?
+        .first()
+        .copied()
+        .ok_or(StoreError::InvalidDumpPayload)?;
+    if marker < ZIP_BIG_PREVLEN {
+        return Ok(usize::from(marker));
+    }
+
+    let bytes: [u8; 4] = ziplist_take(data, cursor, 4, end)?
+        .try_into()
+        .map_err(|_| StoreError::InvalidDumpPayload)?;
+    usize::try_from(u32::from_le_bytes(bytes)).map_err(|_| StoreError::InvalidDumpPayload)
+}
+
+fn decode_ziplist_entry(
+    data: &[u8],
+    cursor: &mut usize,
+    end: usize,
+) -> Result<Vec<u8>, StoreError> {
+    let header = ziplist_take(data, cursor, 1, end)?
+        .first()
+        .copied()
+        .ok_or(StoreError::InvalidDumpPayload)?;
+    let encoding = if header < 0xC0 { header & 0xC0 } else { header };
+
+    match encoding {
+        0x00 => {
+            let len = usize::from(header & 0x3F);
+            Ok(ziplist_take(data, cursor, len, end)?.to_vec())
+        }
+        0x40 => {
+            let next = ziplist_take(data, cursor, 1, end)?
+                .first()
+                .copied()
+                .ok_or(StoreError::InvalidDumpPayload)?;
+            let len = (usize::from(header & 0x3F) << 8) | usize::from(next);
+            Ok(ziplist_take(data, cursor, len, end)?.to_vec())
+        }
+        0x80 => {
+            let bytes: [u8; 4] = ziplist_take(data, cursor, 4, end)?
+                .try_into()
+                .map_err(|_| StoreError::InvalidDumpPayload)?;
+            let len = usize::try_from(u32::from_be_bytes(bytes))
+                .map_err(|_| StoreError::InvalidDumpPayload)?;
+            Ok(ziplist_take(data, cursor, len, end)?.to_vec())
+        }
+        0xC0 => Ok(decode_ziplist_i16(data, cursor, end)?
+            .to_string()
+            .into_bytes()),
+        0xD0 => Ok(decode_ziplist_i32(data, cursor, end)?
+            .to_string()
+            .into_bytes()),
+        0xE0 => Ok(decode_ziplist_i64(data, cursor, end)?
+            .to_string()
+            .into_bytes()),
+        0xF0 => Ok(decode_ziplist_i24(data, cursor, end)?
+            .to_string()
+            .into_bytes()),
+        0xFE => Ok(decode_ziplist_i8(data, cursor, end)?
+            .to_string()
+            .into_bytes()),
+        0xF1..=0xFD => Ok(i64::from((header & 0x0F) - 1).to_string().into_bytes()),
+        _ => Err(StoreError::InvalidDumpPayload),
+    }
+}
+
+fn ziplist_take<'a>(
+    data: &'a [u8],
+    cursor: &mut usize,
+    len: usize,
+    end: usize,
+) -> Result<&'a [u8], StoreError> {
+    let next = cursor
+        .checked_add(len)
+        .ok_or(StoreError::InvalidDumpPayload)?;
+    if next > end {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    let bytes = data
+        .get(*cursor..next)
+        .ok_or(StoreError::InvalidDumpPayload)?;
+    *cursor = next;
+    Ok(bytes)
+}
+
+fn decode_ziplist_i8(data: &[u8], cursor: &mut usize, end: usize) -> Result<i8, StoreError> {
+    let bytes: [u8; 1] = ziplist_take(data, cursor, 1, end)?
+        .try_into()
+        .map_err(|_| StoreError::InvalidDumpPayload)?;
+    Ok(i8::from_le_bytes(bytes))
+}
+
+fn decode_ziplist_i16(data: &[u8], cursor: &mut usize, end: usize) -> Result<i16, StoreError> {
+    let bytes: [u8; 2] = ziplist_take(data, cursor, 2, end)?
+        .try_into()
+        .map_err(|_| StoreError::InvalidDumpPayload)?;
+    Ok(i16::from_le_bytes(bytes))
+}
+
+fn decode_ziplist_i24(data: &[u8], cursor: &mut usize, end: usize) -> Result<i32, StoreError> {
+    let bytes: [u8; 3] = ziplist_take(data, cursor, 3, end)?
+        .try_into()
+        .map_err(|_| StoreError::InvalidDumpPayload)?;
+    let [b0, b1, b2] = bytes;
+    let raw = i32::from(b0) | (i32::from(b1) << 8) | (i32::from(b2) << 16);
+    if raw & 0x80_0000 == 0 {
+        Ok(raw)
+    } else {
+        Ok(raw | !0xFF_FFFF)
+    }
+}
+
+fn decode_ziplist_i32(data: &[u8], cursor: &mut usize, end: usize) -> Result<i32, StoreError> {
+    let bytes: [u8; 4] = ziplist_take(data, cursor, 4, end)?
+        .try_into()
+        .map_err(|_| StoreError::InvalidDumpPayload)?;
+    Ok(i32::from_le_bytes(bytes))
+}
+
+fn decode_ziplist_i64(data: &[u8], cursor: &mut usize, end: usize) -> Result<i64, StoreError> {
+    let bytes: [u8; 8] = ziplist_take(data, cursor, 8, end)?
+        .try_into()
+        .map_err(|_| StoreError::InvalidDumpPayload)?;
+    Ok(i64::from_le_bytes(bytes))
 }
 
 fn decode_intset_members(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
@@ -15684,12 +15895,12 @@ mod tests {
         HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, LatencySample, MaxmemoryPolicy,
         MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT,
         PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK,
-        RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
-        RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2,
-        RDB_TYPE_ZSET_LISTPACK, ScoreBound, ScoreMember, Store, StoreError, StreamAutoClaimOptions,
-        StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor,
-        StreamGroupReadOptions, StreamPendingEntry, Value, ValueType, decode_length,
-        decode_listpack_strings, decode_rdb_string, encode_db_key, encode_length,
+        RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET,
+        RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET,
+        RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, ScoreBound, ScoreMember, Store, StoreError,
+        StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
+        StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value, ValueType,
+        decode_length, decode_listpack_strings, decode_rdb_string, encode_db_key, encode_length,
         encode_listpack_strings, hll_sparse_decode,
     };
 
@@ -20718,6 +20929,70 @@ mod tests {
         buf.extend_from_slice(data);
     }
 
+    fn encode_test_ziplist_strings(entries: &[&[u8]]) -> Result<Vec<u8>, String> {
+        let mut body = Vec::new();
+        let mut prev_len = 0usize;
+        let mut tail_offset = 10usize;
+        for entry in entries {
+            tail_offset = 10usize
+                .checked_add(body.len())
+                .ok_or_else(|| "ziplist tail offset overflow".to_string())?;
+            let entry_start = body.len();
+            if prev_len < 254 {
+                body.push(u8::try_from(prev_len).map_err(|err| err.to_string())?);
+            } else {
+                body.push(0xFE);
+                body.extend_from_slice(
+                    &u32::try_from(prev_len)
+                        .map_err(|err| err.to_string())?
+                        .to_le_bytes(),
+                );
+            }
+
+            if entry.len() <= 0x3F {
+                body.push(u8::try_from(entry.len()).map_err(|err| err.to_string())?);
+            } else if entry.len() <= 0x3FFF {
+                body.push(0x40 | u8::try_from(entry.len() >> 8).map_err(|err| err.to_string())?);
+                body.push(u8::try_from(entry.len() & 0xFF).map_err(|err| err.to_string())?);
+            } else {
+                body.push(0x80);
+                body.extend_from_slice(
+                    &u32::try_from(entry.len())
+                        .map_err(|err| err.to_string())?
+                        .to_be_bytes(),
+                );
+            }
+            body.extend_from_slice(entry);
+            prev_len = body
+                .len()
+                .checked_sub(entry_start)
+                .ok_or_else(|| "ziplist entry length underflow".to_string())?;
+        }
+        body.push(0xFF);
+
+        let total_bytes = 10usize
+            .checked_add(body.len())
+            .ok_or_else(|| "ziplist length overflow".to_string())?;
+        let mut ziplist = Vec::with_capacity(total_bytes);
+        ziplist.extend_from_slice(
+            &u32::try_from(total_bytes)
+                .map_err(|err| err.to_string())?
+                .to_le_bytes(),
+        );
+        ziplist.extend_from_slice(
+            &u32::try_from(tail_offset)
+                .map_err(|err| err.to_string())?
+                .to_le_bytes(),
+        );
+        ziplist.extend_from_slice(
+            &u16::try_from(entries.len())
+                .unwrap_or(u16::MAX)
+                .to_le_bytes(),
+        );
+        ziplist.extend_from_slice(&body);
+        Ok(ziplist)
+    }
+
     #[test]
     fn dump_payload_uses_upstream_container_tags() {
         let mut store = Store::new();
@@ -20952,6 +21227,27 @@ mod tests {
             Err(StoreError::InvalidDumpPayload) => Ok(()),
             other => Err(format!(
                 "duplicate zset listpack members should reject the dump, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn restore_accepts_legacy_list_ziplist() -> Result<(), String> {
+        let ziplist = encode_test_ziplist_strings(&[b"alpha".as_slice(), b"42", b"omega"])?;
+        let mut body = vec![RDB_TYPE_LIST_ZIPLIST];
+        append_raw_dump_bulk(&mut body, &ziplist);
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        store
+            .restore_key(b"l", 0, &payload, false, 100)
+            .map_err(|err| format!("restore legacy list ziplist: {err:?}"))?;
+        match store.lrange(b"l", 0, -1, 100) {
+            Ok(values) if values == vec![b"alpha".to_vec(), b"42".to_vec(), b"omega".to_vec()] => {
+                Ok(())
+            }
+            other => Err(format!(
+                "legacy list ziplist restored wrong values: {other:?}"
             )),
         }
     }
