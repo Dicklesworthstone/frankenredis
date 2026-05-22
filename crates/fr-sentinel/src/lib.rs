@@ -219,7 +219,7 @@ pub struct SentinelRedisInstance {
     pub sentinels: HashMap<String, SentinelRedisInstance>,
     pub slaves: HashMap<String, SentinelRedisInstance>,
     pub quorum: u32,
-    pub parallel_syncs: u32,
+    pub parallel_syncs: i32,
     pub auth_pass: Option<String>,
     pub auth_user: Option<String>,
 

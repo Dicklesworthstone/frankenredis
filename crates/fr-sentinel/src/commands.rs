@@ -418,10 +418,11 @@ fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
                     Ok(value) => value,
                     Err(error) => return error,
                 };
-                master.parallel_syncs = match parse_positive_u32(&value, &option_raw) {
-                    Ok(parsed) => parsed,
-                    Err(error) => return error,
-                };
+                master.parallel_syncs =
+                    match parse_wrapping_i32_from_positive_i64(&value, &option_raw) {
+                        Ok(parsed) => parsed,
+                        Err(error) => return error,
+                    };
                 i += 2;
             }
             "quorum" => {
@@ -595,6 +596,16 @@ fn parse_positive_u32(value: &str, option: &str) -> Result<u32, RespFrame> {
         .ok()
         .filter(|parsed| *parsed > 0)
         .ok_or_else(|| invalid_sentinel_set_argument(value, option))
+}
+
+fn parse_wrapping_i32_from_positive_i64(value: &str, option: &str) -> Result<i32, RespFrame> {
+    let parsed = value
+        .parse::<i64>()
+        .map_err(|_| invalid_sentinel_set_argument(value, option))?;
+    if parsed <= 0 {
+        return Err(invalid_sentinel_set_argument(value, option));
+    }
+    Ok(parsed as i32)
 }
 
 fn parse_non_negative_u64(value: &str, option: &str) -> Result<u64, RespFrame> {
@@ -3502,6 +3513,60 @@ mod tests {
                 master.quorum,
             ),
             before
+        );
+    }
+
+    #[test]
+    fn sentinel_set_parallel_syncs_wraps_oversized_i64_like_upstream() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+
+        for (value, wrapped) in [
+            (b"2147483648".as_slice(), i32::MIN),
+            (b"4294967295".as_slice(), -1),
+            (b"4294967296".as_slice(), 0),
+            (b"9223372036854775807".as_slice(), -1),
+        ] {
+            let result = dispatch_sentinel_command(
+                &mut state,
+                &[b"SET", b"mymaster", b"parallel-syncs", value],
+            );
+            assert_eq!(result, RespFrame::SimpleString("OK".into()));
+            assert_eq!(
+                state
+                    .get_master("mymaster")
+                    .map(|master| master.parallel_syncs),
+                Some(wrapped)
+            );
+
+            let master = dispatch_sentinel_command(&mut state, &[b"MASTER", b"mymaster"]);
+            let expected = wrapped.to_string();
+            assert_eq!(
+                info_field(&master, b"parallel-syncs").as_deref(),
+                Some(expected.as_str())
+            );
+        }
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"SET",
+                b"mymaster",
+                b"parallel-syncs",
+                b"9223372036854775808",
+            ],
+        );
+        assert!(
+            matches!(result, RespFrame::Error(ref message) if message.contains("Invalid argument"))
+        );
+        assert_eq!(
+            state
+                .get_master("mymaster")
+                .map(|master| master.parallel_syncs),
+            Some(-1)
         );
     }
 
