@@ -267,7 +267,7 @@ pub fn check_failover_timeout(master: &SentinelRedisInstance, now: u64) -> bool 
     now.saturating_sub(timeout_base) > master.failover_timeout
 }
 
-pub fn should_start_failover(master: &SentinelRedisInstance, is_leader: bool, now: u64) -> bool {
+pub fn should_start_failover(master: &SentinelRedisInstance, _is_leader: bool, now: u64) -> bool {
     if !master.is_o_down() {
         return false;
     }
@@ -281,9 +281,6 @@ pub fn should_start_failover(master: &SentinelRedisInstance, is_leader: bool, no
         && now.saturating_sub(master.failover_start_time)
             < master.failover_timeout.saturating_mul(2)
     {
-        return false;
-    }
-    if !is_leader && !master.flags.contains(InstanceFlags::FORCE_FAILOVER) {
         return false;
     }
     true
@@ -830,7 +827,7 @@ mod tests {
             SentinelRedisInstance::new_master("mymaster", SentinelAddr::new("10.0.0.1", 6379), 2);
         o_down_master.flags.insert(InstanceFlags::O_DOWN);
         assert!(should_start_failover(&o_down_master, true, now));
-        assert!(!should_start_failover(&o_down_master, false, now));
+        assert!(should_start_failover(&o_down_master, false, now));
 
         o_down_master.flags.insert(InstanceFlags::FORCE_FAILOVER);
         assert!(should_start_failover(&o_down_master, false, now));
