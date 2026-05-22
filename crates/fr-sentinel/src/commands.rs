@@ -46,6 +46,7 @@ pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> R
             cmd_pending_scripts(state)
         }
         "INFO-CACHE" => cmd_info_cache(state, &args[1..]),
+        "SIMULATE-FAILURE" => cmd_simulate_failure(state, &args[1..]),
         "DEBUG" => cmd_debug(state, &args[1..]),
         "HELP" => {
             if args.len() != 1 {
@@ -522,6 +523,32 @@ fn cmd_info_cache(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     RespFrame::Array(Some(reply))
 }
 
+fn cmd_simulate_failure(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
+    state.simfailure_flags = crate::SimFailureFlags::empty();
+
+    for arg in args {
+        let option = String::from_utf8_lossy(arg);
+        if option.eq_ignore_ascii_case("crash-after-election") {
+            state
+                .simfailure_flags
+                .insert(crate::SimFailureFlags::CRASH_AFTER_ELECTION);
+        } else if option.eq_ignore_ascii_case("crash-after-promotion") {
+            state
+                .simfailure_flags
+                .insert(crate::SimFailureFlags::CRASH_AFTER_PROMOTION);
+        } else if option.eq_ignore_ascii_case("help") {
+            return RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"crash-after-election".to_vec())),
+                RespFrame::BulkString(Some(b"crash-after-promotion".to_vec())),
+            ]));
+        } else {
+            return RespFrame::Error("ERR Unknown failure simulation specified".into());
+        }
+    }
+
+    RespFrame::SimpleString("OK".into())
+}
+
 fn info_cache_rows(instance: &crate::SentinelRedisInstance, now_ms: u64) -> Vec<RespFrame> {
     let mut rows = Vec::with_capacity(instance.slaves.len() + 1);
     rows.push(info_cache_row(instance, now_ms));
@@ -572,6 +599,7 @@ fn cmd_help() -> RespFrame {
         "SENTINEL MONITOR <name> <ip> <port> <quorum>",
         "SENTINEL REMOVE <name>",
         "SENTINEL SET <name> <option> <value> ...",
+        "SENTINEL SIMULATE-FAILURE [CRASH-AFTER-ELECTION] [CRASH-AFTER-PROMOTION] [HELP]",
         "SENTINEL RESET <pattern>",
         "SENTINEL GET-MASTER-ADDR-BY-NAME <name>",
         "SENTINEL CKQUORUM <name>",
@@ -1184,6 +1212,64 @@ mod tests {
         assert_eq!(result, RespFrame::SimpleString("OK".into()));
         assert_eq!(state.sentinel_auth_user, None);
         assert_eq!(state.sentinel_auth_pass, None);
+    }
+
+    #[test]
+    fn sentinel_simulate_failure_sets_and_clears_flags() {
+        let mut state = SentinelState::new();
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"SIMULATE-FAILURE",
+                b"crash-after-election",
+                b"CRASH-AFTER-PROMOTION",
+            ],
+        );
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+        assert!(
+            state
+                .simfailure_flags
+                .contains(crate::SimFailureFlags::CRASH_AFTER_ELECTION)
+        );
+        assert!(
+            state
+                .simfailure_flags
+                .contains(crate::SimFailureFlags::CRASH_AFTER_PROMOTION)
+        );
+
+        let result = dispatch_sentinel_command(&mut state, &[b"SIMULATE-FAILURE"]);
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+        assert_eq!(state.simfailure_flags, crate::SimFailureFlags::empty());
+    }
+
+    #[test]
+    fn sentinel_simulate_failure_help_lists_supported_modes() {
+        let mut state = SentinelState::new();
+        let result = dispatch_sentinel_command(&mut state, &[b"SIMULATE-FAILURE", b"HELP"]);
+        assert_eq!(
+            result,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"crash-after-election".to_vec())),
+                RespFrame::BulkString(Some(b"crash-after-promotion".to_vec())),
+            ]))
+        );
+        assert_eq!(state.simfailure_flags, crate::SimFailureFlags::empty());
+    }
+
+    #[test]
+    fn sentinel_simulate_failure_rejects_unknown_after_resetting_flags() {
+        let mut state = SentinelState::new();
+        let result =
+            dispatch_sentinel_command(&mut state, &[b"SIMULATE-FAILURE", b"crash-after-election"]);
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+
+        let result = dispatch_sentinel_command(&mut state, &[b"SIMULATE-FAILURE", b"bad-mode"]);
+        assert_eq!(
+            result,
+            RespFrame::Error("ERR Unknown failure simulation specified".into())
+        );
+        assert_eq!(state.simfailure_flags, crate::SimFailureFlags::empty());
     }
 
     #[test]

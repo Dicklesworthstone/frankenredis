@@ -23,6 +23,28 @@ pub const SCRIPT_RETRY_DELAY_MS: u64 = 30000;
 pub const DEFAULT_FAILOVER_TIMEOUT_MS: u64 = 180000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SimFailureFlags(u8);
+
+impl SimFailureFlags {
+    pub const CRASH_AFTER_ELECTION: Self = Self(1 << 0);
+    pub const CRASH_AFTER_PROMOTION: Self = Self(1 << 1);
+
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    pub fn insert(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct InstanceFlags(u16);
 
 impl InstanceFlags {
@@ -293,6 +315,7 @@ pub struct SentinelState {
     pub resolve_hostnames: bool,
     pub announce_hostnames: bool,
     pub deny_scripts_reconfig: bool,
+    pub simfailure_flags: SimFailureFlags,
     pub loglevel: String,
 }
 
@@ -325,6 +348,7 @@ impl SentinelState {
             resolve_hostnames: false,
             announce_hostnames: false,
             deny_scripts_reconfig: false,
+            simfailure_flags: SimFailureFlags::empty(),
             loglevel: "notice".to_string(),
         }
     }
