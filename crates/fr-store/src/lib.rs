@@ -2979,14 +2979,33 @@ impl Store {
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
         self.drop_if_expired(&key, now_ms);
-        let old = match self.entries.get(&key) {
-            Some(entry) => match &entry.value {
-                Value::String(v) => Some(v.clone()),
-                _ => return Err(StoreError::WrongType),
-            },
-            None => None,
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(&key) {
+            self.next_rand()
+        } else {
+            0
         };
-        self.internal_entries_insert(key, Entry::new(Value::String(value), None, now_ms));
+        let (old, lfu_state) = match self.entries.get_mut(&key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                let lfu = (entry.lfu_freq, entry.lfu_last_touch_min);
+                match &entry.value {
+                    Value::String(v) => (Some(v.clone()), Some(lfu)),
+                    _ => return Err(StoreError::WrongType),
+                }
+            }
+            None => (None, None),
+        };
+        let mut new_entry = Entry::new(Value::String(value), None, now_ms);
+        if let Some((freq, last_touch)) = lfu_state {
+            new_entry.lfu_freq = freq;
+            new_entry.lfu_last_touch_min = last_touch;
+        }
+        self.internal_entries_insert(key, new_entry);
         self.dirty = self.dirty.saturating_add(1);
         Ok(old)
     }
@@ -20510,6 +20529,25 @@ mod tests {
         match store.object_freq(b"z", 1) {
             Some(6) => {}
             other => return Err(format!("ZRANDMEMBER LFU mismatch: {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn getset_existing_string_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store.set(b"s".to_vec(), b"old".to_vec(), None, 0);
+
+        match store.object_freq(b"s", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new string LFU frequency mismatch: {other:?}")),
+        }
+        let _old = store.getset(b"s".to_vec(), b"new".to_vec(), 1).unwrap();
+        match store.object_freq(b"s", 1) {
+            Some(6) => {}
+            other => return Err(format!("GETSET LFU mismatch: {other:?}")),
         }
         Ok(())
     }
