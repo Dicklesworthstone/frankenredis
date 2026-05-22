@@ -6090,33 +6090,46 @@ impl Store {
         let max_intset_entries = self.set_max_intset_entries;
         let max_listpack_entries = self.set_max_listpack_entries;
         let max_listpack_value = self.set_max_listpack_value;
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &mut entry.value {
-                Value::Set(s) => {
-                    let mut added = 0_u64;
-                    for m in members {
-                        if s.insert(m.clone()) {
-                            added += 1;
-                        }
-                    }
-                    if added > 0 {
-                        Self::mark_digest_stale_fields(
-                            &mut self.digest_stale,
-                            &mut self.digest_mutations,
-                        );
-                        Self::refresh_set_encoding_flags(
-                            entry,
-                            max_intset_entries,
-                            max_listpack_entries,
-                            max_listpack_value,
-                        );
-                    }
-                    entry.touch_write(now_ms);
-                    self.dirty = self.dirty.saturating_add(added);
-                    Ok(added)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                entry.touch_write(now_ms);
+                match &mut entry.value {
+                    Value::Set(s) => {
+                        let mut added = 0_u64;
+                        for m in members {
+                            if s.insert(m.clone()) {
+                                added += 1;
+                            }
+                        }
+                        if added > 0 {
+                            Self::mark_digest_stale_fields(
+                                &mut self.digest_stale,
+                                &mut self.digest_mutations,
+                            );
+                            Self::refresh_set_encoding_flags(
+                                entry,
+                                max_intset_entries,
+                                max_listpack_entries,
+                                max_listpack_value,
+                            );
+                        }
+                        self.dirty = self.dirty.saturating_add(added);
+                        Ok(added)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => {
                 let mut s = BTreeSet::new();
                 let mut added = 0_u64;
@@ -17623,6 +17636,33 @@ mod tests {
         match store.object_freq(b"s", 1) {
             Some(6) => {}
             other => return Err(format!("SREM should bump LFU frequency, got {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sadd_existing_member_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .sadd(b"s", &[b"a".to_vec()], 0)
+            .map_err(|err| format!("seed set failed: {err:?}"))?;
+
+        match store.object_freq(b"s", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new set LFU frequency mismatch: {other:?}")),
+        }
+        match store
+            .sadd(b"s", &[b"a".to_vec()], 1)
+            .map_err(|err| format!("sadd failed: {err:?}"))?
+        {
+            0 => {}
+            other => return Err(format!("SADD duplicate member count mismatch: {other}")),
+        }
+        match store.object_freq(b"s", 1) {
+            Some(6) => {}
+            other => return Err(format!("SADD should bump LFU frequency, got {other:?}")),
         }
         Ok(())
     }
