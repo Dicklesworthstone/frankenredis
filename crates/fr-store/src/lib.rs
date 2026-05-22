@@ -12013,7 +12013,7 @@ impl Store {
                 } else {
                     buf.push(RDB_TYPE_ZSET_2);
                     encode_length(&mut buf, zs.len());
-                    for (member, score) in zs.iter_asc() {
+                    for (member, score) in zs.iter_desc() {
                         encode_dump_bulk(&mut buf, member);
                         buf.extend_from_slice(&score.to_le_bytes());
                     }
@@ -20726,6 +20726,52 @@ mod tests {
         assert_eq!(
             store.dump_key(b"raw_zset", 100).unwrap()[0],
             RDB_TYPE_ZSET_2
+        );
+    }
+
+    #[test]
+    fn dump_zset2_uses_upstream_descending_skiplist_order() {
+        let mut store = Store::new();
+        store.zset_max_listpack_entries = 2;
+        store
+            .zadd(
+                b"z",
+                &[
+                    (2.0, b"alpha".to_vec()),
+                    (3.0, b"gamma".to_vec()),
+                    (2.0, b"beta".to_vec()),
+                ],
+                100,
+            )
+            .unwrap();
+
+        let payload = store.dump_key(b"z", 100).unwrap();
+        assert_eq!(payload[0], RDB_TYPE_ZSET_2);
+        let data_end = payload.len() - DUMP_TRAILER_LEN;
+        let mut cursor = 1;
+        let (count, consumed) = decode_length(&payload, cursor).unwrap();
+        cursor += consumed;
+        assert_eq!(count, 3);
+
+        let mut dumped = Vec::new();
+        for _ in 0..count {
+            let (member, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
+            cursor += consumed;
+            assert!(cursor + 8 <= data_end);
+            let mut score_bytes = [0; 8];
+            score_bytes.copy_from_slice(&payload[cursor..cursor + 8]);
+            let score = f64::from_le_bytes(score_bytes);
+            cursor += 8;
+            dumped.push((member, score));
+        }
+        assert_eq!(cursor, data_end);
+        assert_eq!(
+            dumped,
+            vec![
+                (b"gamma".to_vec(), 3.0),
+                (b"beta".to_vec(), 2.0),
+                (b"alpha".to_vec(), 2.0),
+            ]
         );
     }
 
