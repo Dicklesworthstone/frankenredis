@@ -12650,6 +12650,7 @@ impl Store {
                                     pending_entry.last_delivered_ms.to_string().into_bytes(),
                                     b"RETRYCOUNT".to_vec(),
                                     pending_entry.deliveries.to_string().into_bytes(),
+                                    b"JUSTID".to_vec(),
                                     b"FORCE".to_vec(),
                                 ]);
                             }
@@ -23011,6 +23012,7 @@ mod tests {
                 b"250".to_vec(),
                 b"RETRYCOUNT".to_vec(),
                 b"7".to_vec(),
+                b"JUSTID".to_vec(),
                 b"FORCE".to_vec(),
             ]
         );
