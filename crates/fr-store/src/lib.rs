@@ -12138,7 +12138,9 @@ impl Store {
                     cursor += fc;
                     let (value, vc) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += vc;
-                    hash.insert(field, value);
+                    if hash.insert(field, value).is_some() {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
                 }
                 Value::Hash(hash)
             }
@@ -20874,6 +20876,25 @@ mod tests {
             Err(StoreError::InvalidDumpPayload) => Ok(()),
             other => Err(format!(
                 "duplicate raw set members should reject the dump, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn restore_rejects_duplicate_raw_hash_fields() -> Result<(), String> {
+        let mut body = vec![RDB_TYPE_HASH];
+        encode_length(&mut body, 2);
+        append_raw_dump_bulk(&mut body, b"field");
+        append_raw_dump_bulk(&mut body, b"one");
+        append_raw_dump_bulk(&mut body, b"field");
+        append_raw_dump_bulk(&mut body, b"two");
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        match store.restore_key(b"h", 0, &payload, false, 100) {
+            Err(StoreError::InvalidDumpPayload) => Ok(()),
+            other => Err(format!(
+                "duplicate raw hash fields should reject the dump, got {other:?}"
             )),
         }
     }
