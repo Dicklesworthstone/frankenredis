@@ -3217,6 +3217,53 @@ mod tests {
     }
 
     #[test]
+    fn sentinel_failover_rejects_stale_replica_candidates_like_upstream() {
+        let mut state = SentinelState::new();
+        state.previous_time = 100_000;
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+        add_replica(&mut state, "mymaster", "stale-info", |replica| {
+            replica.link.last_avail_time = 100_000;
+            replica.info_refresh = 0;
+        });
+        add_replica(&mut state, "mymaster", "stale-ping", |replica| {
+            replica.link.last_avail_time = 0;
+            replica.info_refresh = 100_000;
+        });
+        add_replica(&mut state, "mymaster", "stale-master-link", |replica| {
+            replica.link.last_avail_time = 100_000;
+            replica.info_refresh = 100_000;
+            replica.master_link_down_time = crate::DEFAULT_DOWN_AFTER_MS.saturating_mul(10) + 1;
+        });
+
+        let result = dispatch_sentinel_command(&mut state, &[b"FAILOVER", b"mymaster"]);
+
+        assert!(matches!(result, RespFrame::Error(message) if message.contains("NOGOODSLAVE")));
+        assert_eq!(state.current_epoch, 0);
+
+        let master_exists = state.masters.contains_key("mymaster");
+        let Some(master) = state.get_master_mut("mymaster") else {
+            assert!(master_exists, "mymaster exists");
+            return;
+        };
+        let Some(replica) = master.slaves.get_mut("stale-info") else {
+            assert!(
+                master.slaves.contains_key("stale-info"),
+                "stale-info replica exists"
+            );
+            return;
+        };
+        replica.info_refresh = 100_000;
+
+        let result = dispatch_sentinel_command(&mut state, &[b"FAILOVER", b"mymaster"]);
+
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+        assert_eq!(state.current_epoch, 1);
+    }
+
+    #[test]
     fn test_glob_match() {
         assert!(glob_match("*", "anything"));
         assert!(glob_match("my*", "mymaster"));

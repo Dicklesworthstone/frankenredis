@@ -382,6 +382,36 @@ mod tests {
     }
 
     #[test]
+    fn select_slave_at_excludes_stale_upstream_candidates() {
+        let mut master = make_master_with_slaves();
+        let now = 100_000;
+        for slave in master.slaves.values_mut() {
+            slave.link.last_avail_time = now;
+            slave.info_refresh = 0;
+        }
+
+        assert_eq!(select_slave_at(&master, now, 1_000, 10_000), None);
+
+        master
+            .slaves
+            .get_mut("10.0.0.10:6379")
+            .unwrap()
+            .info_refresh = now;
+        assert_eq!(
+            select_slave_at(&master, now, 1_000, 10_000),
+            Some("10.0.0.10:6379".into())
+        );
+
+        let stale_master_link_time = master.down_after_period.saturating_mul(10) + 1;
+        master
+            .slaves
+            .get_mut("10.0.0.10:6379")
+            .unwrap()
+            .master_link_down_time = stale_master_link_time;
+        assert_eq!(select_slave_at(&master, now, 1_000, 10_000), None);
+    }
+
+    #[test]
     fn failover_state_progression() {
         let addr = SentinelAddr::new("10.0.0.1", 6379);
         let mut master = SentinelRedisInstance::new_master("mymaster", addr, 2);
