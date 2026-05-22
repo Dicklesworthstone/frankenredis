@@ -11098,6 +11098,9 @@ impl Store {
         keys: &[&[u8]],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
         // Collect values, treating missing keys as empty strings.
         // Enforce a total memory limit for the operation to prevent DoS.
         const MAX_BITOP_TOTAL_BYTES: usize = 512 * 1024 * 1024; // 512 MiB
@@ -11105,19 +11108,30 @@ impl Store {
         let mut values: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
         for &key in keys {
             self.drop_if_expired(key, now_ms);
-            match self.entries.get(key) {
-                Some(entry) => match &entry.value {
-                    Value::String(v) => {
-                        total_bytes = total_bytes.saturating_add(v.len());
-                        if total_bytes > MAX_BITOP_TOTAL_BYTES {
-                            return Err(StoreError::GenericError(
-                                "BITOP total input size exceeds limit".to_string(),
-                            ));
-                        }
-                        values.push(v.clone());
+            let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+                self.next_rand()
+            } else {
+                0
+            };
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    if lfu_tracking_enabled {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
-                    _ => return Err(StoreError::WrongType),
-                },
+                    entry.touch(now_ms);
+                    match &entry.value {
+                        Value::String(v) => {
+                            total_bytes = total_bytes.saturating_add(v.len());
+                            if total_bytes > MAX_BITOP_TOTAL_BYTES {
+                                return Err(StoreError::GenericError(
+                                    "BITOP total input size exceeds limit".to_string(),
+                                ));
+                            }
+                            values.push(v.clone());
+                        }
+                        _ => return Err(StoreError::WrongType),
+                    }
+                }
                 None => values.push(Vec::new()),
             }
         }
