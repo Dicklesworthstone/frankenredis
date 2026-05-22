@@ -178,29 +178,24 @@ pub fn advance_failover_state(
             FailoverState::WaitStart
         }
 
-        (FailoverState::WaitStart, FailoverEvent::SlaveSelected(key)) => {
-            ctx.promoted_slave_key = Some(key.clone());
-            ctx.slaves_to_reconfig = master
-                .slaves
-                .keys()
-                .filter(|k| *k != &key)
-                .cloned()
-                .collect();
-            master.failover_state_change_time = now;
-            FailoverState::SelectSlave
+        (
+            FailoverState::WaitStart | FailoverState::SelectSlave,
+            FailoverEvent::SlaveSelected(key),
+        ) => {
+            if promote_selected_slave(master, &key, ctx) {
+                master.failover_state_change_time = now;
+                FailoverState::SendSlaveofNoone
+            } else {
+                current
+            }
         }
 
-        (FailoverState::SelectSlave, FailoverEvent::SlaveofNoOneSent) => {
-            master.failover_state_change_time = now;
-            FailoverState::SendSlaveofNoone
-        }
-
-        (FailoverState::SendSlaveofNoone, FailoverEvent::PromotionConfirmed) => {
+        (FailoverState::SendSlaveofNoone, FailoverEvent::SlaveofNoOneSent) => {
             master.failover_state_change_time = now;
             FailoverState::WaitPromotion
         }
 
-        (FailoverState::WaitPromotion, FailoverEvent::ReconfigurationComplete) => {
+        (FailoverState::WaitPromotion, FailoverEvent::PromotionConfirmed) => {
             master.failover_state_change_time = now;
             FailoverState::ReconfSlaves
         }
@@ -222,12 +217,35 @@ pub fn advance_failover_state(
     next
 }
 
+fn promote_selected_slave(
+    master: &mut SentinelRedisInstance,
+    key: &str,
+    ctx: &mut FailoverContext,
+) -> bool {
+    let Some(slave) = master.slaves.get_mut(key) else {
+        return false;
+    };
+    slave.flags.insert(InstanceFlags::PROMOTED);
+    master.promoted_slave = Some(Box::new(slave.clone()));
+    ctx.promoted_slave_key = Some(key.to_string());
+    ctx.slaves_to_reconfig = master
+        .slaves
+        .keys()
+        .filter(|candidate| candidate.as_str() != key)
+        .cloned()
+        .collect();
+    true
+}
+
 fn clear_aborted_failover(master: &mut SentinelRedisInstance, now: u64) {
     master.failover_state_change_time = now;
     master.flags.remove(InstanceFlags::FAILOVER_IN_PROGRESS);
     master.flags.remove(InstanceFlags::FORCE_FAILOVER);
     if let Some(promoted) = master.promoted_slave.as_mut() {
         promoted.flags.remove(InstanceFlags::PROMOTED);
+    }
+    for slave in master.slaves.values_mut() {
+        slave.flags.remove(InstanceFlags::PROMOTED);
     }
     master.promoted_slave = None;
 }
@@ -461,6 +479,9 @@ mod tests {
     fn failover_state_progression() {
         let addr = SentinelAddr::new("10.0.0.1", 6379);
         let mut master = SentinelRedisInstance::new_master("mymaster", addr, 2);
+        let slave =
+            SentinelRedisInstance::new_master("replica-1", SentinelAddr::new("10.0.0.2", 6380), 0);
+        master.slaves.insert("replica-1".to_string(), slave);
         let mut ctx = FailoverContext::new();
 
         let state =
@@ -473,12 +494,28 @@ mod tests {
             &mut ctx,
             2000,
         );
-        assert_eq!(state, FailoverState::SelectSlave);
-        assert_eq!(ctx.promoted_slave_key, Some("10.0.0.10:6379".to_string()));
+        assert_eq!(state, FailoverState::WaitStart);
+
+        let state = advance_failover_state(
+            &mut master,
+            FailoverEvent::SlaveSelected("replica-1".to_string()),
+            &mut ctx,
+            2500,
+        );
+        assert_eq!(state, FailoverState::SendSlaveofNoone);
+        assert_eq!(ctx.promoted_slave_key, Some("replica-1".to_string()));
+        assert!(ctx.slaves_to_reconfig.is_empty());
+        assert!(master.promoted_slave.is_some());
+        assert!(
+            master
+                .slaves
+                .get("replica-1")
+                .is_some_and(|slave| slave.flags.contains(InstanceFlags::PROMOTED))
+        );
 
         let state =
             advance_failover_state(&mut master, FailoverEvent::SlaveofNoOneSent, &mut ctx, 3000);
-        assert_eq!(state, FailoverState::SendSlaveofNoone);
+        assert_eq!(state, FailoverState::WaitPromotion);
 
         let state = advance_failover_state(
             &mut master,
@@ -486,7 +523,7 @@ mod tests {
             &mut ctx,
             4000,
         );
-        assert_eq!(state, FailoverState::WaitPromotion);
+        assert_eq!(state, FailoverState::ReconfSlaves);
     }
 
     #[test]
@@ -526,6 +563,10 @@ mod tests {
             SentinelRedisInstance::new_master("replica-1", SentinelAddr::new("10.0.0.2", 6380), 0);
         promoted.flags.insert(InstanceFlags::PROMOTED);
         master.promoted_slave = Some(Box::new(promoted));
+        let mut stored =
+            SentinelRedisInstance::new_master("replica-1", SentinelAddr::new("10.0.0.2", 6380), 0);
+        stored.flags.insert(InstanceFlags::PROMOTED);
+        master.slaves.insert("replica-1".to_string(), stored);
         let mut ctx = FailoverContext::new();
 
         let state = advance_failover_state(
@@ -538,6 +579,12 @@ mod tests {
         assert!(!master.flags.contains(InstanceFlags::FAILOVER_IN_PROGRESS));
         assert!(!master.flags.contains(InstanceFlags::FORCE_FAILOVER));
         assert!(master.promoted_slave.is_none());
+        assert!(
+            !master
+                .slaves
+                .get("replica-1")
+                .is_some_and(|slave| slave.flags.contains(InstanceFlags::PROMOTED))
+        );
     }
 
     #[test]
@@ -551,6 +598,10 @@ mod tests {
             SentinelRedisInstance::new_master("replica-1", SentinelAddr::new("10.0.0.2", 6380), 0);
         promoted.flags.insert(InstanceFlags::PROMOTED);
         master.promoted_slave = Some(Box::new(promoted));
+        let mut stored =
+            SentinelRedisInstance::new_master("replica-1", SentinelAddr::new("10.0.0.2", 6380), 0);
+        stored.flags.insert(InstanceFlags::PROMOTED);
+        master.slaves.insert("replica-1".to_string(), stored);
         let mut ctx = FailoverContext::new();
 
         let state = advance_failover_state(&mut master, FailoverEvent::Timeout, &mut ctx, 2000);
@@ -561,6 +612,12 @@ mod tests {
         assert!(!master.flags.contains(InstanceFlags::FAILOVER_IN_PROGRESS));
         assert!(!master.flags.contains(InstanceFlags::FORCE_FAILOVER));
         assert!(master.promoted_slave.is_none());
+        assert!(
+            !master
+                .slaves
+                .get("replica-1")
+                .is_some_and(|slave| slave.flags.contains(InstanceFlags::PROMOTED))
+        );
     }
 
     #[test]
