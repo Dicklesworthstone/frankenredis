@@ -235,7 +235,7 @@ fn cmd_remove(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
 }
 
 fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
-    if args.len() < 3 || args.len().is_multiple_of(2) {
+    if args.len() < 3 {
         return RespFrame::Error("ERR wrong number of arguments for 'sentinel set' command".into());
     }
     let name = String::from_utf8_lossy(args[0]);
@@ -246,58 +246,114 @@ fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     };
 
     let mut i = 1;
-    while i + 1 < args.len() {
+    while i < args.len() {
         let option_raw = String::from_utf8_lossy(args[i]);
         let option = option_raw.to_ascii_lowercase();
-        let value = String::from_utf8_lossy(args[i + 1]);
 
         match option.as_str() {
             "down-after-milliseconds" => {
+                let value = match sentinel_set_value(args, i, &option_raw) {
+                    Ok(value) => value,
+                    Err(error) => return error,
+                };
                 master.down_after_period = match parse_positive_u64(&value, &option_raw) {
                     Ok(parsed) => parsed,
                     Err(error) => return error,
                 };
+                i += 2;
             }
             "failover-timeout" => {
+                let value = match sentinel_set_value(args, i, &option_raw) {
+                    Ok(value) => value,
+                    Err(error) => return error,
+                };
                 master.failover_timeout = match parse_positive_u64(&value, &option_raw) {
                     Ok(parsed) => parsed,
                     Err(error) => return error,
                 };
+                i += 2;
             }
             "parallel-syncs" => {
+                let value = match sentinel_set_value(args, i, &option_raw) {
+                    Ok(value) => value,
+                    Err(error) => return error,
+                };
                 master.parallel_syncs = match parse_positive_u32(&value, &option_raw) {
                     Ok(parsed) => parsed,
                     Err(error) => return error,
                 };
+                i += 2;
             }
             "quorum" => {
+                let value = match sentinel_set_value(args, i, &option_raw) {
+                    Ok(value) => value,
+                    Err(error) => return error,
+                };
                 master.quorum = match parse_positive_u32(&value, &option_raw) {
                     Ok(parsed) => parsed,
                     Err(error) => return error,
                 };
+                i += 2;
             }
             "master-reboot-down-after-period" => {
+                let value = match sentinel_set_value(args, i, &option_raw) {
+                    Ok(value) => value,
+                    Err(error) => return error,
+                };
                 master.master_reboot_down_after_period =
                     match parse_non_negative_u64(&value, &option_raw) {
                         Ok(parsed) => parsed,
                         Err(error) => return error,
                     };
+                i += 2;
             }
             "auth-pass" => {
+                let value = match sentinel_set_value(args, i, &option_raw) {
+                    Ok(value) => value,
+                    Err(error) => return error,
+                };
                 master.auth_pass = if value.is_empty() {
                     None
                 } else {
                     Some(value.into_owned())
                 };
+                i += 2;
             }
             "auth-user" => {
+                let value = match sentinel_set_value(args, i, &option_raw) {
+                    Ok(value) => value,
+                    Err(error) => return error,
+                };
                 master.auth_user = if value.is_empty() {
                     None
                 } else {
                     Some(value.into_owned())
                 };
+                i += 2;
+            }
+            "rename-command" => {
+                let Some(oldname) = args.get(i + 1) else {
+                    return unknown_sentinel_set_option(&option_raw);
+                };
+                let Some(newname) = args.get(i + 2) else {
+                    return unknown_sentinel_set_option(&option_raw);
+                };
+                let oldname = String::from_utf8_lossy(oldname);
+                let newname = String::from_utf8_lossy(newname);
+                if oldname.is_empty() {
+                    return invalid_sentinel_set_argument(&oldname, &option_raw);
+                }
+                if newname.is_empty() {
+                    return invalid_sentinel_set_argument(&newname, &option_raw);
+                }
+                set_renamed_command(master, &oldname, &newname);
+                i += 3;
             }
             "notification-script" => {
+                let value = match sentinel_set_value(args, i, &option_raw) {
+                    Ok(value) => value,
+                    Err(error) => return error,
+                };
                 if deny_scripts_reconfig {
                     return RespFrame::Error(
                         "ERR Reconfiguration of scripts path is denied for security reasons. Check the deny-scripts-reconfig configuration directive in your Sentinel configuration".into(),
@@ -313,8 +369,13 @@ fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
                 } else {
                     Some(value.into_owned())
                 };
+                i += 2;
             }
             "client-reconfig-script" => {
+                let value = match sentinel_set_value(args, i, &option_raw) {
+                    Ok(value) => value,
+                    Err(error) => return error,
+                };
                 if deny_scripts_reconfig {
                     return RespFrame::Error(
                         "ERR Reconfiguration of scripts path is denied for security reasons. Check the deny-scripts-reconfig configuration directive in your Sentinel configuration".into(),
@@ -331,14 +392,38 @@ fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
                 } else {
                     Some(value.into_owned())
                 };
+                i += 2;
             }
             _ => {
-                return RespFrame::Error(format!("ERR Unknown option '{}'", option));
+                return unknown_sentinel_set_option(&option_raw);
             }
         }
-        i += 2;
     }
     RespFrame::SimpleString("OK".into())
+}
+
+fn sentinel_set_value<'a>(
+    args: &'a [&[u8]],
+    option_index: usize,
+    option: &str,
+) -> Result<std::borrow::Cow<'a, str>, RespFrame> {
+    args.get(option_index + 1)
+        .map(|value| String::from_utf8_lossy(value))
+        .ok_or_else(|| unknown_sentinel_set_option(option))
+}
+
+fn set_renamed_command(master: &mut crate::SentinelRedisInstance, oldname: &str, newname: &str) {
+    let old_key = oldname.to_ascii_lowercase();
+    master.renamed_commands.remove(&old_key);
+    if !oldname.eq_ignore_ascii_case(newname) {
+        master.renamed_commands.insert(old_key, newname.to_string());
+    }
+}
+
+fn unknown_sentinel_set_option(option: &str) -> RespFrame {
+    RespFrame::Error(format!(
+        "ERR Unknown option or number of arguments for SENTINEL SET '{option}'"
+    ))
 }
 
 fn path_has_execute_permission(path: &str) -> bool {
@@ -1455,6 +1540,99 @@ mod tests {
             return;
         };
         assert_eq!(master.master_reboot_down_after_period, 5000);
+    }
+
+    #[test]
+    fn sentinel_set_rename_command_tracks_per_master_mapping() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"SET",
+                b"mymaster",
+                b"rename-command",
+                b"CONFIG",
+                b"SENTINEL-CONFIG",
+                b"auth-user",
+                b"sentinel-user",
+            ],
+        );
+        assert!(matches!(result, RespFrame::SimpleString(_)));
+
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        assert_eq!(
+            master.renamed_commands.get("config").map(String::as_str),
+            Some("SENTINEL-CONFIG")
+        );
+        assert_eq!(master.auth_user.as_deref(), Some("sentinel-user"));
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"SET", b"mymaster", b"rename-command", b"CONFIG", b"CONFIG"],
+        );
+        assert!(matches!(result, RespFrame::SimpleString(_)));
+
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        assert!(!master.renamed_commands.contains_key("config"));
+    }
+
+    #[test]
+    fn sentinel_set_rename_command_rejects_empty_names_and_missing_value() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+
+        for args in [
+            [
+                b"SET".as_slice(),
+                b"mymaster".as_slice(),
+                b"rename-command".as_slice(),
+                b"".as_slice(),
+                b"RENAMED".as_slice(),
+            ],
+            [
+                b"SET".as_slice(),
+                b"mymaster".as_slice(),
+                b"rename-command".as_slice(),
+                b"CONFIG".as_slice(),
+                b"".as_slice(),
+            ],
+        ] {
+            let result = dispatch_sentinel_command(&mut state, &args);
+            assert!(
+                matches!(result, RespFrame::Error(message) if message.contains("Invalid argument"))
+            );
+        }
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"SET", b"mymaster", b"rename-command", b"CONFIG"],
+        );
+        assert!(
+            matches!(result, RespFrame::Error(message) if message.contains("Unknown option or number of arguments"))
+        );
+
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        assert!(master.renamed_commands.is_empty());
     }
 
     #[test]

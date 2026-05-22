@@ -192,6 +192,7 @@ pub struct SentinelRedisInstance {
     pub promoted_slave: Option<Box<SentinelRedisInstance>>,
     pub master_reboot_down_after_period: u64,
 
+    pub renamed_commands: HashMap<String, String>,
     pub notification_script: Option<String>,
     pub client_reconfig_script: Option<String>,
 }
@@ -238,6 +239,7 @@ impl SentinelRedisInstance {
             failover_timeout: DEFAULT_FAILOVER_TIMEOUT_MS,
             promoted_slave: None,
             master_reboot_down_after_period: 0,
+            renamed_commands: HashMap::new(),
             notification_script: None,
             client_reconfig_script: None,
         }
