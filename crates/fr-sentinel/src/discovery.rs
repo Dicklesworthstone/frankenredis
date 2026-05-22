@@ -80,16 +80,17 @@ pub enum DiscoveryAction {
         sentinel_key: String,
         addr: SentinelAddr,
         runid: String,
+        current_epoch: u64,
+        master_addr: SentinelAddr,
+        master_config_epoch: u64,
     },
     UpdateSentinel {
         master_name: String,
         sentinel_key: String,
         addr: SentinelAddr,
-    },
-    UpdateMasterAddr {
-        master_name: String,
-        new_addr: SentinelAddr,
-        new_epoch: u64,
+        current_epoch: u64,
+        master_addr: SentinelAddr,
+        master_config_epoch: u64,
     },
     None,
 }
@@ -108,17 +109,8 @@ pub fn process_hello_message(
         None => return DiscoveryAction::None,
     };
 
-    if hello.master_config_epoch > master.config_epoch
-        && (hello.master_ip != master.addr.hostname || hello.master_port != master.addr.port)
-    {
-        return DiscoveryAction::UpdateMasterAddr {
-            master_name: hello.master_name.clone(),
-            new_addr: SentinelAddr::new(&hello.master_ip, hello.master_port),
-            new_epoch: hello.master_config_epoch,
-        };
-    }
-
     let sentinel_key = format!("{}:{}", hello.sentinel_ip, hello.sentinel_port);
+    let master_addr = SentinelAddr::new(&hello.master_ip, hello.master_port);
 
     if !master.sentinels.contains_key(&sentinel_key) {
         return DiscoveryAction::AddSentinel {
@@ -126,6 +118,9 @@ pub fn process_hello_message(
             sentinel_key,
             addr: SentinelAddr::new(&hello.sentinel_ip, hello.sentinel_port),
             runid: hello.sentinel_runid.clone(),
+            current_epoch: hello.current_epoch,
+            master_addr,
+            master_config_epoch: hello.master_config_epoch,
         };
     }
 
@@ -133,6 +128,9 @@ pub fn process_hello_message(
         master_name: hello.master_name.clone(),
         sentinel_key,
         addr: SentinelAddr::new(&hello.sentinel_ip, hello.sentinel_port),
+        current_epoch: hello.current_epoch,
+        master_addr,
+        master_config_epoch: hello.master_config_epoch,
     }
 }
 
@@ -143,7 +141,11 @@ pub fn apply_discovery_action(state: &mut SentinelState, action: DiscoveryAction
             sentinel_key,
             addr,
             runid,
+            current_epoch,
+            master_addr,
+            master_config_epoch,
         } => {
+            advance_current_epoch(state, current_epoch);
             if let Some(master) = state.get_master_mut(&master_name) {
                 let mut sentinel = SentinelRedisInstance::new_master(&sentinel_key, addr, 0);
                 sentinel.flags = InstanceFlags::SENTINEL;
@@ -152,31 +154,44 @@ pub fn apply_discovery_action(state: &mut SentinelState, action: DiscoveryAction
                 sentinel.runid = Some(runid);
                 sentinel.last_hello_time = now;
                 master.sentinels.insert(sentinel_key, sentinel);
+                apply_master_config_from_hello(master, master_addr, master_config_epoch);
             }
         }
         DiscoveryAction::UpdateSentinel {
             master_name,
             sentinel_key,
             addr,
+            current_epoch,
+            master_addr,
+            master_config_epoch,
         } => {
-            if let Some(master) = state.get_master_mut(&master_name)
-                && let Some(sentinel) = master.sentinels.get_mut(&sentinel_key)
-            {
-                sentinel.addr = addr;
-                sentinel.last_hello_time = now;
-            }
-        }
-        DiscoveryAction::UpdateMasterAddr {
-            master_name,
-            new_addr,
-            new_epoch,
-        } => {
+            advance_current_epoch(state, current_epoch);
             if let Some(master) = state.get_master_mut(&master_name) {
-                master.addr = new_addr;
-                master.config_epoch = new_epoch;
+                if let Some(sentinel) = master.sentinels.get_mut(&sentinel_key) {
+                    sentinel.addr = addr;
+                    sentinel.last_hello_time = now;
+                }
+                apply_master_config_from_hello(master, master_addr, master_config_epoch);
             }
         }
         DiscoveryAction::None => {}
+    }
+}
+
+fn advance_current_epoch(state: &mut SentinelState, current_epoch: u64) {
+    if current_epoch > state.current_epoch {
+        state.current_epoch = current_epoch;
+    }
+}
+
+fn apply_master_config_from_hello(
+    master: &mut SentinelRedisInstance,
+    master_addr: SentinelAddr,
+    master_config_epoch: u64,
+) {
+    if master_config_epoch > master.config_epoch {
+        master.addr = master_addr;
+        master.config_epoch = master_config_epoch;
     }
 }
 
@@ -403,12 +418,60 @@ mod tests {
         };
 
         let action = process_hello_message(&state, &hello, 1000);
-        assert!(matches!(action, DiscoveryAction::UpdateMasterAddr { .. }));
+        assert!(matches!(action, DiscoveryAction::AddSentinel { .. }));
 
         apply_discovery_action(&mut state, action, 1000);
         let master = state.get_master("mymaster").unwrap();
         assert_eq!(master.addr.hostname, "10.0.0.2");
         assert_eq!(master.addr.port, 6380);
+        assert_eq!(master.config_epoch, 5);
+    }
+
+    #[test]
+    fn process_hello_advances_current_epoch() {
+        let mut state = SentinelState::new();
+        state.current_epoch = 2;
+        state.monitor("mymaster", "10.0.0.1", 6379, 2).unwrap();
+
+        let hello = HelloMessage {
+            sentinel_ip: "192.168.1.2".to_string(),
+            sentinel_port: 26379,
+            sentinel_runid: "other123".to_string(),
+            current_epoch: 7,
+            master_name: "mymaster".to_string(),
+            master_ip: "10.0.0.1".to_string(),
+            master_port: 6379,
+            master_config_epoch: 0,
+        };
+
+        let action = process_hello_message(&state, &hello, 1000);
+        apply_discovery_action(&mut state, action, 1000);
+
+        assert_eq!(state.current_epoch, 7);
+    }
+
+    #[test]
+    fn process_hello_updates_master_config_epoch_without_address_change() {
+        let mut state = SentinelState::new();
+        state.monitor("mymaster", "10.0.0.1", 6379, 2).unwrap();
+
+        let hello = HelloMessage {
+            sentinel_ip: "192.168.1.2".to_string(),
+            sentinel_port: 26379,
+            sentinel_runid: "other123".to_string(),
+            current_epoch: 1,
+            master_name: "mymaster".to_string(),
+            master_ip: "10.0.0.1".to_string(),
+            master_port: 6379,
+            master_config_epoch: 5,
+        };
+
+        let action = process_hello_message(&state, &hello, 1000);
+        apply_discovery_action(&mut state, action, 1000);
+
+        let master = state.get_master("mymaster").unwrap();
+        assert_eq!(master.addr.hostname, "10.0.0.1");
+        assert_eq!(master.addr.port, 6379);
         assert_eq!(master.config_epoch, 5);
     }
 
