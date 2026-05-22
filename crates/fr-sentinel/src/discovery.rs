@@ -39,15 +39,97 @@ impl HelloMessage {
 
         Some(HelloMessage {
             sentinel_ip: parts[0].to_string(),
-            sentinel_port: parts[1].parse().ok()?,
+            sentinel_port: parse_redis_hello_port(parts[1])?,
             sentinel_runid: parts[2].to_string(),
-            current_epoch: parts[3].parse().ok()?,
+            current_epoch: parse_redis_strtoull_prefix(parts[3]),
             master_name: parts[4].to_string(),
             master_ip: parts[5].to_string(),
-            master_port: parts[6].parse().ok()?,
-            master_config_epoch: parts[7].parse().ok()?,
+            master_port: parse_redis_hello_port(parts[6])?,
+            master_config_epoch: parse_redis_strtoull_prefix(parts[7]),
         })
     }
+}
+
+fn parse_redis_hello_port(value: &str) -> Option<u16> {
+    let port = parse_redis_atoi_prefix(value);
+    u16::try_from(port).ok()
+}
+
+fn parse_redis_atoi_prefix(value: &str) -> i64 {
+    let bytes = value.as_bytes();
+    let mut cursor = skip_ascii_space(bytes);
+    let negative = match bytes.get(cursor) {
+        Some(b'-') => {
+            cursor += 1;
+            true
+        }
+        Some(b'+') => {
+            cursor += 1;
+            false
+        }
+        _ => false,
+    };
+
+    let mut parsed = 0i64;
+    let mut saw_digit = false;
+    while let Some(byte) = bytes.get(cursor).filter(|byte| byte.is_ascii_digit()) {
+        parsed = parsed
+            .saturating_mul(10)
+            .saturating_add(i64::from(*byte - b'0'));
+        saw_digit = true;
+        cursor += 1;
+    }
+
+    if !saw_digit {
+        return 0;
+    }
+    if negative {
+        parsed.saturating_neg()
+    } else {
+        parsed
+    }
+}
+
+fn parse_redis_strtoull_prefix(value: &str) -> u64 {
+    let bytes = value.as_bytes();
+    let mut cursor = skip_ascii_space(bytes);
+    let negative = match bytes.get(cursor) {
+        Some(b'-') => {
+            cursor += 1;
+            true
+        }
+        Some(b'+') => {
+            cursor += 1;
+            false
+        }
+        _ => false,
+    };
+
+    let mut parsed = 0u64;
+    let mut saw_digit = false;
+    while let Some(byte) = bytes.get(cursor).filter(|byte| byte.is_ascii_digit()) {
+        parsed = parsed
+            .saturating_mul(10)
+            .saturating_add(u64::from(*byte - b'0'));
+        saw_digit = true;
+        cursor += 1;
+    }
+
+    if !saw_digit {
+        return 0;
+    }
+    if negative {
+        0u64.wrapping_sub(parsed)
+    } else {
+        parsed
+    }
+}
+
+fn skip_ascii_space(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len())
 }
 
 pub fn create_hello_message(state: &SentinelState, master: &SentinelRedisInstance) -> HelloMessage {
@@ -399,6 +481,20 @@ mod tests {
     fn hello_message_parse_invalid() {
         assert!(HelloMessage::parse("not,enough,parts").is_none());
         assert!(HelloMessage::parse("").is_none());
+        assert!(HelloMessage::parse("ip,-1,runid,1,mymaster,host,6379,1").is_none());
+    }
+
+    #[test]
+    fn hello_message_parse_uses_redis_numeric_prefixes() {
+        let decoded = HelloMessage::parse(
+            "192.0.2.1,abc,runid,12epoch,mymaster,10.0.0.1,6379tail,7cfg",
+        )
+        .unwrap();
+
+        assert_eq!(decoded.sentinel_port, 0);
+        assert_eq!(decoded.current_epoch, 12);
+        assert_eq!(decoded.master_port, 6379);
+        assert_eq!(decoded.master_config_epoch, 7);
     }
 
     #[test]
