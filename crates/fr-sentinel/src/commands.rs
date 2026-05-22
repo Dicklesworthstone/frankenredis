@@ -23,19 +23,19 @@ pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> R
     match subcommand.as_str() {
         "MYID" => {
             if args.len() != 1 {
-                return wrong_arity("sentinel|myid");
+                return wrong_arity("sentinel myid");
             }
             cmd_myid(state)
         }
         "MASTERS" => {
             if args.len() != 1 {
-                return wrong_arity("sentinel|masters");
+                return wrong_arity("sentinel masters");
             }
             cmd_masters(state)
         }
         "MASTER" => cmd_master(state, &args[1..]),
-        "REPLICAS" => cmd_replicas(state, &args[1..], "sentinel|replicas"),
-        "SLAVES" => cmd_replicas(state, &args[1..], "sentinel|slaves"),
+        "REPLICAS" => cmd_replicas(state, &args[1..], "sentinel replicas"),
+        "SLAVES" => cmd_replicas(state, &args[1..], "sentinel slaves"),
         "SENTINELS" => cmd_sentinels(state, &args[1..]),
         "IS-MASTER-DOWN-BY-ADDR" => cmd_is_master_down_by_addr(state, &args[1..]),
         "MONITOR" => cmd_monitor(state, &args[1..]),
@@ -47,14 +47,14 @@ pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> R
         "CONFIG" => cmd_config(state, &args[1..]),
         "FLUSHCONFIG" => {
             if args.len() != 1 {
-                return wrong_arity("sentinel|flushconfig");
+                return wrong_arity("sentinel flushconfig");
             }
             cmd_flushconfig(state)
         }
         "FAILOVER" => cmd_failover(state, &args[1..]),
         "PENDING-SCRIPTS" => {
             if args.len() != 1 {
-                return wrong_arity("sentinel|pending-scripts");
+                return wrong_arity("sentinel pending-scripts");
             }
             cmd_pending_scripts(state)
         }
@@ -63,7 +63,7 @@ pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> R
         "DEBUG" => cmd_debug(state, &args[1..]),
         "HELP" => {
             if args.len() != 1 {
-                return wrong_arity("sentinel|help");
+                return wrong_arity("sentinel help");
             }
             cmd_help()
         }
@@ -100,7 +100,7 @@ fn cmd_masters(state: &SentinelState) -> RespFrame {
 
 fn cmd_master(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     if args.len() != 1 {
-        return wrong_arity("sentinel|master");
+        return wrong_arity("sentinel master");
     }
     let name = String::from_utf8_lossy(args[0]);
     let now_ms = state.previous_time;
@@ -132,7 +132,7 @@ fn cmd_replicas(
 
 fn cmd_sentinels(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     if args.len() != 1 {
-        return wrong_arity("sentinel|sentinels");
+        return wrong_arity("sentinel sentinels");
     }
     let name = String::from_utf8_lossy(args[0]);
     let now_ms = state.previous_time;
@@ -151,7 +151,7 @@ fn cmd_sentinels(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
 
 fn cmd_is_master_down_by_addr(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     if args.len() != 4 {
-        return wrong_arity("sentinel|is-master-down-by-addr");
+        return wrong_arity("sentinel is-master-down-by-addr");
     }
 
     let ip = String::from_utf8_lossy(args[0]);
@@ -276,7 +276,7 @@ fn sentinel_desync_mix_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
 
 fn cmd_monitor(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     if args.len() != 4 {
-        return wrong_arity("sentinel|monitor");
+        return wrong_arity("sentinel monitor");
     }
     let name = String::from_utf8_lossy(args[0]);
     let ip = String::from_utf8_lossy(args[1]);
@@ -360,7 +360,7 @@ fn parse_monitor_quorum(value: &str) -> Result<u32, RespFrame> {
 
 fn cmd_remove(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     if args.len() != 1 {
-        return wrong_arity("sentinel|remove");
+        return wrong_arity("sentinel remove");
     }
     let name = String::from_utf8_lossy(args[0]);
     match state.remove(&name) {
@@ -371,7 +371,7 @@ fn cmd_remove(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
 
 fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     if args.len() < 3 {
-        return RespFrame::Error("ERR wrong number of arguments for 'sentinel|set' command".into());
+        return RespFrame::Error("ERR wrong number of arguments for 'sentinel set' command".into());
     }
     let name = String::from_utf8_lossy(args[0]);
     let deny_scripts_reconfig = state.deny_scripts_reconfig;
@@ -625,7 +625,7 @@ fn invalid_sentinel_set_argument(value: &str, option: &str) -> RespFrame {
 
 fn cmd_reset(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     if args.len() != 1 {
-        return wrong_arity("sentinel|reset");
+        return wrong_arity("sentinel reset");
     }
     let pattern = String::from_utf8_lossy(args[0]);
     let now_ms = state.previous_time;
@@ -668,7 +668,7 @@ fn reset_master(master: &mut SentinelRedisInstance, now_ms: u64) {
 
 fn cmd_get_master_addr(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     if args.len() != 1 {
-        return wrong_arity("sentinel|get-master-addr-by-name");
+        return wrong_arity("sentinel get-master-addr-by-name");
     }
     let name = String::from_utf8_lossy(args[0]);
     match state.get_master(&name) {
@@ -712,7 +712,7 @@ fn announced_addr(addr: &crate::SentinelAddr, announce_hostnames: bool) -> &str 
 
 fn cmd_ckquorum(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     if args.len() != 1 {
-        return wrong_arity("sentinel|ckquorum");
+        return wrong_arity("sentinel ckquorum");
     }
     let name = String::from_utf8_lossy(args[0]);
     match state.get_master(&name) {
@@ -769,7 +769,7 @@ const SENTINEL_CONFIG_KEYS: [&str; 7] = [
 
 fn cmd_config(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     if args.len() < 2 {
-        return wrong_arity("sentinel|config");
+        return wrong_arity("sentinel config");
     }
 
     let subcommand = String::from_utf8_lossy(args[0]).to_ascii_uppercase();
@@ -925,7 +925,7 @@ fn cmd_flushconfig(_state: &SentinelState) -> RespFrame {
 
 fn cmd_failover(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     if args.len() != 1 {
-        return wrong_arity("sentinel|failover");
+        return wrong_arity("sentinel failover");
     }
     let name = String::from_utf8_lossy(args[0]);
     let now = state.previous_time;
@@ -1071,7 +1071,7 @@ fn pending_script_job_reply(script: &crate::ScriptJob, now_ms: u64) -> RespFrame
 
 fn cmd_info_cache(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     if args.is_empty() {
-        return wrong_arity("sentinel|info-cache");
+        return wrong_arity("sentinel info-cache");
     }
 
     let mut masters: Vec<&crate::SentinelRedisInstance> = args
@@ -1097,7 +1097,7 @@ fn cmd_info_cache(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
 
 fn cmd_simulate_failure(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     if args.is_empty() {
-        return wrong_arity("sentinel|simulate-failure");
+        return wrong_arity("sentinel simulate-failure");
     }
 
     state.simfailure_flags = crate::SimFailureFlags::empty();
@@ -2465,7 +2465,7 @@ mod tests {
         let result = dispatch_sentinel_command(&mut state, &[b"MYID", b"extra"]);
         assert_eq!(
             result,
-            RespFrame::Error("ERR wrong number of arguments for 'sentinel|myid' command".into())
+            RespFrame::Error("ERR wrong number of arguments for 'sentinel myid' command".into())
         );
     }
 
@@ -2475,7 +2475,7 @@ mod tests {
         let result = dispatch_sentinel_command(&mut state, &[b"help", b"extra"]);
         assert_eq!(
             result,
-            RespFrame::Error("ERR wrong number of arguments for 'sentinel|help' command".into())
+            RespFrame::Error("ERR wrong number of arguments for 'sentinel help' command".into())
         );
     }
 
@@ -2487,14 +2487,14 @@ mod tests {
         assert_eq!(
             replicas,
             RespFrame::Error(
-                "ERR wrong number of arguments for 'sentinel|replicas' command".into()
+                "ERR wrong number of arguments for 'sentinel replicas' command".into()
             )
         );
 
         let slaves = dispatch_sentinel_command(&mut state, &[b"SLAVES"]);
         assert_eq!(
             slaves,
-            RespFrame::Error("ERR wrong number of arguments for 'sentinel|slaves' command".into())
+            RespFrame::Error("ERR wrong number of arguments for 'sentinel slaves' command".into())
         );
     }
 
@@ -2503,15 +2503,15 @@ mod tests {
         let mut state = SentinelState::new();
 
         let cases: Vec<(Vec<&[u8]>, &str)> = vec![
-            (vec![b"MASTER", b"extra", b"arg"], "sentinel|master"),
-            (vec![b"MASTERS", b"extra"], "sentinel|masters"),
-            (vec![b"SENTINELS"], "sentinel|sentinels"),
-            (vec![b"RESET"], "sentinel|reset"),
-            (vec![b"CONFIG", b"GET"], "sentinel|config"),
-            (vec![b"FLUSHCONFIG", b"extra"], "sentinel|flushconfig"),
+            (vec![b"MASTER", b"extra", b"arg"], "sentinel master"),
+            (vec![b"MASTERS", b"extra"], "sentinel masters"),
+            (vec![b"SENTINELS"], "sentinel sentinels"),
+            (vec![b"RESET"], "sentinel reset"),
+            (vec![b"CONFIG", b"GET"], "sentinel config"),
+            (vec![b"FLUSHCONFIG", b"extra"], "sentinel flushconfig"),
             (
                 vec![b"PENDING-SCRIPTS", b"extra"],
-                "sentinel|pending-scripts",
+                "sentinel pending-scripts",
             ),
         ];
         for (args, command_name) in cases {
@@ -4267,7 +4267,7 @@ mod tests {
         assert_eq!(
             result,
             RespFrame::Error(
-                "ERR wrong number of arguments for 'sentinel|simulate-failure' command".into()
+                "ERR wrong number of arguments for 'sentinel simulate-failure' command".into()
             )
         );
         assert!(
@@ -4545,7 +4545,7 @@ mod tests {
         assert_eq!(
             result,
             RespFrame::Error(
-                "ERR wrong number of arguments for 'sentinel|info-cache' command".into()
+                "ERR wrong number of arguments for 'sentinel info-cache' command".into()
             )
         );
     }
