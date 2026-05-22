@@ -1153,7 +1153,9 @@ fn sorted_instance_info_arrays<'a>(
     instances: impl Iterator<Item = &'a crate::SentinelRedisInstance>,
     now_ms: u64,
 ) -> Vec<RespFrame> {
-    let mut instances: Vec<_> = instances.collect();
+    let mut instances: Vec<_> = instances
+        .filter(|instance| !instance.is_slave() || instance.replica_announced)
+        .collect();
     instances.sort_by(|left, right| left.name.cmp(&right.name));
     instances
         .into_iter()
@@ -1991,6 +1993,34 @@ mod tests {
                 &[b"SENTINELS", b"beta"]
             )),
             ["sentinel-a", "sentinel-b", "sentinel-c"]
+        );
+    }
+
+    #[test]
+    fn sentinel_replicas_hide_unannounced_replicas_like_upstream() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+        add_replica(&mut state, "mymaster", "announced", |_| {});
+        add_replica(&mut state, "mymaster", "unannounced", |replica| {
+            replica.replica_announced = false;
+        });
+
+        assert_eq!(
+            list_reply_names(dispatch_sentinel_command(
+                &mut state,
+                &[b"REPLICAS", b"mymaster"]
+            )),
+            ["announced"]
+        );
+        assert_eq!(
+            list_reply_names(dispatch_sentinel_command(
+                &mut state,
+                &[b"SLAVES", b"mymaster"]
+            )),
+            ["announced"]
         );
     }
 
