@@ -6826,13 +6826,33 @@ impl Store {
         self.drop_if_expired(source, now_ms);
         self.drop_if_expired(destination, now_ms);
 
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let source_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(source) {
+            self.next_rand()
+        } else {
+            0
+        };
         let source_is_set = if let Some(entry) = self.entries.get_mut(source) {
+            if lfu_tracking_enabled {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, source_rand_sample);
+            }
             entry.touch(now_ms);
             Some(matches!(&entry.value, Value::Set(_)))
         } else {
             None
         };
+        let destination_rand_sample =
+            if lfu_tracking_enabled && self.entries.contains_key(destination) {
+                self.next_rand()
+            } else {
+                0
+            };
         let destination_is_set = if let Some(entry) = self.entries.get_mut(destination) {
+            if lfu_tracking_enabled {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, destination_rand_sample);
+            }
             entry.touch(now_ms);
             Some(matches!(&entry.value, Value::Set(_)))
         } else {
@@ -17528,6 +17548,39 @@ mod tests {
             other => {
                 return Err(format!(
                     "missing-member SMOVE should refresh destination metadata, got {other:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn smove_missing_member_bumps_lfu_for_existing_source_and_destination() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .sadd(b"src", &[b"a".to_vec()], 0)
+            .map_err(|err| format!("seed source set failed: {err:?}"))?;
+        store
+            .sadd(b"dst", &[b"b".to_vec()], 0)
+            .map_err(|err| format!("seed destination set failed: {err:?}"))?;
+
+        if store
+            .smove(b"src", b"dst", b"missing", 1)
+            .map_err(|err| format!("smove missing member failed: {err:?}"))?
+        {
+            return Err("SMOVE missing member should return false".into());
+        }
+        match store.object_freq(b"src", 1) {
+            Some(6) => {}
+            other => return Err(format!("SMOVE should bump LFU for source, got {other:?}")),
+        }
+        match store.object_freq(b"dst", 1) {
+            Some(6) => {}
+            other => {
+                return Err(format!(
+                    "SMOVE should bump LFU for destination, got {other:?}"
                 ));
             }
         }
