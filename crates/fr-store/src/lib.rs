@@ -3209,9 +3209,21 @@ impl Store {
         now_ms: u64,
     ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         let byte_idx = offset / 8;
         let bit_idx = 7 - (offset % 8); // MSB-first within each byte
-        match self.with_mutated_entry(key, |entry| match &mut entry.value {
+        match self.with_mutated_entry(key, |entry| {
+            if lfu_tracking_enabled {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+            }
+            match &mut entry.value {
             Value::String(v) => {
                 let old_len = v.len();
                 if v.len() <= byte_idx {
@@ -3230,9 +3242,10 @@ impl Store {
                 // value to raw, regardless of length.
                 // (br-frankenredis-setbitenc)
                 entry.force_raw_encoding = true;
-                Ok((old_bit, changed))
+                    Ok((old_bit, changed))
+                }
+                _ => Err(StoreError::WrongType),
             }
-            _ => Err(StoreError::WrongType),
         }) {
             Some(result) => {
                 let (old_bit, changed) = result?;
@@ -20213,6 +20226,25 @@ mod tests {
         match store.object_freq(b"s", 1) {
             Some(6) => {}
             other => return Err(format!("SETRANGE LFU mismatch: {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn setbit_existing_string_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store.set(b"s".to_vec(), b"\x00".to_vec(), None, 0);
+
+        match store.object_freq(b"s", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new string LFU frequency mismatch: {other:?}")),
+        }
+        let _old = store.setbit(b"s", 0, true, 1).unwrap();
+        match store.object_freq(b"s", 1) {
+            Some(6) => {}
+            other => return Err(format!("SETBIT LFU mismatch: {other:?}")),
         }
         Ok(())
     }
