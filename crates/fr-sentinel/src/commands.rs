@@ -2,7 +2,7 @@
 
 use std::{fs, os::unix::fs::PermissionsExt};
 
-use crate::SentinelState;
+use crate::{SentinelRedisInstance, SentinelState};
 use fr_protocol::RespFrame;
 
 pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
@@ -506,22 +506,48 @@ fn cmd_ckquorum(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     }
     let name = String::from_utf8_lossy(args[0]);
     match state.get_master(&name) {
-        Some(master) => {
-            let sentinel_count = master.sentinels.len() as u32 + 1;
-            if sentinel_count >= master.quorum {
-                RespFrame::SimpleString(format!(
-                    "OK {} usable Sentinels. Quorum and failover authorization is possible",
-                    sentinel_count
-                ))
-            } else {
-                RespFrame::Error(format!(
-                    "NOQUORUM {} Sentinels known, {} needed for quorum",
-                    sentinel_count, master.quorum
-                ))
-            }
-        }
+        Some(master) => ckquorum_reply(master),
         None => missing_master_error(),
     }
+}
+
+fn ckquorum_reply(master: &SentinelRedisInstance) -> RespFrame {
+    let usable = master
+        .sentinels
+        .values()
+        .filter(|sentinel| !sentinel.is_s_down() && !sentinel.is_o_down())
+        .count()
+        .saturating_add(1);
+    let voters = master.sentinels.len().saturating_add(1);
+    let quorum = match usize::try_from(master.quorum) {
+        Ok(quorum) => quorum,
+        Err(_) => usize::MAX,
+    };
+    let no_quorum = usable < quorum;
+    let no_auth = usable < (voters / 2).saturating_add(1);
+
+    if !no_quorum && !no_auth {
+        return RespFrame::SimpleString(format!(
+            "OK {} usable Sentinels. Quorum and failover authorization can be reached",
+            usable
+        ));
+    }
+
+    let mut message = format!("NOQUORUM {} usable Sentinels. ", usable);
+    if no_quorum {
+        message.push_str(
+            "Not enough available Sentinels to reach the specified quorum for this master",
+        );
+    }
+    if no_auth {
+        if no_quorum {
+            message.push_str(". ");
+        }
+        message.push_str(
+            "Not enough available Sentinels to reach the majority and authorize a failover",
+        );
+    }
+    RespFrame::Error(message)
 }
 
 const SENTINEL_CONFIG_KEYS: [&str; 7] = [
@@ -1529,6 +1555,85 @@ mod tests {
             dispatch_sentinel_command(&mut state, &[b"GET-MASTER-ADDR-BY-NAME", b"missing"]);
 
         assert_eq!(result, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn sentinel_ckquorum_replies_match_upstream_wording() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+        let master = state.get_master_mut("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        for index in 0..2 {
+            let name = format!("sentinel-{index}");
+            let sentinel = sentinel_instance(&name, "127.0.0.1", 26379, InstanceFlags::SENTINEL);
+            master.sentinels.insert(name, sentinel);
+        }
+
+        let result = dispatch_sentinel_command(&mut state, &[b"CKQUORUM", b"mymaster"]);
+
+        assert_eq!(
+            result,
+            RespFrame::SimpleString(
+                "OK 3 usable Sentinels. Quorum and failover authorization can be reached".into()
+            )
+        );
+    }
+
+    #[test]
+    fn sentinel_ckquorum_reports_upstream_quorum_failure_reason() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"3"],
+        );
+
+        let result = dispatch_sentinel_command(&mut state, &[b"CKQUORUM", b"mymaster"]);
+
+        assert_eq!(
+            result,
+            RespFrame::Error(
+                "NOQUORUM 1 usable Sentinels. Not enough available Sentinels to reach the specified quorum for this master".into()
+            )
+        );
+    }
+
+    #[test]
+    fn sentinel_ckquorum_reports_upstream_majority_failure_reason() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"1"],
+        );
+        let master = state.get_master_mut("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        for index in 0..4 {
+            let name = format!("sentinel-{index}");
+            let flags = if index == 0 {
+                InstanceFlags::SENTINEL
+            } else {
+                InstanceFlags::SENTINEL.union(InstanceFlags::S_DOWN)
+            };
+            let sentinel = sentinel_instance(&name, "127.0.0.1", 26379, flags);
+            master.sentinels.insert(name, sentinel);
+        }
+
+        let result = dispatch_sentinel_command(&mut state, &[b"CKQUORUM", b"mymaster"]);
+
+        assert_eq!(
+            result,
+            RespFrame::Error(
+                "NOQUORUM 2 usable Sentinels. Not enough available Sentinels to reach the majority and authorize a failover".into()
+            )
+        );
     }
 
     #[test]
