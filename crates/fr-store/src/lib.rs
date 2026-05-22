@@ -712,6 +712,17 @@ impl Entry {
         self.touch(now_ms);
         self.bump_mod_count();
     }
+
+    fn duplicate_for_copy(&self, now_ms: u64) -> Self {
+        let mut entry = Self::new(self.value.clone(), self.expires_at_ms, now_ms);
+        entry.force_raw_encoding = self.force_raw_encoding;
+        entry.force_string_encoding = self.force_string_encoding;
+        entry.force_set_listpack_encoding = self.force_set_listpack_encoding;
+        entry.force_set_hashtable_encoding = self.force_set_hashtable_encoding;
+        entry.force_hash_hashtable_encoding = self.force_hash_hashtable_encoding;
+        entry.force_zset_skiplist_encoding = self.force_zset_skiplist_encoding;
+        entry
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10645,8 +10656,27 @@ impl Store {
         self.drop_if_expired(source, now_ms);
         self.drop_if_expired(destination, now_ms);
 
-        let entry = match self.entries.get(source) {
-            Some(e) => e.clone(),
+        if !self.record_keyspace_lookup(source, now_ms) {
+            return Ok(false);
+        }
+
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled {
+            self.next_rand()
+        } else {
+            0
+        };
+
+        let entry = match self.entries.get_mut(source) {
+            Some(source_entry) => {
+                if lfu_tracking_enabled {
+                    source_entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                source_entry.touch(now_ms);
+                source_entry.duplicate_for_copy(now_ms)
+            }
             None => return Ok(false),
         };
 
@@ -16149,7 +16179,7 @@ mod tests {
         BitRangeUnit, DUMP_CRC64_LEN, DUMP_TRAILER_LEN, DUMP_VERSION_LEN, EvictionLoopFailure,
         EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue, HLL_REDIS_DENSE_ENCODING,
         HLL_REDIS_DENSE_SIZE, HLL_REDIS_HEADER_SIZE, HLL_REDIS_MAGIC, HLL_REDIS_SPARSE_ENCODING,
-        HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, LatencySample, MaxmemoryPolicy,
+        HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, LFU_INIT_VAL, LatencySample, MaxmemoryPolicy,
         MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT,
         PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK,
         RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST,
@@ -17658,6 +17688,94 @@ mod tests {
         let mut store = Store::new();
         let err = store.renamenx(b"missing", b"new", 0).expect_err("renamenx");
         assert_eq!(err, StoreError::KeyNotFound);
+    }
+
+    #[test]
+    fn copy_refreshes_source_and_destination_idle_metadata() -> Result<(), String> {
+        let mut store = Store::new();
+        store.set(b"src".to_vec(), b"v".to_vec(), None, 0);
+        match store.object_idletime(b"src", 90_000) {
+            Some(90) => {}
+            other => {
+                return Err(format!(
+                    "source idle time should start at 90 seconds, got {other:?}"
+                ));
+            }
+        }
+
+        if !store
+            .copy(b"src", b"dst", false, 120_000)
+            .map_err(|err| format!("copy failed: {err:?}"))?
+        {
+            return Err("copy should create destination".into());
+        }
+
+        match store.object_idletime(b"src", 180_000) {
+            Some(60) => {}
+            other => {
+                return Err(format!(
+                    "COPY should refresh source idle metadata like lookupKeyRead, got {other:?}"
+                ));
+            }
+        }
+        match store.object_idletime(b"dst", 180_000) {
+            Some(60) => {}
+            other => {
+                return Err(format!(
+                    "COPY destination should be a fresh object with current LRU, got {other:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn copy_resets_destination_lfu_metadata() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store.set(b"src".to_vec(), b"v".to_vec(), None, 0);
+        let Some(source) = store.entries.get_mut(b"src".as_slice()) else {
+            return Err("source entry missing".into());
+        };
+        source.lfu_freq = 200;
+        source.lfu_last_touch_min = 0;
+
+        if !store
+            .copy(b"src", b"dst", false, 60_000)
+            .map_err(|err| format!("copy failed: {err:?}"))?
+        {
+            return Err("copy should create destination".into());
+        }
+
+        let Some(copied) = store.entries.get(b"dst".as_slice()) else {
+            return Err("copied entry missing".into());
+        };
+        match copied.lfu_freq {
+            LFU_INIT_VAL => {}
+            other => {
+                return Err(format!(
+                    "COPY destination should start at LFU_INIT_VAL, got {other}"
+                ));
+            }
+        }
+        match copied.lfu_last_touch_min {
+            1 => {}
+            other => {
+                return Err(format!(
+                    "COPY destination should start with current LFU minute, got {other}"
+                ));
+            }
+        }
+        match store.object_freq(b"dst", 60_000) {
+            Some(LFU_INIT_VAL) => {}
+            other => {
+                return Err(format!(
+                    "OBJECT FREQ should report fresh destination LFU, got {other:?}"
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[test]
