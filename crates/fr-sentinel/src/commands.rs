@@ -25,6 +25,7 @@ pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> R
         "MASTER" => cmd_master(state, &args[1..]),
         "REPLICAS" | "SLAVES" => cmd_replicas(state, &args[1..]),
         "SENTINELS" => cmd_sentinels(state, &args[1..]),
+        "IS-MASTER-DOWN-BY-ADDR" => cmd_is_master_down_by_addr(state, &args[1..]),
         "MONITOR" => cmd_monitor(state, &args[1..]),
         "REMOVE" => cmd_remove(state, &args[1..]),
         "SET" => cmd_set(state, &args[1..]),
@@ -110,6 +111,75 @@ fn cmd_sentinels(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
         }
         None => RespFrame::Error(format!("ERR No such master with that name: {}", name)),
     }
+}
+
+fn cmd_is_master_down_by_addr(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
+    if args.len() != 4 {
+        return wrong_arity("sentinel is-master-down-by-addr");
+    }
+
+    let ip = String::from_utf8_lossy(args[0]);
+    let port = match String::from_utf8_lossy(args[1]).parse::<u16>() {
+        Ok(port) => port,
+        Err(_) => return RespFrame::Error("ERR Invalid port number".into()),
+    };
+    let requested_epoch = match String::from_utf8_lossy(args[2]).parse::<u64>() {
+        Ok(epoch) => epoch,
+        Err(_) => return RespFrame::Error("ERR Invalid current epoch".into()),
+    };
+    let requested_runid = String::from_utf8_lossy(args[3]);
+
+    let master_name = find_master_name_by_addr(state, &ip, port);
+    let is_down = master_name
+        .as_deref()
+        .and_then(|name| state.get_master(name))
+        .is_some_and(|master| {
+            !state.tilt && master.is_master() && master.flags.contains(crate::InstanceFlags::S_DOWN)
+        });
+
+    let (leader, leader_epoch) = if requested_runid == "*" {
+        (None, 0)
+    } else if let Some(master_name) = master_name {
+        sentinel_vote_leader(state, &master_name, requested_epoch, &requested_runid)
+    } else {
+        (None, 0)
+    };
+
+    RespFrame::Array(Some(vec![
+        RespFrame::Integer(i64::from(is_down)),
+        RespFrame::BulkString(Some(leader.unwrap_or_else(|| "*".to_string()).into_bytes())),
+        RespFrame::Integer(i64::try_from(leader_epoch).unwrap_or(i64::MAX)),
+    ]))
+}
+
+fn find_master_name_by_addr(state: &SentinelState, ip: &str, port: u16) -> Option<String> {
+    state
+        .masters
+        .values()
+        .find(|master| master.addr.port == port && master.addr.hostname.eq_ignore_ascii_case(ip))
+        .map(|master| master.name.clone())
+}
+
+fn sentinel_vote_leader(
+    state: &mut SentinelState,
+    master_name: &str,
+    requested_epoch: u64,
+    requested_runid: &str,
+) -> (Option<String>, u64) {
+    if requested_epoch > state.current_epoch {
+        state.current_epoch = requested_epoch;
+    }
+    let current_epoch = state.current_epoch;
+    let Some(master) = state.get_master_mut(master_name) else {
+        return (None, 0);
+    };
+
+    if master.leader_epoch < requested_epoch && current_epoch <= requested_epoch {
+        master.leader = Some(requested_runid.to_string());
+        master.leader_epoch = current_epoch;
+    }
+
+    (master.leader.clone(), master.leader_epoch)
 }
 
 fn cmd_monitor(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
@@ -600,6 +670,7 @@ fn cmd_help() -> RespFrame {
         "SENTINEL REMOVE <name>",
         "SENTINEL SET <name> <option> <value> ...",
         "SENTINEL SIMULATE-FAILURE [CRASH-AFTER-ELECTION] [CRASH-AFTER-PROMOTION] [HELP]",
+        "SENTINEL IS-MASTER-DOWN-BY-ADDR <ip> <port> <current-epoch> <runid>",
         "SENTINEL RESET <pattern>",
         "SENTINEL GET-MASTER-ADDR-BY-NAME <name>",
         "SENTINEL CKQUORUM <name>",
@@ -764,6 +835,14 @@ mod tests {
         ]))
     }
 
+    fn is_master_down_reply(is_down: i64, leader: &str, leader_epoch: i64) -> RespFrame {
+        RespFrame::Array(Some(vec![
+            RespFrame::Integer(is_down),
+            RespFrame::BulkString(Some(leader.as_bytes().to_vec())),
+            RespFrame::Integer(leader_epoch),
+        ]))
+    }
+
     #[test]
     fn test_myid() {
         let mut state = SentinelState::new();
@@ -782,6 +861,110 @@ mod tests {
 
         let result = dispatch_sentinel_command(&mut state, &[b"MASTERS"]);
         assert_eq!(array_len(&result), Some(1));
+    }
+
+    #[test]
+    fn sentinel_is_master_down_by_addr_reports_unknown_as_not_down() {
+        let mut state = SentinelState::new();
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"IS-MASTER-DOWN-BY-ADDR", b"127.0.0.1", b"6379", b"1", b"*"],
+        );
+        assert_eq!(result, is_master_down_reply(0, "*", 0));
+    }
+
+    #[test]
+    fn sentinel_is_master_down_by_addr_checks_subjective_down_without_vote() {
+        let mut state = SentinelState::new();
+        assert!(state.monitor("mymaster", "127.0.0.1", 6379, 1).is_ok());
+        assert!(state.get_master("mymaster").is_some());
+        if let Some(master) = state.get_master_mut("mymaster") {
+            master.flags.insert(InstanceFlags::S_DOWN);
+        }
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"IS-MASTER-DOWN-BY-ADDR", b"127.0.0.1", b"6379", b"7", b"*"],
+        );
+        assert_eq!(result, is_master_down_reply(1, "*", 0));
+        assert_eq!(state.current_epoch, 0);
+        assert_eq!(
+            state
+                .get_master("mymaster")
+                .and_then(|master| master.leader.clone()),
+            None
+        );
+    }
+
+    #[test]
+    fn sentinel_is_master_down_by_addr_votes_once_per_epoch() {
+        let mut state = SentinelState::new();
+        assert!(state.monitor("mymaster", "127.0.0.1", 6379, 1).is_ok());
+        assert!(state.get_master("mymaster").is_some());
+        if let Some(master) = state.get_master_mut("mymaster") {
+            master.flags.insert(InstanceFlags::S_DOWN);
+        }
+
+        let first = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"IS-MASTER-DOWN-BY-ADDR",
+                b"127.0.0.1",
+                b"6379",
+                b"7",
+                b"candidate-a",
+            ],
+        );
+        assert_eq!(first, is_master_down_reply(1, "candidate-a", 7));
+        assert_eq!(state.current_epoch, 7);
+
+        let duplicate_epoch = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"IS-MASTER-DOWN-BY-ADDR",
+                b"127.0.0.1",
+                b"6379",
+                b"7",
+                b"candidate-b",
+            ],
+        );
+        assert_eq!(duplicate_epoch, is_master_down_reply(1, "candidate-a", 7));
+
+        let next_epoch = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"IS-MASTER-DOWN-BY-ADDR",
+                b"127.0.0.1",
+                b"6379",
+                b"8",
+                b"candidate-b",
+            ],
+        );
+        assert_eq!(next_epoch, is_master_down_reply(1, "candidate-b", 8));
+        assert_eq!(state.current_epoch, 8);
+    }
+
+    #[test]
+    fn sentinel_is_master_down_by_addr_tilt_suppresses_down_but_not_vote() {
+        let mut state = SentinelState::new();
+        assert!(state.monitor("mymaster", "127.0.0.1", 6379, 1).is_ok());
+        state.tilt = true;
+        assert!(state.get_master("mymaster").is_some());
+        if let Some(master) = state.get_master_mut("mymaster") {
+            master.flags.insert(InstanceFlags::S_DOWN);
+        }
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"IS-MASTER-DOWN-BY-ADDR",
+                b"127.0.0.1",
+                b"6379",
+                b"9",
+                b"candidate",
+            ],
+        );
+        assert_eq!(result, is_master_down_reply(0, "candidate", 9));
     }
 
     #[test]
