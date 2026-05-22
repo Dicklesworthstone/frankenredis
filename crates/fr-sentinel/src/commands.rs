@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use std::{fs, os::unix::fs::PermissionsExt};
+
 use crate::SentinelState;
 use fr_protocol::RespFrame;
 
@@ -237,6 +239,7 @@ fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
         return RespFrame::Error("ERR wrong number of arguments for 'sentinel set' command".into());
     }
     let name = String::from_utf8_lossy(args[0]);
+    let deny_scripts_reconfig = state.deny_scripts_reconfig;
     let master = match state.get_master_mut(&name) {
         Some(m) => m,
         None => return RespFrame::Error(format!("ERR No such master with that name: {}", name)),
@@ -287,6 +290,41 @@ fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
                     Some(value.into_owned())
                 };
             }
+            "notification-script" => {
+                if deny_scripts_reconfig {
+                    return RespFrame::Error(
+                        "ERR Reconfiguration of scripts path is denied for security reasons. Check the deny-scripts-reconfig configuration directive in your Sentinel configuration".into(),
+                    );
+                }
+                if !value.is_empty() && !path_has_execute_permission(&value) {
+                    return RespFrame::Error(
+                        "ERR Notification script seems non existing or non executable".into(),
+                    );
+                }
+                master.notification_script = if value.is_empty() {
+                    None
+                } else {
+                    Some(value.into_owned())
+                };
+            }
+            "client-reconfig-script" => {
+                if deny_scripts_reconfig {
+                    return RespFrame::Error(
+                        "ERR Reconfiguration of scripts path is denied for security reasons. Check the deny-scripts-reconfig configuration directive in your Sentinel configuration".into(),
+                    );
+                }
+                if !value.is_empty() && !path_has_execute_permission(&value) {
+                    return RespFrame::Error(
+                        "ERR Client reconfiguration script seems non existing or non executable"
+                            .into(),
+                    );
+                }
+                master.client_reconfig_script = if value.is_empty() {
+                    None
+                } else {
+                    Some(value.into_owned())
+                };
+            }
             _ => {
                 return RespFrame::Error(format!("ERR Unknown option '{}'", option));
             }
@@ -294,6 +332,10 @@ fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
         i += 2;
     }
     RespFrame::SimpleString("OK".into())
+}
+
+fn path_has_execute_permission(path: &str) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
 }
 
 fn parse_positive_u64(value: &str, option: &str) -> Result<u64, RespFrame> {
@@ -1155,6 +1197,98 @@ mod tests {
         };
         assert_eq!(master.auth_user, None);
         assert_eq!(master.auth_pass, None);
+    }
+
+    #[test]
+    fn sentinel_set_script_paths_accept_executable_and_empty_clears() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+        let executable_path = match std::env::current_exe() {
+            Ok(path) => path.to_string_lossy().into_owned(),
+            Err(_) => return,
+        };
+        assert!(!executable_path.is_empty(), "test executable has a path");
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"SET",
+                b"mymaster",
+                b"notification-script",
+                executable_path.as_bytes(),
+                b"client-reconfig-script",
+                executable_path.as_bytes(),
+            ],
+        );
+        assert!(matches!(result, RespFrame::SimpleString(_)));
+
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        assert_eq!(
+            master.notification_script.as_deref(),
+            Some(executable_path.as_str())
+        );
+        assert_eq!(
+            master.client_reconfig_script.as_deref(),
+            Some(executable_path.as_str())
+        );
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"SET",
+                b"mymaster",
+                b"notification-script",
+                b"",
+                b"client-reconfig-script",
+                b"",
+            ],
+        );
+        assert!(matches!(result, RespFrame::SimpleString(_)));
+
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        assert_eq!(master.notification_script, None);
+        assert_eq!(master.client_reconfig_script, None);
+    }
+
+    #[test]
+    fn sentinel_set_script_paths_respect_deny_scripts_reconfig() {
+        let mut state = SentinelState::new();
+        state.deny_scripts_reconfig = true;
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"SET",
+                b"mymaster",
+                b"notification-script",
+                b"/tmp/frankenredis-missing-sentinel-notification-script",
+            ],
+        );
+        assert!(
+            matches!(result, RespFrame::Error(message) if message.contains("deny-scripts-reconfig"))
+        );
+
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        assert_eq!(master.notification_script, None);
     }
 
     #[test]
