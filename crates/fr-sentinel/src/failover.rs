@@ -230,9 +230,11 @@ fn promote_selected_slave(
     ctx.promoted_slave_key = Some(key.to_string());
     ctx.slaves_to_reconfig = master
         .slaves
-        .keys()
-        .filter(|candidate| candidate.as_str() != key)
-        .cloned()
+        .iter()
+        .filter(|(candidate, slave)| {
+            candidate.as_str() != key && !slave.flags.contains(InstanceFlags::S_DOWN)
+        })
+        .map(|(candidate, _)| candidate.clone())
         .collect();
     true
 }
