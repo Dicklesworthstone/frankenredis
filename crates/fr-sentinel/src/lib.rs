@@ -282,6 +282,26 @@ impl SentinelRedisInstance {
         }
     }
 
+    pub fn initialize_created_link_state(&mut self, now: u64) {
+        self.link.refcount = 1;
+        self.link.disconnected = true;
+        self.link.act_ping_time = now;
+        self.link.last_ping_time = 0;
+        self.link.last_avail_time = now;
+        self.link.last_pong_time = now;
+        self.last_pub_time = now;
+        self.last_hello_time = now;
+        self.last_master_down_reply_time = now;
+        self.role_reported_time = now;
+        self.role_reported = if self.is_master() {
+            Role::Master
+        } else if self.is_slave() {
+            Role::Slave
+        } else {
+            Role::Unknown
+        };
+    }
+
     #[must_use]
     pub fn is_master(&self) -> bool {
         self.flags.contains(InstanceFlags::MASTER)
@@ -413,7 +433,8 @@ impl SentinelState {
             return Err("ERR Quorum must be 1 or greater.");
         }
         let addr = SentinelAddr::new(hostname, port);
-        let instance = SentinelRedisInstance::new_master(&name, addr, quorum);
+        let mut instance = SentinelRedisInstance::new_master(&name, addr, quorum);
+        instance.initialize_created_link_state(self.previous_time);
         self.masters.insert(name, instance);
         Ok(())
     }

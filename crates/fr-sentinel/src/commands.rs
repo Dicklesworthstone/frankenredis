@@ -1902,6 +1902,37 @@ mod tests {
     }
 
     #[test]
+    fn sentinel_monitor_initializes_link_state_like_upstream() {
+        let mut state = SentinelState::new();
+        state.previous_time = 12_345;
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+        assert!(matches!(result, RespFrame::SimpleString(_)));
+
+        let result = dispatch_sentinel_command(&mut state, &[b"MASTER", b"mymaster"]);
+        assert_eq!(
+            info_field(&result, b"flags").as_deref(),
+            Some("master,disconnected")
+        );
+        assert_eq!(info_field(&result, b"link-refcount").as_deref(), Some("1"));
+        assert_eq!(info_field(&result, b"last-ping-sent").as_deref(), Some("0"));
+        assert_eq!(
+            info_field(&result, b"last-ok-ping-reply").as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            info_field(&result, b"last-ping-reply").as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            info_field(&result, b"role-reported-time").as_deref(),
+            Some("0")
+        );
+    }
+
+    #[test]
     fn sentinel_monitor_malformed_port_returns_invalid_port() {
         let mut state = SentinelState::new();
         let result = dispatch_sentinel_command(

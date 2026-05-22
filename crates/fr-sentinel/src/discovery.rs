@@ -147,6 +147,7 @@ pub fn apply_discovery_action(state: &mut SentinelState, action: DiscoveryAction
             if let Some(master) = state.get_master_mut(&master_name) {
                 let mut sentinel = SentinelRedisInstance::new_master(&sentinel_key, addr, 0);
                 sentinel.flags = InstanceFlags::SENTINEL;
+                sentinel.initialize_created_link_state(now);
                 sentinel.runid = Some(runid);
                 sentinel.last_hello_time = now;
                 master.sentinels.insert(sentinel_key, sentinel);
@@ -247,6 +248,7 @@ pub fn discover_replicas_from_info(
                 let addr = SentinelAddr::new(&replica.ip, replica.port);
                 let mut slave = SentinelRedisInstance::new_master(&key, addr, 0);
                 slave.flags = InstanceFlags::SLAVE;
+                slave.initialize_created_link_state(now);
                 slave.slave_repl_offset = replica.slave_repl_offset;
                 slave.info_refresh = now;
                 entry.insert(slave);
@@ -345,6 +347,19 @@ mod tests {
         apply_discovery_action(&mut state, action, 1000);
         let master = state.get_master("mymaster").unwrap();
         assert_eq!(master.sentinels.len(), 1);
+        let Some(sentinel) = master.sentinels.get("192.168.1.2:26379") else {
+            assert!(
+                master.sentinels.contains_key("192.168.1.2:26379"),
+                "sentinel was inserted"
+            );
+            return;
+        };
+        assert_eq!(sentinel.link.refcount, 1);
+        assert!(sentinel.link.disconnected);
+        assert_eq!(sentinel.link.act_ping_time, 1000);
+        assert_eq!(sentinel.link.last_avail_time, 1000);
+        assert_eq!(sentinel.link.last_pong_time, 1000);
+        assert_eq!(sentinel.role_reported_time, 1000);
     }
 
     #[test]
@@ -429,6 +444,19 @@ slave1:ip=10.0.0.11,port=6379,state=online,offset=12340,lag=1
         discover_replicas_from_info(&mut master, &replicas, 1000);
         assert_eq!(master.slaves.len(), 1);
         assert!(master.slaves.contains_key("10.0.0.10:6379"));
+        let Some(replica) = master.slaves.get("10.0.0.10:6379") else {
+            assert!(
+                master.slaves.contains_key("10.0.0.10:6379"),
+                "replica was inserted"
+            );
+            return;
+        };
+        assert_eq!(replica.link.refcount, 1);
+        assert!(replica.link.disconnected);
+        assert_eq!(replica.link.act_ping_time, 1000);
+        assert_eq!(replica.link.last_avail_time, 1000);
+        assert_eq!(replica.link.last_pong_time, 1000);
+        assert_eq!(replica.role_reported_time, 1000);
     }
 
     #[test]
