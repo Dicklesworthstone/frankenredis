@@ -682,15 +682,15 @@ fn cmd_config_get(state: &SentinelState, patterns: &[&[u8]]) -> RespFrame {
             if emitted.contains(&key) || !glob_match_ignore_ascii_case(&pattern, key) {
                 continue;
             }
-            reply.push((
-                RespFrame::BulkString(Some(key.as_bytes().to_vec())),
-                RespFrame::BulkString(Some(sentinel_config_value(state, key).into_bytes())),
-            ));
+            reply.push(RespFrame::BulkString(Some(key.as_bytes().to_vec())));
+            reply.push(RespFrame::BulkString(Some(
+                sentinel_config_value(state, key).into_bytes(),
+            )));
             emitted.push(key);
         }
     }
 
-    RespFrame::Map(Some(reply))
+    RespFrame::Array(Some(reply))
 }
 
 fn sentinel_config_value(state: &SentinelState, key: &str) -> String {
