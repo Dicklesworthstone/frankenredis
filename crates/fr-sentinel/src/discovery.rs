@@ -147,6 +147,7 @@ pub fn apply_discovery_action(state: &mut SentinelState, action: DiscoveryAction
             if let Some(master) = state.get_master_mut(&master_name) {
                 let mut sentinel = SentinelRedisInstance::new_master(&sentinel_key, addr, 0);
                 sentinel.flags = InstanceFlags::SENTINEL;
+                sentinel.down_after_period = master.down_after_period;
                 sentinel.initialize_created_link_state(now);
                 sentinel.runid = Some(runid);
                 sentinel.last_hello_time = now;
@@ -248,6 +249,7 @@ pub fn discover_replicas_from_info(
                 let addr = SentinelAddr::new(&replica.ip, replica.port);
                 let mut slave = SentinelRedisInstance::new_master(&key, addr, 0);
                 slave.flags = InstanceFlags::SLAVE;
+                slave.down_after_period = master.down_after_period;
                 slave.initialize_created_link_state(now);
                 slave.slave_repl_offset = replica.slave_repl_offset;
                 slave.info_refresh = now;
@@ -329,6 +331,8 @@ mod tests {
     fn process_hello_discovers_new_sentinel() {
         let mut state = SentinelState::new();
         state.monitor("mymaster", "10.0.0.1", 6379, 2).unwrap();
+        let master = state.get_master_mut("mymaster").unwrap();
+        master.down_after_period = 7_000;
 
         let hello = HelloMessage {
             sentinel_ip: "192.168.1.2".to_string(),
@@ -360,6 +364,7 @@ mod tests {
         assert_eq!(sentinel.link.last_avail_time, 1000);
         assert_eq!(sentinel.link.last_pong_time, 1000);
         assert_eq!(sentinel.role_reported_time, 1000);
+        assert_eq!(sentinel.down_after_period, 7_000);
     }
 
     #[test]
@@ -429,6 +434,7 @@ slave1:ip=10.0.0.11,port=6379,state=online,offset=12340,lag=1
     fn discover_replicas_adds_new() {
         let addr = SentinelAddr::new("10.0.0.1", 6379);
         let mut master = SentinelRedisInstance::new_master("mymaster", addr, 2);
+        master.down_after_period = 7_000;
 
         let replicas = vec![ReplicaInfo {
             ip: "10.0.0.10".to_string(),
@@ -457,6 +463,7 @@ slave1:ip=10.0.0.11,port=6379,state=online,offset=12340,lag=1
         assert_eq!(replica.link.last_avail_time, 1000);
         assert_eq!(replica.link.last_pong_time, 1000);
         assert_eq!(replica.role_reported_time, 1000);
+        assert_eq!(replica.down_after_period, 7_000);
     }
 
     #[test]
