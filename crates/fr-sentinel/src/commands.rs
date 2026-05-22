@@ -276,6 +276,13 @@ fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
                     Err(error) => return error,
                 };
             }
+            "master-reboot-down-after-period" => {
+                master.master_reboot_down_after_period =
+                    match parse_non_negative_u64(&value, &option_raw) {
+                        Ok(parsed) => parsed,
+                        Err(error) => return error,
+                    };
+            }
             "auth-pass" => {
                 master.auth_pass = if value.is_empty() {
                     None
@@ -352,6 +359,12 @@ fn parse_positive_u32(value: &str, option: &str) -> Result<u32, RespFrame> {
         .ok()
         .filter(|parsed| *parsed > 0)
         .ok_or_else(|| invalid_sentinel_set_argument(value, option))
+}
+
+fn parse_non_negative_u64(value: &str, option: &str) -> Result<u64, RespFrame> {
+    value
+        .parse::<u64>()
+        .map_err(|_| invalid_sentinel_set_argument(value, option))
 }
 
 fn invalid_sentinel_set_argument(value: &str, option: &str) -> RespFrame {
@@ -1377,6 +1390,71 @@ mod tests {
             info_field(first, b"client-reconfig-script").as_deref(),
             Some(executable_path.as_str())
         );
+    }
+
+    #[test]
+    fn sentinel_set_master_reboot_down_after_period_accepts_non_negative_values() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"SET",
+                b"mymaster",
+                b"master-reboot-down-after-period",
+                b"0",
+            ],
+        );
+        assert!(matches!(result, RespFrame::SimpleString(_)));
+
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        assert_eq!(master.master_reboot_down_after_period, 0);
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"SET",
+                b"mymaster",
+                b"master-reboot-down-after-period",
+                b"5000",
+            ],
+        );
+        assert!(matches!(result, RespFrame::SimpleString(_)));
+
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        assert_eq!(master.master_reboot_down_after_period, 5000);
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"SET",
+                b"mymaster",
+                b"master-reboot-down-after-period",
+                b"-1",
+            ],
+        );
+        assert!(
+            matches!(result, RespFrame::Error(message) if message.contains("Invalid argument"))
+        );
+
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        assert_eq!(master.master_reboot_down_after_period, 5000);
     }
 
     #[test]

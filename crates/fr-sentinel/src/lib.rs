@@ -190,6 +190,7 @@ pub struct SentinelRedisInstance {
     pub failover_start_time: u64,
     pub failover_timeout: u64,
     pub promoted_slave: Option<Box<SentinelRedisInstance>>,
+    pub master_reboot_down_after_period: u64,
 
     pub notification_script: Option<String>,
     pub client_reconfig_script: Option<String>,
@@ -236,6 +237,7 @@ impl SentinelRedisInstance {
             failover_start_time: 0,
             failover_timeout: DEFAULT_FAILOVER_TIMEOUT_MS,
             promoted_slave: None,
+            master_reboot_down_after_period: 0,
             notification_script: None,
             client_reconfig_script: None,
         }
