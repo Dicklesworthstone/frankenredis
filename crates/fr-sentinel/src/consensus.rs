@@ -90,9 +90,11 @@ pub fn evaluate_leader_election(
     my_runid: &str,
     current_epoch: u64,
     sentinel_count: u32,
+    quorum: u32,
     votes: &[LeaderVote],
 ) -> LeaderElectionResult {
-    let votes_needed = (sentinel_count / 2) + 1;
+    let majority = (sentinel_count / 2) + 1;
+    let votes_needed = majority.max(quorum);
 
     let mut votes_by_voter: std::collections::HashMap<&str, &str> =
         std::collections::HashMap::new();
@@ -302,7 +304,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate_leader_election("s2", 1, 5, &votes);
+        let result = evaluate_leader_election("s2", 1, 5, 2, &votes);
         assert_eq!(result.winner, Some("s2".to_string()));
         assert!(result.is_winner);
         assert_eq!(result.votes_received, 3);
@@ -324,9 +326,36 @@ mod tests {
             },
         ];
 
-        let result = evaluate_leader_election("s1", 1, 5, &votes);
+        let result = evaluate_leader_election("s1", 1, 5, 2, &votes);
         assert!(result.winner.is_none());
         assert!(!result.is_winner);
+    }
+
+    #[test]
+    fn leader_election_requires_quorum_even_after_majority() {
+        let votes = vec![
+            LeaderVote {
+                voter_runid: "s1".to_string(),
+                leader_runid: "candidate".to_string(),
+                epoch: 1,
+            },
+            LeaderVote {
+                voter_runid: "s2".to_string(),
+                leader_runid: "candidate".to_string(),
+                epoch: 1,
+            },
+            LeaderVote {
+                voter_runid: "s3".to_string(),
+                leader_runid: "candidate".to_string(),
+                epoch: 1,
+            },
+        ];
+
+        let result = evaluate_leader_election("candidate", 1, 5, 4, &votes);
+        assert!(result.winner.is_none());
+        assert!(!result.is_winner);
+        assert_eq!(result.votes_received, 3);
+        assert_eq!(result.votes_needed, 4);
     }
 
     #[test]
@@ -349,7 +378,7 @@ mod tests {
             },
         ];
 
-        let result = evaluate_leader_election("candidate", 1, 5, &votes);
+        let result = evaluate_leader_election("candidate", 1, 5, 2, &votes);
         assert!(result.winner.is_none());
         assert_eq!(result.votes_received, 1);
     }
