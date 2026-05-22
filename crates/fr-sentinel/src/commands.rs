@@ -150,8 +150,7 @@ fn cmd_is_master_down_by_addr(state: &mut SentinelState, args: &[&[u8]]) -> Resp
     let (leader, leader_epoch) = if requested_runid == "*" {
         (None, 0)
     } else if let Some(master_name) = master_name {
-        // Convert i64 epoch to u64 for vote comparison; negative epochs won't match
-        let epoch_u64 = u64::try_from(requested_epoch).unwrap_or(0);
+        let epoch_u64 = signed_epoch_to_unsigned(requested_epoch);
         sentinel_vote_leader(state, &master_name, epoch_u64, &requested_runid)
     } else {
         (None, 0)
@@ -160,8 +159,16 @@ fn cmd_is_master_down_by_addr(state: &mut SentinelState, args: &[&[u8]]) -> Resp
     RespFrame::Array(Some(vec![
         RespFrame::Integer(i64::from(is_down)),
         RespFrame::BulkString(Some(leader.unwrap_or_else(|| "*".to_string()).into_bytes())),
-        RespFrame::Integer(i64::try_from(leader_epoch).unwrap_or(i64::MAX)),
+        RespFrame::Integer(unsigned_epoch_to_signed(leader_epoch)),
     ]))
+}
+
+fn signed_epoch_to_unsigned(epoch: i64) -> u64 {
+    u64::from_ne_bytes(epoch.to_ne_bytes())
+}
+
+fn unsigned_epoch_to_signed(epoch: u64) -> i64 {
+    i64::from_ne_bytes(epoch.to_ne_bytes())
 }
 
 fn find_master_name_by_addr(state: &SentinelState, ip: &str, port: i64) -> Option<String> {
@@ -1583,14 +1590,18 @@ mod tests {
         let mut state = SentinelState::new();
         assert!(state.monitor("mymaster", "127.0.0.1", 6379, 1).is_ok());
 
-        // Negative epoch with '*' runid should return normal no-vote reply, not error
         let result = dispatch_sentinel_command(
             &mut state,
-            &[b"IS-MASTER-DOWN-BY-ADDR", b"127.0.0.1", b"6379", b"-1", b"*"],
+            &[
+                b"IS-MASTER-DOWN-BY-ADDR",
+                b"127.0.0.1",
+                b"6379",
+                b"-1",
+                b"*",
+            ],
         );
         assert_eq!(result, is_master_down_reply(0, "*", 0));
 
-        // Also test large negative epoch
         let result = dispatch_sentinel_command(
             &mut state,
             &[
@@ -1602,6 +1613,26 @@ mod tests {
             ],
         );
         assert_eq!(result, is_master_down_reply(0, "*", 0));
+    }
+
+    #[test]
+    fn sentinel_is_master_down_by_addr_negative_epoch_vote_wraps_like_redis() {
+        let mut state = SentinelState::new();
+        assert!(state.monitor("mymaster", "127.0.0.1", 6379, 1).is_ok());
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"IS-MASTER-DOWN-BY-ADDR",
+                b"127.0.0.1",
+                b"6379",
+                b"-1",
+                b"candidate",
+            ],
+        );
+
+        assert_eq!(result, is_master_down_reply(0, "candidate", -1));
+        assert_eq!(state.current_epoch, u64::MAX);
     }
 
     #[test]
