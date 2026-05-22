@@ -1824,6 +1824,32 @@ mod tests {
     }
 
     #[test]
+    fn sentinel_myid_extra_args_returns_subcommand_syntax_error() {
+        let mut state = SentinelState::new();
+        let result = dispatch_sentinel_command(&mut state, &[b"MYID", b"extra"]);
+        assert_eq!(
+            result,
+            RespFrame::Error(
+                "ERR unknown subcommand or wrong number of arguments for 'MYID'. Try SENTINEL HELP."
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn sentinel_help_extra_args_returns_subcommand_syntax_error() {
+        let mut state = SentinelState::new();
+        let result = dispatch_sentinel_command(&mut state, &[b"help", b"extra"]);
+        assert_eq!(
+            result,
+            RespFrame::Error(
+                "ERR unknown subcommand or wrong number of arguments for 'help'. Try SENTINEL HELP."
+                    .into()
+            )
+        );
+    }
+
+    #[test]
     fn sentinel_list_replies_are_sorted_by_instance_name() {
         let mut state = SentinelState::new();
         for name in ["gamma", "alpha", "beta"] {
