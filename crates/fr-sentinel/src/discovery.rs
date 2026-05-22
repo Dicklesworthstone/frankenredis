@@ -253,17 +253,24 @@ pub fn parse_replica_info_from_master(info_output: &str) -> Vec<ReplicaInfo> {
                 slave_repl_offset: 0,
             };
 
-            for part in value.split(',') {
-                if let Some((k, v)) = part.split_once('=') {
-                    match k {
-                        "ip" => replica.ip = v.to_string(),
-                        "port" => replica.port = v.parse().unwrap_or(0),
-                        "state" => replica.flags = v.to_string(),
-                        "offset" => replica.slave_repl_offset = v.parse().unwrap_or(0),
-                        "lag" => {}
-                        _ => {}
+            if value.contains("ip=") {
+                for part in value.split(',') {
+                    if let Some((k, v)) = part.split_once('=') {
+                        match k {
+                            "ip" => replica.ip = v.to_string(),
+                            "port" => replica.port = v.parse().unwrap_or(0),
+                            "state" => replica.flags = v.to_string(),
+                            "offset" => replica.slave_repl_offset = v.parse().unwrap_or(0),
+                            "lag" => {}
+                            _ => {}
+                        }
                     }
                 }
+            } else {
+                let mut parts = value.split(',');
+                replica.ip = parts.next().unwrap_or_default().to_string();
+                replica.port = parts.next().and_then(|port| port.parse().ok()).unwrap_or(0);
+                replica.flags = parts.next().unwrap_or_default().to_string();
             }
 
             if replica.port > 0 && !replica.ip.is_empty() {
@@ -609,6 +616,22 @@ slave1:ip=10.0.0.11,port=6379,state=online,offset=12340,lag=1
         assert_eq!(replicas[0].port, 6379);
         assert_eq!(replicas[0].slave_repl_offset, 12345);
         assert_eq!(replicas[1].ip, "10.0.0.11");
+    }
+
+    #[test]
+    fn parse_replica_info_accepts_legacy_slave_rows() {
+        let info = r#"
+# Replication
+role:master
+connected_slaves:1
+slave0:10.0.0.10,6379,online
+"#;
+
+        let replicas = parse_replica_info_from_master(info);
+        assert_eq!(replicas.len(), 1);
+        assert_eq!(replicas[0].ip, "10.0.0.10");
+        assert_eq!(replicas[0].port, 6379);
+        assert_eq!(replicas[0].flags, "online");
     }
 
     #[test]
