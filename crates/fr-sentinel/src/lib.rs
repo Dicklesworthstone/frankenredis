@@ -337,6 +337,8 @@ pub struct ScriptJob {
     pub path: String,
     pub args: Vec<String>,
     pub retry_count: u32,
+    pub pid: Option<i64>,
+    pub start_time_ms: u64,
 }
 
 #[derive(Debug)]

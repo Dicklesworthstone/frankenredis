@@ -831,12 +831,12 @@ fn cmd_pending_scripts(state: &SentinelState) -> RespFrame {
     let scripts: Vec<RespFrame> = state
         .scripts_queue
         .iter()
-        .map(pending_script_job_reply)
+        .map(|script| pending_script_job_reply(script, state.previous_time))
         .collect();
     RespFrame::Array(Some(scripts))
 }
 
-fn pending_script_job_reply(script: &crate::ScriptJob) -> RespFrame {
+fn pending_script_job_reply(script: &crate::ScriptJob, now_ms: u64) -> RespFrame {
     let mut argv = Vec::with_capacity(script.args.len() + 1);
     argv.push(RespFrame::BulkString(Some(
         script.path.clone().into_bytes(),
@@ -855,15 +855,31 @@ fn pending_script_job_reply(script: &crate::ScriptJob) -> RespFrame {
         ),
         (
             RespFrame::BulkString(Some(b"flags".to_vec())),
-            RespFrame::BulkString(Some(b"scheduled".to_vec())),
+            RespFrame::BulkString(Some(if script.pid.is_some() {
+                b"running".to_vec()
+            } else {
+                b"scheduled".to_vec()
+            })),
         ),
         (
             RespFrame::BulkString(Some(b"pid".to_vec())),
-            RespFrame::BulkString(Some(b"0".to_vec())),
+            RespFrame::BulkString(Some(script.pid.unwrap_or(0).to_string().into_bytes())),
         ),
         (
-            RespFrame::BulkString(Some(b"run-delay".to_vec())),
-            RespFrame::BulkString(Some(b"0".to_vec())),
+            RespFrame::BulkString(Some(if script.pid.is_some() {
+                b"run-time".to_vec()
+            } else {
+                b"run-delay".to_vec()
+            })),
+            RespFrame::BulkString(Some(
+                if script.pid.is_some() {
+                    now_ms.saturating_sub(script.start_time_ms)
+                } else {
+                    script.start_time_ms.saturating_sub(now_ms)
+                }
+                .to_string()
+                .into_bytes(),
+            )),
         ),
         (
             RespFrame::BulkString(Some(b"retry-num".to_vec())),
@@ -2629,10 +2645,13 @@ mod tests {
     #[test]
     fn sentinel_pending_scripts_reports_upstream_job_fields() {
         let mut state = SentinelState::new();
+        state.previous_time = 7000;
         state.scripts_queue.push(ScriptJob {
             path: "/tmp/notify.sh".into(),
             args: vec!["event".into(), "mymaster".into()],
             retry_count: 2,
+            pid: None,
+            start_time_ms: 7500,
         });
 
         let result = dispatch_sentinel_command(&mut state, &[b"PENDING-SCRIPTS"]);
@@ -2650,8 +2669,41 @@ mod tests {
                 ),
                 (bulk_str("flags"), bulk_str("scheduled")),
                 (bulk_str("pid"), bulk_str("0")),
-                (bulk_str("run-delay"), bulk_str("0")),
+                (bulk_str("run-delay"), bulk_str("500")),
                 (bulk_str("retry-num"), bulk_str("2")),
+            ]))]))
+        );
+    }
+
+    #[test]
+    fn sentinel_pending_scripts_reports_running_job_runtime() {
+        let mut state = SentinelState::new();
+        state.previous_time = 9000;
+        state.scripts_queue.push(ScriptJob {
+            path: "/tmp/reconfig.sh".into(),
+            args: vec!["mymaster".into(), "leader".into()],
+            retry_count: 3,
+            pid: Some(4242),
+            start_time_ms: 8750,
+        });
+
+        let result = dispatch_sentinel_command(&mut state, &[b"PENDING-SCRIPTS"]);
+
+        assert_eq!(
+            result,
+            RespFrame::Array(Some(vec![RespFrame::Map(Some(vec![
+                (
+                    bulk_str("argv"),
+                    RespFrame::Array(Some(vec![
+                        bulk_str("/tmp/reconfig.sh"),
+                        bulk_str("mymaster"),
+                        bulk_str("leader"),
+                    ])),
+                ),
+                (bulk_str("flags"), bulk_str("running")),
+                (bulk_str("pid"), bulk_str("4242")),
+                (bulk_str("run-time"), bulk_str("250")),
+                (bulk_str("retry-num"), bulk_str("3")),
             ]))]))
         );
     }
