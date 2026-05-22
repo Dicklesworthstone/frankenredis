@@ -13251,7 +13251,10 @@ fn decode_zipmap_pairs(data: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, StoreE
         return Err(StoreError::InvalidDumpPayload);
     }
 
-    let expected_count = data[0];
+    let expected_count = data
+        .first()
+        .copied()
+        .ok_or(StoreError::InvalidDumpPayload)?;
     let mut cursor = 1;
     let payload_end = data.len() - 1;
     let mut hash = BTreeMap::new();
@@ -13265,7 +13268,10 @@ fn decode_zipmap_pairs(data: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, StoreE
         if key_end > payload_end {
             return Err(StoreError::InvalidDumpPayload);
         }
-        let key = data[cursor..key_end].to_vec();
+        let key = data
+            .get(cursor..key_end)
+            .ok_or(StoreError::InvalidDumpPayload)?
+            .to_vec();
         cursor = key_end;
 
         let (val_len, val_len_size) = decode_zipmap_len(data, cursor, payload_end)?;
@@ -13286,14 +13292,17 @@ fn decode_zipmap_pairs(data: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, StoreE
         if next > payload_end {
             return Err(StoreError::InvalidDumpPayload);
         }
-        let value = data[cursor..value_end].to_vec();
+        let value = data
+            .get(cursor..value_end)
+            .ok_or(StoreError::InvalidDumpPayload)?
+            .to_vec();
         cursor = next;
 
         if hash.insert(key, value).is_some() {
             return Err(StoreError::InvalidDumpPayload);
         }
     }
-    if cursor != payload_end || hash.is_empty() {
+    if !matches!(cursor.cmp(&payload_end), std::cmp::Ordering::Equal) || hash.is_empty() {
         return Err(StoreError::InvalidDumpPayload);
     }
     if !matches!(expected_count, ZIPMAP_BIGLEN)
@@ -13328,7 +13337,12 @@ fn decode_zipmap_len(
             if bytes_end > payload_end {
                 return Err(StoreError::InvalidDumpPayload);
             }
-            let bytes: [u8; 4] = data[cursor + 1..bytes_end]
+            let bytes_start = cursor
+                .checked_add(1)
+                .ok_or(StoreError::InvalidDumpPayload)?;
+            let bytes: [u8; 4] = data
+                .get(bytes_start..bytes_end)
+                .ok_or(StoreError::InvalidDumpPayload)?
                 .try_into()
                 .map_err(|_| StoreError::InvalidDumpPayload)?;
             usize::try_from(u32::from_be_bytes(bytes))
