@@ -32,6 +32,7 @@ const RDB_OPCODE_FUNCTION2: u8 = 245;
 const DUMP_VERSION_LEN: usize = 2;
 const DUMP_CRC64_LEN: usize = 8;
 const DUMP_TRAILER_LEN: usize = DUMP_VERSION_LEN + DUMP_CRC64_LEN;
+const AOF_REWRITE_ITEMS_PER_CMD: usize = 64;
 const RDB_ENCVAL: u8 = 0xC0;
 const RDB_ENC_INT8: u8 = 0;
 const RDB_ENC_INT16: u8 = 1;
@@ -12396,7 +12397,7 @@ impl Store {
     ///
     /// Returns a list of command argv vectors. Loaded function libraries are serialized
     /// as deterministic FUNCTION LOAD REPLACE commands first. Non-expired entries are
-    /// then serialized as the appropriate write command (SET, HSET, RPUSH, SADD, ZADD,
+    /// then serialized as the appropriate write command (SET, HMSET, RPUSH, SADD, ZADD,
     /// XADD), followed by PEXPIREAT if the key has an expiry. Expired entries are skipped.
     ///
     /// This is the core of AOF rewrite: the output can be wrapped in `AofRecord`
@@ -12469,15 +12470,19 @@ impl Store {
                 }
                 Value::Hash(h) => {
                     if !h.is_empty() {
-                        let mut argv = vec![b"HSET".to_vec(), logical_key.clone()];
                         // Sort fields for deterministic output.
                         let mut fields: Vec<(&Vec<u8>, &Vec<u8>)> = h.iter().collect();
                         fields.sort_by(|a, b| a.0.cmp(b.0));
-                        for (field, value) in fields {
-                            argv.push(field.clone());
-                            argv.push(value.clone());
+                        for chunk in fields.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
+                            // Redis aof.c::rewriteHashObject writes HMSET in
+                            // batches capped by AOF_REWRITE_ITEMS_PER_CMD.
+                            let mut argv = vec![b"HMSET".to_vec(), logical_key.clone()];
+                            for (field, value) in chunk {
+                                argv.push((*field).clone());
+                                argv.push((*value).clone());
+                            }
+                            commands.push(argv);
                         }
-                        commands.push(argv);
 
                         // Redis 7.4 per-field TTLs: reconstruct each field's
                         // deadline via HPEXPIREAT (absolute ms) so replay
@@ -12504,28 +12509,32 @@ impl Store {
                 }
                 Value::List(l) => {
                     if !l.is_empty() {
-                        let mut argv = vec![b"RPUSH".to_vec(), logical_key.clone()];
-                        for item in l {
-                            argv.push(item.clone());
+                        let items: Vec<&Vec<u8>> = l.iter().collect();
+                        for chunk in items.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
+                            let mut argv = vec![b"RPUSH".to_vec(), logical_key.clone()];
+                            for item in chunk {
+                                argv.push((*item).clone());
+                            }
+                            commands.push(argv);
                         }
-                        commands.push(argv);
                     }
                 }
                 Value::Set(s) => {
                     if !s.is_empty() {
-                        let mut argv = vec![b"SADD".to_vec(), logical_key.clone()];
                         // Sort members for deterministic output.
                         let mut members: Vec<&Vec<u8>> = s.iter().collect();
                         members.sort();
-                        for member in members {
-                            argv.push(member.clone());
+                        for chunk in members.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
+                            let mut argv = vec![b"SADD".to_vec(), logical_key.clone()];
+                            for member in chunk {
+                                argv.push((*member).clone());
+                            }
+                            commands.push(argv);
                         }
-                        commands.push(argv);
                     }
                 }
                 Value::SortedSet(zs) => {
                     if !zs.is_empty() {
-                        let mut argv = vec![b"ZADD".to_vec(), logical_key.clone()];
                         // Sort by score then member for deterministic output.
                         let mut pairs: Vec<(&Vec<u8>, &f64)> = zs.iter().collect();
                         pairs.sort_by(|a, b| {
@@ -12533,11 +12542,14 @@ impl Store {
                                 .unwrap_or(std::cmp::Ordering::Equal)
                                 .then_with(|| a.0.cmp(b.0))
                         });
-                        for (member, score) in pairs {
-                            argv.push(redis_score_to_string(*score).into_bytes());
-                            argv.push(member.clone());
+                        for chunk in pairs.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
+                            let mut argv = vec![b"ZADD".to_vec(), logical_key.clone()];
+                            for (member, score) in chunk {
+                                argv.push(redis_score_to_string(**score).into_bytes());
+                                argv.push((*member).clone());
+                            }
+                            commands.push(argv);
                         }
-                        commands.push(argv);
                     }
                 }
                 Value::Stream(entries) => {
@@ -22583,10 +22595,10 @@ mod tests {
             .unwrap();
         let cmds = store.to_aof_commands(100);
         assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0][0], b"HSET");
+        assert_eq!(cmds[0][0], b"HMSET");
         assert_eq!(cmds[0][1], b"myhash");
         // Fields are sorted deterministically
-        assert_eq!(cmds[0].len(), 6); // HSET key f1 v1 f2 v2
+        assert_eq!(cmds[0].len(), 6); // HMSET key f1 v1 f2 v2
     }
 
     #[test]
@@ -22634,6 +22646,80 @@ mod tests {
         assert_eq!(cmds[0][1], b"myzset");
         // Score-member pairs sorted by score then member
         assert_eq!(cmds[0].len(), 6); // ZADD key score1 member1 score2 member2
+    }
+
+    fn expect_aof_command_shapes(
+        cmds: &[Vec<Vec<u8>>],
+        expected: &[(&[u8], usize)],
+    ) -> Result<(), String> {
+        let mut actual = cmds.iter();
+        for (expected_name, expected_len) in expected {
+            let Some(cmd) = actual.next() else {
+                return Err("missing AOF command".into());
+            };
+            let Some(name) = cmd.first() else {
+                return Err("empty AOF command".into());
+            };
+            if !super::eq_ascii_ci(name, expected_name) {
+                return Err("AOF command name mismatch".into());
+            }
+            match cmd.len().cmp(expected_len) {
+                std::cmp::Ordering::Equal => {}
+                _ => return Err("AOF command length mismatch".into()),
+            }
+        }
+        if actual.next().is_some() {
+            return Err("unexpected extra AOF command".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn aof_commands_collection_batches_at_upstream_limit() -> Result<(), String> {
+        let mut store = Store::new();
+        let list_items: Vec<Vec<u8>> = (0u8..65).map(|idx| vec![b'l', idx]).collect();
+        if store.rpush(b"list", &list_items, 100).is_err() {
+            return Err("rpush failed".into());
+        }
+        let cmds = store.to_aof_commands(100);
+        expect_aof_command_shapes(
+            &cmds,
+            &[(b"RPUSH".as_slice(), 66), (b"RPUSH".as_slice(), 3)],
+        )?;
+
+        let mut store = Store::new();
+        for idx in 0u8..65 {
+            if store
+                .hset(b"hash", vec![b'f', idx], vec![b'v', idx], 100)
+                .is_err()
+            {
+                return Err("hset failed".into());
+            }
+        }
+        let cmds = store.to_aof_commands(100);
+        expect_aof_command_shapes(
+            &cmds,
+            &[(b"HMSET".as_slice(), 130), (b"HMSET".as_slice(), 4)],
+        )?;
+
+        let mut store = Store::new();
+        let set_items: Vec<Vec<u8>> = (0u8..65).map(|idx| vec![b's', idx]).collect();
+        if store.sadd(b"set", &set_items, 100).is_err() {
+            return Err("sadd failed".into());
+        }
+        let cmds = store.to_aof_commands(100);
+        expect_aof_command_shapes(&cmds, &[(b"SADD".as_slice(), 66), (b"SADD".as_slice(), 3)])?;
+
+        let mut store = Store::new();
+        let zset_items: Vec<(f64, Vec<u8>)> = (0u8..65)
+            .map(|idx| (f64::from(idx), vec![b'z', idx]))
+            .collect();
+        if store.zadd(b"zset", &zset_items, 100).is_err() {
+            return Err("zadd failed".into());
+        }
+        let cmds = store.to_aof_commands(100);
+        expect_aof_command_shapes(&cmds, &[(b"ZADD".as_slice(), 130), (b"ZADD".as_slice(), 4)])?;
+        Ok(())
     }
 
     #[test]
@@ -22958,7 +23044,7 @@ mod tests {
         let commands: Vec<&[u8]> = cmds.iter().map(|c| c[0].as_slice()).collect();
         // All data types represented
         assert!(commands.contains(&b"SET".as_slice()));
-        assert!(commands.contains(&b"HSET".as_slice()));
+        assert!(commands.contains(&b"HMSET".as_slice()));
         assert!(commands.contains(&b"RPUSH".as_slice()));
         assert!(commands.contains(&b"SADD".as_slice()));
     }
@@ -25764,11 +25850,11 @@ mod tests {
                         ),
                         "PEXPIREAT replay must target an existing key"
                     );
-                } else if eq_ascii_ci(command, b"HSET") {
+                } else if eq_ascii_ci(command, b"HSET") || eq_ascii_ci(command, b"HMSET") {
                     for pair in argv[2..].chunks_exact(2) {
                         store
                             .hset(&key, pair[0].clone(), pair[1].clone(), METAMORPHIC_NOW_MS)
-                            .expect("HSET replay must stay valid");
+                            .expect("hash replay must stay valid");
                     }
                 } else if eq_ascii_ci(command, b"RPUSH") {
                     store
