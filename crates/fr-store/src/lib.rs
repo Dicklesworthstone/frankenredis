@@ -4963,15 +4963,25 @@ impl Store {
             return Ok(Vec::new());
         }
         self.drop_expired_hash_fields(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::Hash(m) => {
-                    let keys: Vec<Vec<u8>> = m.keys().cloned().collect();
-                    entry.touch(now_ms);
-                    Ok(keys)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                entry.touch(now_ms);
+                match &entry.value {
+                    Value::Hash(m) => Ok(m.keys().cloned().collect()),
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -4981,15 +4991,25 @@ impl Store {
             return Ok(Vec::new());
         }
         self.drop_expired_hash_fields(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::Hash(m) => {
-                    let result: Vec<Vec<u8>> = m.values().cloned().collect();
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                entry.touch(now_ms);
+                match &entry.value {
+                    Value::Hash(m) => Ok(m.values().cloned().collect()),
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -18814,6 +18834,66 @@ mod tests {
             store.hvals(b"h", 0).unwrap(),
             vec![b"1".to_vec(), b"2".to_vec()]
         );
+    }
+
+    #[test]
+    fn hkeys_existing_hash_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .hset(b"h", b"a".to_vec(), b"1".to_vec(), 0)
+            .map_err(|err| format!("seed hash failed: {err:?}"))?;
+
+        match store.object_freq(b"h", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new hash LFU frequency mismatch: {other:?}")),
+        }
+        let keys = store
+            .hkeys(b"h", 1)
+            .map_err(|err| format!("hkeys failed: {err:?}"))?;
+        match keys.as_slice() {
+            [field] => match field.as_slice() {
+                b"a" => {}
+                other => return Err(format!("HKEYS field mismatch: {other:?}")),
+            },
+            other => return Err(format!("HKEYS result mismatch: {other:?}")),
+        }
+        match store.object_freq(b"h", 1) {
+            Some(6) => {}
+            other => return Err(format!("HKEYS should bump LFU frequency, got {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn hvals_existing_hash_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .hset(b"h", b"a".to_vec(), b"1".to_vec(), 0)
+            .map_err(|err| format!("seed hash failed: {err:?}"))?;
+
+        match store.object_freq(b"h", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new hash LFU frequency mismatch: {other:?}")),
+        }
+        let values = store
+            .hvals(b"h", 1)
+            .map_err(|err| format!("hvals failed: {err:?}"))?;
+        match values.as_slice() {
+            [value] => match value.as_slice() {
+                b"1" => {}
+                other => return Err(format!("HVALS value mismatch: {other:?}")),
+            },
+            other => return Err(format!("HVALS result mismatch: {other:?}")),
+        }
+        match store.object_freq(b"h", 1) {
+            Some(6) => {}
+            other => return Err(format!("HVALS should bump LFU frequency, got {other:?}")),
+        }
+        Ok(())
     }
 
     #[test]
