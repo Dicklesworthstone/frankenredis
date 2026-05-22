@@ -293,6 +293,7 @@ pub struct SentinelState {
     pub resolve_hostnames: bool,
     pub announce_hostnames: bool,
     pub deny_scripts_reconfig: bool,
+    pub loglevel: String,
 }
 
 impl Default for SentinelState {
@@ -324,6 +325,7 @@ impl SentinelState {
             resolve_hostnames: false,
             announce_hostnames: false,
             deny_scripts_reconfig: false,
+            loglevel: "notice".to_string(),
         }
     }
 

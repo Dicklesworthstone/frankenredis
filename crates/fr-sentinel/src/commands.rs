@@ -31,6 +31,7 @@ pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> R
         "RESET" => cmd_reset(state, &args[1..]),
         "GET-MASTER-ADDR-BY-NAME" => cmd_get_master_addr(state, &args[1..]),
         "CKQUORUM" => cmd_ckquorum(state, &args[1..]),
+        "CONFIG" => cmd_config(state, &args[1..]),
         "FLUSHCONFIG" => {
             if args.len() != 1 {
                 return wrong_arity("sentinel flushconfig");
@@ -300,6 +301,168 @@ fn cmd_ckquorum(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     }
 }
 
+const SENTINEL_CONFIG_KEYS: [&str; 7] = [
+    "resolve-hostnames",
+    "announce-hostnames",
+    "announce-ip",
+    "announce-port",
+    "sentinel-user",
+    "sentinel-pass",
+    "loglevel",
+];
+
+fn cmd_config(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
+    if args.len() < 2 {
+        return wrong_arity("sentinel config");
+    }
+
+    let subcommand = String::from_utf8_lossy(args[0]).to_ascii_uppercase();
+    match subcommand.as_str() {
+        "GET" if args.len() >= 2 => cmd_config_get(state, &args[1..]),
+        "SET" if args.len() >= 3 => cmd_config_set(state, &args[1..]),
+        _ => RespFrame::Error(
+            "ERR Only SENTINEL CONFIG GET <param> [<param> <param> ...]/ SET <param> <value> [<param> <value> ...] are supported.".into(),
+        ),
+    }
+}
+
+fn cmd_config_get(state: &SentinelState, patterns: &[&[u8]]) -> RespFrame {
+    let mut emitted = Vec::new();
+    let mut reply = Vec::new();
+
+    for raw_pattern in patterns {
+        let pattern = String::from_utf8_lossy(raw_pattern);
+        for key in SENTINEL_CONFIG_KEYS {
+            if emitted.contains(&key) || !glob_match_ignore_ascii_case(&pattern, key) {
+                continue;
+            }
+            reply.push(RespFrame::BulkString(Some(key.as_bytes().to_vec())));
+            reply.push(RespFrame::BulkString(Some(
+                sentinel_config_value(state, key).into_bytes(),
+            )));
+            emitted.push(key);
+        }
+    }
+
+    RespFrame::Array(Some(reply))
+}
+
+fn sentinel_config_value(state: &SentinelState, key: &str) -> String {
+    match key {
+        "resolve-hostnames" => yes_no(state.resolve_hostnames).to_string(),
+        "announce-hostnames" => yes_no(state.announce_hostnames).to_string(),
+        "announce-ip" => state.announce_ip.clone().unwrap_or_default(),
+        "announce-port" => state.announce_port.unwrap_or(0).to_string(),
+        "sentinel-user" => state.sentinel_auth_user.clone().unwrap_or_default(),
+        "sentinel-pass" => state.sentinel_auth_pass.clone().unwrap_or_default(),
+        "loglevel" => state.loglevel.clone(),
+        _ => String::new(),
+    }
+}
+
+fn cmd_config_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
+    let mut seen = Vec::new();
+    let mut updates = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor < args.len() {
+        let option_raw = String::from_utf8_lossy(args[cursor]);
+        let Some(option) = canonical_sentinel_config_key(&option_raw) else {
+            return RespFrame::Error(format!(
+                "ERR Invalid argument '{}' to SENTINEL CONFIG SET",
+                option_raw
+            ));
+        };
+        if seen.contains(&option) {
+            return RespFrame::Error(format!(
+                "ERR Duplicate argument '{}' to SENTINEL CONFIG SET",
+                option_raw
+            ));
+        }
+        if cursor + 1 == args.len() {
+            return RespFrame::Error(format!("ERR Missing argument '{}' value", option_raw));
+        }
+
+        let value = String::from_utf8_lossy(args[cursor + 1]).into_owned();
+        if !sentinel_config_value_is_valid(option, &value) {
+            return RespFrame::Error(format!(
+                "ERR Invalid value '{value}' to SENTINEL CONFIG SET '{option_raw}'"
+            ));
+        }
+
+        seen.push(option);
+        updates.push((option, value));
+        cursor += 2;
+    }
+
+    for (option, value) in updates {
+        apply_sentinel_config_update(state, option, value);
+    }
+    RespFrame::SimpleString("OK".into())
+}
+
+fn canonical_sentinel_config_key(option: &str) -> Option<&'static str> {
+    SENTINEL_CONFIG_KEYS
+        .into_iter()
+        .find(|key| key.eq_ignore_ascii_case(option))
+}
+
+fn sentinel_config_value_is_valid(option: &str, value: &str) -> bool {
+    match option {
+        "resolve-hostnames" | "announce-hostnames" => parse_yes_no(value).is_some(),
+        "announce-port" => value
+            .parse::<i64>()
+            .is_ok_and(|parsed| (0..=65_535).contains(&parsed)),
+        "loglevel" => matches!(
+            value.to_ascii_lowercase().as_str(),
+            "debug" | "verbose" | "notice" | "warning" | "nothing"
+        ),
+        "announce-ip" | "sentinel-user" | "sentinel-pass" => true,
+        _ => false,
+    }
+}
+
+fn apply_sentinel_config_update(state: &mut SentinelState, option: &str, value: String) {
+    match option {
+        "resolve-hostnames" => {
+            state.resolve_hostnames = parse_yes_no(&value).unwrap_or(false);
+        }
+        "announce-hostnames" => {
+            state.announce_hostnames = parse_yes_no(&value).unwrap_or(false);
+        }
+        "announce-ip" => {
+            state.announce_ip = Some(value);
+        }
+        "announce-port" => {
+            state.announce_port = value.parse::<u16>().ok();
+        }
+        "sentinel-user" => {
+            state.sentinel_auth_user = if value.is_empty() { None } else { Some(value) };
+        }
+        "sentinel-pass" => {
+            state.sentinel_auth_pass = if value.is_empty() { None } else { Some(value) };
+        }
+        "loglevel" => {
+            state.loglevel = value.to_ascii_lowercase();
+        }
+        _ => {}
+    }
+}
+
+fn parse_yes_no(value: &str) -> Option<bool> {
+    if value.eq_ignore_ascii_case("yes") {
+        Some(true)
+    } else if value.eq_ignore_ascii_case("no") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
 fn cmd_flushconfig(_state: &SentinelState) -> RespFrame {
     RespFrame::SimpleString("OK".into())
 }
@@ -412,6 +575,8 @@ fn cmd_help() -> RespFrame {
         "SENTINEL RESET <pattern>",
         "SENTINEL GET-MASTER-ADDR-BY-NAME <name>",
         "SENTINEL CKQUORUM <name>",
+        "SENTINEL CONFIG SET <param> <value> [<param> <value> ...]",
+        "SENTINEL CONFIG GET <param> [<param> ...]",
         "SENTINEL FLUSHCONFIG",
         "SENTINEL FAILOVER <name>",
         "SENTINEL PENDING-SCRIPTS",
@@ -510,6 +675,10 @@ fn glob_match(pattern: &str, text: &str) -> bool {
         return text.starts_with(prefix);
     }
     pattern == text
+}
+
+fn glob_match_ignore_ascii_case(pattern: &str, text: &str) -> bool {
+    glob_match(&pattern.to_ascii_lowercase(), &text.to_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -807,6 +976,214 @@ mod tests {
         assert!(glob_match("*mast*", "mymaster"));
         assert!(glob_match("mymaster", "mymaster"));
         assert!(!glob_match("mymaster", "mymaster2"));
+    }
+
+    #[test]
+    fn sentinel_config_get_set_handles_multiple_variables() {
+        let mut state = SentinelState::new();
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"CONFIG",
+                b"SET",
+                b"resolve-hostnames",
+                b"yes",
+                b"announce-port",
+                b"1234",
+            ],
+        );
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"CONFIG", b"GET", b"resolve-hostnames", b"announce-port"],
+        );
+        assert_eq!(
+            result,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"resolve-hostnames".to_vec())),
+                RespFrame::BulkString(Some(b"yes".to_vec())),
+                RespFrame::BulkString(Some(b"announce-port".to_vec())),
+                RespFrame::BulkString(Some(b"1234".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sentinel_config_get_deduplicates_unknowns_and_patterns() {
+        let mut state = SentinelState::new();
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"CONFIG",
+                b"SET",
+                b"loglevel",
+                b"notice",
+                b"announce-port",
+                b"1234",
+                b"announce-hostnames",
+                b"yes",
+            ],
+        );
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"CONFIG",
+                b"GET",
+                b"resolve-hostnames",
+                b"resolve-hostnames",
+                b"does-not-exist",
+            ],
+        );
+        assert_eq!(
+            result,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"resolve-hostnames".to_vec())),
+                RespFrame::BulkString(Some(b"no".to_vec())),
+            ]))
+        );
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"CONFIG", b"GET", b"log*", b"*level", b"loglevel"],
+        );
+        assert_eq!(
+            result,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"loglevel".to_vec())),
+                RespFrame::BulkString(Some(b"notice".to_vec())),
+            ]))
+        );
+
+        let result = dispatch_sentinel_command(&mut state, &[b"CONFIG", b"GET", b"announce*"]);
+        assert_eq!(
+            result,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"announce-hostnames".to_vec())),
+                RespFrame::BulkString(Some(b"yes".to_vec())),
+                RespFrame::BulkString(Some(b"announce-ip".to_vec())),
+                RespFrame::BulkString(Some(Vec::new())),
+                RespFrame::BulkString(Some(b"announce-port".to_vec())),
+                RespFrame::BulkString(Some(b"1234".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sentinel_config_set_rejects_duplicates_atomically() {
+        let mut state = SentinelState::new();
+        let result =
+            dispatch_sentinel_command(&mut state, &[b"CONFIG", b"SET", b"announce-port", b"111"]);
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"CONFIG",
+                b"SET",
+                b"resolve-hostnames",
+                b"yes",
+                b"announce-port",
+                b"1234",
+                b"announce-port",
+                b"100",
+            ],
+        );
+        assert!(
+            matches!(result, RespFrame::Error(ref message) if message.contains("Duplicate argument"))
+        );
+        assert!(!state.resolve_hostnames);
+        assert_eq!(state.announce_port, Some(111));
+    }
+
+    #[test]
+    fn sentinel_config_set_rejects_bad_values_atomically() {
+        let mut state = SentinelState::new();
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"CONFIG", b"SET", b"resolve-hostnames", b"no"],
+        );
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"CONFIG",
+                b"SET",
+                b"announce-port",
+                b"-1234",
+                b"resolve-hostnames",
+                b"yes",
+            ],
+        );
+        assert!(
+            matches!(result, RespFrame::Error(ref message) if message.contains("Invalid value"))
+        );
+        assert!(!state.resolve_hostnames);
+        assert_eq!(state.announce_port, None);
+    }
+
+    #[test]
+    fn sentinel_config_set_reports_missing_values() {
+        let mut state = SentinelState::new();
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"CONFIG",
+                b"SET",
+                b"resolve-hostnames",
+                b"yes",
+                b"announce-port",
+                b"1234",
+                b"announce-ip",
+            ],
+        );
+        assert!(
+            matches!(result, RespFrame::Error(ref message) if message.contains("Missing argument 'announce-ip' value"))
+        );
+        assert!(!state.resolve_hostnames);
+        assert_eq!(state.announce_port, None);
+        assert_eq!(state.announce_ip, None);
+    }
+
+    #[test]
+    fn sentinel_config_set_updates_credentials_and_loglevel() {
+        let mut state = SentinelState::new();
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"CONFIG",
+                b"SET",
+                b"sentinel-user",
+                b"agent",
+                b"sentinel-pass",
+                b"secret",
+                b"loglevel",
+                b"WARNING",
+            ],
+        );
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+        assert_eq!(state.sentinel_auth_user.as_deref(), Some("agent"));
+        assert_eq!(state.sentinel_auth_pass.as_deref(), Some("secret"));
+        assert_eq!(state.loglevel, "warning");
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"CONFIG",
+                b"SET",
+                b"sentinel-user",
+                b"",
+                b"sentinel-pass",
+                b"",
+            ],
+        );
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+        assert_eq!(state.sentinel_auth_user, None);
+        assert_eq!(state.sentinel_auth_pass, None);
     }
 
     #[test]
