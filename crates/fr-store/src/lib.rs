@@ -681,13 +681,7 @@ impl Entry {
     /// ally as `rand_sample % denom == 0`, which is uniform when the
     /// upstream PRNG is uniform — that's how fr's other random-sampled
     /// commands (HRANDFIELD, RANDOMKEY, …) consume the LCG.
-    fn bump_lfu_freq(
-        &mut self,
-        now_ms: u64,
-        decay_time: u64,
-        log_factor: u64,
-        rand_sample: u64,
-    ) {
+    fn bump_lfu_freq(&mut self, now_ms: u64, decay_time: u64, log_factor: u64, rand_sample: u64) {
         let counter = self.current_lfu_freq(now_ms, decay_time);
         if counter < 255 {
             let baseval = u64::from(counter.saturating_sub(LFU_INIT_VAL));
@@ -858,7 +852,7 @@ pub enum MaxmemoryPolicy {
     VolatileRandom,
     /// Evict keys with an expiry, preferring those closest to expiring.
     VolatileTtl,
-    /// Evict any key, preferring the least frequently used (approximated as LRU).
+    /// Evict any key, preferring the least frequently used.
     AllkeysLfu,
     /// Evict only keys with an expiry, preferring the least frequently used.
     VolatileLfu,
@@ -1123,12 +1117,7 @@ impl CommandHistogramTracker {
     }
 
     /// Record a command latency with an explicit outcome classification.
-    pub fn record_with_kind(
-        &mut self,
-        command: &str,
-        latency_us: u64,
-        kind: CommandRecordKind,
-    ) {
+    pub fn record_with_kind(&mut self, command: &str, latency_us: u64, kind: CommandRecordKind) {
         // (frankenredis-6n2qm) Upstream canonicalises command names to
         // their lowercase commands.def form (`cmd->fullname`) before
         // updating the per-command histogram. fr previously upper-cased
@@ -2527,9 +2516,8 @@ impl Store {
             return;
         };
         let needs_hashtable = m.len() > max_listpack_entries
-            || m.iter().any(|(k, v)| {
-                k.len() > max_listpack_value || v.len() > max_listpack_value
-            });
+            || m.iter()
+                .any(|(k, v)| k.len() > max_listpack_value || v.len() > max_listpack_value);
         if needs_hashtable {
             entry.force_hash_hashtable_encoding = true;
         }
@@ -2547,8 +2535,8 @@ impl Store {
         let Value::SortedSet(zs) = &entry.value else {
             return;
         };
-        let needs_skiplist = zs.len() > max_listpack_entries
-            || zs.keys().any(|k| k.len() > max_listpack_value);
+        let needs_skiplist =
+            zs.len() > max_listpack_entries || zs.keys().any(|k| k.len() > max_listpack_value);
         if needs_skiplist {
             entry.force_zset_skiplist_encoding = true;
         }
@@ -4571,7 +4559,8 @@ impl Store {
             ));
         }
 
-        for (key, entry, groups, last_id, entries_added, max_deleted_id, field_ttls) in left_entries {
+        for (key, entry, groups, last_id, entries_added, max_deleted_id, field_ttls) in left_entries
+        {
             let mut swapped = Vec::with_capacity(
                 right_prefix.len() + key.len().saturating_sub(left_prefix.len()),
             );
@@ -4600,7 +4589,9 @@ impl Store {
             }
         }
 
-        for (key, entry, groups, last_id, entries_added, max_deleted_id, field_ttls) in right_entries {
+        for (key, entry, groups, last_id, entries_added, max_deleted_id, field_ttls) in
+            right_entries
+        {
             let mut swapped = Vec::with_capacity(
                 left_prefix.len() + key.len().saturating_sub(right_prefix.len()),
             );
@@ -9170,9 +9161,7 @@ impl Store {
                             .max()
                             .unwrap_or(0);
                         let idle_ms = match meta {
-                            Some(m) if m.seen_time_ms > 0 => {
-                                now_ms.saturating_sub(m.seen_time_ms)
-                            }
+                            Some(m) if m.seen_time_ms > 0 => now_ms.saturating_sub(m.seen_time_ms),
                             _ => {
                                 if last_delivery > 0 {
                                     now_ms.saturating_sub(last_delivery)
@@ -9188,8 +9177,7 @@ impl Store {
                         let inactive_ms_or_neg_one: i64 = match meta {
                             Some(m) => match m.active_time_ms {
                                 Some(at) if at > 0 => {
-                                    i64::try_from(now_ms.saturating_sub(at))
-                                        .unwrap_or(i64::MAX)
+                                    i64::try_from(now_ms.saturating_sub(at)).unwrap_or(i64::MAX)
                                 }
                                 _ => -1,
                             },
@@ -9462,13 +9450,12 @@ impl Store {
             }
         }
 
-        let dest_encoding = if saw_dense_input
-            || hll_sparse_should_promote(&merged, self.hll_sparse_max_bytes)
-        {
-            HllEncoding::Dense
-        } else {
-            HllEncoding::Sparse
-        };
+        let dest_encoding =
+            if saw_dense_input || hll_sparse_should_promote(&merged, self.hll_sparse_max_bytes) {
+                HllEncoding::Dense
+            } else {
+                HllEncoding::Sparse
+            };
         let data = hll_encode(&merged, dest_encoding);
         let mut entry = Entry::new(Value::String(data), existing_ttl, now_ms);
         // PFMERGE's destination is a raw-encoded HLL string, same as pfadd.
@@ -10425,15 +10412,12 @@ impl Store {
                     // path.
                     let fits_listpack = h.len() <= max_listpack_entries
                         && h.iter().all(|(k, v)| {
-                            k.len() <= max_listpack_value
-                                && v.len() <= max_listpack_value
+                            k.len() <= max_listpack_value && v.len() <= max_listpack_value
                         });
                     if fits_listpack {
                         let result: Vec<(Vec<u8>, Vec<u8>)> = h
                             .iter()
-                            .filter(|(field, _)| {
-                                pattern.is_none_or(|pat| glob_match(pat, field))
-                            })
+                            .filter(|(field, _)| pattern.is_none_or(|pat| glob_match(pat, field)))
                             .map(|(f, v)| (f.clone(), v.clone()))
                             .collect();
                         return Ok((0, result));
@@ -10508,9 +10492,7 @@ impl Store {
                     if is_listpack_or_intset {
                         let result: Vec<Vec<u8>> = s
                             .iter()
-                            .filter(|member| {
-                                pattern.is_none_or(|pat| glob_match(pat, member))
-                            })
+                            .filter(|member| pattern.is_none_or(|pat| glob_match(pat, member)))
                             .cloned()
                             .collect();
                         return Ok((0, result));
@@ -10577,9 +10559,7 @@ impl Store {
                     if fits_listpack {
                         let result: Vec<(Vec<u8>, f64)> = zs
                             .iter_asc()
-                            .filter(|(member, _)| {
-                                pattern.is_none_or(|pat| glob_match(pat, member))
-                            })
+                            .filter(|(member, _)| pattern.is_none_or(|pat| glob_match(pat, member)))
                             .map(|(m, s)| (m.clone(), *s))
                             .collect();
                         return Ok((0, result));
@@ -10924,13 +10904,30 @@ impl Store {
         usage
     }
 
-    fn select_eviction_candidate(&mut self, _now_ms: u64) -> Option<Vec<u8>> {
+    fn select_lfu_eviction_candidate(&self, now_ms: u64, volatile_only: bool) -> Option<Vec<u8>> {
+        let mut best_key: Option<Vec<u8>> = None;
+        let mut best_freq = u8::MAX;
+        let mut best_access = u64::MAX;
+        for (key, entry) in &self.entries {
+            if volatile_only && entry.expires_at_ms.is_none() {
+                continue;
+            }
+            let freq = entry.current_lfu_freq(now_ms, self.lfu_decay_time);
+            if freq < best_freq || (freq == best_freq && entry.last_access_ms < best_access) {
+                best_freq = freq;
+                best_access = entry.last_access_ms;
+                best_key = Some(key.clone());
+            }
+        }
+        best_key
+    }
+
+    fn select_eviction_candidate(&mut self, now_ms: u64) -> Option<Vec<u8>> {
         match self.maxmemory_policy {
             MaxmemoryPolicy::Noeviction => None,
 
-            MaxmemoryPolicy::AllkeysLru | MaxmemoryPolicy::AllkeysLfu => {
+            MaxmemoryPolicy::AllkeysLru => {
                 // Pick the key with the smallest last_access_ms (least recently used).
-                // LFU is approximated as LRU since we don't track access frequency.
                 let mut best_key: Option<Vec<u8>> = None;
                 let mut best_access: u64 = u64::MAX;
                 for (key, entry) in &self.entries {
@@ -10942,7 +10939,9 @@ impl Store {
                 best_key
             }
 
-            MaxmemoryPolicy::VolatileLru | MaxmemoryPolicy::VolatileLfu => {
+            MaxmemoryPolicy::AllkeysLfu => self.select_lfu_eviction_candidate(now_ms, false),
+
+            MaxmemoryPolicy::VolatileLru => {
                 // Pick the volatile key (has expiry) with the smallest last_access_ms.
                 let mut best_key: Option<Vec<u8>> = None;
                 let mut best_access: u64 = u64::MAX;
@@ -10954,6 +10953,8 @@ impl Store {
                 }
                 best_key
             }
+
+            MaxmemoryPolicy::VolatileLfu => self.select_lfu_eviction_candidate(now_ms, true),
 
             MaxmemoryPolicy::VolatileTtl => {
                 // Pick the volatile key with the smallest expires_at_ms (soonest to expire).
@@ -13776,9 +13777,7 @@ fn parse_f64(bytes: &[u8]) -> Result<f64, StoreError> {
     {
         return Err(StoreError::ValueNotFloat);
     }
-    let val = text
-        .parse::<f64>()
-        .map_err(|_| StoreError::ValueNotFloat)?;
+    let val = text.parse::<f64>().map_err(|_| StoreError::ValueNotFloat)?;
     if val.is_nan() {
         return Err(StoreError::ValueNotFloat);
     }
@@ -14822,7 +14821,8 @@ fn hll_decode_dense_registers(payload: &[u8]) -> Result<Vec<u8>, StoreError> {
         let bit = index * 6;
         let byte = bit / 8;
         let shift = bit % 8;
-        let raw = u16::from(payload[byte]) | u16::from(payload.get(byte + 1).copied().unwrap_or(0)) << 8;
+        let raw =
+            u16::from(payload[byte]) | u16::from(payload.get(byte + 1).copied().unwrap_or(0)) << 8;
         *register = ((raw >> shift) & 0x3f) as u8;
     }
     Ok(registers)
@@ -15191,8 +15191,7 @@ fn positional_call_has_extra_arg_after_function(s: &str) -> bool {
             }
             continue;
         }
-        let lok = i == 0
-            || !matches!(bytes[i - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+        let lok = i == 0 || !matches!(bytes[i - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
         if lok && matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'_') {
             let st = i;
             while i < bytes.len()
@@ -15397,7 +15396,9 @@ fn find_unknown_table_key(buf: &str, allowed: &[&str]) -> Option<String> {
                 while j < bytes.len() && bytes[j].is_ascii_whitespace() {
                     j += 1;
                 }
-                if j < bytes.len() && bytes[j] == b'=' && bytes.get(j + 1).copied() != Some(b'=')
+                if j < bytes.len()
+                    && bytes[j] == b'='
+                    && bytes.get(j + 1).copied() != Some(b'=')
                     && !allowed.contains(&ident)
                 {
                     return Some(ident.to_string());
@@ -16155,9 +16156,7 @@ mod tests {
         // single-char values stays as listpack — matching vendored
         // redis 7.2.4 for the same payload.
         let mut store = Store::new();
-        let entries: Vec<Vec<u8>> = (0..200u16)
-            .map(|i| format!("v{i}").into_bytes())
-            .collect();
+        let entries: Vec<Vec<u8>> = (0..200u16).map(|i| format!("v{i}").into_bytes()).collect();
         let _ = store.rpush(b"list", &entries, 0);
 
         assert_eq!(store.object_encoding(b"list", 0), Some("listpack"));
@@ -16226,7 +16225,12 @@ mod tests {
         store2
             .sadd(
                 b"t",
-                &[b"1".to_vec(), b"2".to_vec(), b"3".to_vec(), b"alpha".to_vec()],
+                &[
+                    b"1".to_vec(),
+                    b"2".to_vec(),
+                    b"3".to_vec(),
+                    b"alpha".to_vec(),
+                ],
                 0,
             )
             .expect("sadd mixed");
@@ -16293,24 +16297,23 @@ mod tests {
         store
             .sadd(
                 b"s",
-                &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"alpha".to_vec()],
+                &[
+                    b"a".to_vec(),
+                    b"b".to_vec(),
+                    b"c".to_vec(),
+                    b"alpha".to_vec(),
+                ],
                 0,
             )
             .expect("sadd");
         assert_eq!(store.object_encoding(b"s", 0), Some("listpack"));
-        let (cursor, items) = store
-            .sscan(b"s", 0, None, 1, 0)
-            .expect("sscan listpack");
+        let (cursor, items) = store.sscan(b"s", 0, None, 1, 0).expect("sscan listpack");
         assert_eq!(cursor, 0);
         assert_eq!(items.len(), 4);
 
         // Intset
         store
-            .sadd(
-                b"si",
-                &[b"1".to_vec(), b"2".to_vec(), b"3".to_vec()],
-                0,
-            )
+            .sadd(b"si", &[b"1".to_vec(), b"2".to_vec(), b"3".to_vec()], 0)
             .expect("sadd intset");
         assert_eq!(store.object_encoding(b"si", 0), Some("intset"));
         let (cursor, items) = store
@@ -16323,14 +16326,16 @@ mod tests {
         store
             .zadd(
                 b"z",
-                &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())],
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"b".to_vec()),
+                    (3.0, b"c".to_vec()),
+                ],
                 0,
             )
             .expect("zadd");
         assert_eq!(store.object_encoding(b"z", 0), Some("listpack"));
-        let (cursor, items) = store
-            .zscan(b"z", 0, None, 1, 0)
-            .expect("zscan listpack");
+        let (cursor, items) = store.zscan(b"z", 0, None, 1, 0).expect("zscan listpack");
         assert_eq!(cursor, 0);
         assert_eq!(items.len(), 3);
 
@@ -16902,6 +16907,75 @@ mod tests {
     }
 
     #[test]
+    fn allkeys_lfu_eviction_prefers_lowest_decayed_frequency() {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store.set(b"old-hot".to_vec(), b"v".to_vec(), None, 0);
+        store.set(b"new-cold".to_vec(), b"v".to_vec(), None, 10_000);
+
+        let hot = store
+            .entries
+            .get_mut(b"old-hot".as_slice())
+            .expect("hot entry");
+        hot.lfu_freq = 200;
+        hot.last_access_ms = 0;
+
+        let cold = store
+            .entries
+            .get_mut(b"new-cold".as_slice())
+            .expect("cold entry");
+        cold.lfu_freq = 5;
+        cold.last_access_ms = 10_000;
+
+        assert_eq!(
+            store.select_eviction_candidate(10_000),
+            Some(b"new-cold".to_vec())
+        );
+    }
+
+    #[test]
+    fn volatile_lfu_ignores_nonvolatile_keys_and_uses_frequency() {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::VolatileLfu;
+        store.lfu_decay_time = 0;
+        store.set(b"persistent-rare".to_vec(), b"v".to_vec(), None, 0);
+        store.set(b"volatile-hot".to_vec(), b"v".to_vec(), Some(60_000), 0);
+        store.set(
+            b"volatile-cold".to_vec(),
+            b"v".to_vec(),
+            Some(60_000),
+            10_000,
+        );
+
+        let persistent = store
+            .entries
+            .get_mut(b"persistent-rare".as_slice())
+            .expect("persistent entry");
+        persistent.lfu_freq = 1;
+        persistent.last_access_ms = 0;
+
+        let hot = store
+            .entries
+            .get_mut(b"volatile-hot".as_slice())
+            .expect("volatile hot entry");
+        hot.lfu_freq = 100;
+        hot.last_access_ms = 0;
+
+        let cold = store
+            .entries
+            .get_mut(b"volatile-cold".as_slice())
+            .expect("volatile cold entry");
+        cold.lfu_freq = 4;
+        cold.last_access_ms = 10_000;
+
+        assert_eq!(
+            store.select_eviction_candidate(10_000),
+            Some(b"volatile-cold".to_vec())
+        );
+    }
+
+    #[test]
     fn rename_moves_key() {
         let mut store = Store::new();
         store.set(b"old".to_vec(), b"v".to_vec(), None, 0);
@@ -17137,12 +17211,16 @@ mod tests {
 
         // Field TTL must follow the hash to its new key.
         assert_eq!(
-            store.hash_field_expires.get(&(b"db1:h".to_vec(), b"f".to_vec())),
+            store
+                .hash_field_expires
+                .get(&(b"db1:h".to_vec(), b"f".to_vec())),
             Some(&99_999),
             "field TTL must follow the hash through SWAPDB"
         );
         assert!(
-            !store.hash_field_expires.contains_key(&(b"db0:h".to_vec(), b"f".to_vec())),
+            !store
+                .hash_field_expires
+                .contains_key(&(b"db0:h".to_vec(), b"f".to_vec())),
             "old (db0:h, f) row must be gone"
         );
     }
@@ -19451,13 +19529,13 @@ mod tests {
         // surround). fr previously called `.trim()` inside `parse_f64` which
         // silently accepted these.
         for stored in &[
-            b" 1.5".as_slice(),       // leading space
-            b"1.5 ".as_slice(),       // trailing space
-            b"\t1.5".as_slice(),      // leading tab
-            b"1.5\t".as_slice(),      // trailing tab
-            b" 1.5 ".as_slice(),      // both
-            b"\n1.5".as_slice(),      // leading newline
-            b"1.5\n".as_slice(),      // trailing newline
+            b" 1.5".as_slice(),  // leading space
+            b"1.5 ".as_slice(),  // trailing space
+            b"\t1.5".as_slice(), // leading tab
+            b"1.5\t".as_slice(), // trailing tab
+            b" 1.5 ".as_slice(), // both
+            b"\n1.5".as_slice(), // leading newline
+            b"1.5\n".as_slice(), // trailing newline
         ] {
             let mut store = Store::new();
             store.set(b"k".to_vec(), stored.to_vec(), None, 0);
@@ -19479,11 +19557,7 @@ mod tests {
     #[test]
     fn hincrbyfloat_rejects_stored_value_with_whitespace_6h90t() {
         // (frankenredis-6h90t) Same rule applies to HINCRBYFLOAT.
-        for stored in &[
-            b" 1.5".as_slice(),
-            b"1.5 ".as_slice(),
-            b"\t1.5".as_slice(),
-        ] {
+        for stored in &[b" 1.5".as_slice(), b"1.5 ".as_slice(), b"\t1.5".as_slice()] {
             let mut store = Store::new();
             store.hset(b"h", b"f".to_vec(), stored.to_vec(), 0).unwrap();
             let result = store.hincrbyfloat_text(b"h", b"f", b"1.0", 1.0, 0);
@@ -21853,10 +21927,7 @@ mod tests {
         let mut s = Store::new();
 
         let err = s
-            .function_load(
-                b"#!lua name=lib1\nredis.register_function()",
-                false,
-            )
+            .function_load(b"#!lua name=lib1\nredis.register_function()", false)
             .expect_err("zero args must error");
         assert_eq!(
             err,
@@ -21867,10 +21938,7 @@ mod tests {
         );
 
         let err = s
-            .function_load(
-                b"#!lua name=lib2\nredis.register_function('f')",
-                false,
-            )
+            .function_load(b"#!lua name=lib2\nredis.register_function('f')", false)
             .expect_err("single string arg must error");
         assert_eq!(
             err,
@@ -21912,10 +21980,7 @@ mod tests {
 
         // callback as a number
         let err = s
-            .function_load(
-                b"#!lua name=lib2\nredis.register_function('f', 42)",
-                false,
-            )
+            .function_load(b"#!lua name=lib2\nredis.register_function('f', 42)", false)
             .expect_err("numeric callback must error");
         assert_eq!(
             err,
@@ -22033,7 +22098,8 @@ mod tests {
         let mut s2 = Store::new();
         let code2 = b"#!lua name=lib_multi\n\
                       redis.register_function{function_name='f', callback=function() return 1 end, flags={'no-writes', 'allow-stale'}}";
-        s2.function_load(code2, false).expect("multi-flag library must load");
+        s2.function_load(code2, false)
+            .expect("multi-flag library must load");
         let lib2 = s2
             .function_libraries
             .get("lib_multi")
@@ -22047,7 +22113,8 @@ mod tests {
         let mut s3 = Store::new();
         let code3 = b"#!lua name=lib_none\n\
                       redis.register_function{function_name='f', callback=function() return 1 end}";
-        s3.function_load(code3, false).expect("flagless library must load");
+        s3.function_load(code3, false)
+            .expect("flagless library must load");
         let lib3 = s3
             .function_libraries
             .get("lib_none")
@@ -22326,16 +22393,14 @@ mod tests {
         // times'. fr previously silently overwrote the first name.
         // (frankenredis-fnhdr)
         let mut store = Store::new();
-        let code =
-            b"#!lua name=a name=b\nredis.register_function('f', function() return 1 end)";
+        let code = b"#!lua name=a name=b\nredis.register_function('f', function() return 1 end)";
         let err = store
             .function_load(code, false)
             .expect_err("duplicate name= must error");
         assert_eq!(
             err,
             StoreError::GenericError(
-                "ERR Invalid metadata value, name argument was given multiple times"
-                    .to_string()
+                "ERR Invalid metadata value, name argument was given multiple times".to_string()
             )
         );
         assert!(
@@ -23121,22 +23186,13 @@ mod tests {
 
         // DEL + small HSET resets stickiness.
         store.del(&[b"h".to_vec()], 0);
-        store
-            .hset(b"h", b"f".to_vec(), b"v".to_vec(), 0)
-            .unwrap();
+        store.hset(b"h", b"f".to_vec(), b"v".to_vec(), 0).unwrap();
         assert_eq!(store.object_encoding(b"h", 0), Some("listpack"));
 
         // Reset threshold for the value-side check.
         store.hash_max_listpack_entries = 128;
         // Per-value threshold also flips encoding.
-        store
-            .hset(
-                b"hv",
-                b"f".to_vec(),
-                vec![b'x'; 65],
-                0,
-            )
-            .unwrap();
+        store.hset(b"hv", b"f".to_vec(), vec![b'x'; 65], 0).unwrap();
         assert_eq!(store.object_encoding(b"hv", 0), Some("hashtable"));
         store.hash_max_listpack_value = 100;
         assert_eq!(
@@ -23163,9 +23219,7 @@ mod tests {
 
         // Per-value threshold also promotes.
         store.zset_max_listpack_entries = 128;
-        let _ = store
-            .zadd(b"zv", &[(1.0, vec![b'x'; 65])], 0)
-            .unwrap();
+        let _ = store.zadd(b"zv", &[(1.0, vec![b'x'; 65])], 0).unwrap();
         assert_eq!(store.object_encoding(b"zv", 0), Some("skiplist"));
         store.zset_max_listpack_value = 100;
         assert_eq!(
