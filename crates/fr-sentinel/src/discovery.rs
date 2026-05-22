@@ -486,10 +486,9 @@ mod tests {
 
     #[test]
     fn hello_message_parse_uses_redis_numeric_prefixes() {
-        let decoded = HelloMessage::parse(
-            "192.0.2.1,abc,runid,12epoch,mymaster,10.0.0.1,6379tail,7cfg",
-        )
-        .unwrap();
+        let decoded =
+            HelloMessage::parse("192.0.2.1,abc,runid,12epoch,mymaster,10.0.0.1,6379tail,7cfg")
+                .unwrap();
 
         assert_eq!(decoded.sentinel_port, 0);
         assert_eq!(decoded.current_epoch, 12);

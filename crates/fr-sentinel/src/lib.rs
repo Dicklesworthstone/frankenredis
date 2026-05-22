@@ -619,7 +619,11 @@ mod tests {
             HelloMessage::parse(hello.trim_end()).map(|msg| (msg.sentinel_port, msg.master_port)),
             Some((26379, 6379))
         );
-        assert!(HelloMessage::parse(&read_seed(&corpus_root, "hello_invalid_port.txt")?).is_none());
+        assert_eq!(
+            HelloMessage::parse(&read_seed(&corpus_root, "hello_invalid_port.txt")?)
+                .map(|msg| (msg.sentinel_port, msg.master_port)),
+            Some((0, 6379))
+        );
         assert!(HelloMessage::parse(&read_seed(&corpus_root, "hello_extra_field.txt")?).is_none());
 
         let replicas =
