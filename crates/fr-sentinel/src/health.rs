@@ -185,9 +185,7 @@ pub fn apply_info_to_instance(instance: &mut SentinelRedisInstance, info: &Parse
             crate::LinkStatus::Down
         };
     }
-    if let Some(down_ms) = info.master_link_down_since {
-        instance.master_link_down_time = down_ms;
-    }
+    instance.master_link_down_time = info.master_link_down_since.unwrap_or(0);
     if let Some(offset) = info.slave_repl_offset {
         instance.slave_repl_offset = offset;
     }
@@ -363,6 +361,7 @@ slave_priority:100
         let info = ParsedInfo {
             role: Some(Role::Master),
             run_id: Some("test123".to_string()),
+            master_link_down_since: Some(12_000),
             slave_repl_offset: Some(99999),
             ..Default::default()
         };
@@ -370,8 +369,24 @@ slave_priority:100
         apply_info_to_instance(&mut instance, &info, 5000);
         assert_eq!(instance.role_reported, Role::Master);
         assert_eq!(instance.runid, Some("test123".to_string()));
+        assert_eq!(instance.master_link_down_time, 12_000);
         assert_eq!(instance.slave_repl_offset, 99999);
         assert_eq!(instance.info_refresh, 5000);
+    }
+
+    #[test]
+    fn apply_info_clears_missing_master_link_down_time() {
+        let mut instance = make_instance();
+        instance.master_link_down_time = 42_000;
+        let info = ParsedInfo {
+            role: Some(Role::Slave),
+            master_link_down_since: None,
+            ..Default::default()
+        };
+
+        apply_info_to_instance(&mut instance, &info, 6000);
+
+        assert_eq!(instance.master_link_down_time, 0);
     }
 
     #[test]
