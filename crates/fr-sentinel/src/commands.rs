@@ -15,7 +15,7 @@ pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> R
     match subcommand.as_str() {
         "MYID" => {
             if args.len() != 1 {
-                return wrong_arity("sentinel myid");
+                return subcommand_syntax_error(&subcommand_raw);
             }
             cmd_myid(state)
         }
@@ -54,19 +54,23 @@ pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> R
         "DEBUG" => cmd_debug(state, &args[1..]),
         "HELP" => {
             if args.len() != 1 {
-                return wrong_arity("sentinel help");
+                return subcommand_syntax_error(&subcommand_raw);
             }
             cmd_help()
         }
-        _ => RespFrame::Error(format!(
-            "ERR unknown subcommand or wrong number of arguments for '{subcommand_raw}'. Try SENTINEL HELP."
-        )),
+        _ => subcommand_syntax_error(&subcommand_raw),
     }
 }
 
 fn wrong_arity(command: &'static str) -> RespFrame {
     RespFrame::Error(format!(
         "ERR wrong number of arguments for '{command}' command"
+    ))
+}
+
+fn subcommand_syntax_error(subcommand: &str) -> RespFrame {
+    RespFrame::Error(format!(
+        "ERR unknown subcommand or wrong number of arguments for '{subcommand}'. Try SENTINEL HELP."
     ))
 }
 
