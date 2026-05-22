@@ -30,7 +30,8 @@ pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> R
             cmd_masters(state)
         }
         "MASTER" => cmd_master(state, &args[1..]),
-        "REPLICAS" | "SLAVES" => cmd_replicas(state, &args[1..]),
+        "REPLICAS" => cmd_replicas(state, &args[1..], "sentinel replicas"),
+        "SLAVES" => cmd_replicas(state, &args[1..], "sentinel slaves"),
         "SENTINELS" => cmd_sentinels(state, &args[1..]),
         "IS-MASTER-DOWN-BY-ADDR" => cmd_is_master_down_by_addr(state, &args[1..]),
         "MONITOR" => cmd_monitor(state, &args[1..]),
@@ -104,9 +105,13 @@ fn cmd_master(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     }
 }
 
-fn cmd_replicas(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
+fn cmd_replicas(
+    state: &SentinelState,
+    args: &[&[u8]],
+    arity_command_name: &'static str,
+) -> RespFrame {
     if args.len() != 1 {
-        return wrong_arity("sentinel replicas");
+        return wrong_arity(arity_command_name);
     }
     let name = String::from_utf8_lossy(args[0]);
     let now_ms = state.previous_time;
@@ -2296,6 +2301,25 @@ mod tests {
                 "ERR unknown subcommand or wrong number of arguments for 'help'. Try SENTINEL HELP."
                     .into()
             )
+        );
+    }
+
+    #[test]
+    fn sentinel_slaves_wrong_arity_names_original_subcommand() {
+        let mut state = SentinelState::new();
+
+        let replicas = dispatch_sentinel_command(&mut state, &[b"REPLICAS"]);
+        assert_eq!(
+            replicas,
+            RespFrame::Error(
+                "ERR wrong number of arguments for 'sentinel replicas' command".into()
+            )
+        );
+
+        let slaves = dispatch_sentinel_command(&mut state, &[b"SLAVES"]);
+        assert_eq!(
+            slaves,
+            RespFrame::Error("ERR wrong number of arguments for 'sentinel slaves' command".into())
         );
     }
 
