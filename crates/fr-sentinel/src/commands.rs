@@ -2231,6 +2231,50 @@ mod tests {
     }
 
     #[test]
+    fn sentinel_instance_link_counters_and_failover_state_match_upstream_order() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+
+        let master_exists = state.masters.contains_key("mymaster");
+        let Some(master) = state.get_master_mut("mymaster") else {
+            assert!(master_exists, "mymaster exists");
+            return;
+        };
+        master.link.pending_commands = 7;
+        master.link.refcount = 3;
+        master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
+        master.failover_state = crate::FailoverState::WaitPromotion;
+
+        let result = dispatch_sentinel_command(&mut state, &[b"MASTER", b"mymaster"]);
+
+        assert_eq!(
+            info_field(&result, b"link-pending-commands").as_deref(),
+            Some("7")
+        );
+        assert_eq!(info_field(&result, b"link-refcount").as_deref(), Some("3"));
+        assert_eq!(
+            info_field(&result, b"failover-state").as_deref(),
+            Some("wait_promotion")
+        );
+
+        let names = info_field_names(&result);
+        assert_eq!(
+            names.get(5..9),
+            Some(
+                &[
+                    "link-pending-commands".to_string(),
+                    "link-refcount".to_string(),
+                    "failover-state".to_string(),
+                    "last-ping-sent".to_string(),
+                ][..]
+            )
+        );
+    }
+
+    #[test]
     fn sentinel_get_master_addr_unknown_master_returns_null_array() {
         let mut state = SentinelState::new();
 
