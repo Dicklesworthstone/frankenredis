@@ -1166,7 +1166,9 @@ fn instance_to_info_array(instance: &crate::SentinelRedisInstance, now_ms: u64) 
     if instance.flags.contains(InstanceFlags::FAILOVER_IN_PROGRESS) {
         pairs.push(RespFrame::BulkString(Some(b"failover-state".to_vec())));
         pairs.push(RespFrame::BulkString(Some(
-            failover_state_str(&instance.failover_state).as_bytes().to_vec(),
+            failover_state_str(&instance.failover_state)
+                .as_bytes()
+                .to_vec(),
         )));
     }
 
@@ -1261,7 +1263,9 @@ fn instance_to_info_array(instance: &crate::SentinelRedisInstance, now_ms: u64) 
     if instance.is_slave() {
         pairs.extend([
             RespFrame::BulkString(Some(b"master-link-down-time".to_vec())),
-            RespFrame::BulkString(Some(instance.master_link_down_time.to_string().into_bytes())),
+            RespFrame::BulkString(Some(
+                instance.master_link_down_time.to_string().into_bytes(),
+            )),
             RespFrame::BulkString(Some(b"master-link-status".to_vec())),
             RespFrame::BulkString(Some(
                 match instance.slave_master_link_status {
@@ -1281,7 +1285,11 @@ fn instance_to_info_array(instance: &crate::SentinelRedisInstance, now_ms: u64) 
             )),
             RespFrame::BulkString(Some(b"master-port".to_vec())),
             RespFrame::BulkString(Some(
-                instance.slave_master_port.unwrap_or(0).to_string().into_bytes(),
+                instance
+                    .slave_master_port
+                    .unwrap_or(0)
+                    .to_string()
+                    .into_bytes(),
             )),
             RespFrame::BulkString(Some(b"slave-priority".to_vec())),
             RespFrame::BulkString(Some(instance.slave_priority.to_string().into_bytes())),
