@@ -2898,15 +2898,28 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(0);
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::String(v) => {
-                    let len = v.len();
-                    entry.touch(now_ms);
-                    Ok(len)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::String(v) => {
+                        let len = v.len();
+                        entry.touch(now_ms);
+                        Ok(len)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(0),
         }
     }
@@ -19396,6 +19409,27 @@ mod tests {
         match store.object_freq(b"z", 1) {
             Some(6) => {}
             other => return Err(format!("ZRANK LFU mismatch: {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn strlen_existing_string_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store.set(b"s".to_vec(), b"hello".to_vec(), None, 0);
+
+        match store.object_freq(b"s", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new string LFU frequency mismatch: {other:?}")),
+        }
+        let _len = store
+            .strlen(b"s", 1)
+            .map_err(|err| format!("strlen failed: {err:?}"))?;
+        match store.object_freq(b"s", 1) {
+            Some(6) => {}
+            other => return Err(format!("STRLEN LFU mismatch: {other:?}")),
         }
         Ok(())
     }
