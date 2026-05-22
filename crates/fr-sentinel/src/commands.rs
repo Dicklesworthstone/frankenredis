@@ -1347,6 +1347,32 @@ fn instance_to_info_array(instance: &crate::SentinelRedisInstance, now_ms: u64) 
         ]);
     }
 
+    // Sentinels only
+    if instance.is_sentinel() {
+        pairs.extend([
+            RespFrame::BulkString(Some(b"last-hello-message".to_vec())),
+            RespFrame::BulkString(Some(
+                if instance.last_hello_time > 0 {
+                    now_ms.saturating_sub(instance.last_hello_time)
+                } else {
+                    0
+                }
+                .to_string()
+                .into_bytes(),
+            )),
+            RespFrame::BulkString(Some(b"voted-leader".to_vec())),
+            RespFrame::BulkString(Some(
+                instance
+                    .leader
+                    .clone()
+                    .unwrap_or_else(|| "?".to_string())
+                    .into_bytes(),
+            )),
+            RespFrame::BulkString(Some(b"voted-leader-epoch".to_vec())),
+            RespFrame::BulkString(Some(instance.leader_epoch.to_string().into_bytes())),
+        ]);
+    }
+
     RespFrame::Array(Some(pairs))
 }
 
@@ -2048,6 +2074,48 @@ mod tests {
             return;
         };
         assert_eq!(info_field(first, b"runid").as_deref(), Some("known-runid"));
+    }
+
+    #[test]
+    fn sentinel_sentinels_includes_vote_metadata_fields() {
+        let mut state = SentinelState::new();
+        state.previous_time = 10_000;
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+
+        {
+            let Some(master) = state.get_master_mut("mymaster") else {
+                return;
+            };
+            let mut sentinel =
+                sentinel_instance("other-sentinel", "192.168.1.2", 26379, InstanceFlags::SENTINEL);
+            sentinel.last_hello_time = 9_500;
+            sentinel.leader = Some("candidate-runid".to_string());
+            sentinel.leader_epoch = 42;
+            master.sentinels.insert("other-sentinel".to_string(), sentinel);
+        }
+
+        let result = dispatch_sentinel_command(&mut state, &[b"SENTINELS", b"mymaster"]);
+        let RespFrame::Array(Some(sentinels)) = result else {
+            panic!("expected array");
+        };
+        let Some(first) = sentinels.first() else {
+            panic!("expected at least one sentinel");
+        };
+        assert_eq!(
+            info_field(first, b"last-hello-message").as_deref(),
+            Some("500")
+        );
+        assert_eq!(
+            info_field(first, b"voted-leader").as_deref(),
+            Some("candidate-runid")
+        );
+        assert_eq!(
+            info_field(first, b"voted-leader-epoch").as_deref(),
+            Some("42")
+        );
     }
 
     #[test]
