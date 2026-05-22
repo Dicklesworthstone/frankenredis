@@ -3136,6 +3136,19 @@ mod tests {
             matches!(result, RespFrame::Error(message) if message.contains("Invalid argument"))
         );
 
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"SET",
+                b"mymaster",
+                b"master-reboot-down-after-period",
+                b"9223372036854775808",
+            ],
+        );
+        assert!(
+            matches!(result, RespFrame::Error(message) if message.contains("Invalid argument"))
+        );
+
         let master = state.get_master("mymaster");
         assert!(master.is_some(), "mymaster exists");
         let Some(master) = master else {
@@ -3262,6 +3275,10 @@ mod tests {
             (
                 b"down-after-milliseconds".as_slice(),
                 b"not-a-number".as_slice(),
+            ),
+            (
+                b"down-after-milliseconds".as_slice(),
+                b"9223372036854775808".as_slice(),
             ),
             (b"failover-timeout".as_slice(), b"0".as_slice()),
             (b"parallel-syncs".as_slice(), b"-1".as_slice()),
@@ -3957,6 +3974,15 @@ mod tests {
         let mut state = SentinelState::new();
 
         let result = dispatch_sentinel_command(&mut state, &[b"DEBUG", b"ping-period", b"0"]);
+        assert!(
+            matches!(result, RespFrame::Error(message) if message.contains("Invalid argument"))
+        );
+        assert_eq!(state.debug_config.ping_period, crate::PING_PERIOD_MS);
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"DEBUG", b"ping-period", b"9223372036854775808"],
+        );
         assert!(
             matches!(result, RespFrame::Error(message) if message.contains("Invalid argument"))
         );
