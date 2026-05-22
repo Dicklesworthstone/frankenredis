@@ -1006,16 +1006,17 @@ fn pending_script_job_reply(script: &crate::ScriptJob, now_ms: u64) -> RespFrame
 }
 
 fn cmd_info_cache(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
-    let mut masters: Vec<&crate::SentinelRedisInstance> = if args.is_empty() {
-        state.masters.values().collect()
-    } else {
-        args.iter()
-            .filter_map(|name| {
-                let name = String::from_utf8_lossy(name);
-                state.get_master(&name)
-            })
-            .collect()
-    };
+    if args.is_empty() {
+        return wrong_arity("sentinel|info-cache");
+    }
+
+    let mut masters: Vec<&crate::SentinelRedisInstance> = args
+        .iter()
+        .filter_map(|name| {
+            let name = String::from_utf8_lossy(name);
+            state.get_master(&name)
+        })
+        .collect();
     masters.sort_by(|left, right| left.name.cmp(&right.name));
     masters.dedup_by(|left, right| left.name == right.name);
 
@@ -4122,7 +4123,7 @@ mod tests {
     }
 
     #[test]
-    fn sentinel_info_cache_returns_all_masters_with_self_and_replica_rows() {
+    fn sentinel_info_cache_returns_requested_masters_with_self_and_replica_rows() {
         let mut state = SentinelState::new();
         state.previous_time = 10_000;
         let _ = dispatch_sentinel_command(
@@ -4155,7 +4156,7 @@ mod tests {
             alpha.slaves.insert("replica-a".to_string(), replica_a);
         }
 
-        let result = dispatch_sentinel_command(&mut state, &[b"INFO-CACHE"]);
+        let result = dispatch_sentinel_command(&mut state, &[b"INFO-CACHE", b"alpha", b"zeta"]);
         assert_eq!(
             result,
             RespFrame::Array(Some(vec![
@@ -4168,6 +4169,18 @@ mod tests {
                 RespFrame::BulkString(Some(b"zeta".to_vec())),
                 RespFrame::Array(Some(vec![expected_info_cache_row(0, None)])),
             ]))
+        );
+    }
+
+    #[test]
+    fn sentinel_info_cache_rejects_missing_master_name_like_upstream() {
+        let mut state = SentinelState::new();
+        let result = dispatch_sentinel_command(&mut state, &[b"INFO-CACHE"]);
+        assert_eq!(
+            result,
+            RespFrame::Error(
+                "ERR wrong number of arguments for 'sentinel|info-cache' command".into()
+            )
         );
     }
 
