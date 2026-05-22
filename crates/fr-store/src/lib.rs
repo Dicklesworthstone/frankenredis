@@ -20907,8 +20907,8 @@ mod tests {
 
     #[test]
     fn restore_rejects_duplicate_hash_listpack_fields() -> Result<(), String> {
-        let listpack =
-            encode_listpack_strings(&[b"field".as_slice(), b"one", b"field", b"two"]).unwrap();
+        let listpack = encode_listpack_strings(&[b"field".as_slice(), b"one", b"field", b"two"])
+            .ok_or_else(|| "encode hash listpack".to_string())?;
         let mut body = vec![RDB_TYPE_HASH_LISTPACK];
         append_raw_dump_bulk(&mut body, &listpack);
         let payload = append_dump_footer(body);
@@ -20924,7 +20924,8 @@ mod tests {
 
     #[test]
     fn restore_rejects_duplicate_set_listpack_members() -> Result<(), String> {
-        let listpack = encode_listpack_strings(&[b"dup".as_slice(), b"dup"]).unwrap();
+        let listpack = encode_listpack_strings(&[b"dup".as_slice(), b"dup"])
+            .ok_or_else(|| "encode set listpack".to_string())?;
         let mut body = vec![RDB_TYPE_SET_LISTPACK];
         append_raw_dump_bulk(&mut body, &listpack);
         let payload = append_dump_footer(body);
@@ -20940,7 +20941,8 @@ mod tests {
 
     #[test]
     fn restore_rejects_duplicate_zset_listpack_members() -> Result<(), String> {
-        let listpack = encode_listpack_strings(&[b"dup".as_slice(), b"1", b"dup", b"2"]).unwrap();
+        let listpack = encode_listpack_strings(&[b"dup".as_slice(), b"1", b"dup", b"2"])
+            .ok_or_else(|| "encode zset listpack".to_string())?;
         let mut body = vec![RDB_TYPE_ZSET_LISTPACK];
         append_raw_dump_bulk(&mut body, &listpack);
         let payload = append_dump_footer(body);
