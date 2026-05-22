@@ -3725,6 +3725,8 @@ mod tests {
         state.check_tilt(1000);
         state.check_tilt(1060);
         assert!(state.tilt);
+        state.check_tilt(1110);
+        assert!(state.tilt);
         state.check_tilt(1136);
         assert!(!state.tilt);
     }

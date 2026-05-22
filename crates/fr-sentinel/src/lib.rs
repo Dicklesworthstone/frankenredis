@@ -553,6 +553,7 @@ mod tests {
         state.check_tilt(5000);
         assert!(state.tilt);
 
+        state.previous_time = 35_999;
         state.check_tilt(36000);
         assert!(!state.tilt);
     }
@@ -570,6 +571,7 @@ mod tests {
         assert!(state.tilt);
         assert_eq!(state.tilt_start_time, 4000);
 
+        state.previous_time = 34_000;
         state.check_tilt(34_001);
         assert!(!state.tilt);
     }
