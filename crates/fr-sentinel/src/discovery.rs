@@ -526,10 +526,10 @@ mod tests {
         );
         assert_eq!(
             result,
-            fr_protocol::RespFrame::Map(Some(vec![(
+            fr_protocol::RespFrame::Array(Some(vec![
                 fr_protocol::RespFrame::BulkString(Some(b"announce-port".to_vec())),
                 fr_protocol::RespFrame::BulkString(Some(b"0".to_vec())),
-            )]))
+            ]))
         );
     }
 
