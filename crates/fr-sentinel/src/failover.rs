@@ -221,7 +221,14 @@ pub fn check_failover_timeout(master: &SentinelRedisInstance, now: u64) -> bool 
     if master.failover_state == FailoverState::None {
         return false;
     }
-    now.saturating_sub(master.failover_start_time) > master.failover_timeout
+    let timeout_base = if master.failover_state == FailoverState::WaitStart
+        || master.failover_state_change_time == 0
+    {
+        master.failover_start_time
+    } else {
+        master.failover_state_change_time
+    };
+    now.saturating_sub(timeout_base) > master.failover_timeout
 }
 
 pub fn should_start_failover(master: &SentinelRedisInstance, is_leader: bool, now: u64) -> bool {
@@ -462,6 +469,20 @@ mod tests {
 
         assert!(!check_failover_timeout(&master, 100000));
         assert!(check_failover_timeout(&master, 200000));
+    }
+
+    #[test]
+    fn failover_timeout_uses_state_change_time_after_wait_start() {
+        let mut master =
+            SentinelRedisInstance::new_master("mymaster", SentinelAddr::new("10.0.0.1", 6379), 2);
+        master.failover_state = FailoverState::WaitPromotion;
+        master.failover_start_time = 1_000;
+        master.failover_state_change_time = 200_000;
+        master.failover_timeout = 30_000;
+
+        assert!(!check_failover_timeout(&master, 229_999));
+        assert!(!check_failover_timeout(&master, 230_000));
+        assert!(check_failover_timeout(&master, 230_001));
     }
 
     #[test]
