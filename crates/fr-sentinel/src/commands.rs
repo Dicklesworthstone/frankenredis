@@ -142,7 +142,7 @@ fn cmd_is_master_down_by_addr(state: &mut SentinelState, args: &[&[u8]]) -> Resp
     };
     let requested_epoch = match String::from_utf8_lossy(args[2]).parse::<i64>() {
         Ok(epoch) => epoch,
-        Err(_) => return RespFrame::Error("ERR Invalid current epoch".into()),
+        Err(_) => return RespFrame::Error("ERR value is not an integer or out of range".into()),
     };
     let requested_runid = String::from_utf8_lossy(args[3]);
 
@@ -1839,6 +1839,25 @@ mod tests {
             );
             assert_eq!(result, is_master_down_reply(0, "*", 0));
         }
+    }
+
+    #[test]
+    fn sentinel_is_master_down_by_addr_malformed_epoch_error_matches_upstream() {
+        let mut state = SentinelState::new();
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"IS-MASTER-DOWN-BY-ADDR",
+                b"127.0.0.1",
+                b"6379",
+                b"not-an-epoch",
+                b"runid",
+            ],
+        );
+        assert_eq!(
+            result,
+            RespFrame::Error("ERR value is not an integer or out of range".into())
+        );
     }
 
     #[test]
