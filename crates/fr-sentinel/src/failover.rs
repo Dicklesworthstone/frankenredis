@@ -210,15 +210,8 @@ pub fn advance_failover_state(
             FailoverState::UpdateConfig
         }
 
-        (_, FailoverEvent::Timeout) => {
-            master.failover_state_change_time = now;
-            master.flags.remove(InstanceFlags::FAILOVER_IN_PROGRESS);
-            FailoverState::None
-        }
-
-        (_, FailoverEvent::Abort(_)) => {
-            master.failover_state_change_time = now;
-            master.flags.remove(InstanceFlags::FAILOVER_IN_PROGRESS);
+        (_, FailoverEvent::Timeout | FailoverEvent::Abort(_)) => {
+            clear_aborted_failover(master, now);
             FailoverState::None
         }
 
@@ -227,6 +220,16 @@ pub fn advance_failover_state(
 
     master.failover_state = next;
     next
+}
+
+fn clear_aborted_failover(master: &mut SentinelRedisInstance, now: u64) {
+    master.failover_state_change_time = now;
+    master.flags.remove(InstanceFlags::FAILOVER_IN_PROGRESS);
+    master.flags.remove(InstanceFlags::FORCE_FAILOVER);
+    if let Some(promoted) = master.promoted_slave.as_mut() {
+        promoted.flags.remove(InstanceFlags::PROMOTED);
+    }
+    master.promoted_slave = None;
 }
 
 pub fn check_failover_timeout(master: &SentinelRedisInstance, now: u64) -> bool {
@@ -518,6 +521,11 @@ mod tests {
         let mut master = SentinelRedisInstance::new_master("mymaster", addr, 2);
         master.failover_state = FailoverState::SelectSlave;
         master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
+        master.flags.insert(InstanceFlags::FORCE_FAILOVER);
+        let mut promoted =
+            SentinelRedisInstance::new_master("replica-1", SentinelAddr::new("10.0.0.2", 6380), 0);
+        promoted.flags.insert(InstanceFlags::PROMOTED);
+        master.promoted_slave = Some(Box::new(promoted));
         let mut ctx = FailoverContext::new();
 
         let state = advance_failover_state(
@@ -528,6 +536,31 @@ mod tests {
         );
         assert_eq!(state, FailoverState::None);
         assert!(!master.flags.contains(InstanceFlags::FAILOVER_IN_PROGRESS));
+        assert!(!master.flags.contains(InstanceFlags::FORCE_FAILOVER));
+        assert!(master.promoted_slave.is_none());
+    }
+
+    #[test]
+    fn failover_timeout_clears_forced_and_promoted_state() {
+        let addr = SentinelAddr::new("10.0.0.1", 6379);
+        let mut master = SentinelRedisInstance::new_master("mymaster", addr, 2);
+        master.failover_state = FailoverState::WaitPromotion;
+        master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
+        master.flags.insert(InstanceFlags::FORCE_FAILOVER);
+        let mut promoted =
+            SentinelRedisInstance::new_master("replica-1", SentinelAddr::new("10.0.0.2", 6380), 0);
+        promoted.flags.insert(InstanceFlags::PROMOTED);
+        master.promoted_slave = Some(Box::new(promoted));
+        let mut ctx = FailoverContext::new();
+
+        let state = advance_failover_state(&mut master, FailoverEvent::Timeout, &mut ctx, 2000);
+
+        assert_eq!(state, FailoverState::None);
+        assert_eq!(master.failover_state, FailoverState::None);
+        assert_eq!(master.failover_state_change_time, 2000);
+        assert!(!master.flags.contains(InstanceFlags::FAILOVER_IN_PROGRESS));
+        assert!(!master.flags.contains(InstanceFlags::FORCE_FAILOVER));
+        assert!(master.promoted_slave.is_none());
     }
 
     #[test]
