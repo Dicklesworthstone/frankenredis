@@ -3377,9 +3377,12 @@ fn exists(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("EXISTS"));
     }
+    // (frankenredis-fz457) EXISTS is a metadata query that does NOT update
+    // access time. Differential probe vs vendored 7.2.4 confirmed OBJECT IDLETIME
+    // remains unchanged after EXISTS.
     let mut count = 0_i64;
     for key in &argv[1..] {
-        if store.exists(key, now_ms) {
+        if store.exists_no_touch(key, now_ms) {
             count = count.saturating_add(1);
         }
     }
@@ -5559,7 +5562,8 @@ fn georadiusbymember(
     // empty array. (br-frankenredis-geofromnonexistent)
     let score = store.zscore(&argv[1], &argv[2], now_ms)?;
     let Some(score) = score else {
-        if !store.exists(&argv[1], now_ms) {
+        // zscore already touched the key if it exists; this is just for error selection.
+        if !store.exists_no_touch(&argv[1], now_ms) {
             return Ok(RespFrame::Array(Some(Vec::new())));
         }
         return Ok(RespFrame::Error(
@@ -5670,7 +5674,8 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             // exists but the member does not. A missing source key
             // proceeds with frommember set, then returns an empty
             // result. (br-frankenredis-geofromnonexistent)
-            if center_lon.is_none() && store.exists(&argv[1], now_ms) {
+            // zscore already touched the key if it exists; this is just for error selection.
+            if center_lon.is_none() && store.exists_no_touch(&argv[1], now_ms) {
                 return Ok(RespFrame::Error(
                     "ERR could not decode requested zset member".to_string(),
                 ));
@@ -5911,7 +5916,8 @@ fn geosearchstore(
             // (br-frankenredis-geofromnonexistent) — missing source
             // key proceeds with frommember set; only error when the
             // key exists but the member is missing.
-            if center_lon.is_none() && store.exists(&synth[1], now_ms) {
+            // zscore already touched the key if it exists; this is just for error selection.
+            if center_lon.is_none() && store.exists_no_touch(&synth[1], now_ms) {
                 return Ok(RespFrame::Error(
                     "ERR could not decode requested zset member".to_string(),
                 ));
@@ -19987,7 +19993,9 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             hello_simple("STATS"),
             hello_simple("    Return information about the memory usage of the server."),
             hello_simple("USAGE <key> [SAMPLES <count>]"),
-            hello_simple("    Return memory in bytes used by <key> and its value. Nested values are"),
+            hello_simple(
+                "    Return memory in bytes used by <key> and its value. Nested values are",
+            ),
             hello_simple("    sampled up to <count> times (default: 5, 0 means sample all)."),
             hello_simple("HELP"),
             hello_simple("    Print this help."),
@@ -20749,7 +20757,9 @@ fn msetnx(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 3 || argv.len().is_multiple_of(2) {
         return Err(CommandError::WrongArity("MSETNX"));
     }
-    // Check if any key already exists (any type, not just string)
+    // Upstream t_string.c::msetGenericCommand uses lookupKeyWrite for this
+    // NX preflight, so existing-key checks keep normal write-lookup touch
+    // semantics. This differs from EXISTS, which explicitly uses LOOKUP_NOTOUCH.
     for i in (1..argv.len()).step_by(2) {
         if store.exists(&argv[i], now_ms) {
             return Ok(RespFrame::Integer(0));
@@ -22688,6 +22698,9 @@ fn move_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     }
     let source = fr_store::encode_db_key(source_db, &argv[1]);
     let destination = fr_store::encode_db_key(target_db as usize, &argv[1]);
+    // Upstream db.c::moveCommand uses lookupKeyWrite for both source and
+    // destination existence checks, so these keep normal write-lookup touch
+    // semantics.
     if !store.exists(&source, now_ms) || store.exists(&destination, now_ms) {
         return Ok(RespFrame::Integer(0));
     }
@@ -23898,6 +23911,8 @@ fn restore_cmd(
     // legacy_redis_code/redis/src/cluster.c::restoreCommand which calls
     // `lookupKeyWrite` + busy-key check before `verifyDumpPayload`.
     // (br-frankenredis-ao1i)
+    // Upstream cluster.c::restoreCommand uses lookupKeyWrite for the busy-key
+    // preflight, so the check keeps normal write-lookup touch semantics.
     if !replace && store.exists(key, now_ms) {
         return Ok(RespFrame::Error(
             "BUSYKEY Target key name already exists.".to_string(),
@@ -26016,6 +26031,68 @@ mod tests {
         ];
         let out = dispatch_argv(&argv, &mut store, 0).expect("exists");
         assert_eq!(out, RespFrame::Integer(2));
+    }
+
+    #[test]
+    fn exists_command_does_not_touch_lru() {
+        // (frankenredis-fz457) EXISTS is a metadata query that does NOT
+        // update LRU access time.
+        let mut store = Store::new();
+        // LRU policy to enable OBJECT IDLETIME tracking
+        store.maxmemory_policy = fr_store::MaxmemoryPolicy::AllkeysLru;
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 1000);
+
+        // Verify key exists
+        assert_eq!(
+            dispatch_argv(&[b"EXISTS".to_vec(), b"k".to_vec()], &mut store, 2_000).expect("exists"),
+            RespFrame::Integer(1)
+        );
+        // IDLETIME should be 3 seconds (created at t=1000, checked at t=4000)
+        // If EXISTS had touched, IDLETIME would be 2 seconds (touched at t=2000)
+        assert_eq!(
+            dispatch_argv(
+                &[b"OBJECT".to_vec(), b"IDLETIME".to_vec(), b"k".to_vec()],
+                &mut store,
+                4_000,
+            )
+            .expect("idletime after exists"),
+            RespFrame::Integer(3)
+        );
+    }
+
+    #[test]
+    fn exists_command_does_not_touch_lfu() {
+        // (frankenredis-fz457) EXISTS is a metadata query that does NOT
+        // update LFU frequency.
+        let mut store = Store::new();
+        store.maxmemory_policy = fr_store::MaxmemoryPolicy::AllkeysLfu;
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 100);
+
+        // Initial frequency after SET
+        assert_eq!(
+            dispatch_argv(
+                &[b"OBJECT".to_vec(), b"FREQ".to_vec(), b"k".to_vec()],
+                &mut store,
+                150,
+            )
+            .expect("initial freq"),
+            RespFrame::Integer(5)
+        );
+        // EXISTS should not bump frequency
+        assert_eq!(
+            dispatch_argv(&[b"EXISTS".to_vec(), b"k".to_vec()], &mut store, 2_100).expect("exists"),
+            RespFrame::Integer(1)
+        );
+        // Frequency should remain at 5, not bumped
+        assert_eq!(
+            dispatch_argv(
+                &[b"OBJECT".to_vec(), b"FREQ".to_vec(), b"k".to_vec()],
+                &mut store,
+                3_100,
+            )
+            .expect("freq after exists"),
+            RespFrame::Integer(5)
+        );
     }
 
     #[test]
@@ -41012,10 +41089,7 @@ mod tests {
                 "MEMORY <subcommand> [<arg> [value] [opt] ...]. Subcommands are:".to_string()
             )
         );
-        assert_eq!(
-            items[12],
-            RespFrame::SimpleString("HELP".to_string())
-        );
+        assert_eq!(items[12], RespFrame::SimpleString("HELP".to_string()));
     }
 
     #[test]
