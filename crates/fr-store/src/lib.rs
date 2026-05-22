@@ -13200,12 +13200,12 @@ fn decode_ziplist_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
     if data.len() < ZIPLIST_HEADER_SIZE + 1 {
         return Err(StoreError::InvalidDumpPayload);
     }
-    if data.last().copied() != Some(ZIP_END) {
+    if !matches!(data.last().copied(), Some(ZIP_END)) {
         return Err(StoreError::InvalidDumpPayload);
     }
 
     let zlbytes = read_ziplist_u32_le(data, 0)?;
-    if zlbytes != data.len() {
+    if !ziplist_usize_eq(zlbytes, data.len()) {
         return Err(StoreError::InvalidDumpPayload);
     }
     let tail_offset = read_ziplist_u32_le(data, 4)?;
@@ -13219,7 +13219,7 @@ fn decode_ziplist_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
     while cursor < end {
         let entry_start = cursor;
         let encoded_prev_len = decode_ziplist_prevlen(data, &mut cursor, end)?;
-        if encoded_prev_len != prev_entry_len {
+        if !ziplist_usize_eq(encoded_prev_len, prev_entry_len) {
             return Err(StoreError::InvalidDumpPayload);
         }
         entries.push(decode_ziplist_entry(data, &mut cursor, end)?);
@@ -13230,14 +13230,18 @@ fn decode_ziplist_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
     }
 
     let expected_tail = last_entry_start.unwrap_or(ZIPLIST_HEADER_SIZE);
-    if tail_offset != expected_tail {
+    if !ziplist_usize_eq(tail_offset, expected_tail) {
         return Err(StoreError::InvalidDumpPayload);
     }
-    if zllen != u16::MAX && usize::from(zllen) != entries.len() {
+    if !matches!(zllen, u16::MAX) && !ziplist_usize_eq(usize::from(zllen), entries.len()) {
         return Err(StoreError::InvalidDumpPayload);
     }
 
     Ok(entries)
+}
+
+fn ziplist_usize_eq(left: usize, right: usize) -> bool {
+    matches!(left.cmp(&right), std::cmp::Ordering::Equal)
 }
 
 fn read_ziplist_u16_le(data: &[u8], offset: usize) -> Result<u16, StoreError> {
@@ -13311,24 +13315,28 @@ fn decode_ziplist_entry(
                 .map_err(|_| StoreError::InvalidDumpPayload)?;
             Ok(ziplist_take(data, cursor, len, end)?.to_vec())
         }
-        0xC0 => Ok(decode_ziplist_i16(data, cursor, end)?
-            .to_string()
-            .into_bytes()),
-        0xD0 => Ok(decode_ziplist_i32(data, cursor, end)?
-            .to_string()
-            .into_bytes()),
-        0xE0 => Ok(decode_ziplist_i64(data, cursor, end)?
-            .to_string()
-            .into_bytes()),
-        0xF0 => Ok(decode_ziplist_i24(data, cursor, end)?
-            .to_string()
-            .into_bytes()),
-        0xFE => Ok(decode_ziplist_i8(data, cursor, end)?
-            .to_string()
-            .into_bytes()),
-        0xF1..=0xFD => Ok(i64::from((header & 0x0F) - 1).to_string().into_bytes()),
+        0xC0 => Ok(ziplist_integer_bytes(i64::from(decode_ziplist_i16(
+            data, cursor, end,
+        )?))),
+        0xD0 => Ok(ziplist_integer_bytes(i64::from(decode_ziplist_i32(
+            data, cursor, end,
+        )?))),
+        0xE0 => Ok(ziplist_integer_bytes(decode_ziplist_i64(
+            data, cursor, end,
+        )?)),
+        0xF0 => Ok(ziplist_integer_bytes(i64::from(decode_ziplist_i24(
+            data, cursor, end,
+        )?))),
+        0xFE => Ok(ziplist_integer_bytes(i64::from(decode_ziplist_i8(
+            data, cursor, end,
+        )?))),
+        0xF1..=0xFD => Ok(ziplist_integer_bytes(i64::from((header & 0x0F) - 1))),
         _ => Err(StoreError::InvalidDumpPayload),
     }
+}
+
+fn ziplist_integer_bytes(value: i64) -> Vec<u8> {
+    value.to_string().into_bytes()
 }
 
 fn ziplist_take<'a>(
@@ -13370,7 +13378,7 @@ fn decode_ziplist_i24(data: &[u8], cursor: &mut usize, end: usize) -> Result<i32
         .map_err(|_| StoreError::InvalidDumpPayload)?;
     let [b0, b1, b2] = bytes;
     let raw = i32::from(b0) | (i32::from(b1) << 8) | (i32::from(b2) << 16);
-    if raw & 0x80_0000 == 0 {
+    if matches!(raw & 0x80_0000, 0) {
         Ok(raw)
     } else {
         Ok(raw | !0xFF_FFFF)
@@ -20929,68 +20937,58 @@ mod tests {
         buf.extend_from_slice(data);
     }
 
-    fn encode_test_ziplist_strings(entries: &[&[u8]]) -> Result<Vec<u8>, String> {
+    fn encode_test_ziplist_strings(entries: &[&[u8]]) -> Option<Vec<u8>> {
         let mut body = Vec::new();
         let mut prev_len = 0usize;
         let mut tail_offset = 10usize;
         for entry in entries {
-            tail_offset = 10usize
-                .checked_add(body.len())
-                .ok_or_else(|| "ziplist tail offset overflow".to_string())?;
+            tail_offset = 10usize.checked_add(body.len())?;
             let entry_start = body.len();
             if prev_len < 254 {
-                body.push(u8::try_from(prev_len).map_err(|err| err.to_string())?);
+                body.push(u8::try_from(prev_len).ok()?);
             } else {
                 body.push(0xFE);
-                body.extend_from_slice(
-                    &u32::try_from(prev_len)
-                        .map_err(|err| err.to_string())?
-                        .to_le_bytes(),
-                );
+                body.extend_from_slice(&u32::try_from(prev_len).ok()?.to_le_bytes());
             }
 
             if entry.len() <= 0x3F {
-                body.push(u8::try_from(entry.len()).map_err(|err| err.to_string())?);
+                body.push(u8::try_from(entry.len()).ok()?);
             } else if entry.len() <= 0x3FFF {
-                body.push(0x40 | u8::try_from(entry.len() >> 8).map_err(|err| err.to_string())?);
-                body.push(u8::try_from(entry.len() & 0xFF).map_err(|err| err.to_string())?);
+                body.push(0x40 | u8::try_from(entry.len() >> 8).ok()?);
+                body.push(u8::try_from(entry.len() & 0xFF).ok()?);
             } else {
                 body.push(0x80);
-                body.extend_from_slice(
-                    &u32::try_from(entry.len())
-                        .map_err(|err| err.to_string())?
-                        .to_be_bytes(),
-                );
+                body.extend_from_slice(&u32::try_from(entry.len()).ok()?.to_be_bytes());
             }
             body.extend_from_slice(entry);
-            prev_len = body
-                .len()
-                .checked_sub(entry_start)
-                .ok_or_else(|| "ziplist entry length underflow".to_string())?;
+            prev_len = body.len().checked_sub(entry_start)?;
         }
         body.push(0xFF);
 
-        let total_bytes = 10usize
-            .checked_add(body.len())
-            .ok_or_else(|| "ziplist length overflow".to_string())?;
+        let total_bytes = 10usize.checked_add(body.len())?;
         let mut ziplist = Vec::with_capacity(total_bytes);
-        ziplist.extend_from_slice(
-            &u32::try_from(total_bytes)
-                .map_err(|err| err.to_string())?
-                .to_le_bytes(),
-        );
-        ziplist.extend_from_slice(
-            &u32::try_from(tail_offset)
-                .map_err(|err| err.to_string())?
-                .to_le_bytes(),
-        );
+        ziplist.extend_from_slice(&u32::try_from(total_bytes).ok()?.to_le_bytes());
+        ziplist.extend_from_slice(&u32::try_from(tail_offset).ok()?.to_le_bytes());
         ziplist.extend_from_slice(
             &u16::try_from(entries.len())
                 .unwrap_or(u16::MAX)
                 .to_le_bytes(),
         );
         ziplist.extend_from_slice(&body);
-        Ok(ziplist)
+        Some(ziplist)
+    }
+
+    fn byte_vecs_match(actual: &[Vec<u8>], expected: &[&[u8]]) -> bool {
+        matches!(actual.len().cmp(&expected.len()), std::cmp::Ordering::Equal)
+            && actual
+                .iter()
+                .zip(expected)
+                .all(|(actual_item, expected_item)| {
+                    matches!(
+                        actual_item.as_slice().cmp(expected_item),
+                        std::cmp::Ordering::Equal
+                    )
+                })
     }
 
     #[test]
@@ -21233,7 +21231,8 @@ mod tests {
 
     #[test]
     fn restore_accepts_legacy_list_ziplist() -> Result<(), String> {
-        let ziplist = encode_test_ziplist_strings(&[b"alpha".as_slice(), b"42", b"omega"])?;
+        let ziplist = encode_test_ziplist_strings(&[b"alpha".as_slice(), b"42", b"omega"])
+            .ok_or_else(|| "encode legacy list ziplist".to_string())?;
         let mut body = vec![RDB_TYPE_LIST_ZIPLIST];
         append_raw_dump_bulk(&mut body, &ziplist);
         let payload = append_dump_footer(body);
@@ -21243,7 +21242,7 @@ mod tests {
             .restore_key(b"l", 0, &payload, false, 100)
             .map_err(|err| format!("restore legacy list ziplist: {err:?}"))?;
         match store.lrange(b"l", 0, -1, 100) {
-            Ok(values) if values == vec![b"alpha".to_vec(), b"42".to_vec(), b"omega".to_vec()] => {
+            Ok(values) if byte_vecs_match(&values, &[b"alpha".as_slice(), b"42", b"omega"]) => {
                 Ok(())
             }
             other => Err(format!(

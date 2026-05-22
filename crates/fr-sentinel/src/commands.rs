@@ -1379,12 +1379,12 @@ fn instance_to_info_array(instance: &crate::SentinelRedisInstance, now_ms: u64) 
 fn failover_state_str(state: &FailoverState) -> &'static str {
     match state {
         FailoverState::None => "none",
-        FailoverState::WaitStart => "wait-start",
-        FailoverState::SelectSlave => "select-slave",
-        FailoverState::SendSlaveofNoone => "send-slaveof-noone",
-        FailoverState::WaitPromotion => "wait-promotion",
-        FailoverState::ReconfSlaves => "reconf-slaves",
-        FailoverState::UpdateConfig => "update-config",
+        FailoverState::WaitStart => "wait_start",
+        FailoverState::SelectSlave => "select_slave",
+        FailoverState::SendSlaveofNoone => "send_slaveof_noone",
+        FailoverState::WaitPromotion => "wait_promotion",
+        FailoverState::ReconfSlaves => "reconf_slaves",
+        FailoverState::UpdateConfig => "update_config",
     }
 }
 
@@ -2089,12 +2089,18 @@ mod tests {
             let Some(master) = state.get_master_mut("mymaster") else {
                 return;
             };
-            let mut sentinel =
-                sentinel_instance("other-sentinel", "192.168.1.2", 26379, InstanceFlags::SENTINEL);
+            let mut sentinel = sentinel_instance(
+                "other-sentinel",
+                "192.168.1.2",
+                26379,
+                InstanceFlags::SENTINEL,
+            );
             sentinel.last_hello_time = 9_500;
             sentinel.leader = Some("candidate-runid".to_string());
             sentinel.leader_epoch = 42;
-            master.sentinels.insert("other-sentinel".to_string(), sentinel);
+            master
+                .sentinels
+                .insert("other-sentinel".to_string(), sentinel);
         }
 
         let result = dispatch_sentinel_command(&mut state, &[b"SENTINELS", b"mymaster"]);
@@ -2115,6 +2121,29 @@ mod tests {
         assert_eq!(
             info_field(first, b"voted-leader-epoch").as_deref(),
             Some("42")
+        );
+    }
+
+    #[test]
+    fn sentinel_master_failover_state_uses_upstream_names() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+
+        let master_exists = state.masters.contains_key("mymaster");
+        let Some(master) = state.get_master_mut("mymaster") else {
+            assert!(master_exists, "mymaster exists");
+            return;
+        };
+        master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
+        master.failover_state = crate::FailoverState::ReconfSlaves;
+
+        let result = dispatch_sentinel_command(&mut state, &[b"MASTER", b"mymaster"]);
+        assert_eq!(
+            info_field(&result, b"failover-state").as_deref(),
+            Some("reconf_slaves")
         );
     }
 
