@@ -12628,13 +12628,19 @@ impl Store {
                             commands.push(create);
 
                             for consumer in &group.consumers {
-                                commands.push(vec![
-                                    b"XGROUP".to_vec(),
-                                    b"CREATECONSUMER".to_vec(),
-                                    logical_key.clone(),
-                                    group_name.clone(),
-                                    consumer.clone(),
-                                ]);
+                                let has_pending = group
+                                    .pending
+                                    .values()
+                                    .any(|pending| pending.consumer == *consumer);
+                                if !has_pending {
+                                    commands.push(vec![
+                                        b"XGROUP".to_vec(),
+                                        b"CREATECONSUMER".to_vec(),
+                                        logical_key.clone(),
+                                        group_name.clone(),
+                                        consumer.clone(),
+                                    ]);
+                                }
                             }
 
                             for ((pending_ms, pending_seq), pending_entry) in &group.pending {
@@ -22953,7 +22959,7 @@ mod tests {
             .expect("xclaim must succeed");
 
         let cmds = store.to_aof_commands(100);
-        assert_eq!(cmds.len(), 7);
+        assert_eq!(cmds.len(), 6);
         assert_eq!(cmds[0][0], b"XADD");
         // XGROUP CREATE replay carries the ENTRIESREAD trailer so the
         // restored group preserves its read counter. (frankenredis-ic8v)
@@ -22986,21 +22992,11 @@ mod tests {
                 b"CREATECONSUMER".to_vec(),
                 b"s".to_vec(),
                 b"g".to_vec(),
-                b"bob".to_vec(),
-            ]
-        );
-        assert_eq!(
-            cmds[5],
-            vec![
-                b"XGROUP".to_vec(),
-                b"CREATECONSUMER".to_vec(),
-                b"s".to_vec(),
-                b"g".to_vec(),
                 b"idle".to_vec(),
             ]
         );
         assert_eq!(
-            cmds[6],
+            cmds[5],
             vec![
                 b"XCLAIM".to_vec(),
                 b"s".to_vec(),
