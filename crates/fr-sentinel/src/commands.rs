@@ -732,11 +732,8 @@ fn ckquorum_reply(master: &SentinelRedisInstance) -> RespFrame {
         .count()
         .saturating_add(1);
     let voters = master.sentinels.len().saturating_add(1);
-    let quorum = match usize::try_from(master.quorum) {
-        Ok(quorum) => quorum,
-        Err(_) => usize::MAX,
-    };
-    let no_quorum = usable < quorum;
+    let usable_for_quorum = i32::try_from(usable).unwrap_or(i32::MAX);
+    let no_quorum = usable_for_quorum < master.quorum as i32;
     let no_auth = usable < (voters / 2).saturating_add(1);
 
     if !no_quorum && !no_auth {
@@ -3008,6 +3005,53 @@ mod tests {
                 "NOQUORUM 1 usable Sentinels. Not enough available Sentinels to reach the specified quorum for this master".into()
             )
         );
+    }
+
+    #[test]
+    fn sentinel_ckquorum_compares_wrapped_quorum_as_signed_int_like_upstream() {
+        let mut state = SentinelState::new();
+        for (name, quorum, expected) in [
+            (
+                b"q2147483647".as_slice(),
+                b"2147483647".as_slice(),
+                RespFrame::Error(
+                    "NOQUORUM 1 usable Sentinels. Not enough available Sentinels to reach the specified quorum for this master".into(),
+                ),
+            ),
+            (
+                b"q2147483648".as_slice(),
+                b"2147483648".as_slice(),
+                RespFrame::SimpleString(
+                    "OK 1 usable Sentinels. Quorum and failover authorization can be reached"
+                        .into(),
+                ),
+            ),
+            (
+                b"q4294967295".as_slice(),
+                b"4294967295".as_slice(),
+                RespFrame::SimpleString(
+                    "OK 1 usable Sentinels. Quorum and failover authorization can be reached"
+                        .into(),
+                ),
+            ),
+            (
+                b"q4294967296".as_slice(),
+                b"4294967296".as_slice(),
+                RespFrame::SimpleString(
+                    "OK 1 usable Sentinels. Quorum and failover authorization can be reached"
+                        .into(),
+                ),
+            ),
+        ] {
+            let monitor = dispatch_sentinel_command(
+                &mut state,
+                &[b"MONITOR", name, b"127.0.0.1", b"6379", quorum],
+            );
+            assert_eq!(monitor, RespFrame::SimpleString("OK".into()));
+
+            let result = dispatch_sentinel_command(&mut state, &[b"CKQUORUM", name]);
+            assert_eq!(result, expected);
+        }
     }
 
     #[test]
