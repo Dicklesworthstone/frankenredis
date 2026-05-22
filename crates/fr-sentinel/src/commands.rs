@@ -1176,9 +1176,23 @@ fn instance_to_info_array(instance: &crate::SentinelRedisInstance, now_ms: u64) 
         RespFrame::BulkString(Some(b"flags".to_vec())),
         RespFrame::BulkString(Some(instance_flags_to_string(instance).into_bytes())),
         RespFrame::BulkString(Some(b"link-pending-commands".to_vec())),
-        RespFrame::BulkString(Some(b"0".to_vec())), // fr-sentinel doesn't track pending commands
+        RespFrame::BulkString(Some(
+            instance.link.pending_commands.to_string().into_bytes(),
+        )),
         RespFrame::BulkString(Some(b"link-refcount".to_vec())),
-        RespFrame::BulkString(Some(b"1".to_vec())), // fr-sentinel uses single refcount
+        RespFrame::BulkString(Some(instance.link.refcount.to_string().into_bytes())),
+    ];
+
+    if instance.flags.contains(InstanceFlags::FAILOVER_IN_PROGRESS) {
+        pairs.push(RespFrame::BulkString(Some(b"failover-state".to_vec())));
+        pairs.push(RespFrame::BulkString(Some(
+            failover_state_str(&instance.failover_state)
+                .as_bytes()
+                .to_vec(),
+        )));
+    }
+
+    pairs.extend([
         RespFrame::BulkString(Some(b"last-ping-sent".to_vec())),
         RespFrame::BulkString(Some(
             if instance.link.act_ping_time > 0 {
@@ -1203,17 +1217,7 @@ fn instance_to_info_array(instance: &crate::SentinelRedisInstance, now_ms: u64) 
                 .to_string()
                 .into_bytes(),
         )),
-    ];
-
-    // Conditional: failover-state when FAILOVER_IN_PROGRESS
-    if instance.flags.contains(InstanceFlags::FAILOVER_IN_PROGRESS) {
-        pairs.push(RespFrame::BulkString(Some(b"failover-state".to_vec())));
-        pairs.push(RespFrame::BulkString(Some(
-            failover_state_str(&instance.failover_state)
-                .as_bytes()
-                .to_vec(),
-        )));
-    }
+    ]);
 
     // Conditional: s-down-time when S_DOWN
     if instance.flags.contains(InstanceFlags::S_DOWN) {
@@ -1542,6 +1546,19 @@ mod tests {
                 }
                 _ => None,
             })
+    }
+
+    fn info_field_names(frame: &RespFrame) -> Vec<String> {
+        let RespFrame::Array(Some(fields)) = frame else {
+            return Vec::new();
+        };
+        fields
+            .chunks_exact(2)
+            .filter_map(|pair| match &pair[0] {
+                RespFrame::BulkString(Some(name)) => String::from_utf8(name.clone()).ok(),
+                _ => None,
+            })
+            .collect()
     }
 
     fn debug_bulk_integer_field(frame: &RespFrame, key: &[u8]) -> Option<i64> {
