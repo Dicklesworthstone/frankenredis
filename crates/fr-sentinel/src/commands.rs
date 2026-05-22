@@ -1118,6 +1118,10 @@ fn instance_to_info_array(instance: &crate::SentinelRedisInstance) -> RespFrame 
         RespFrame::BulkString(Some(instance.addr.hostname.clone().into_bytes())),
         RespFrame::BulkString(Some(b"port".to_vec())),
         RespFrame::BulkString(Some(instance.addr.port.to_string().into_bytes())),
+        RespFrame::BulkString(Some(b"runid".to_vec())),
+        RespFrame::BulkString(Some(
+            instance.runid.clone().unwrap_or_default().into_bytes(),
+        )),
         RespFrame::BulkString(Some(b"flags".to_vec())),
         RespFrame::BulkString(Some(flags_to_string(&instance.flags).into_bytes())),
         RespFrame::BulkString(Some(b"quorum".to_vec())),
@@ -1149,11 +1153,6 @@ fn instance_to_info_array(instance: &crate::SentinelRedisInstance) -> RespFrame 
         RespFrame::BulkString(Some(b"num-other-sentinels".to_vec())),
         RespFrame::BulkString(Some(instance.sentinels.len().to_string().into_bytes())),
     ]);
-
-    if let Some(ref runid) = instance.runid {
-        pairs.push(RespFrame::BulkString(Some(b"runid".to_vec())));
-        pairs.push(RespFrame::BulkString(Some(runid.clone().into_bytes())));
-    }
 
     RespFrame::Array(Some(pairs))
 }
@@ -1658,6 +1657,34 @@ mod tests {
         let result =
             dispatch_sentinel_command(&mut state, &[b"GET-MASTER-ADDR-BY-NAME", b"mymaster"]);
         assert_eq!(array_len(&result), Some(2));
+    }
+
+    #[test]
+    fn sentinel_master_replies_always_include_runid_field() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+
+        let result = dispatch_sentinel_command(&mut state, &[b"MASTER", b"mymaster"]);
+        assert_eq!(info_field(&result, b"runid").as_deref(), Some(""));
+
+        let master_exists = state.masters.contains_key("mymaster");
+        let Some(master) = state.get_master_mut("mymaster") else {
+            assert!(master_exists, "mymaster exists");
+            return;
+        };
+        master.runid = Some("known-runid".to_string());
+
+        let result = dispatch_sentinel_command(&mut state, &[b"MASTERS"]);
+        let RespFrame::Array(Some(masters)) = result else {
+            return;
+        };
+        let Some(first) = masters.first() else {
+            return;
+        };
+        assert_eq!(info_field(first, b"runid").as_deref(), Some("known-runid"));
     }
 
     #[test]
@@ -2891,11 +2918,17 @@ mod tests {
         // Add a replica and sentinel
         {
             let master = state.masters.get_mut("mymaster").unwrap();
-            let replica =
-                SentinelRedisInstance::new_master("replica1", SentinelAddr::new("127.0.0.2", 6380), 1);
+            let replica = SentinelRedisInstance::new_master(
+                "replica1",
+                SentinelAddr::new("127.0.0.2", 6380),
+                1,
+            );
             master.slaves.insert("replica1".to_string(), replica);
-            let sentinel =
-                SentinelRedisInstance::new_master("sentinel1", SentinelAddr::new("127.0.0.3", 26379), 1);
+            let sentinel = SentinelRedisInstance::new_master(
+                "sentinel1",
+                SentinelAddr::new("127.0.0.3", 26379),
+                1,
+            );
             master.sentinels.insert("sentinel1".to_string(), sentinel);
         }
 
@@ -2911,8 +2944,11 @@ mod tests {
             master.leader = Some("leader-sentinel".to_string());
             master.runid = Some("old-runid".to_string());
             master.role_reported = Role::Slave;
-            let promoted =
-                SentinelRedisInstance::new_master("promoted", SentinelAddr::new("127.0.0.2", 6380), 1);
+            let promoted = SentinelRedisInstance::new_master(
+                "promoted",
+                SentinelAddr::new("127.0.0.2", 6380),
+                1,
+            );
             master.promoted_slave = Some(Box::new(promoted));
 
             // Verify dirty state is set
