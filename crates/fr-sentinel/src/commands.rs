@@ -63,7 +63,7 @@ pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> R
         "DEBUG" => cmd_debug(state, &args[1..]),
         "HELP" => {
             if args.len() != 1 {
-                return subcommand_syntax_error(&subcommand_raw);
+                return wrong_arity("sentinel|help");
             }
             cmd_help()
         }
@@ -2473,15 +2473,12 @@ mod tests {
     }
 
     #[test]
-    fn sentinel_help_extra_args_returns_subcommand_syntax_error() {
+    fn sentinel_help_extra_args_returns_pipe_qualified_arity_error() {
         let mut state = SentinelState::new();
         let result = dispatch_sentinel_command(&mut state, &[b"help", b"extra"]);
         assert_eq!(
             result,
-            RespFrame::Error(
-                "ERR unknown subcommand or wrong number of arguments for 'help'. Try SENTINEL HELP."
-                    .into()
-            )
+            RespFrame::Error("ERR wrong number of arguments for 'sentinel|help' command".into())
         );
     }
 
