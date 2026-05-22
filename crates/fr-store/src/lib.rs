@@ -6648,18 +6648,23 @@ impl Store {
         self.drop_if_expired(source, now_ms);
         self.drop_if_expired(destination, now_ms);
 
-        match self.entries.get(source) {
-            Some(entry) => {
-                if !matches!(&entry.value, Value::Set(_)) {
-                    return Err(StoreError::WrongType);
-                }
-            }
-            None => return Ok(false),
+        let source_is_set = if let Some(entry) = self.entries.get_mut(source) {
+            entry.touch(now_ms);
+            Some(matches!(&entry.value, Value::Set(_)))
+        } else {
+            None
+        };
+        let destination_is_set = if let Some(entry) = self.entries.get_mut(destination) {
+            entry.touch(now_ms);
+            Some(matches!(&entry.value, Value::Set(_)))
+        } else {
+            None
+        };
+
+        if source_is_set.is_none() {
+            return Ok(false);
         }
-        if source != destination
-            && let Some(entry) = self.entries.get(destination)
-            && !matches!(&entry.value, Value::Set(_))
-        {
+        if matches!(source_is_set, Some(false)) || matches!(destination_is_set, Some(false)) {
             return Err(StoreError::WrongType);
         }
         if source == destination {
@@ -17273,6 +17278,71 @@ mod tests {
         );
         assert!(!store.smove(b"s", b"s", b"z", 0).expect("missing member"));
         assert_eq!(store.scard(b"s", 0).expect("set cardinality"), 2);
+    }
+
+    #[test]
+    fn smove_same_source_refreshes_idle_metadata() -> Result<(), String> {
+        let mut store = Store::new();
+        store
+            .sadd(b"s", &[b"a".to_vec()], 0)
+            .map_err(|err| format!("seed set failed: {err:?}"))?;
+        match store.object_idletime(b"s", 30_000) {
+            Some(30) => {}
+            other => return Err(format!("source idle should start at 30, got {other:?}")),
+        }
+
+        if !store
+            .smove(b"s", b"s", b"a", 90_000)
+            .map_err(|err| format!("smove same-set failed: {err:?}"))?
+        {
+            return Err("same-set SMOVE should report existing member".into());
+        }
+
+        match store.object_idletime(b"s", 120_000) {
+            Some(30) => {}
+            other => {
+                return Err(format!(
+                    "same-set SMOVE should refresh touched object metadata, got {other:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn smove_missing_member_refreshes_source_and_destination_idle_metadata() -> Result<(), String> {
+        let mut store = Store::new();
+        store
+            .sadd(b"src", &[b"a".to_vec()], 0)
+            .map_err(|err| format!("seed source set failed: {err:?}"))?;
+        store
+            .sadd(b"dst", &[b"b".to_vec()], 0)
+            .map_err(|err| format!("seed destination set failed: {err:?}"))?;
+
+        if store
+            .smove(b"src", b"dst", b"missing", 90_000)
+            .map_err(|err| format!("smove missing member failed: {err:?}"))?
+        {
+            return Err("SMOVE missing member should return false".into());
+        }
+
+        match store.object_idletime(b"src", 120_000) {
+            Some(30) => {}
+            other => {
+                return Err(format!(
+                    "missing-member SMOVE should refresh source metadata, got {other:?}"
+                ));
+            }
+        }
+        match store.object_idletime(b"dst", 120_000) {
+            Some(30) => {}
+            other => {
+                return Err(format!(
+                    "missing-member SMOVE should refresh destination metadata, got {other:?}"
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[test]
