@@ -212,9 +212,9 @@ fn cmd_monitor(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     }
     let name = String::from_utf8_lossy(args[0]);
     let ip = String::from_utf8_lossy(args[1]);
-    let port: u16 = match String::from_utf8_lossy(args[2]).parse() {
+    let port: u16 = match parse_monitor_port(&String::from_utf8_lossy(args[2])) {
         Ok(p) => p,
-        Err(_) => return RespFrame::Error("ERR Invalid port number".into()),
+        Err(e) => return e,
     };
     let quorum_raw = String::from_utf8_lossy(args[3]);
     let quorum = match parse_monitor_quorum(&quorum_raw) {
@@ -233,6 +233,13 @@ fn cmd_monitor(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
 
 fn monitor_address_is_allowed(state: &SentinelState, value: &str) -> bool {
     state.resolve_hostnames || value.parse::<std::net::IpAddr>().is_ok()
+}
+
+fn parse_monitor_port(value: &str) -> Result<u16, RespFrame> {
+    let parsed = value
+        .parse::<i64>()
+        .map_err(|_| RespFrame::Error("ERR Invalid port".into()))?;
+    u16::try_from(parsed).map_err(|_| RespFrame::Error("ERR Invalid port number.".into()))
 }
 
 fn parse_monitor_quorum(value: &str) -> Result<u32, RespFrame> {
@@ -1744,6 +1751,27 @@ mod tests {
     }
 
     #[test]
+    fn sentinel_monitor_port_errors_match_upstream() {
+        let mut state = SentinelState::new();
+
+        let malformed = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"bad-port", b"127.0.0.1", b"NaN", b"1"],
+        );
+        assert_eq!(malformed, RespFrame::Error("ERR Invalid port".into()));
+        assert!(state.get_master("bad-port").is_none());
+
+        for port in [b"-1".as_slice(), b"65536".as_slice()] {
+            let result = dispatch_sentinel_command(
+                &mut state,
+                &[b"MONITOR", b"bad-range", b"127.0.0.1", port, b"1"],
+            );
+            assert_eq!(result, RespFrame::Error("ERR Invalid port number.".into()));
+            assert!(state.get_master("bad-range").is_none());
+        }
+    }
+
+    #[test]
     fn sentinel_monitor_rejects_hostname_when_resolution_is_disabled() {
         let mut state = SentinelState::new();
         assert!(!state.resolve_hostnames);
@@ -1765,6 +1793,30 @@ mod tests {
         );
         assert_eq!(result, RespFrame::SimpleString("OK".into()));
         assert!(state.get_master("host-ok").is_some());
+    }
+
+    #[test]
+    fn sentinel_monitor_malformed_port_returns_invalid_port() {
+        let mut state = SentinelState::new();
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"m", b"127.0.0.1", b"notAPort", b"1"],
+        );
+        assert_eq!(result, RespFrame::Error("ERR Invalid port".into()));
+    }
+
+    #[test]
+    fn sentinel_monitor_out_of_range_port_returns_invalid_port_number() {
+        let mut state = SentinelState::new();
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"m", b"127.0.0.1", b"99999", b"1"],
+        );
+        assert_eq!(result, RespFrame::Error("ERR Invalid port number.".into()));
+
+        let result =
+            dispatch_sentinel_command(&mut state, &[b"MONITOR", b"m", b"127.0.0.1", b"-1", b"1"]);
+        assert_eq!(result, RespFrame::Error("ERR Invalid port number.".into()));
     }
 
     #[test]
