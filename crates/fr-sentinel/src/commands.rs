@@ -785,15 +785,15 @@ fn cmd_config_get(state: &SentinelState, patterns: &[&[u8]]) -> RespFrame {
             if emitted.contains(&key) || !glob_match_ignore_ascii_case(&pattern, key) {
                 continue;
             }
-            reply.push(RespFrame::BulkString(Some(key.as_bytes().to_vec())));
-            reply.push(RespFrame::BulkString(Some(
-                sentinel_config_value(state, key).into_bytes(),
-            )));
+            reply.push((
+                RespFrame::BulkString(Some(key.as_bytes().to_vec())),
+                RespFrame::BulkString(Some(sentinel_config_value(state, key).into_bytes())),
+            ));
             emitted.push(key);
         }
     }
 
-    RespFrame::Array(Some(reply))
+    RespFrame::Map(Some(reply))
 }
 
 fn sentinel_config_value(state: &SentinelState, key: &str) -> String {
@@ -3769,16 +3769,20 @@ mod tests {
         );
         assert_eq!(
             result,
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"resolve-hostnames".to_vec())),
-                RespFrame::BulkString(Some(b"yes".to_vec())),
-                RespFrame::BulkString(Some(b"announce-port".to_vec())),
-                RespFrame::BulkString(Some(b"1234".to_vec())),
+            RespFrame::Map(Some(vec![
+                (
+                    RespFrame::BulkString(Some(b"resolve-hostnames".to_vec())),
+                    RespFrame::BulkString(Some(b"yes".to_vec())),
+                ),
+                (
+                    RespFrame::BulkString(Some(b"announce-port".to_vec())),
+                    RespFrame::BulkString(Some(b"1234".to_vec())),
+                ),
             ]))
         );
         assert_eq!(
             result.to_bytes(),
-            b"*4\r\n$17\r\nresolve-hostnames\r\n$3\r\nyes\r\n$13\r\nannounce-port\r\n$4\r\n1234\r\n"
+            b"%2\r\n$17\r\nresolve-hostnames\r\n$3\r\nyes\r\n$13\r\nannounce-port\r\n$4\r\n1234\r\n"
                 .to_vec()
         );
     }
@@ -3813,10 +3817,10 @@ mod tests {
         );
         assert_eq!(
             result,
-            RespFrame::Array(Some(vec![
+            RespFrame::Map(Some(vec![(
                 RespFrame::BulkString(Some(b"resolve-hostnames".to_vec())),
                 RespFrame::BulkString(Some(b"no".to_vec())),
-            ]))
+            )]))
         );
 
         let result = dispatch_sentinel_command(
@@ -3825,22 +3829,28 @@ mod tests {
         );
         assert_eq!(
             result,
-            RespFrame::Array(Some(vec![
+            RespFrame::Map(Some(vec![(
                 RespFrame::BulkString(Some(b"loglevel".to_vec())),
                 RespFrame::BulkString(Some(b"notice".to_vec())),
-            ]))
+            )]))
         );
 
         let result = dispatch_sentinel_command(&mut state, &[b"CONFIG", b"GET", b"announce*"]);
         assert_eq!(
             result,
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"announce-hostnames".to_vec())),
-                RespFrame::BulkString(Some(b"yes".to_vec())),
-                RespFrame::BulkString(Some(b"announce-ip".to_vec())),
-                RespFrame::BulkString(Some(Vec::new())),
-                RespFrame::BulkString(Some(b"announce-port".to_vec())),
-                RespFrame::BulkString(Some(b"1234".to_vec())),
+            RespFrame::Map(Some(vec![
+                (
+                    RespFrame::BulkString(Some(b"announce-hostnames".to_vec())),
+                    RespFrame::BulkString(Some(b"yes".to_vec())),
+                ),
+                (
+                    RespFrame::BulkString(Some(b"announce-ip".to_vec())),
+                    RespFrame::BulkString(Some(Vec::new())),
+                ),
+                (
+                    RespFrame::BulkString(Some(b"announce-port".to_vec())),
+                    RespFrame::BulkString(Some(b"1234".to_vec())),
+                ),
             ]))
         );
 
@@ -3848,10 +3858,10 @@ mod tests {
             dispatch_sentinel_command(&mut state, &[b"CONFIG", b"GET", b"ANNOUNCE-[G-I]OST*"]);
         assert_eq!(
             result,
-            RespFrame::Array(Some(vec![
+            RespFrame::Map(Some(vec![(
                 RespFrame::BulkString(Some(b"announce-hostnames".to_vec())),
                 RespFrame::BulkString(Some(b"yes".to_vec())),
-            ]))
+            )]))
         );
     }
 
@@ -3932,10 +3942,10 @@ mod tests {
             dispatch_sentinel_command(&mut state, &[b"CONFIG", b"GET", b"RESOLVE-HOSTNAMES"]);
         assert_eq!(
             result,
-            RespFrame::Array(Some(vec![
+            RespFrame::Map(Some(vec![(
                 RespFrame::BulkString(Some(b"resolve-hostnames".to_vec())),
                 RespFrame::BulkString(Some(b"yes".to_vec())),
-            ]))
+            )]))
         );
 
         let result = dispatch_sentinel_command(
