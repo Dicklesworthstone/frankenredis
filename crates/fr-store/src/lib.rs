@@ -9231,15 +9231,28 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(0);
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::Stream(entries) => {
-                    let result = entries.len();
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::Stream(entries) => {
+                        let result = entries.len();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(0),
         }
     }
@@ -9255,26 +9268,39 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(Vec::new());
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::Stream(entries) => {
-                    if start > end {
-                        return Ok(Vec::new());
-                    }
-                    let mut out = Vec::new();
-                    for (id, fields) in entries.range(start..=end) {
-                        out.push((*id, fields.clone()));
-                        if let Some(limit) = count
-                            && out.len() >= limit
-                        {
-                            break;
-                        }
-                    }
-                    entry.touch(now_ms);
-                    Ok(out)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::Stream(entries) => {
+                        if start > end {
+                            return Ok(Vec::new());
+                        }
+                        let mut out = Vec::new();
+                        for (id, fields) in entries.range(start..=end) {
+                            out.push((*id, fields.clone()));
+                            if let Some(limit) = count
+                                && out.len() >= limit
+                            {
+                                break;
+                            }
+                        }
+                        entry.touch(now_ms);
+                        Ok(out)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -9290,26 +9316,39 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(Vec::new());
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::Stream(entries) => {
-                    if start > end {
-                        return Ok(Vec::new());
-                    }
-                    let mut out = Vec::new();
-                    for (id, fields) in entries.range(start..=end).rev() {
-                        out.push((*id, fields.clone()));
-                        if let Some(limit) = count
-                            && out.len() >= limit
-                        {
-                            break;
-                        }
-                    }
-                    entry.touch(now_ms);
-                    Ok(out)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::Stream(entries) => {
+                        if start > end {
+                            return Ok(Vec::new());
+                        }
+                        let mut out = Vec::new();
+                        for (id, fields) in entries.range(start..=end).rev() {
+                            out.push((*id, fields.clone()));
+                            if let Some(limit) = count
+                                && out.len() >= limit
+                            {
+                                break;
+                            }
+                        }
+                        entry.touch(now_ms);
+                        Ok(out)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(Vec::new()),
         }
     }
