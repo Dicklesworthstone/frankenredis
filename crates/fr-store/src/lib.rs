@@ -5139,15 +5139,25 @@ impl Store {
             return Ok(0);
         }
         self.drop_hash_field_if_expired(key, field, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::Hash(m) => {
-                    let result = m.get(field).map_or(0, Vec::len);
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                entry.touch(now_ms);
+                match &entry.value {
+                    Value::Hash(m) => Ok(m.get(field).map_or(0, Vec::len)),
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(0),
         }
     }
@@ -18967,6 +18977,33 @@ mod tests {
             .hset(b"h", b"f".to_vec(), b"hello".to_vec(), 0)
             .unwrap();
         assert_eq!(store.hstrlen(b"h", b"f", 0).unwrap(), 5);
+    }
+
+    #[test]
+    fn hstrlen_existing_hash_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .hset(b"h", b"f".to_vec(), b"hello".to_vec(), 0)
+            .map_err(|err| format!("seed hash failed: {err:?}"))?;
+
+        match store.object_freq(b"h", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new hash LFU frequency mismatch: {other:?}")),
+        }
+        match store
+            .hstrlen(b"h", b"f", 1)
+            .map_err(|err| format!("hstrlen failed: {err:?}"))?
+        {
+            5 => {}
+            other => return Err(format!("HSTRLEN length mismatch: {other:?}")),
+        }
+        match store.object_freq(b"h", 1) {
+            Some(6) => {}
+            other => return Err(format!("HSTRLEN should bump LFU frequency, got {other:?}")),
+        }
+        Ok(())
     }
 
     #[test]
