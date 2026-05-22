@@ -4874,15 +4874,25 @@ impl Store {
             return Ok(false);
         }
         self.drop_hash_field_if_expired(key, field, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::Hash(m) => {
-                    let result = m.contains_key(field);
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                entry.touch(now_ms);
+                match &entry.value {
+                    Value::Hash(m) => Ok(m.contains_key(field)),
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(false),
         }
     }
@@ -18652,6 +18662,33 @@ mod tests {
         assert_eq!(store.hlen(b"h", 0).unwrap(), 1);
         assert_eq!(store.hdel(b"h", &[b"f2"], 0).unwrap(), 1);
         assert!(!store.exists(b"h", 0));
+    }
+
+    #[test]
+    fn hexists_existing_hash_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .hset(b"h", b"f".to_vec(), b"v".to_vec(), 0)
+            .map_err(|err| format!("seed hash failed: {err:?}"))?;
+
+        match store.object_freq(b"h", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new hash LFU frequency mismatch: {other:?}")),
+        }
+        match store
+            .hexists(b"h", b"missing", 1)
+            .map_err(|err| format!("hexists failed: {err:?}"))?
+        {
+            false => {}
+            true => return Err("HEXISTS missing field returned true".to_string()),
+        }
+        match store.object_freq(b"h", 1) {
+            Some(6) => {}
+            other => return Err(format!("HEXISTS should bump LFU frequency, got {other:?}")),
+        }
+        Ok(())
     }
 
     #[test]
