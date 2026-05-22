@@ -12110,6 +12110,9 @@ impl Store {
                 // List
                 let (count, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
+                if count == 0 {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
                 let mut list = VecDeque::with_capacity(count.min(1024));
                 for _ in 0..count {
                     let (item, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -12122,6 +12125,9 @@ impl Store {
                 // Set
                 let (count, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
+                if count == 0 {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
                 let mut set = BTreeSet::new();
                 for _ in 0..count {
                     let (member, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -12137,6 +12143,9 @@ impl Store {
                 // Hash
                 let (count, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
+                if count == 0 {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
                 let mut hash = BTreeMap::new();
                 for _ in 0..count {
                     let (field, fc) = decode_rdb_string(payload, cursor, data_end)?;
@@ -12153,6 +12162,9 @@ impl Store {
                 // Sorted set
                 let (count, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
+                if count == 0 {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
                 let mut zs = SortedSet::new();
                 for _ in 0..count {
                     let (member, mc) = decode_rdb_string(payload, cursor, data_end)?;
@@ -12247,6 +12259,9 @@ impl Store {
                         _ => return Err(StoreError::InvalidDumpPayload),
                     }
                 }
+                if list.is_empty() {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
                 Value::List(list)
             }
             RDB_TYPE_LIST_QUICKLIST => {
@@ -12260,12 +12275,19 @@ impl Store {
                         list.push_back(item);
                     }
                 }
+                if list.is_empty() {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
                 Value::List(list)
             }
             RDB_TYPE_HASH_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                Value::Hash(hash_from_flat_entries(decode_listpack_strings(&listpack)?)?)
+                let hash = hash_from_flat_entries(decode_listpack_strings(&listpack)?)?;
+                if hash.is_empty() {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
+                Value::Hash(hash)
             }
             RDB_TYPE_HASH_ZIPLIST => {
                 let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -12292,6 +12314,9 @@ impl Store {
                 for member in decode_intset_members(&intset)? {
                     set.insert(member);
                 }
+                if set.is_empty() {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
                 Value::Set(set)
             }
             RDB_TYPE_SET_LISTPACK => {
@@ -12304,13 +12329,20 @@ impl Store {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                 }
+                if set.is_empty() {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
                 force_set_listpack_encoding = true;
                 Value::Set(set)
             }
             RDB_TYPE_ZSET_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                Value::SortedSet(zset_from_flat_entries(decode_listpack_strings(&listpack)?)?)
+                let zs = zset_from_flat_entries(decode_listpack_strings(&listpack)?)?;
+                if zs.is_empty() {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
+                Value::SortedSet(zs)
             }
             RDB_TYPE_ZSET_ZIPLIST => {
                 let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -16064,14 +16096,14 @@ mod tests {
         HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, LatencySample, MaxmemoryPolicy,
         MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT,
         PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK,
-        RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP, RDB_TYPE_LIST_QUICKLIST,
+        RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST,
         RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET,
         RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET,
         RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, ScoreBound, ScoreMember,
         Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions,
         StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value,
         ValueType, decode_length, decode_listpack_strings, decode_rdb_string, encode_db_key,
-        encode_length, encode_listpack_strings, hll_sparse_decode,
+        encode_intset, encode_length, encode_listpack_strings, hll_sparse_decode,
     };
 
     fn group_read_options(
@@ -21420,6 +21452,105 @@ mod tests {
     }
 
     #[test]
+    fn restore_rejects_empty_aggregate_payloads() -> Result<(), String> {
+        let empty_listpack =
+            encode_listpack_strings(&[]).ok_or_else(|| "encode empty listpack".to_string())?;
+        let empty_ziplist =
+            encode_test_ziplist_strings(&[]).ok_or_else(|| "encode empty ziplist".to_string())?;
+        let empty_zipmap =
+            encode_test_zipmap(&[]).ok_or_else(|| "encode empty zipmap".to_string())?;
+        let empty_intset = encode_intset(&[]).ok_or_else(|| "encode empty intset".to_string())?;
+
+        let mut cases = Vec::new();
+
+        let mut raw_list = vec![RDB_TYPE_LIST];
+        encode_length(&mut raw_list, 0);
+        cases.push((b"raw-list".as_slice(), raw_list));
+
+        let mut raw_set = vec![RDB_TYPE_SET];
+        encode_length(&mut raw_set, 0);
+        cases.push((b"raw-set".as_slice(), raw_set));
+
+        let mut raw_hash = vec![RDB_TYPE_HASH];
+        encode_length(&mut raw_hash, 0);
+        cases.push((b"raw-hash".as_slice(), raw_hash));
+
+        let mut raw_zset = vec![RDB_TYPE_ZSET_2];
+        encode_length(&mut raw_zset, 0);
+        cases.push((b"raw-zset".as_slice(), raw_zset));
+
+        let mut quicklist = vec![RDB_TYPE_LIST_QUICKLIST];
+        encode_length(&mut quicklist, 0);
+        cases.push((b"quicklist".as_slice(), quicklist));
+
+        let mut quicklist2 = vec![RDB_TYPE_LIST_QUICKLIST_2];
+        encode_length(&mut quicklist2, 0);
+        cases.push((b"quicklist2".as_slice(), quicklist2));
+
+        let mut list_ziplist = vec![RDB_TYPE_LIST_ZIPLIST];
+        append_raw_dump_bulk(&mut list_ziplist, &empty_ziplist);
+        cases.push((b"list-ziplist".as_slice(), list_ziplist));
+
+        let mut hash_ziplist = vec![RDB_TYPE_HASH_ZIPLIST];
+        append_raw_dump_bulk(&mut hash_ziplist, &empty_ziplist);
+        cases.push((b"hash-ziplist".as_slice(), hash_ziplist));
+
+        let mut zset_ziplist = vec![RDB_TYPE_ZSET_ZIPLIST];
+        append_raw_dump_bulk(&mut zset_ziplist, &empty_ziplist);
+        cases.push((b"zset-ziplist".as_slice(), zset_ziplist));
+
+        let mut hash_zipmap = vec![RDB_TYPE_HASH_ZIPMAP];
+        append_raw_dump_bulk(&mut hash_zipmap, &empty_zipmap);
+        cases.push((b"hash-zipmap".as_slice(), hash_zipmap));
+
+        let mut set_intset = vec![RDB_TYPE_SET_INTSET];
+        append_raw_dump_bulk(&mut set_intset, &empty_intset);
+        cases.push((b"set-intset".as_slice(), set_intset));
+
+        let mut set_listpack = vec![RDB_TYPE_SET_LISTPACK];
+        append_raw_dump_bulk(&mut set_listpack, &empty_listpack);
+        cases.push((b"set-listpack".as_slice(), set_listpack));
+
+        let mut hash_listpack = vec![RDB_TYPE_HASH_LISTPACK];
+        append_raw_dump_bulk(&mut hash_listpack, &empty_listpack);
+        cases.push((b"hash-listpack".as_slice(), hash_listpack));
+
+        let mut zset_listpack = vec![RDB_TYPE_ZSET_LISTPACK];
+        append_raw_dump_bulk(&mut zset_listpack, &empty_listpack);
+        cases.push((b"zset-listpack".as_slice(), zset_listpack));
+
+        for (key, body) in cases {
+            let payload = append_dump_footer(body);
+            let mut store = Store::new();
+            match store.restore_key(key, 0, &payload, false, 100) {
+                Err(StoreError::InvalidDumpPayload) => {}
+                _ => return Err("empty aggregate payload restored successfully".to_string()),
+            }
+            if store.exists(key, 100) {
+                return Err("empty aggregate payload created a key".to_string());
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn restore_accepts_empty_string_payload() -> Result<(), String> {
+        let mut body = vec![RDB_TYPE_STRING];
+        append_raw_dump_bulk(&mut body, b"");
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        store
+            .restore_key(b"empty-string", 0, &payload, false, 100)
+            .map_err(|err| format!("empty string restore failed: {err:?}"))?;
+        match store.get(b"empty-string", 100) {
+            Ok(Some(value)) if value.is_empty() => Ok(()),
+            other => Err(format!("empty string restore produced {other:?}")),
+        }
+    }
+
+    #[test]
     fn restore_accepts_legacy_list_ziplist() -> Result<(), String> {
         let ziplist = encode_test_ziplist_strings(&[b"alpha".as_slice(), b"42", b"omega"])
             .ok_or_else(|| "encode legacy list ziplist".to_string())?;
@@ -21585,6 +21716,54 @@ mod tests {
                 "duplicate zset ziplist members should reject the dump, got {other:?}"
             )),
         }
+    }
+
+    #[test]
+    fn restore_rejects_empty_list() {
+        let mut body = vec![RDB_TYPE_LIST];
+        encode_length(&mut body, 0);
+        let payload = append_dump_footer(body);
+        let mut store = Store::new();
+        assert!(matches!(
+            store.restore_key(b"l", 0, &payload, false, 100),
+            Err(StoreError::InvalidDumpPayload)
+        ));
+    }
+
+    #[test]
+    fn restore_rejects_empty_set() {
+        let mut body = vec![RDB_TYPE_SET];
+        encode_length(&mut body, 0);
+        let payload = append_dump_footer(body);
+        let mut store = Store::new();
+        assert!(matches!(
+            store.restore_key(b"s", 0, &payload, false, 100),
+            Err(StoreError::InvalidDumpPayload)
+        ));
+    }
+
+    #[test]
+    fn restore_rejects_empty_hash() {
+        let mut body = vec![RDB_TYPE_HASH];
+        encode_length(&mut body, 0);
+        let payload = append_dump_footer(body);
+        let mut store = Store::new();
+        assert!(matches!(
+            store.restore_key(b"h", 0, &payload, false, 100),
+            Err(StoreError::InvalidDumpPayload)
+        ));
+    }
+
+    #[test]
+    fn restore_rejects_empty_zset() {
+        let mut body = vec![RDB_TYPE_ZSET_2];
+        encode_length(&mut body, 0);
+        let payload = append_dump_footer(body);
+        let mut store = Store::new();
+        assert!(matches!(
+            store.restore_key(b"z", 0, &payload, false, 100),
+            Err(StoreError::InvalidDumpPayload)
+        ));
     }
 
     #[test]
