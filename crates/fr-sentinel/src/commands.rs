@@ -1032,6 +1032,10 @@ fn cmd_info_cache(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
 }
 
 fn cmd_simulate_failure(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
+    if args.is_empty() {
+        return wrong_arity("sentinel|simulate-failure");
+    }
+
     state.simfailure_flags = crate::SimFailureFlags::empty();
 
     for arg in args {
@@ -3888,7 +3892,7 @@ mod tests {
     }
 
     #[test]
-    fn sentinel_simulate_failure_sets_and_clears_flags() {
+    fn sentinel_simulate_failure_sets_flags_and_rejects_missing_mode() {
         let mut state = SentinelState::new();
 
         let result = dispatch_sentinel_command(
@@ -3912,8 +3916,22 @@ mod tests {
         );
 
         let result = dispatch_sentinel_command(&mut state, &[b"SIMULATE-FAILURE"]);
-        assert_eq!(result, RespFrame::SimpleString("OK".into()));
-        assert_eq!(state.simfailure_flags, crate::SimFailureFlags::empty());
+        assert_eq!(
+            result,
+            RespFrame::Error(
+                "ERR wrong number of arguments for 'sentinel|simulate-failure' command".into()
+            )
+        );
+        assert!(
+            state
+                .simfailure_flags
+                .contains(crate::SimFailureFlags::CRASH_AFTER_ELECTION)
+        );
+        assert!(
+            state
+                .simfailure_flags
+                .contains(crate::SimFailureFlags::CRASH_AFTER_PROMOTION)
+        );
     }
 
     #[test]
