@@ -12396,7 +12396,7 @@ impl Store {
     /// Generate AOF-compatible command sequences that reconstruct the entire store.
     ///
     /// Returns a list of command argv vectors. Loaded function libraries are serialized
-    /// as deterministic FUNCTION LOAD REPLACE commands first. Non-expired entries are
+    /// as deterministic FUNCTION LOAD commands first. Non-expired entries are
     /// then serialized as the appropriate write command (SET, HMSET, RPUSH, SADD, ZADD,
     /// XADD), followed by PEXPIREAT if the key has an expiry. Expired entries are skipped.
     ///
@@ -12436,7 +12436,6 @@ impl Store {
             commands.push(vec![
                 b"FUNCTION".to_vec(),
                 b"LOAD".to_vec(),
-                b"REPLACE".to_vec(),
                 library.code.clone(),
             ]);
         }
@@ -23065,12 +23064,10 @@ mod tests {
         assert_eq!(cmds.len(), 3);
         assert_eq!(cmds[0][0], b"FUNCTION");
         assert_eq!(cmds[0][1], b"LOAD");
-        assert_eq!(cmds[0][2], b"REPLACE");
-        assert_eq!(cmds[0][3], alpha);
+        assert_eq!(cmds[0][2], alpha);
         assert_eq!(cmds[1][0], b"FUNCTION");
         assert_eq!(cmds[1][1], b"LOAD");
-        assert_eq!(cmds[1][2], b"REPLACE");
-        assert_eq!(cmds[1][3], beta);
+        assert_eq!(cmds[1][2], beta);
         assert_eq!(cmds[2][0], b"SET");
         assert_eq!(cmds[2][1], b"key");
         assert_eq!(cmds[2][2], b"value");
@@ -23094,18 +23091,8 @@ mod tests {
         assert_eq!(
             cmds,
             vec![
-                vec![
-                    b"FUNCTION".to_vec(),
-                    b"LOAD".to_vec(),
-                    b"REPLACE".to_vec(),
-                    alpha,
-                ],
-                vec![
-                    b"FUNCTION".to_vec(),
-                    b"LOAD".to_vec(),
-                    b"REPLACE".to_vec(),
-                    beta,
-                ],
+                vec![b"FUNCTION".to_vec(), b"LOAD".to_vec(), alpha],
+                vec![b"FUNCTION".to_vec(), b"LOAD".to_vec(), beta],
                 vec![b"SET".to_vec(), b"db0".to_vec(), b"v0".to_vec()],
                 vec![b"SELECT".to_vec(), b"1".to_vec()],
                 vec![b"SET".to_vec(), b"db1".to_vec(), b"v1".to_vec()],
@@ -23137,18 +23124,8 @@ mod tests {
         assert_eq!(
             cmds,
             vec![
-                vec![
-                    b"FUNCTION".to_vec(),
-                    b"LOAD".to_vec(),
-                    b"REPLACE".to_vec(),
-                    alpha,
-                ],
-                vec![
-                    b"FUNCTION".to_vec(),
-                    b"LOAD".to_vec(),
-                    b"REPLACE".to_vec(),
-                    beta,
-                ],
+                vec![b"FUNCTION".to_vec(), b"LOAD".to_vec(), alpha],
+                vec![b"FUNCTION".to_vec(), b"LOAD".to_vec(), beta],
                 vec![b"SET".to_vec(), b"a0".to_vec(), b"va0".to_vec()],
                 vec![b"PEXPIREAT".to_vec(), b"a0".to_vec(), b"7100".to_vec()],
                 vec![b"SELECT".to_vec(), b"1".to_vec()],
@@ -26084,18 +26061,8 @@ mod tests {
             assert_eq!(
                 commands,
                 vec![
-                    vec![
-                        b"FUNCTION".to_vec(),
-                        b"LOAD".to_vec(),
-                        b"REPLACE".to_vec(),
-                        alpha,
-                    ],
-                    vec![
-                        b"FUNCTION".to_vec(),
-                        b"LOAD".to_vec(),
-                        b"REPLACE".to_vec(),
-                        beta,
-                    ],
+                    vec![b"FUNCTION".to_vec(), b"LOAD".to_vec(), alpha],
+                    vec![b"FUNCTION".to_vec(), b"LOAD".to_vec(), beta],
                     vec![b"SET".to_vec(), b"a0".to_vec(), b"va0".to_vec()],
                     vec![b"PEXPIREAT".to_vec(), b"a0".to_vec(), b"8000".to_vec()],
                     vec![b"SELECT".to_vec(), b"2".to_vec()],
