@@ -5116,11 +5116,19 @@ impl Store {
         now_ms: u64,
     ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
+        let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
         self.internal_entry(key.to_vec(), Value::Hash(BTreeMap::new()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let result = self
             .with_mutated_entry(key, |entry| {
+                if should_bump_lfu {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
                 let Value::Hash(m) = &mut entry.value else {
                     return Err(StoreError::WrongType);
                 };
@@ -19020,6 +19028,56 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(store.hget(b"h", b"f", 0).unwrap(), Some(b"v1".to_vec()));
+    }
+
+    #[test]
+    fn hsetnx_existing_hash_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .hsetnx(b"h", b"f".to_vec(), b"v1".to_vec(), 0)
+            .map_err(|err| format!("hsetnx seed failed: {err:?}"))?;
+
+        match store.object_freq(b"h", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new hash LFU frequency mismatch: {other:?}")),
+        }
+        match store
+            .hsetnx(b"h", b"f".to_vec(), b"v2".to_vec(), 1)
+            .map_err(|err| format!("hsetnx no-op failed: {err:?}"))?
+        {
+            false => {}
+            true => return Err("HSETNX changed an existing field".to_string()),
+        }
+        match store.object_freq(b"h", 1) {
+            Some(6) => {}
+            other => return Err(format!("HSETNX no-op LFU mismatch: {other:?}")),
+        }
+
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .hsetnx(b"h", b"f".to_vec(), b"v1".to_vec(), 0)
+            .map_err(|err| format!("hsetnx second seed failed: {err:?}"))?;
+
+        match store.object_freq(b"h", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("second new hash LFU mismatch: {other:?}")),
+        }
+        match store
+            .hsetnx(b"h", b"g".to_vec(), b"v3".to_vec(), 2)
+            .map_err(|err| format!("hsetnx insert failed: {err:?}"))?
+        {
+            true => {}
+            false => return Err("HSETNX did not insert a missing field".to_string()),
+        }
+        match store.object_freq(b"h", 2) {
+            Some(6) => {}
+            other => return Err(format!("HSETNX insert LFU mismatch: {other:?}")),
+        }
+        Ok(())
     }
 
     #[test]
