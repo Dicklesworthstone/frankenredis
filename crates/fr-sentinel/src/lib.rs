@@ -154,14 +154,26 @@ pub enum LinkStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SentinelAddr {
     pub hostname: String,
+    pub ip: String,
     pub port: u16,
 }
 
 impl SentinelAddr {
     #[must_use]
     pub fn new(hostname: impl Into<String>, port: u16) -> Self {
+        let hostname = hostname.into();
+        Self {
+            ip: hostname.clone(),
+            hostname,
+            port,
+        }
+    }
+
+    #[must_use]
+    pub fn new_with_ip(hostname: impl Into<String>, ip: impl Into<String>, port: u16) -> Self {
         Self {
             hostname: hostname.into(),
+            ip: ip.into(),
             port,
         }
     }
@@ -425,6 +437,15 @@ impl SentinelState {
         port: u16,
         quorum: u32,
     ) -> Result<(), &'static str> {
+        self.monitor_addr(name, SentinelAddr::new(hostname, port), quorum)
+    }
+
+    pub fn monitor_addr(
+        &mut self,
+        name: impl Into<String>,
+        addr: SentinelAddr,
+        quorum: u32,
+    ) -> Result<(), &'static str> {
         let name = name.into();
         if self.masters.contains_key(&name) {
             return Err("ERR Duplicate master name.");
@@ -432,7 +453,6 @@ impl SentinelState {
         if quorum == 0 {
             return Err("ERR Quorum must be 1 or greater.");
         }
-        let addr = SentinelAddr::new(hostname, port);
         let mut instance = SentinelRedisInstance::new_master(&name, addr, quorum);
         instance.initialize_created_link_state(self.previous_time);
         self.masters.insert(name, instance);

@@ -148,7 +148,11 @@ pub fn create_hello_message(state: &SentinelState, master: &SentinelRedisInstanc
         sentinel_runid: state.myid_hex(),
         current_epoch: state.current_epoch,
         master_name: master.name.clone(),
-        master_ip: master.addr.hostname.clone(),
+        master_ip: if state.announce_hostnames {
+            master.addr.hostname.clone()
+        } else {
+            master.addr.ip.clone()
+        },
         master_port: master.addr.port,
         master_config_epoch: master.config_epoch,
     }

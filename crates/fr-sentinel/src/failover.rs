@@ -384,7 +384,9 @@ pub fn finalize_failover(
 }
 
 fn sentinel_addr_eq(left: &crate::SentinelAddr, right: &crate::SentinelAddr) -> bool {
-    left.port == right.port && left.hostname.eq_ignore_ascii_case(&right.hostname)
+    left.port == right.port
+        && (left.ip.eq_ignore_ascii_case(&right.ip)
+            || left.hostname.eq_ignore_ascii_case(&right.hostname))
 }
 
 fn push_unique_addr(addrs: &mut Vec<crate::SentinelAddr>, addr: crate::SentinelAddr) {

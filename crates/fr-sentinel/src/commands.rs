@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
-use std::{fs, os::unix::fs::PermissionsExt};
+use std::{
+    fs,
+    net::{IpAddr, ToSocketAddrs},
+    os::unix::fs::PermissionsExt,
+};
 
 use crate::{FailoverState, InstanceFlags, SentinelRedisInstance, SentinelState};
 use fr_protocol::RespFrame;
@@ -89,7 +93,8 @@ fn cmd_myid(state: &SentinelState) -> RespFrame {
 
 fn cmd_masters(state: &SentinelState) -> RespFrame {
     let now_ms = state.previous_time;
-    let masters = sorted_instance_info_arrays(state.masters.values(), now_ms);
+    let masters =
+        sorted_instance_info_arrays(state.masters.values(), now_ms, state.announce_hostnames);
     RespFrame::Array(Some(masters))
 }
 
@@ -100,7 +105,7 @@ fn cmd_master(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     let name = String::from_utf8_lossy(args[0]);
     let now_ms = state.previous_time;
     match state.get_master(&name) {
-        Some(master) => instance_to_info_array(master, now_ms),
+        Some(master) => instance_to_info_array(master, now_ms, state.announce_hostnames),
         None => missing_master_error(),
     }
 }
@@ -117,7 +122,11 @@ fn cmd_replicas(
     let now_ms = state.previous_time;
     match state.get_master(&name) {
         Some(master) => {
-            let replicas = sorted_instance_info_arrays(master.slaves.values(), now_ms);
+            let replicas = sorted_instance_info_arrays(
+                master.slaves.values(),
+                now_ms,
+                state.announce_hostnames,
+            );
             RespFrame::Array(Some(replicas))
         }
         None => missing_master_error(),
@@ -132,7 +141,11 @@ fn cmd_sentinels(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     let now_ms = state.previous_time;
     match state.get_master(&name) {
         Some(master) => {
-            let sentinels = sorted_instance_info_arrays(master.sentinels.values(), now_ms);
+            let sentinels = sorted_instance_info_arrays(
+                master.sentinels.values(),
+                now_ms,
+                state.announce_hostnames,
+            );
             RespFrame::Array(Some(sentinels))
         }
         None => missing_master_error(),
@@ -193,7 +206,9 @@ fn find_master_name_by_addr(state: &SentinelState, ip: &str, port: i64) -> Optio
         .masters
         .values()
         .find(|master| {
-            i64::from(master.addr.port) == port && master.addr.hostname.eq_ignore_ascii_case(ip)
+            i64::from(master.addr.port) == port
+                && (master.addr.ip.eq_ignore_ascii_case(ip)
+                    || master.addr.hostname.eq_ignore_ascii_case(ip))
         })
         .map(|master| master.name.clone())
 }
@@ -277,13 +292,14 @@ fn cmd_monitor(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
         Ok(p) => p,
         Err(e) => return e,
     };
-    if !monitor_address_is_allowed(state, &ip) {
-        return RespFrame::Error("ERR Invalid IP address or hostname specified".into());
-    }
+    let addr = match resolve_monitor_addr(state, &ip, port) {
+        Ok(addr) => addr,
+        Err(error) => return error,
+    };
 
     let default_down_after = state.debug_config.default_down_after;
     let default_failover_timeout = state.debug_config.default_failover_timeout;
-    match state.monitor(name.as_ref(), ip.as_ref(), port, quorum) {
+    match state.monitor_addr(name.as_ref(), addr, quorum) {
         Ok(()) => {
             if let Some(master) = state.get_master_mut(&name) {
                 master.down_after_period = default_down_after;
@@ -295,8 +311,37 @@ fn cmd_monitor(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     }
 }
 
-fn monitor_address_is_allowed(state: &SentinelState, value: &str) -> bool {
-    state.resolve_hostnames || value.parse::<std::net::IpAddr>().is_ok()
+fn resolve_monitor_addr(
+    state: &SentinelState,
+    hostname: &str,
+    port: u16,
+) -> Result<crate::SentinelAddr, RespFrame> {
+    let Some(ip) = resolve_sentinel_ip(hostname, state.resolve_hostnames) else {
+        return Err(RespFrame::Error(
+            "ERR Invalid IP address or hostname specified".into(),
+        ));
+    };
+    Ok(crate::SentinelAddr::new_with_ip(hostname, ip, port))
+}
+
+fn resolve_sentinel_ip(value: &str, allow_hostnames: bool) -> Option<String> {
+    if let Ok(ip) = value.parse::<IpAddr>() {
+        return Some(ip.to_string());
+    }
+    if !allow_hostnames {
+        return None;
+    }
+
+    let mut resolved = (value, 0).to_socket_addrs().ok()?;
+    let mut fallback = None;
+    for addr in resolved.by_ref() {
+        let ip = addr.ip();
+        if ip.is_ipv4() {
+            return Some(ip.to_string());
+        }
+        fallback.get_or_insert_with(|| ip.to_string());
+    }
+    fallback
 }
 
 fn parse_monitor_port(value: &str) -> Result<u16, RespFrame> {
@@ -620,7 +665,11 @@ fn cmd_get_master_addr(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
         Some(master) => {
             let addr = current_master_addr(master);
             RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(addr.hostname.clone().into_bytes())),
+                RespFrame::BulkString(Some(
+                    announced_addr(addr, state.announce_hostnames)
+                        .as_bytes()
+                        .to_vec(),
+                )),
                 RespFrame::BulkString(Some(addr.port.to_string().into_bytes())),
             ]))
         }
@@ -641,6 +690,14 @@ fn current_master_addr(master: &SentinelRedisInstance) -> &crate::SentinelAddr {
         return &promoted.addr;
     }
     &master.addr
+}
+
+fn announced_addr(addr: &crate::SentinelAddr, announce_hostnames: bool) -> &str {
+    if announce_hostnames {
+        &addr.hostname
+    } else {
+        &addr.ip
+    }
 }
 
 fn cmd_ckquorum(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
@@ -1280,6 +1337,7 @@ fn cmd_help() -> RespFrame {
 fn sorted_instance_info_arrays<'a>(
     instances: impl Iterator<Item = &'a crate::SentinelRedisInstance>,
     now_ms: u64,
+    announce_hostnames: bool,
 ) -> Vec<RespFrame> {
     let mut instances: Vec<_> = instances
         .filter(|instance| !instance.is_slave() || instance.replica_announced)
@@ -1287,16 +1345,24 @@ fn sorted_instance_info_arrays<'a>(
     instances.sort_by(|left, right| left.name.cmp(&right.name));
     instances
         .into_iter()
-        .map(|inst| instance_to_info_array(inst, now_ms))
+        .map(|inst| instance_to_info_array(inst, now_ms, announce_hostnames))
         .collect()
 }
 
-fn instance_to_info_array(instance: &crate::SentinelRedisInstance, now_ms: u64) -> RespFrame {
+fn instance_to_info_array(
+    instance: &crate::SentinelRedisInstance,
+    now_ms: u64,
+    announce_hostnames: bool,
+) -> RespFrame {
     let mut pairs = vec![
         RespFrame::BulkString(Some(b"name".to_vec())),
         RespFrame::BulkString(Some(instance.name.clone().into_bytes())),
         RespFrame::BulkString(Some(b"ip".to_vec())),
-        RespFrame::BulkString(Some(instance.addr.hostname.clone().into_bytes())),
+        RespFrame::BulkString(Some(
+            announced_addr(&instance.addr, announce_hostnames)
+                .as_bytes()
+                .to_vec(),
+        )),
         RespFrame::BulkString(Some(b"port".to_vec())),
         RespFrame::BulkString(Some(instance.addr.port.to_string().into_bytes())),
         RespFrame::BulkString(Some(b"runid".to_vec())),
@@ -2203,10 +2269,44 @@ mod tests {
         state.resolve_hostnames = true;
         let result = dispatch_sentinel_command(
             &mut state,
-            &[b"MONITOR", b"host-ok", b"example.local", b"6379", b"1"],
+            &[b"MONITOR", b"host-ok", b"localhost", b"6379", b"1"],
         );
         assert_eq!(result, RespFrame::SimpleString("OK".into()));
         assert!(state.get_master("host-ok").is_some());
+    }
+
+    #[test]
+    fn sentinel_monitor_stores_resolved_ip_and_announce_hostnames_switches_reply() {
+        let mut state = SentinelState::new();
+        state.resolve_hostnames = true;
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"hostmaster", b"localhost", b"6379", b"1"],
+        );
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+
+        let result = dispatch_sentinel_command(&mut state, &[b"MASTER", b"hostmaster"]);
+        assert_eq!(info_field(&result, b"ip").as_deref(), Some("127.0.0.1"));
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"CONFIG", b"SET", b"announce-hostnames", b"yes"],
+        );
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+
+        let result = dispatch_sentinel_command(&mut state, &[b"MASTER", b"hostmaster"]);
+        assert_eq!(info_field(&result, b"ip").as_deref(), Some("localhost"));
+
+        let result =
+            dispatch_sentinel_command(&mut state, &[b"GET-MASTER-ADDR-BY-NAME", b"hostmaster"]);
+        assert_eq!(
+            result,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"localhost".to_vec())),
+                RespFrame::BulkString(Some(b"6379".to_vec())),
+            ]))
+        );
     }
 
     #[test]
