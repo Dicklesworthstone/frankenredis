@@ -274,10 +274,18 @@ fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
                 };
             }
             "auth-pass" => {
-                master.auth_pass = Some(value.into_owned());
+                master.auth_pass = if value.is_empty() {
+                    None
+                } else {
+                    Some(value.into_owned())
+                };
             }
             "auth-user" => {
-                master.auth_user = Some(value.into_owned());
+                master.auth_user = if value.is_empty() {
+                    None
+                } else {
+                    Some(value.into_owned())
+                };
             }
             _ => {
                 return RespFrame::Error(format!("ERR Unknown option '{}'", option));
@@ -1103,6 +1111,50 @@ mod tests {
             return;
         };
         assert_eq!(master.down_after_period, 5000);
+    }
+
+    #[test]
+    fn sentinel_set_empty_auth_values_clear_credentials() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"SET",
+                b"mymaster",
+                b"auth-user",
+                b"agent",
+                b"auth-pass",
+                b"secret",
+            ],
+        );
+        assert!(matches!(result, RespFrame::SimpleString(_)));
+
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        assert_eq!(master.auth_user.as_deref(), Some("agent"));
+        assert_eq!(master.auth_pass.as_deref(), Some("secret"));
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"SET", b"mymaster", b"auth-user", b"", b"auth-pass", b""],
+        );
+        assert!(matches!(result, RespFrame::SimpleString(_)));
+
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        assert_eq!(master.auth_user, None);
+        assert_eq!(master.auth_pass, None);
     }
 
     #[test]
