@@ -6905,10 +6905,21 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
         let rand_val = self.next_rand();
+        let lfu_rand = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         let mut should_remove_key = false;
         let member = match self.entries.get_mut(key) {
             Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand);
+                }
                 let result = match &mut entry.value {
                     Value::Set(s) => {
                         if s.is_empty() {
@@ -19537,6 +19548,29 @@ mod tests {
         match store.object_freq(b"l", 1) {
             Some(6) => {}
             other => return Err(format!("RPOP LFU mismatch: {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn spop_existing_set_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .sadd(b"s", &[b"m1".to_vec(), b"m2".to_vec()], 0)
+            .map_err(|e| format!("sadd failed: {e:?}"))?;
+
+        match store.object_freq(b"s", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new set LFU frequency mismatch: {other:?}")),
+        }
+        let _val = store
+            .spop(b"s", 1)
+            .map_err(|err| format!("spop failed: {err:?}"))?;
+        match store.object_freq(b"s", 1) {
+            Some(6) => {}
+            other => return Err(format!("SPOP LFU mismatch: {other:?}")),
         }
         Ok(())
     }
