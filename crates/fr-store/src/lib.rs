@@ -2940,21 +2940,34 @@ impl Store {
     /// MGET returns values for each key; non-string keys return None (like Redis).
     #[must_use]
     pub fn mget(&mut self, keys: &[&[u8]], now_ms: u64) -> Vec<Option<Vec<u8>>> {
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
             if !self.record_keyspace_lookup(key, now_ms) {
                 results.push(None);
                 continue;
             }
+            let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(*key) {
+                self.next_rand()
+            } else {
+                0
+            };
             let val = match self.entries.get_mut(*key) {
-                Some(entry) => match &entry.value {
-                    Value::String(v) => {
-                        let v = v.clone();
-                        entry.touch(now_ms);
-                        Some(v)
+                Some(entry) => {
+                    if lfu_tracking_enabled {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
-                    _ => None,
-                },
+                    match &entry.value {
+                        Value::String(v) => {
+                            let v = v.clone();
+                            entry.touch(now_ms);
+                            Some(v)
+                        }
+                        _ => None,
+                    }
+                }
                 None => None,
             };
             results.push(val);
@@ -19944,6 +19957,34 @@ mod tests {
         match store.object_freq(b"s", 1) {
             Some(6) => {}
             other => return Err(format!("GETRANGE LFU mismatch: {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mget_existing_strings_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store.set(b"s1".to_vec(), b"v1".to_vec(), None, 0);
+        store.set(b"s2".to_vec(), b"v2".to_vec(), None, 0);
+
+        match store.object_freq(b"s1", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("s1 initial LFU frequency mismatch: {other:?}")),
+        }
+        match store.object_freq(b"s2", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("s2 initial LFU frequency mismatch: {other:?}")),
+        }
+        let _vals = store.mget(&[b"s1", b"s2"], 1);
+        match store.object_freq(b"s1", 1) {
+            Some(6) => {}
+            other => return Err(format!("MGET s1 LFU mismatch: {other:?}")),
+        }
+        match store.object_freq(b"s2", 1) {
+            Some(6) => {}
+            other => return Err(format!("MGET s2 LFU mismatch: {other:?}")),
         }
         Ok(())
     }
