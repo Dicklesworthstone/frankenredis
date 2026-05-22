@@ -15,6 +15,7 @@ const RDB_TYPE_SET: u8 = 2;
 const RDB_TYPE_ZSET: u8 = 3;
 const RDB_TYPE_HASH: u8 = 4;
 const RDB_TYPE_ZSET_2: u8 = 5;
+const RDB_TYPE_HASH_ZIPMAP: u8 = 9;
 const RDB_TYPE_LIST_ZIPLIST: u8 = 10;
 const RDB_TYPE_SET_INTSET: u8 = 11;
 const RDB_TYPE_ZSET_ZIPLIST: u8 = 12;
@@ -12275,6 +12276,15 @@ impl Store {
                 }
                 Value::Hash(hash)
             }
+            RDB_TYPE_HASH_ZIPMAP => {
+                let (zipmap, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                cursor += consumed;
+                let hash = decode_zipmap_pairs(&zipmap)?;
+                if hash.is_empty() {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
+                Value::Hash(hash)
+            }
             RDB_TYPE_SET_INTSET => {
                 let (intset, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
@@ -13231,6 +13241,103 @@ fn zset_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<SortedSet, StoreError
         }
     }
     Ok(zs)
+}
+
+fn decode_zipmap_pairs(data: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, StoreError> {
+    const ZIPMAP_BIGLEN: u8 = 254;
+    const ZIPMAP_END: u8 = 255;
+
+    if data.len() < 2 || !matches!(data.last().copied(), Some(ZIPMAP_END)) {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+
+    let expected_count = data[0];
+    let mut cursor = 1;
+    let payload_end = data.len() - 1;
+    let mut hash = BTreeMap::new();
+
+    while cursor < payload_end {
+        let (key_len, key_len_size) = decode_zipmap_len(data, cursor, payload_end)?;
+        cursor += key_len_size;
+        let key_end = cursor
+            .checked_add(key_len)
+            .ok_or(StoreError::InvalidDumpPayload)?;
+        if key_end > payload_end {
+            return Err(StoreError::InvalidDumpPayload);
+        }
+        let key = data[cursor..key_end].to_vec();
+        cursor = key_end;
+
+        let (val_len, val_len_size) = decode_zipmap_len(data, cursor, payload_end)?;
+        cursor += val_len_size;
+        let free = usize::from(
+            data.get(cursor)
+                .copied()
+                .ok_or(StoreError::InvalidDumpPayload)?,
+        );
+        cursor += 1;
+
+        let value_end = cursor
+            .checked_add(val_len)
+            .ok_or(StoreError::InvalidDumpPayload)?;
+        let next = value_end
+            .checked_add(free)
+            .ok_or(StoreError::InvalidDumpPayload)?;
+        if next > payload_end {
+            return Err(StoreError::InvalidDumpPayload);
+        }
+        let value = data[cursor..value_end].to_vec();
+        cursor = next;
+
+        if hash.insert(key, value).is_some() {
+            return Err(StoreError::InvalidDumpPayload);
+        }
+    }
+    if cursor != payload_end || hash.is_empty() {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    if !matches!(expected_count, ZIPMAP_BIGLEN)
+        && !matches!(
+            usize::from(expected_count).cmp(&hash.len()),
+            std::cmp::Ordering::Equal
+        )
+    {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    Ok(hash)
+}
+
+fn decode_zipmap_len(
+    data: &[u8],
+    cursor: usize,
+    payload_end: usize,
+) -> Result<(usize, usize), StoreError> {
+    const ZIPMAP_BIGLEN: u8 = 254;
+    const ZIPMAP_END: u8 = 255;
+
+    let marker = data
+        .get(cursor)
+        .copied()
+        .ok_or(StoreError::InvalidDumpPayload)?;
+    match marker {
+        len if len < ZIPMAP_BIGLEN => Ok((usize::from(len), 1)),
+        ZIPMAP_BIGLEN => {
+            let bytes_end = cursor
+                .checked_add(5)
+                .ok_or(StoreError::InvalidDumpPayload)?;
+            if bytes_end > payload_end {
+                return Err(StoreError::InvalidDumpPayload);
+            }
+            let bytes: [u8; 4] = data[cursor + 1..bytes_end]
+                .try_into()
+                .map_err(|_| StoreError::InvalidDumpPayload)?;
+            usize::try_from(u32::from_be_bytes(bytes))
+                .map(|len| (len, 5))
+                .map_err(|_| StoreError::InvalidDumpPayload)
+        }
+        ZIPMAP_END => Err(StoreError::InvalidDumpPayload),
+        _ => Err(StoreError::InvalidDumpPayload),
+    }
 }
 
 fn decode_ziplist_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
@@ -15943,14 +16050,14 @@ mod tests {
         HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, LatencySample, MaxmemoryPolicy,
         MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT,
         PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK,
-        RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2,
-        RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
-        RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2,
-        RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, ScoreBound, ScoreMember, Store, StoreError,
-        StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
-        StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value, ValueType,
-        decode_length, decode_listpack_strings, decode_rdb_string, encode_db_key, encode_length,
-        encode_listpack_strings, hll_sparse_decode,
+        RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP, RDB_TYPE_LIST_QUICKLIST,
+        RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET,
+        RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET,
+        RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, ScoreBound, ScoreMember,
+        Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions,
+        StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value,
+        ValueType, decode_length, decode_listpack_strings, decode_rdb_string, encode_db_key,
+        encode_length, encode_listpack_strings, hll_sparse_decode,
     };
 
     fn group_read_options(
@@ -21019,6 +21126,34 @@ mod tests {
         Some(ziplist)
     }
 
+    fn encode_test_zipmap(pairs: &[(&[u8], &[u8])]) -> Option<Vec<u8>> {
+        let mut zm = Vec::new();
+        zm.push(if pairs.len() < 254 {
+            u8::try_from(pairs.len()).ok()?
+        } else {
+            254
+        });
+        for (key, value) in pairs {
+            if key.len() < 254 {
+                zm.push(u8::try_from(key.len()).ok()?);
+            } else {
+                zm.push(254);
+                zm.extend_from_slice(&u32::try_from(key.len()).ok()?.to_be_bytes());
+            }
+            zm.extend_from_slice(key);
+            if value.len() < 254 {
+                zm.push(u8::try_from(value.len()).ok()?);
+            } else {
+                zm.push(254);
+                zm.extend_from_slice(&u32::try_from(value.len()).ok()?.to_be_bytes());
+            }
+            zm.push(0);
+            zm.extend_from_slice(value);
+        }
+        zm.push(255);
+        Some(zm)
+    }
+
     fn byte_vecs_match(actual: &[Vec<u8>], expected: &[&[u8]]) -> bool {
         matches!(actual.len().cmp(&expected.len()), std::cmp::Ordering::Equal)
             && actual
@@ -21356,6 +21491,47 @@ mod tests {
             Err(StoreError::InvalidDumpPayload) => Ok(()),
             other => Err(format!(
                 "duplicate hash ziplist fields should reject the dump, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn restore_accepts_legacy_hash_zipmap() -> Result<(), String> {
+        let zipmap = encode_test_zipmap(&[(b"field".as_slice(), b"value"), (b"count", b"42")])
+            .ok_or_else(|| "encode legacy hash zipmap".to_string())?;
+        let mut body = vec![RDB_TYPE_HASH_ZIPMAP];
+        append_raw_dump_bulk(&mut body, &zipmap);
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        store
+            .restore_key(b"h", 0, &payload, false, 100)
+            .map_err(|err| format!("restore legacy hash zipmap: {err:?}"))?;
+        match store.hget(b"h", b"field", 100) {
+            Ok(Some(value))
+                if matches!(value.as_slice().cmp(b"value"), std::cmp::Ordering::Equal) =>
+            {
+                Ok(())
+            }
+            other => Err(format!(
+                "legacy hash zipmap restored wrong field value: {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn restore_rejects_duplicate_legacy_hash_zipmap_fields() -> Result<(), String> {
+        let zipmap = encode_test_zipmap(&[(b"dup".as_slice(), b"one"), (b"dup", b"two")])
+            .ok_or_else(|| "encode duplicate hash zipmap".to_string())?;
+        let mut body = vec![RDB_TYPE_HASH_ZIPMAP];
+        append_raw_dump_bulk(&mut body, &zipmap);
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        match store.restore_key(b"h", 0, &payload, false, 100) {
+            Err(StoreError::InvalidDumpPayload) => Ok(()),
+            other => Err(format!(
+                "duplicate hash zipmap fields should reject the dump, got {other:?}"
             )),
         }
     }
