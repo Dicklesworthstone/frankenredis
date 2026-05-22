@@ -5669,34 +5669,47 @@ impl Store {
         now_ms: u64,
     ) -> Result<Option<Vec<Vec<u8>>>, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &mut entry.value {
-                Value::List(l) => {
-                    let mut result = Vec::new();
-                    for _ in 0..count {
-                        match l.pop_front() {
-                            Some(v) => result.push(v),
-                            None => break,
-                        }
-                    }
-                    if !result.is_empty() {
-                        self.dirty = self.dirty.saturating_add(result.len() as u64);
-                    }
-                    if l.is_empty() {
-                        self.internal_entries_remove(key);
-                        self.stream_groups.remove(key);
-                        self.stream_last_ids.remove(key);
-                    } else if !result.is_empty() {
-                        Self::mark_digest_stale_fields(
-                            &mut self.digest_stale,
-                            &mut self.digest_mutations,
-                        );
-                        entry.touch_write(now_ms);
-                    }
-                    Ok(Some(result))
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &mut entry.value {
+                    Value::List(l) => {
+                        let mut result = Vec::new();
+                        for _ in 0..count {
+                            match l.pop_front() {
+                                Some(v) => result.push(v),
+                                None => break,
+                            }
+                        }
+                        if !result.is_empty() {
+                            self.dirty = self.dirty.saturating_add(result.len() as u64);
+                        }
+                        if l.is_empty() {
+                            self.internal_entries_remove(key);
+                            self.stream_groups.remove(key);
+                            self.stream_last_ids.remove(key);
+                        } else if !result.is_empty() {
+                            Self::mark_digest_stale_fields(
+                                &mut self.digest_stale,
+                                &mut self.digest_mutations,
+                            );
+                            entry.touch_write(now_ms);
+                        }
+                        Ok(Some(result))
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(None),
         }
     }
@@ -5749,34 +5762,47 @@ impl Store {
         now_ms: u64,
     ) -> Result<Option<Vec<Vec<u8>>>, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &mut entry.value {
-                Value::List(l) => {
-                    let mut result = Vec::new();
-                    for _ in 0..count {
-                        match l.pop_back() {
-                            Some(v) => result.push(v),
-                            None => break,
-                        }
-                    }
-                    if !result.is_empty() {
-                        self.dirty = self.dirty.saturating_add(result.len() as u64);
-                    }
-                    if l.is_empty() {
-                        self.internal_entries_remove(key);
-                        self.stream_groups.remove(key);
-                        self.stream_last_ids.remove(key);
-                    } else if !result.is_empty() {
-                        Self::mark_digest_stale_fields(
-                            &mut self.digest_stale,
-                            &mut self.digest_mutations,
-                        );
-                        entry.touch_write(now_ms);
-                    }
-                    Ok(Some(result))
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &mut entry.value {
+                    Value::List(l) => {
+                        let mut result = Vec::new();
+                        for _ in 0..count {
+                            match l.pop_back() {
+                                Some(v) => result.push(v),
+                                None => break,
+                            }
+                        }
+                        if !result.is_empty() {
+                            self.dirty = self.dirty.saturating_add(result.len() as u64);
+                        }
+                        if l.is_empty() {
+                            self.internal_entries_remove(key);
+                            self.stream_groups.remove(key);
+                            self.stream_last_ids.remove(key);
+                        } else if !result.is_empty() {
+                            Self::mark_digest_stale_fields(
+                                &mut self.digest_stale,
+                                &mut self.digest_mutations,
+                            );
+                            entry.touch_write(now_ms);
+                        }
+                        Ok(Some(result))
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(None),
         }
     }
@@ -19942,6 +19968,52 @@ mod tests {
         match store.object_freq(b"l", 1) {
             Some(6) => {}
             other => return Err(format!("RPOP LFU mismatch: {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lpop_count_existing_list_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .lpush(b"l", &[b"v1".to_vec(), b"v2".to_vec(), b"v3".to_vec()], 0)
+            .unwrap();
+
+        match store.object_freq(b"l", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new list LFU frequency mismatch: {other:?}")),
+        }
+        let _vals = store
+            .lpop_count(b"l", 2, 1)
+            .map_err(|err| format!("lpop_count failed: {err:?}"))?;
+        match store.object_freq(b"l", 1) {
+            Some(6) => {}
+            other => return Err(format!("LPOP COUNT LFU mismatch: {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rpop_count_existing_list_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .rpush(b"l", &[b"v1".to_vec(), b"v2".to_vec(), b"v3".to_vec()], 0)
+            .unwrap();
+
+        match store.object_freq(b"l", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new list LFU frequency mismatch: {other:?}")),
+        }
+        let _vals = store
+            .rpop_count(b"l", 2, 1)
+            .map_err(|err| format!("rpop_count failed: {err:?}"))?;
+        match store.object_freq(b"l", 1) {
+            Some(6) => {}
+            other => return Err(format!("RPOP COUNT LFU mismatch: {other:?}")),
         }
         Ok(())
     }
