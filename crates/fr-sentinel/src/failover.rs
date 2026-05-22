@@ -17,13 +17,14 @@ pub struct SlaveScore {
 
 impl SlaveScore {
     pub fn from_instance(key: &str, slave: &SentinelRedisInstance) -> Self {
+        let master_link_up = slave.slave_master_link_status == LinkStatus::Up; // ubs:ignore - enum status comparison, not a secret
         Self {
             key: key.to_string(),
             priority: slave.slave_priority,
             repl_offset: slave.slave_repl_offset,
             runid: slave.runid.clone(),
             is_connected: !slave.link.disconnected,
-            master_link_up: slave.slave_master_link_status == LinkStatus::Up,
+            master_link_up,
         }
     }
 }
@@ -340,15 +341,80 @@ pub fn finalize_failover(
         && let Some(ref promoted_key) = ctx.promoted_slave_key
         && let Some(promoted) = master.slaves.remove(promoted_key)
     {
-        master.addr = promoted.addr.clone();
-        master.runid = promoted.runid.clone();
-        master.config_epoch = current_epoch;
+        let old_addr = master.addr.clone();
+        let new_addr = promoted.addr.clone();
+        let mut slave_addrs: Vec<_> = master
+            .slaves
+            .values()
+            .filter(|slave| !sentinel_addr_eq(&slave.addr, &new_addr))
+            .map(|slave| slave.addr.clone())
+            .collect();
+        if !sentinel_addr_eq(&old_addr, &new_addr) {
+            push_unique_addr(&mut slave_addrs, old_addr);
+        }
+
+        let quorum = master.quorum;
+        let down_after_period = master.down_after_period;
+        master.slaves.clear();
+        master.addr = new_addr;
+        master.runid = None;
+        master.config_epoch = if master.failover_epoch == 0 {
+            current_epoch
+        } else {
+            master.failover_epoch
+        };
+        master.flags = InstanceFlags::MASTER;
+        master.leader = None;
         master.failover_state = FailoverState::None;
-        master.failover_state_change_time = now;
-        master.flags.remove(InstanceFlags::FAILOVER_IN_PROGRESS);
-        master.flags.remove(InstanceFlags::O_DOWN);
-        master.flags.remove(InstanceFlags::S_DOWN);
+        master.failover_state_change_time = 0;
+        master.failover_start_time = 0;
+        master.promoted_slave = None;
+        master.s_down_since_time = 0;
+        master.o_down_since_time = 0;
+        master.link.act_ping_time = now;
+        master.link.last_ping_time = 0;
+        master.link.last_avail_time = now;
+        master.link.last_pong_time = now;
+        master.role_reported_time = now;
+        master.role_reported = crate::Role::Master;
+
+        for addr in slave_addrs {
+            let key = sentinel_slave_key(&addr);
+            let slave = reset_slave_instance(&key, addr, quorum, down_after_period, now);
+            master.slaves.insert(key, slave);
+        }
     }
+}
+
+fn sentinel_addr_eq(left: &crate::SentinelAddr, right: &crate::SentinelAddr) -> bool {
+    left.port == right.port && left.hostname.eq_ignore_ascii_case(&right.hostname)
+}
+
+fn push_unique_addr(addrs: &mut Vec<crate::SentinelAddr>, addr: crate::SentinelAddr) {
+    if !addrs
+        .iter()
+        .any(|existing| sentinel_addr_eq(existing, &addr))
+    {
+        addrs.push(addr);
+    }
+}
+
+fn sentinel_slave_key(addr: &crate::SentinelAddr) -> String {
+    format!("{}:{}", addr.hostname, addr.port)
+}
+
+fn reset_slave_instance(
+    key: &str,
+    addr: crate::SentinelAddr,
+    quorum: u32,
+    down_after_period: u64,
+    now: u64,
+) -> SentinelRedisInstance {
+    let mut slave = SentinelRedisInstance::new_master(key, addr, quorum);
+    slave.flags = InstanceFlags::SLAVE;
+    slave.down_after_period = down_after_period;
+    slave.initialize_created_link_state(now);
+    slave
 }
 
 #[cfg(test)]
@@ -680,6 +746,76 @@ mod tests {
 
         track_slave_reconfiguration(&mut ctx, "10.0.0.11:6379", ReconfigStatus::Done);
         assert!(is_reconfiguration_complete(&ctx));
+    }
+
+    #[test]
+    fn finalize_failover_readds_old_master_as_replica_like_upstream() {
+        let mut state = SentinelState::new();
+        state.current_epoch = 9;
+        let mut master =
+            SentinelRedisInstance::new_master("mymaster", SentinelAddr::new("10.0.0.1", 6379), 2);
+        master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
+        master.flags.insert(InstanceFlags::S_DOWN);
+        master.flags.insert(InstanceFlags::O_DOWN);
+        master.failover_epoch = 7;
+        master.failover_state = FailoverState::UpdateConfig;
+        master.failover_state_change_time = 10_000;
+        master.failover_start_time = 9_000;
+        master.leader = Some("leader".to_string());
+        master.down_after_period = 12_345;
+
+        let mut promoted =
+            SentinelRedisInstance::new_master("promoted", SentinelAddr::new("10.0.0.2", 6380), 0);
+        promoted.flags = InstanceFlags::SLAVE.union(InstanceFlags::PROMOTED);
+        promoted.runid = Some("promoted-runid".to_string());
+        master.slaves.insert("promoted".to_string(), promoted);
+
+        let mut existing =
+            SentinelRedisInstance::new_master("existing", SentinelAddr::new("10.0.0.3", 6381), 0);
+        existing.flags = InstanceFlags::SLAVE;
+        master.slaves.insert("existing".to_string(), existing);
+
+        let mut sentinel =
+            SentinelRedisInstance::new_master("sentinel", SentinelAddr::new("10.0.0.4", 26379), 0);
+        sentinel.flags = InstanceFlags::SENTINEL;
+        master.sentinels.insert("sentinel".to_string(), sentinel);
+
+        state.masters.insert("mymaster".to_string(), master);
+        let ctx = FailoverContext {
+            promoted_slave_key: Some("promoted".to_string()),
+            slaves_to_reconfig: vec!["existing".to_string()],
+            slaves_reconfigured: vec!["existing".to_string()],
+        };
+
+        finalize_failover(&mut state, "mymaster", &ctx, 50_000);
+
+        let master = state.get_master("mymaster").expect("master retained");
+        assert_eq!(master.addr, SentinelAddr::new("10.0.0.2", 6380));
+        assert_eq!(master.runid, None);
+        assert_eq!(master.config_epoch, 7);
+        assert_eq!(master.flags, InstanceFlags::MASTER);
+        assert_eq!(master.failover_state, FailoverState::None);
+        assert_eq!(master.failover_state_change_time, 0);
+        assert_eq!(master.failover_start_time, 0);
+        assert!(master.promoted_slave.is_none());
+        assert_eq!(master.leader, None);
+        assert_eq!(master.s_down_since_time, 0);
+        assert_eq!(master.o_down_since_time, 0);
+        assert_eq!(master.role_reported, crate::Role::Master);
+        assert_eq!(master.role_reported_time, 50_000);
+        assert_eq!(master.link.act_ping_time, 50_000);
+        assert_eq!(master.link.last_avail_time, 50_000);
+        assert_eq!(master.sentinels.len(), 1);
+
+        assert!(master.slaves.contains_key("10.0.0.1:6379"));
+        assert!(master.slaves.contains_key("10.0.0.3:6381"));
+        assert!(!master.slaves.contains_key("10.0.0.2:6380"));
+        for slave in master.slaves.values() {
+            assert_eq!(slave.flags, InstanceFlags::SLAVE);
+            assert_eq!(slave.down_after_period, 12_345);
+            assert_eq!(slave.role_reported, crate::Role::Slave);
+            assert_eq!(slave.role_reported_time, 50_000);
+        }
     }
 
     #[test]
