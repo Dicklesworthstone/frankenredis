@@ -2683,9 +2683,9 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return ExpireTimeValue::KeyMissing;
         }
-        if let Some(entry) = self.entries.get_mut(key) {
-            entry.touch(now_ms);
-        }
+        // (frankenredis-ttlnotouch) EXPIRETIME/PEXPIRETIME are metadata queries
+        // that do NOT update access time. Differential probe vs vendored 7.2.4
+        // confirmed OBJECT IDLETIME remains unchanged after these commands.
         match self.entries.get(key).and_then(|entry| entry.expires_at_ms) {
             Some(expires_at_ms) => ExpireTimeValue::ExpiresAt(expires_at_ms),
             None => ExpireTimeValue::NoExpiry,
@@ -2854,10 +2854,12 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return PttlValue::KeyMissing;
         };
-        let Some(entry) = self.entries.get_mut(key) else {
+        // (frankenredis-ttlnotouch) TTL/PTTL are metadata queries that do NOT
+        // update access time. Differential probe vs vendored 7.2.4 confirmed
+        // OBJECT IDLETIME remains unchanged after TTL/PTTL.
+        let Some(entry) = self.entries.get(key) else {
             return PttlValue::KeyMissing;
         };
-        entry.touch(now_ms);
         let decision = evaluate_expiry(now_ms, entry.expires_at_ms);
         if decision.remaining_ms == -1 {
             PttlValue::NoExpiry
@@ -17853,7 +17855,10 @@ mod tests {
     }
 
     #[test]
-    fn pttl_updates_keyspace_stats_and_lru() {
+    fn pttl_updates_keyspace_stats_but_not_lru() {
+        // (frankenredis-ttlnotouch) TTL/PTTL are metadata queries that update
+        // keyspace hit/miss stats but do NOT update access time (LRU). Verified
+        // via differential probe: OBJECT IDLETIME stays unchanged after TTL.
         let mut store = Store::new();
         store.set(b"k".to_vec(), b"v".to_vec(), Some(5_000), 1_000);
         store.reset_info_stats();
@@ -17861,13 +17866,14 @@ mod tests {
         assert_eq!(store.pttl(b"k", 2_000), PttlValue::Remaining(4_000));
         assert_eq!(store.stat_keyspace_hits, 1);
         assert_eq!(store.stat_keyspace_misses, 0);
+        // Access time should NOT be updated - stays at original 1_000 from set()
         assert_eq!(
             store
                 .entries
                 .get(b"k".as_ref())
                 .expect("pttl entry")
                 .last_access_ms,
-            2_000
+            1_000
         );
     }
 
