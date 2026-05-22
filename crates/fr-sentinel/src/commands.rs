@@ -765,11 +765,27 @@ fn instance_to_info_array(instance: &crate::SentinelRedisInstance) -> RespFrame 
         RespFrame::BulkString(Some(instance.failover_timeout.to_string().into_bytes())),
         RespFrame::BulkString(Some(b"parallel-syncs".to_vec())),
         RespFrame::BulkString(Some(instance.parallel_syncs.to_string().into_bytes())),
+    ];
+
+    if instance.is_master() {
+        if let Some(ref script) = instance.notification_script {
+            pairs.push(RespFrame::BulkString(Some(b"notification-script".to_vec())));
+            pairs.push(RespFrame::BulkString(Some(script.clone().into_bytes())));
+        }
+        if let Some(ref script) = instance.client_reconfig_script {
+            pairs.push(RespFrame::BulkString(Some(
+                b"client-reconfig-script".to_vec(),
+            )));
+            pairs.push(RespFrame::BulkString(Some(script.clone().into_bytes())));
+        }
+    }
+
+    pairs.extend([
         RespFrame::BulkString(Some(b"num-slaves".to_vec())),
         RespFrame::BulkString(Some(instance.slaves.len().to_string().into_bytes())),
         RespFrame::BulkString(Some(b"num-other-sentinels".to_vec())),
         RespFrame::BulkString(Some(instance.sentinels.len().to_string().into_bytes())),
-    ];
+    ]);
 
     if let Some(ref runid) = instance.runid {
         pairs.push(RespFrame::BulkString(Some(b"runid".to_vec())));
@@ -876,6 +892,22 @@ mod tests {
             RespFrame::Array(Some(items)) => Some(items.len()),
             _ => None,
         }
+    }
+
+    fn info_field(frame: &RespFrame, key: &[u8]) -> Option<String> {
+        let RespFrame::Array(Some(fields)) = frame else {
+            return None;
+        };
+        fields
+            .chunks_exact(2)
+            .find_map(|pair| match (&pair[0], &pair[1]) {
+                (RespFrame::BulkString(Some(name)), RespFrame::BulkString(Some(value)))
+                    if name == key =>
+                {
+                    String::from_utf8(value.clone()).ok()
+                }
+                _ => None,
+            })
     }
 
     fn expected_info_cache_row(age_ms: i64, info: Option<&str>) -> RespFrame {
@@ -1289,6 +1321,62 @@ mod tests {
             return;
         };
         assert_eq!(master.notification_script, None);
+    }
+
+    #[test]
+    fn sentinel_master_replies_include_configured_script_paths() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+        let executable_path = match std::env::current_exe() {
+            Ok(path) => path.to_string_lossy().into_owned(),
+            Err(_) => return,
+        };
+        assert!(!executable_path.is_empty(), "test executable has a path");
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"SET",
+                b"mymaster",
+                b"notification-script",
+                executable_path.as_bytes(),
+                b"client-reconfig-script",
+                executable_path.as_bytes(),
+            ],
+        );
+        assert!(matches!(result, RespFrame::SimpleString(_)));
+
+        let result = dispatch_sentinel_command(&mut state, &[b"MASTER", b"mymaster"]);
+        assert_eq!(
+            info_field(&result, b"notification-script").as_deref(),
+            Some(executable_path.as_str())
+        );
+        assert_eq!(
+            info_field(&result, b"client-reconfig-script").as_deref(),
+            Some(executable_path.as_str())
+        );
+
+        let result = dispatch_sentinel_command(&mut state, &[b"MASTERS"]);
+        assert_eq!(array_len(&result), Some(1));
+        let RespFrame::Array(Some(masters)) = result else {
+            return;
+        };
+        let first = masters.first();
+        assert!(first.is_some(), "MASTERS includes mymaster");
+        let Some(first) = first else {
+            return;
+        };
+        assert_eq!(
+            info_field(first, b"notification-script").as_deref(),
+            Some(executable_path.as_str())
+        );
+        assert_eq!(
+            info_field(first, b"client-reconfig-script").as_deref(),
+            Some(executable_path.as_str())
+        );
     }
 
     #[test]
