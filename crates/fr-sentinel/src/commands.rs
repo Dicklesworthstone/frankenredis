@@ -797,6 +797,7 @@ fn cmd_failover(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     }
     let name = String::from_utf8_lossy(args[0]);
     let now = state.previous_time;
+    let debug_config = state.debug_config.clone();
     let new_epoch = state.current_epoch.saturating_add(1);
     let mut started = false;
     let reply = match state.get_master_mut(&name) {
@@ -805,7 +806,7 @@ fn cmd_failover(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
             if master.flags.contains(InstanceFlags::FAILOVER_IN_PROGRESS) {
                 return RespFrame::Error("-INPROG Failover already in progress".into());
             }
-            if !has_suitable_failover_replica(master) {
+            if !has_suitable_failover_replica(master, now, &debug_config) {
                 return RespFrame::Error("-NOGOODSLAVE No suitable replica to promote".into());
             }
             master.flags.insert(InstanceFlags::FORCE_FAILOVER);
@@ -825,17 +826,53 @@ fn cmd_failover(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     reply
 }
 
-fn has_suitable_failover_replica(master: &crate::SentinelRedisInstance) -> bool {
-    master.slaves.values().any(is_suitable_failover_replica)
+fn has_suitable_failover_replica(
+    master: &crate::SentinelRedisInstance,
+    now_ms: u64,
+    config: &crate::SentinelDebugConfig,
+) -> bool {
+    master
+        .slaves
+        .values()
+        .any(|replica| is_suitable_failover_replica(master, replica, now_ms, config))
 }
 
-fn is_suitable_failover_replica(replica: &crate::SentinelRedisInstance) -> bool {
+fn is_suitable_failover_replica(
+    master: &crate::SentinelRedisInstance,
+    replica: &crate::SentinelRedisInstance,
+    now_ms: u64,
+    config: &crate::SentinelDebugConfig,
+) -> bool {
     use crate::InstanceFlags;
 
-    !replica.flags.contains(InstanceFlags::S_DOWN)
-        && !replica.flags.contains(InstanceFlags::O_DOWN)
-        && !replica.link.disconnected
-        && replica.slave_priority > 0
+    if replica.flags.contains(InstanceFlags::S_DOWN)
+        || replica.flags.contains(InstanceFlags::O_DOWN)
+        || replica.link.disconnected
+        || replica.slave_priority == 0
+    {
+        return false;
+    }
+
+    if now_ms.saturating_sub(replica.link.last_avail_time) > config.ping_period.saturating_mul(5) {
+        return false;
+    }
+
+    let info_validity_time = if master.flags.contains(InstanceFlags::S_DOWN) {
+        config.ping_period.saturating_mul(5)
+    } else {
+        config.info_period.saturating_mul(3)
+    };
+    if now_ms.saturating_sub(replica.info_refresh) > info_validity_time {
+        return false;
+    }
+
+    let mut max_master_down_time = master.down_after_period.saturating_mul(10);
+    if master.flags.contains(InstanceFlags::S_DOWN) {
+        max_master_down_time =
+            max_master_down_time.saturating_add(now_ms.saturating_sub(master.s_down_since_time));
+    }
+
+    replica.master_link_down_time <= max_master_down_time
 }
 
 fn cmd_pending_scripts(state: &SentinelState) -> RespFrame {

@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
-use crate::{FailoverState, InstanceFlags, LinkStatus, SentinelRedisInstance, SentinelState};
+use crate::{
+    FailoverState, INFO_PERIOD_MS, InstanceFlags, LinkStatus, PING_PERIOD_MS,
+    SentinelRedisInstance, SentinelState,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlaveScore {
@@ -26,10 +29,21 @@ impl SlaveScore {
 }
 
 pub fn select_slave(master: &SentinelRedisInstance) -> Option<String> {
+    select_slave_at(master, 0, PING_PERIOD_MS, INFO_PERIOD_MS)
+}
+
+pub fn select_slave_at(
+    master: &SentinelRedisInstance,
+    now_ms: u64,
+    ping_period_ms: u64,
+    info_period_ms: u64,
+) -> Option<String> {
     let mut candidates: Vec<SlaveScore> = master
         .slaves
         .iter()
-        .filter(|(_, slave)| is_slave_eligible(slave))
+        .filter(|(_, slave)| {
+            is_slave_eligible(master, slave, now_ms, ping_period_ms, info_period_ms)
+        })
         .map(|(key, slave)| SlaveScore::from_instance(key, slave))
         .collect();
 
@@ -42,7 +56,13 @@ pub fn select_slave(master: &SentinelRedisInstance) -> Option<String> {
     Some(candidates[0].key.clone())
 }
 
-fn is_slave_eligible(slave: &SentinelRedisInstance) -> bool {
+fn is_slave_eligible(
+    master: &SentinelRedisInstance,
+    slave: &SentinelRedisInstance,
+    now_ms: u64,
+    ping_period_ms: u64,
+    info_period_ms: u64,
+) -> bool {
     if slave.is_s_down() || slave.is_o_down() {
         return false;
     }
@@ -55,6 +75,29 @@ fn is_slave_eligible(slave: &SentinelRedisInstance) -> bool {
     if !slave.flags.contains(InstanceFlags::SLAVE) {
         return false;
     }
+
+    if now_ms.saturating_sub(slave.link.last_avail_time) > ping_period_ms.saturating_mul(5) {
+        return false;
+    }
+
+    let info_validity_time = if master.flags.contains(InstanceFlags::S_DOWN) {
+        ping_period_ms.saturating_mul(5)
+    } else {
+        info_period_ms.saturating_mul(3)
+    };
+    if now_ms.saturating_sub(slave.info_refresh) > info_validity_time {
+        return false;
+    }
+
+    let mut max_master_down_time = master.down_after_period.saturating_mul(10);
+    if master.flags.contains(InstanceFlags::S_DOWN) {
+        max_master_down_time =
+            max_master_down_time.saturating_add(now_ms.saturating_sub(master.s_down_since_time));
+    }
+    if slave.master_link_down_time > max_master_down_time {
+        return false;
+    }
+
     true
 }
 
