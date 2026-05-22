@@ -12541,19 +12541,37 @@ impl Store {
                     }
                 }
                 Value::Stream(entries) => {
-                    // Each stream entry becomes a separate XADD command.
-                    for ((ms, seq), fields) in entries {
-                        let id = format!("{ms}-{seq}");
-                        let mut argv = vec![b"XADD".to_vec(), logical_key.clone(), id.into_bytes()];
-                        for (fname, fval) in fields {
-                            argv.push(fname.clone());
-                            argv.push(fval.clone());
+                    if entries.is_empty() {
+                        // Redis aof.c::rewriteStreamObject preserves an
+                        // empty stream with an XADD that immediately trims
+                        // itself away. This creates the stream key before
+                        // the following XSETID / XGROUP commands replay.
+                        commands.push(vec![
+                            b"XADD".to_vec(),
+                            logical_key.clone(),
+                            b"MAXLEN".to_vec(),
+                            b"0".to_vec(),
+                            b"0-1".to_vec(),
+                            b"x".to_vec(),
+                            b"y".to_vec(),
+                        ]);
+                    } else {
+                        // Each stream entry becomes a separate XADD command.
+                        for ((ms, seq), fields) in entries {
+                            let id = format!("{ms}-{seq}");
+                            let mut argv =
+                                vec![b"XADD".to_vec(), logical_key.clone(), id.into_bytes()];
+                            for (fname, fval) in fields {
+                                argv.push(fname.clone());
+                                argv.push(fval.clone());
+                            }
+                            commands.push(argv);
                         }
-                        commands.push(argv);
                     }
 
-                    // Emit XSETID only if the high watermark exceeds the max entry
-                    // or stream metadata differs from the replay-derived defaults.
+                    // Redis always appends XSETID after stream XADD records
+                    // so last_id, entries_added, and max_deleted_entry_id
+                    // survive trims, deletes, and empty streams.
                     let max_entry_id = entries.keys().last().copied();
                     let watermark = self
                         .stream_last_ids
@@ -12564,25 +12582,17 @@ impl Store {
                     let entries_added =
                         self.stream_entries_added_value(&physical_key, entries.len());
                     let max_deleted = self.stream_max_deleted_id(&physical_key).unwrap_or((0, 0));
-                    if max_entry_id.is_none_or(|max| watermark > max)
-                        || entries_added != u64::try_from(entries.len()).unwrap_or(u64::MAX)
-                        || max_deleted != (0, 0)
-                    {
-                        let (ms, seq) = watermark;
-                        let mut xsetid = vec![
-                            b"XSETID".to_vec(),
-                            logical_key.clone(),
-                            format!("{ms}-{seq}").into_bytes(),
-                            b"ENTRIESADDED".to_vec(),
-                            entries_added.to_string().into_bytes(),
-                        ];
-                        if max_deleted != (0, 0) {
-                            let (deleted_ms, deleted_seq) = max_deleted;
-                            xsetid.push(b"MAXDELETEDID".to_vec());
-                            xsetid.push(format!("{deleted_ms}-{deleted_seq}").into_bytes());
-                        }
-                        commands.push(xsetid);
-                    }
+                    let (ms, seq) = watermark;
+                    let (deleted_ms, deleted_seq) = max_deleted;
+                    commands.push(vec![
+                        b"XSETID".to_vec(),
+                        logical_key.clone(),
+                        format!("{ms}-{seq}").into_bytes(),
+                        b"ENTRIESADDED".to_vec(),
+                        entries_added.to_string().into_bytes(),
+                        b"MAXDELETEDID".to_vec(),
+                        format!("{deleted_ms}-{deleted_seq}").into_bytes(),
+                    ]);
 
                     // Emit XGROUP CREATE for each consumer group.
                     if let Some(groups) = self.stream_groups.get(&physical_key) {
@@ -22627,7 +22637,7 @@ mod tests {
     }
 
     #[test]
-    fn aof_commands_stream_key() {
+    fn aof_commands_stream_key() -> Result<(), String> {
         let mut store = Store::new();
         store
             .xadd(
@@ -22636,14 +22646,112 @@ mod tests {
                 &[(b"name".to_vec(), b"val".to_vec())],
                 100,
             )
-            .unwrap();
+            .map_err(|err| format!("xadd failed: {err:?}"))?;
         let cmds = store.to_aof_commands(100);
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0][0], b"XADD");
-        assert_eq!(cmds[0][1], b"mystream");
-        assert_eq!(cmds[0][2], b"1000-0");
-        assert_eq!(cmds[0][3], b"name");
-        assert_eq!(cmds[0][4], b"val");
+        let mut commands = cmds.iter();
+        let Some(xadd) = commands.next() else {
+            return Err("missing XADD".into());
+        };
+        let Some(_xsetid) = commands.next() else {
+            return Err("missing XSETID".into());
+        };
+        if commands.next().is_some() {
+            return Err("unexpected extra stream AOF command".into());
+        }
+        match xadd.len().cmp(&5) {
+            std::cmp::Ordering::Equal => {}
+            _ => return Err("stream XADD argument count mismatch".into()),
+        }
+        for (actual, expected) in xadd.iter().zip([
+            b"XADD".as_slice(),
+            b"mystream".as_slice(),
+            b"1000-0".as_slice(),
+            b"name".as_slice(),
+            b"val".as_slice(),
+        ]) {
+            if !super::eq_ascii_ci(actual, expected) {
+                return Err("stream XADD argument mismatch".into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn aof_commands_empty_stream_uses_upstream_placeholder() -> Result<(), String> {
+        let mut store = Store::new();
+        store
+            .xgroup_create(b"s", b"g", (0, 0), true, 100)
+            .map_err(|err| format!("xgroup create failed: {err:?}"))?;
+
+        let cmds = store.to_aof_commands(100);
+        let expected = [
+            (
+                "placeholder XADD",
+                vec![
+                    (b"XADD".as_slice(), "command"),
+                    (b"s".as_slice(), "key"),
+                    (b"MAXLEN".as_slice(), "trim keyword"),
+                    (b"0".as_slice(), "trim length"),
+                    (b"0-1".as_slice(), "placeholder id"),
+                    (b"x".as_slice(), "placeholder field"),
+                    (b"y".as_slice(), "placeholder value"),
+                ],
+            ),
+            (
+                "XSETID",
+                vec![
+                    (b"XSETID".as_slice(), "command"),
+                    (b"s".as_slice(), "key"),
+                    (b"0-0".as_slice(), "last id"),
+                    (b"ENTRIESADDED".as_slice(), "entries keyword"),
+                    (b"0".as_slice(), "entries count"),
+                    (b"MAXDELETEDID".as_slice(), "deleted keyword"),
+                    (b"0-0".as_slice(), "deleted id"),
+                ],
+            ),
+            (
+                "XGROUP CREATE",
+                vec![
+                    (b"XGROUP".as_slice(), "command"),
+                    (b"CREATE".as_slice(), "subcommand"),
+                    (b"s".as_slice(), "key"),
+                    (b"g".as_slice(), "group"),
+                    (b"0-0".as_slice(), "last id"),
+                ],
+            ),
+        ];
+
+        match cmds.len().cmp(&expected.len()) {
+            std::cmp::Ordering::Equal => {}
+            _ => {
+                return Err(format!(
+                    "empty stream emitted {} commands, expected {}",
+                    cmds.len(),
+                    expected.len()
+                ));
+            }
+        }
+        for (actual, (command_name, expected_args)) in cmds.iter().zip(expected.iter()) {
+            match actual.len().cmp(&expected_args.len()) {
+                std::cmp::Ordering::Equal => {}
+                _ => {
+                    return Err(format!(
+                        "{command_name} has {} args, expected {}",
+                        actual.len(),
+                        expected_args.len()
+                    ));
+                }
+            }
+            for (actual_arg, (expected_arg, label)) in actual.iter().zip(expected_args.iter()) {
+                if !super::eq_ascii_ci(actual_arg, expected_arg) {
+                    return Err(format!(
+                        "{command_name} {label} was {:?}",
+                        String::from_utf8_lossy(actual_arg)
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -22697,22 +22805,22 @@ mod tests {
             .xgroup_create(b"s", b"grp2", (1, 0), false, 100)
             .unwrap();
         let cmds = store.to_aof_commands(100);
-        // XADD + 2x XGROUP CREATE (no XSETID since none was explicitly set)
-        assert_eq!(cmds.len(), 3);
+        // XADD + XSETID + 2x XGROUP CREATE, matching Redis AOF rewrite.
+        assert_eq!(cmds.len(), 4);
         assert_eq!(cmds[0][0], b"XADD");
         // Groups sorted by name
-        assert_eq!(cmds[1][0], b"XGROUP");
-        assert_eq!(cmds[1][1], b"CREATE");
-        assert_eq!(cmds[1][2], b"s");
-        assert_eq!(cmds[1][3], b"grp1");
-        assert_eq!(cmds[1][4], b"0-0");
-        assert_eq!(cmds[1][5], b"ENTRIESREAD");
-        assert_eq!(cmds[1][6], b"0");
         assert_eq!(cmds[2][0], b"XGROUP");
         assert_eq!(cmds[2][1], b"CREATE");
         assert_eq!(cmds[2][2], b"s");
-        assert_eq!(cmds[2][3], b"grp2");
-        assert_eq!(cmds[2][4], b"1-0");
+        assert_eq!(cmds[2][3], b"grp1");
+        assert_eq!(cmds[2][4], b"0-0");
+        assert_eq!(cmds[2][5], b"ENTRIESREAD");
+        assert_eq!(cmds[2][6], b"0");
+        assert_eq!(cmds[3][0], b"XGROUP");
+        assert_eq!(cmds[3][1], b"CREATE");
+        assert_eq!(cmds[3][2], b"s");
+        assert_eq!(cmds[3][3], b"grp2");
+        assert_eq!(cmds[3][4], b"1-0");
     }
 
     #[test]
@@ -22758,12 +22866,12 @@ mod tests {
             .expect("xclaim must succeed");
 
         let cmds = store.to_aof_commands(100);
-        assert_eq!(cmds.len(), 6);
+        assert_eq!(cmds.len(), 7);
         assert_eq!(cmds[0][0], b"XADD");
         // XGROUP CREATE replay carries the ENTRIESREAD trailer so the
         // restored group preserves its read counter. (frankenredis-ic8v)
         assert_eq!(
-            cmds[1],
+            cmds[2],
             vec![
                 b"XGROUP".to_vec(),
                 b"CREATE".to_vec(),
@@ -22775,7 +22883,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            cmds[2],
+            cmds[3],
             vec![
                 b"XGROUP".to_vec(),
                 b"CREATECONSUMER".to_vec(),
@@ -22785,7 +22893,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            cmds[3],
+            cmds[4],
             vec![
                 b"XGROUP".to_vec(),
                 b"CREATECONSUMER".to_vec(),
@@ -22795,7 +22903,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            cmds[4],
+            cmds[5],
             vec![
                 b"XGROUP".to_vec(),
                 b"CREATECONSUMER".to_vec(),
@@ -22805,7 +22913,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            cmds[5],
+            cmds[6],
             vec![
                 b"XCLAIM".to_vec(),
                 b"s".to_vec(),
@@ -25679,14 +25787,29 @@ mod tests {
                         .zadd(&key, &entries, METAMORPHIC_NOW_MS)
                         .expect("ZADD replay must stay valid");
                 } else if eq_ascii_ci(command, b"XADD") {
-                    let id = parse_stream_id_arg(&argv[2]);
-                    let fields: Vec<(Vec<u8>, Vec<u8>)> = argv[3..]
+                    let (id_arg, field_args, max_len): (&[u8], &[Vec<u8>], Option<usize>) =
+                        match argv.as_slice() {
+                            [_, _, option, trim_len, id_arg, field_args @ ..]
+                                if eq_ascii_ci(option, b"MAXLEN") =>
+                            {
+                                (id_arg, field_args, Some(parse_usize_arg(trim_len)))
+                            }
+                            [_, _, id_arg, field_args @ ..] => (id_arg, field_args, None),
+                            _ => (&[][..], &[][..], None),
+                        };
+                    let id = parse_stream_id_arg(id_arg);
+                    let fields: Vec<(Vec<u8>, Vec<u8>)> = field_args
                         .chunks_exact(2)
                         .map(|pair| (pair[0].clone(), pair[1].clone()))
                         .collect();
                     store
                         .xadd(&key, id, &fields, METAMORPHIC_NOW_MS)
                         .expect("XADD replay must stay valid");
+                    if let Some(max_len) = max_len {
+                        store
+                            .xtrim(&key, max_len, None, METAMORPHIC_NOW_MS)
+                            .expect("XADD MAXLEN replay trim must stay valid");
+                    }
                 } else if eq_ascii_ci(command, b"XSETID") {
                     let mut entries_added = None;
                     let mut max_deleted_id = None;
