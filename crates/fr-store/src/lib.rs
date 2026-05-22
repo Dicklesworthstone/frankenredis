@@ -12836,20 +12836,26 @@ fn restore_stream_groups(
             }
         }
 
-        let pending = group
-            .pending
-            .into_iter()
-            .map(|pending| {
-                (
-                    (pending.entry_id_ms, pending.entry_id_seq),
+        let mut pending = BTreeMap::new();
+        for pending_entry in group.pending {
+            if !consumers_set.contains(&pending_entry.consumer) {
+                return Err(StoreError::InvalidDumpPayload);
+            }
+            let pending_id = (pending_entry.entry_id_ms, pending_entry.entry_id_seq);
+            if pending
+                .insert(
+                    pending_id,
                     StreamPendingEntry {
-                        consumer: pending.consumer,
-                        deliveries: pending.deliveries,
-                        last_delivered_ms: pending.last_delivered_ms,
+                        consumer: pending_entry.consumer,
+                        deliveries: pending_entry.deliveries,
+                        last_delivered_ms: pending_entry.last_delivered_ms,
                     },
                 )
-            })
-            .collect();
+                .is_some()
+            {
+                return Err(StoreError::InvalidDumpPayload);
+            }
+        }
         // (frankenredis-p4dpj) Persisted dumps don't carry
         // per-consumer timestamps yet; seed with defaults so
         // XINFO CONSUMERS still produces a stable shape.
@@ -22250,6 +22256,78 @@ mod tests {
         store
             .restore_key(b"valid", 0, &valid_payload, false, 100)
             .map_err(|err| format!("valid stream groups must restore: {err:?}"))?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn restore_rejects_duplicate_stream_pending_entry_ids() -> Result<(), String> {
+        fn pending_entry(
+            consumer: &[u8],
+            deliveries: u64,
+            last_delivered_ms: u64,
+        ) -> fr_persist::RdbStreamPendingEntry {
+            fr_persist::RdbStreamPendingEntry {
+                entry_id_ms: 1,
+                entry_id_seq: 0,
+                consumer: consumer.to_vec(),
+                deliveries,
+                last_delivered_ms,
+            }
+        }
+
+        fn stream_dump_with_pending(
+            pending: Vec<fr_persist::RdbStreamPendingEntry>,
+        ) -> Result<Vec<u8>, String> {
+            let entries = vec![(1, 0, vec![(b"f".to_vec(), b"v".to_vec())])];
+            let groups = vec![fr_persist::RdbStreamConsumerGroup {
+                name: b"g".to_vec(),
+                last_delivered_id_ms: 1,
+                last_delivered_id_seq: 0,
+                entries_read: Some(1),
+                consumers: vec![b"alice".to_vec()],
+                pending,
+            }];
+            let stream_payload = fr_persist::encode_upstream_stream_listpacks3_payload(
+                &entries,
+                Some((1, 0)),
+                &groups,
+                Some(1),
+            )
+            .ok_or_else(|| "stream payload encoding failed".to_string())?;
+            let mut body = vec![RDB_TYPE_STREAM_LISTPACKS_3];
+            body.extend_from_slice(&stream_payload);
+            Ok(append_dump_footer(body))
+        }
+
+        let duplicate_payload = stream_dump_with_pending(vec![
+            pending_entry(b"alice", 1, 100),
+            pending_entry(b"alice", 2, 200),
+        ])?;
+        let mut duplicate_store = Store::new();
+        match duplicate_store.restore_key(b"duplicate-pel", 0, &duplicate_payload, false, 100) {
+            Err(StoreError::InvalidDumpPayload) => {}
+            other => {
+                return Err(format!(
+                    "duplicate stream PEL entry IDs should fail restore, got {other:?}"
+                ));
+            }
+        }
+
+        let valid_payload = stream_dump_with_pending(vec![pending_entry(b"alice", 1, 100)])?;
+        let mut valid_store = Store::new();
+        valid_store
+            .restore_key(b"valid-pel", 0, &valid_payload, false, 100)
+            .map_err(|err| format!("valid stream PEL should restore: {err:?}"))?;
+        let summary = valid_store
+            .xpending_summary(b"valid-pel", b"g", 100)
+            .map_err(|err| format!("pending summary should succeed: {err:?}"))?
+            .ok_or_else(|| "pending summary should be present".to_string())?;
+        if summary.0 != 1 {
+            return Err(format!(
+                "valid stream PEL should contain one entry, got {summary:?}"
+            ));
+        }
 
         Ok(())
     }
