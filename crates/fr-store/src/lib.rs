@@ -5227,20 +5227,27 @@ impl Store {
     pub fn hrandfield(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
         self.drop_if_expired(key, now_ms);
         self.drop_expired_hash_fields(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
         let rand_val = self.next_rand();
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::Hash(m) => {
-                    if m.is_empty() {
-                        return Ok(None);
-                    }
-                    let idx = (rand_val as usize) % m.len();
-                    let field = m.keys().nth(idx).cloned();
-                    entry.touch(now_ms);
-                    Ok(field)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_val);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                entry.touch(now_ms);
+                match &entry.value {
+                    Value::Hash(m) => {
+                        if m.is_empty() {
+                            return Ok(None);
+                        }
+                        let idx = (rand_val as usize) % m.len();
+                        Ok(m.keys().nth(idx).cloned())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(None),
         }
     }
@@ -5263,8 +5270,20 @@ impl Store {
         // But we can't because of the borrow.
         // So let's handle the hash lookup first, get the fields, and then do the work.
 
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let lfu_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         let mut result_type = None;
         if let Some(entry) = self.entries.get_mut(key) {
+            if lfu_tracking_enabled {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
+            }
+            entry.touch(now_ms);
             match &entry.value {
                 Value::Hash(m) => {
                     if m.is_empty() {
@@ -5272,7 +5291,6 @@ impl Store {
                     }
                     let fields: Vec<(Vec<u8>, Vec<u8>)> =
                         m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                    entry.touch(now_ms);
                     result_type = Some(fields);
                 }
                 _ => return Err(StoreError::WrongType),
@@ -19002,6 +19020,74 @@ mod tests {
         match store.object_freq(b"h", 1) {
             Some(6) => {}
             other => return Err(format!("HSTRLEN should bump LFU frequency, got {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn hrandfield_existing_hash_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .hset(b"h", b"f".to_vec(), b"v".to_vec(), 0)
+            .map_err(|err| format!("seed hash failed: {err:?}"))?;
+
+        match store.object_freq(b"h", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new hash LFU frequency mismatch: {other:?}")),
+        }
+        match store
+            .hrandfield(b"h", 1)
+            .map_err(|err| format!("hrandfield failed: {err:?}"))?
+        {
+            Some(field) => match field.as_slice() {
+                b"f" => {}
+                other => return Err(format!("HRANDFIELD field mismatch: {other:?}")),
+            },
+            other => return Err(format!("HRANDFIELD result mismatch: {other:?}")),
+        }
+        match store.object_freq(b"h", 1) {
+            Some(6) => {}
+            other => {
+                return Err(format!(
+                    "HRANDFIELD should bump LFU frequency, got {other:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn hrandfield_count_existing_hash_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .hset(b"h", b"f".to_vec(), b"v".to_vec(), 0)
+            .map_err(|err| format!("seed hash failed: {err:?}"))?;
+
+        match store.object_freq(b"h", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new hash LFU frequency mismatch: {other:?}")),
+        }
+        let pairs = store
+            .hrandfield_count(b"h", 1, 1)
+            .map_err(|err| format!("hrandfield count failed: {err:?}"))?;
+        match pairs.as_slice() {
+            [(field, value)] => match (field.as_slice(), value.as_slice()) {
+                (b"f", b"v") => {}
+                other => return Err(format!("HRANDFIELD count pair mismatch: {other:?}")),
+            },
+            other => return Err(format!("HRANDFIELD count result mismatch: {other:?}")),
+        }
+        match store.object_freq(b"h", 1) {
+            Some(6) => {}
+            other => {
+                return Err(format!(
+                    "HRANDFIELD count should bump LFU frequency, got {other:?}"
+                ));
+            }
         }
         Ok(())
     }
