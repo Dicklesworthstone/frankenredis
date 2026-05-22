@@ -12246,6 +12246,9 @@ impl Store {
                         1 => {
                             let (item, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                             cursor += consumed;
+                            if item.is_empty() {
+                                return Err(StoreError::InvalidDumpPayload);
+                            }
                             list.push_back(item);
                         }
                         2 => {
@@ -21529,6 +21532,45 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn restore_rejects_empty_quicklist2_plain_node() -> Result<(), &'static str> {
+        let mut body = vec![RDB_TYPE_LIST_QUICKLIST_2];
+        encode_length(&mut body, 1);
+        encode_length(&mut body, 1);
+        append_raw_dump_bulk(&mut body, b"");
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        match store.restore_key(b"ql", 0, &payload, false, 100) {
+            Err(StoreError::InvalidDumpPayload) => {}
+            _ => return Err("empty quicklist2 PLAIN node restored successfully"),
+        }
+        if store.exists(b"ql", 100) {
+            return Err("empty quicklist2 PLAIN node created a key");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn restore_preserves_empty_listpack_element_in_quicklist2() -> Result<(), &'static str> {
+        let listpack = encode_listpack_strings(&[b"".as_slice()]).ok_or("encode listpack")?;
+        let mut body = vec![RDB_TYPE_LIST_QUICKLIST_2];
+        encode_length(&mut body, 1);
+        encode_length(&mut body, 2);
+        append_raw_dump_bulk(&mut body, &listpack);
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        if store.restore_key(b"ql", 0, &payload, false, 100).is_err() {
+            return Err("quicklist2 PACKED empty element was rejected");
+        }
+        match store.lrange(b"ql", 0, -1, 100) {
+            Ok(items) if matches!(items.as_slice(), [item] if item.is_empty()) => Ok(()),
+            _ => Err("quicklist2 PACKED empty element restored incorrectly"),
+        }
     }
 
     #[test]
