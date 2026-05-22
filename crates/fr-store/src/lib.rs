@@ -6377,26 +6377,40 @@ impl Store {
             return Err(StoreError::WrongType);
         }
 
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let source_rand_sample = if lfu_tracking_enabled {
+            self.next_rand()
+        } else {
+            0
+        };
+
         // Pop from source.
         let popped = match self.entries.get_mut(source) {
-            Some(entry) => match &mut entry.value {
-                Value::List(l) => {
-                    let val = if eq_ascii_ci(wherefrom, b"LEFT") {
-                        l.pop_front()
-                    } else {
-                        l.pop_back()
-                    };
-                    if val.is_some() && !l.is_empty() {
-                        Self::mark_digest_stale_fields(
-                            &mut self.digest_stale,
-                            &mut self.digest_mutations,
-                        );
-                        entry.touch_write(now_ms);
-                    }
-                    val
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, source_rand_sample);
                 }
-                _ => return Err(StoreError::WrongType),
-            },
+                match &mut entry.value {
+                    Value::List(l) => {
+                        let val = if eq_ascii_ci(wherefrom, b"LEFT") {
+                            l.pop_front()
+                        } else {
+                            l.pop_back()
+                        };
+                        if val.is_some() && !l.is_empty() {
+                            Self::mark_digest_stale_fields(
+                                &mut self.digest_stale,
+                                &mut self.digest_mutations,
+                            );
+                            entry.touch_write(now_ms);
+                        }
+                        val
+                    }
+                    _ => return Err(StoreError::WrongType),
+                }
+            }
             None => return Ok(None),
         };
         let Some(val) = popped else {
@@ -6420,22 +6434,32 @@ impl Store {
             self.stream_last_ids.remove(source);
         }
         // Push to destination.
+        let dest_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(destination) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(destination) {
-            Some(entry) => match &mut entry.value {
-                Value::List(l) => {
-                    if eq_ascii_ci(whereto, b"LEFT") {
-                        l.push_front(val.clone());
-                    } else {
-                        l.push_back(val.clone());
-                    }
-                    Self::mark_digest_stale_fields(
-                        &mut self.digest_stale,
-                        &mut self.digest_mutations,
-                    );
-                    entry.touch_write(now_ms);
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, dest_rand_sample);
                 }
-                _ => return Err(StoreError::WrongType),
-            },
+                match &mut entry.value {
+                    Value::List(l) => {
+                        if eq_ascii_ci(whereto, b"LEFT") {
+                            l.push_front(val.clone());
+                        } else {
+                            l.push_back(val.clone());
+                        }
+                        Self::mark_digest_stale_fields(
+                            &mut self.digest_stale,
+                            &mut self.digest_mutations,
+                        );
+                        entry.touch_write(now_ms);
+                    }
+                    _ => return Err(StoreError::WrongType),
+                }
+            }
             None => {
                 let mut l = VecDeque::new();
                 if eq_ascii_ci(whereto, b"LEFT") {
@@ -20092,6 +20116,36 @@ mod tests {
         match store.object_freq(b"s", 1) {
             Some(6) => {}
             other => return Err(format!("GETEX LFU mismatch: {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lmove_bumps_lfu_frequency_for_source_and_destination() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .lpush(b"src", &[b"v1".to_vec(), b"v2".to_vec()], 0)
+            .unwrap();
+        store.lpush(b"dst", &[b"v3".to_vec()], 0).unwrap();
+
+        match store.object_freq(b"src", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new source LFU frequency mismatch: {other:?}")),
+        }
+        match store.object_freq(b"dst", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new dest LFU frequency mismatch: {other:?}")),
+        }
+        let _moved = store.lmove(b"src", b"dst", b"LEFT", b"RIGHT", 1).unwrap();
+        match store.object_freq(b"src", 1) {
+            Some(6) => {}
+            other => return Err(format!("LMOVE source LFU mismatch: {other:?}")),
+        }
+        match store.object_freq(b"dst", 1) {
+            Some(6) => {}
+            other => return Err(format!("LMOVE dest LFU mismatch: {other:?}")),
         }
         Ok(())
     }
