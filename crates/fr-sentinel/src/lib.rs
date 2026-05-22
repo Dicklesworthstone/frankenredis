@@ -462,12 +462,16 @@ impl SentinelState {
             self.previous_time = now;
             return;
         }
-        let delta = now.abs_diff(self.previous_time);
-        if delta > self.debug_config.tilt_trigger && !self.tilt {
+        let moved_backward = now < self.previous_time;
+        let moved_too_far_forward = now
+            .checked_sub(self.previous_time)
+            .is_some_and(|delta| delta > self.debug_config.tilt_trigger);
+        if moved_backward || moved_too_far_forward {
             self.tilt = true;
             self.tilt_start_time = now;
-        }
-        if self.tilt && now.saturating_sub(self.tilt_start_time) > self.debug_config.tilt_period {
+        } else if self.tilt
+            && now.saturating_sub(self.tilt_start_time) > self.debug_config.tilt_period
+        {
             self.tilt = false;
         }
         self.previous_time = now;
@@ -550,6 +554,23 @@ mod tests {
         assert!(state.tilt);
 
         state.check_tilt(36000);
+        assert!(!state.tilt);
+    }
+
+    #[test]
+    fn tilt_triggers_on_backward_clock_step_and_refreshes_start() {
+        let mut state = SentinelState::new();
+        state.check_tilt(1000);
+
+        state.check_tilt(999);
+        assert!(state.tilt);
+        assert_eq!(state.tilt_start_time, 999);
+
+        state.check_tilt(4000);
+        assert!(state.tilt);
+        assert_eq!(state.tilt_start_time, 4000);
+
+        state.check_tilt(34_001);
         assert!(!state.tilt);
     }
 
