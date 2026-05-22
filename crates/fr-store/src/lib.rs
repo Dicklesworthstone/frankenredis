@@ -11192,12 +11192,23 @@ impl Store {
         aggregate: &[u8],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
         let mut combined: HashMap<Vec<u8>, f64> = HashMap::new();
 
         for (i, &key) in keys.iter().enumerate() {
             self.drop_if_expired(key, now_ms);
             let weight = weights.get(i).copied().unwrap_or(1.0);
+            let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+                self.next_rand()
+            } else {
+                0
+            };
             if let Some(entry) = self.entries.get_mut(key) {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
                 let mut add_member = |member: &Vec<u8>, score: f64| {
                     let weighted = score * weight;
                     use std::collections::hash_map::Entry as HEntry;
@@ -11270,6 +11281,10 @@ impl Store {
             return Ok(0);
         }
 
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+
         let mut min_card = usize::MAX;
         let mut min_idx = 0;
         let mut has_empty = false;
@@ -11300,9 +11315,17 @@ impl Store {
 
         if has_empty {
             for key in keys {
+                let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(*key) {
+                    self.next_rand()
+                } else {
+                    0
+                };
                 if let Some(entry) = self.entries.get_mut(*key)
                     && matches!(entry.value, Value::SortedSet(_) | Value::Set(_))
                 {
+                    if lfu_tracking_enabled {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    }
                     entry.touch(now_ms);
                 }
             }
@@ -11315,8 +11338,16 @@ impl Store {
             return Ok(0);
         }
 
+        let rand_sample_min = if lfu_tracking_enabled && self.entries.contains_key(keys[min_idx]) {
+            self.next_rand()
+        } else {
+            0
+        };
         let mut result: HashMap<Vec<u8>, f64> = match self.entries.get_mut(keys[min_idx]) {
             Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample_min);
+                }
                 let w = weights.get(min_idx).copied().unwrap_or(1.0);
                 let res = match &entry.value {
                     Value::SortedSet(zs) => {
@@ -11337,39 +11368,58 @@ impl Store {
             }
             let weight = weights.get(i).copied().unwrap_or(1.0);
             if result.is_empty() {
+                let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+                    self.next_rand()
+                } else {
+                    0
+                };
                 if let Some(entry) = self.entries.get_mut(key)
                     && matches!(entry.value, Value::SortedSet(_) | Value::Set(_))
                 {
+                    if lfu_tracking_enabled {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    }
                     entry.touch(now_ms);
                 }
                 continue;
             }
+            let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+                self.next_rand()
+            } else {
+                0
+            };
             match self.entries.get_mut(key) {
-                Some(entry) => match &entry.value {
-                    Value::SortedSet(zs) => {
-                        result.retain(|member, score| {
-                            if let Some(&other_score) = zs.dict.get(member) {
-                                *score = aggregate_scores(*score, other_score * weight, aggregate);
-                                true
-                            } else {
-                                false
-                            }
-                        });
-                        entry.touch(now_ms);
+                Some(entry) => {
+                    if lfu_tracking_enabled {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
-                    Value::Set(s) => {
-                        result.retain(|member, score| {
-                            if s.contains(member) {
-                                *score = aggregate_scores(*score, 1.0 * weight, aggregate);
-                                true
-                            } else {
-                                false
-                            }
-                        });
-                        entry.touch(now_ms);
+                    match &entry.value {
+                        Value::SortedSet(zs) => {
+                            result.retain(|member, score| {
+                                if let Some(&other_score) = zs.dict.get(member) {
+                                    *score =
+                                        aggregate_scores(*score, other_score * weight, aggregate);
+                                    true
+                                } else {
+                                    false
+                                }
+                            });
+                            entry.touch(now_ms);
+                        }
+                        Value::Set(s) => {
+                            result.retain(|member, score| {
+                                if s.contains(member) {
+                                    *score = aggregate_scores(*score, 1.0 * weight, aggregate);
+                                    true
+                                } else {
+                                    false
+                                }
+                            });
+                            entry.touch(now_ms);
+                        }
+                        _ => return Err(StoreError::WrongType),
                     }
-                    _ => return Err(StoreError::WrongType),
-                },
+                }
                 None => {
                     result.clear();
                 }
