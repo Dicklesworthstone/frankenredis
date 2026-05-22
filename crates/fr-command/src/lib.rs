@@ -194,9 +194,7 @@ pub fn command_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
         return vec![1];
     }
 
-    if cmd_name.eq_ignore_ascii_case("RESTORE")
-        || cmd_name.eq_ignore_ascii_case("RESTORE-ASKING")
-    {
+    if cmd_name.eq_ignore_ascii_case("RESTORE") || cmd_name.eq_ignore_ascii_case("RESTORE-ASKING") {
         if argv.len() < 2 {
             return Vec::new();
         }
@@ -409,9 +407,7 @@ pub fn command_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
             keys.push(3);
         }
         // Multi-key form: scan for KEYS sentinel and consume the tail.
-        if let Some(keys_idx) = argv
-            .iter()
-            .position(|a| a.eq_ignore_ascii_case(b"KEYS"))
+        if let Some(keys_idx) = argv.iter().position(|a| a.eq_ignore_ascii_case(b"KEYS"))
             && keys_idx + 1 < argv.len()
         {
             for i in (keys_idx + 1)..argv.len() {
@@ -645,9 +641,7 @@ fn validate_numkeys_argument(
         || cmd_name.eq_ignore_ascii_case("ZUNION")
     {
         Some((1, 2))
-    } else if cmd_name.eq_ignore_ascii_case("BLMPOP")
-        || cmd_name.eq_ignore_ascii_case("BZMPOP")
-    {
+    } else if cmd_name.eq_ignore_ascii_case("BLMPOP") || cmd_name.eq_ignore_ascii_case("BZMPOP") {
         Some((2, 3))
     } else if cmd_name.eq_ignore_ascii_case("ZDIFFSTORE")
         || cmd_name.eq_ignore_ascii_case("ZINTERSTORE")
@@ -3702,7 +3696,6 @@ fn hstrlen(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     Ok(RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)))
 }
 
-
 fn lpush(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("LPUSH"));
@@ -4451,7 +4444,9 @@ fn zscore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::WrongArity("ZSCORE"));
     }
     match store.zscore(&argv[1], &argv[2], now_ms)? {
-        Some(score) => Ok(RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes()))),
+        Some(score) => Ok(RespFrame::BulkString(Some(
+            redis_score_to_string(score).into_bytes(),
+        ))),
         None => Ok(RespFrame::BulkString(None)),
     }
 }
@@ -4635,7 +4630,11 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                 pairs = pairs.into_iter().skip(offset).collect();
             }
         }
-        zrange_emit_with_resp(pairs, withscores, store.dispatch_client_ctx.resp_protocol_version)
+        zrange_emit_with_resp(
+            pairs,
+            withscores,
+            store.dispatch_client_ctx.resp_protocol_version,
+        )
     } else if bylex {
         let min_lex = &argv[2];
         let max_lex = &argv[3];
@@ -4730,7 +4729,9 @@ fn zrange_emit_with_resp(
         let mut frames = Vec::with_capacity(pairs.len() * 2);
         for (member, score) in pairs {
             frames.push(RespFrame::BulkString(Some(member)));
-            frames.push(RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())));
+            frames.push(RespFrame::BulkString(Some(
+                redis_score_to_string(score).into_bytes(),
+            )));
         }
         Ok(RespFrame::Array(Some(frames)))
     }
@@ -4822,7 +4823,11 @@ fn zrangebyscore(
             pairs = pairs.into_iter().skip(offset).collect();
         }
     }
-    zrange_emit_with_resp(pairs, withscores, store.dispatch_client_ctx.resp_protocol_version)
+    zrange_emit_with_resp(
+        pairs,
+        withscores,
+        store.dispatch_client_ctx.resp_protocol_version,
+    )
 }
 
 fn zcount(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -4872,10 +4877,7 @@ fn parse_zpop_count(arg: &[u8]) -> Result<usize, CommandError> {
 /// use_nested_array = (c->resp > 2 && count != -1). Under RESP3 with the
 /// COUNT form, each (member, score) is wrapped in a 2-Array; under RESP2
 /// or the no-COUNT form, the wire stays flat.
-fn zpop_count_emit(
-    pairs: Vec<(Vec<u8>, f64)>,
-    resp_protocol_version: i64,
-) -> RespFrame {
+fn zpop_count_emit(pairs: Vec<(Vec<u8>, f64)>, resp_protocol_version: i64) -> RespFrame {
     if resp_protocol_version == 3 {
         let frames = pairs
             .into_iter()
@@ -4891,7 +4893,9 @@ fn zpop_count_emit(
         let mut frames = Vec::with_capacity(pairs.len() * 2);
         for (member, score) in pairs {
             frames.push(RespFrame::BulkString(Some(member)));
-            frames.push(RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())));
+            frames.push(RespFrame::BulkString(Some(
+                redis_score_to_string(score).into_bytes(),
+            )));
         }
         RespFrame::Array(Some(frames))
     }
@@ -5822,12 +5826,10 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         };
         match effective {
             GeoSort::Asc => {
-                results
-                    .sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+                results.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
             }
             GeoSort::Desc => {
-                results
-                    .sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+                results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
             }
             GeoSort::Unspecified => {}
         }
@@ -6027,7 +6029,8 @@ fn geosearchstore(
     // so the WITH* output-shaping flags have no defined meaning here.
     if withcoord || withdist || withhash {
         return Ok(RespFrame::Error(
-            "ERR GEOSEARCHSTORE is not compatible with WITHDIST, WITHHASH and WITHCOORD options".to_string(),
+            "ERR GEOSEARCHSTORE is not compatible with WITHDIST, WITHHASH and WITHCOORD options"
+                .to_string(),
         ));
     }
 
@@ -6215,9 +6218,8 @@ fn parse_stream_range_bound(arg: &[u8], is_start: bool) -> Result<StreamId, Resp
                 RespFrame::Error("ERR invalid start ID for the interval".to_string())
             })
         } else {
-            stream_decr_id(inner).ok_or_else(|| {
-                RespFrame::Error("ERR invalid end ID for the interval".to_string())
-            })
+            stream_decr_id(inner)
+                .ok_or_else(|| RespFrame::Error("ERR invalid end ID for the interval".to_string()))
         };
     }
 
@@ -6342,10 +6344,7 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     // regardless of value; mirror vendored's quirk by checking value > 0
     // so that `XADD ms LIMIT 0 * a 1` returns the "without the special ~
     // option" wording.
-    if trim_limit.map_or(false, |n| n > 0)
-        && trim_maxlen.is_none()
-        && trim_minid.is_none()
-    {
+    if trim_limit.is_some_and(|n| n > 0) && trim_maxlen.is_none() && trim_minid.is_none() {
         return Ok(RespFrame::Error(
             "ERR syntax error, LIMIT cannot be used without specifying a trimming strategy"
                 .to_string(),
@@ -6478,7 +6477,7 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             // through to a no-op (effective_max_len = max_len means
             // "trim to target"). With approximate semantics we treat
             // unknown length as "single node" → no trim.
-            let current_len = store.xlen(&argv[1], now_ms).unwrap_or(0) as usize;
+            let current_len = store.xlen(&argv[1], now_ms).unwrap_or(0);
             let exact_to_trim = current_len.saturating_sub(max_len);
             let mut node_boundary_trim =
                 (exact_to_trim / STREAM_NODE_MAX_ENTRIES) * STREAM_NODE_MAX_ENTRIES;
@@ -6719,7 +6718,7 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     if is_maxlen {
         let max_len = maxlen_value.expect("maxlen_value set when strategy = MaxLen");
         let effective_max_len = if approx {
-            let current_len = store.xlen(&argv[1], now_ms)? as usize;
+            let current_len = store.xlen(&argv[1], now_ms)?;
             let exact_to_trim = current_len.saturating_sub(max_len);
             let mut node_boundary_trim =
                 (exact_to_trim / STREAM_NODE_MAX_ENTRIES) * STREAM_NODE_MAX_ENTRIES;
@@ -6865,8 +6864,7 @@ fn stream_full_consumer_info_to_frame(
     let active_time: i64 = if inactive_or_neg_one < 0 {
         -1
     } else {
-        i64::try_from(now_ms.saturating_sub(inactive_or_neg_one as u64))
-            .unwrap_or(i64::MAX)
+        i64::try_from(now_ms.saturating_sub(inactive_or_neg_one as u64)).unwrap_or(i64::MAX)
     };
     let pairs: Vec<(RespFrame, RespFrame)> = vec![
         (
@@ -7972,9 +7970,7 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             hello_simple("    * MKSTREAM"),
             hello_simple("      Create the empty stream if it does not exist."),
             hello_simple("    * ENTRIESREAD entries_read"),
-            hello_simple(
-                "      Set the group's entries_read counter (internal use).",
-            ),
+            hello_simple("      Set the group's entries_read counter (internal use)."),
             hello_simple("CREATECONSUMER <key> <groupname> <consumer>"),
             hello_simple("    Create a new consumer in the specified group."),
             hello_simple("DELCONSUMER <key> <groupname> <consumer>"),
@@ -8862,8 +8858,14 @@ fn cluster_shards_reply(store: &Store) -> RespFrame {
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let node = if resp3 {
         RespFrame::Map(Some(vec![
-            (hello_bulk("id"), RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec()))),
-            (hello_bulk("port"), RespFrame::Integer(i64::from(store.server_port))),
+            (
+                hello_bulk("id"),
+                RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec())),
+            ),
+            (
+                hello_bulk("port"),
+                RespFrame::Integer(i64::from(store.server_port)),
+            ),
             (hello_bulk("ip"), hello_bulk("")),
             (hello_bulk("endpoint"), hello_bulk("")),
             (hello_bulk("role"), hello_bulk("master")),
@@ -8967,9 +8969,7 @@ fn cluster_cmd(
             hello_simple("MYSHARDID"),
             hello_simple("    Return the node's shard id."),
             hello_simple("NODES"),
-            hello_simple(
-                "    Return cluster configuration seen by node. Output format:",
-            ),
+            hello_simple("    Return cluster configuration seen by node. Output format:"),
             hello_simple(
                 "    <id> <ip:port@bus-port[,hostname]> <flags> <master> <pings> <pongs> <epoch> <link> <slot> ...",
             ),
@@ -8991,9 +8991,7 @@ fn cluster_cmd(
             hello_simple(
                 "    Return information about slots range mappings. Each range is made of:",
             ),
-            hello_simple(
-                "    start, end, master and replicas IP addresses, ports and ids",
-            ),
+            hello_simple("    start, end, master and replicas IP addresses, ports and ids"),
             hello_simple("SHARDS"),
             hello_simple(
                 "    Return information about slot range mappings and the nodes associated with them.",
@@ -9025,7 +9023,11 @@ fn cluster_cmd(
         // where partial coverage flips the state to "fail").
         // (frankenredis-39rkv)
         let slots_assigned = store.cluster_assigned_slots.len();
-        let cluster_state = if slots_assigned >= 16384 { "ok" } else { "fail" };
+        let cluster_state = if slots_assigned >= 16384 {
+            "ok"
+        } else {
+            "fail"
+        };
         let cluster_size = if slots_assigned > 0 { 1 } else { 0 };
         let cluster_current_epoch = store.cluster_current_epoch;
         let cluster_my_epoch = store.cluster_my_config_epoch;
@@ -9353,8 +9355,7 @@ fn cluster_cmd(
         if argv.len() == 3 {
             let flag_str =
                 std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-            if !flag_str.eq_ignore_ascii_case("FORCE")
-                && !flag_str.eq_ignore_ascii_case("TAKEOVER")
+            if !flag_str.eq_ignore_ascii_case("FORCE") && !flag_str.eq_ignore_ascii_case("TAKEOVER")
             {
                 return Err(CommandError::SyntaxError);
             }
@@ -9891,7 +9892,9 @@ fn zrangestore_cmd(
     // offset/count fields are only consumed in the BYSCORE/BYLEX
     // paths). Mirroring that here means `LIMIT 1 -1` doesn't drop
     // the first element from a rank-mode ZRANGESTORE.
-    let pairs = if (byscore || bylex) && let Some(offset) = limit_offset {
+    let pairs = if (byscore || bylex)
+        && let Some(offset) = limit_offset
+    {
         if let Some(count) = limit_count {
             pairs.into_iter().skip(offset).take(count).collect()
         } else {
@@ -10048,8 +10051,7 @@ fn function_cmd(
                 .functions
                 .iter()
                 .map(|f| {
-                    let name_frame =
-                        RespFrame::BulkString(Some(f.name.as_bytes().to_vec()));
+                    let name_frame = RespFrame::BulkString(Some(f.name.as_bytes().to_vec()));
                     let desc_frame = match &f.description {
                         Some(d) => RespFrame::BulkString(Some(d.as_bytes().to_vec())),
                         None => RespFrame::BulkString(None),
@@ -10067,10 +10069,7 @@ fn function_cmd(
                                 RespFrame::BulkString(Some(b"description".to_vec())),
                                 desc_frame,
                             ),
-                            (
-                                RespFrame::BulkString(Some(b"flags".to_vec())),
-                                flags_frame,
-                            ),
+                            (RespFrame::BulkString(Some(b"flags".to_vec())), flags_frame),
                         ]))
                     } else {
                         RespFrame::Array(Some(vec![
@@ -10440,10 +10439,10 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                 if let Some(name) = transformed
                     .strip_prefix("local function ")
                     .and_then(|s| s.find('(').map(|i| &s[..i]))
+                    && name == func_name
+                    && target_func_line.is_none()
                 {
-                    if name == func_name && target_func_line.is_none() {
-                        target_func_line = Some(line_no);
-                    }
+                    target_func_line = Some(line_no);
                 }
                 lua_lines.push(transformed);
             } else {
@@ -10582,10 +10581,7 @@ fn transform_register_function_table_form(body: &str) -> Option<String> {
         }
         let left_ok =
             i == 0 || !matches!(bytes[i - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
-        if depth == 1
-            && left_ok
-            && matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'_')
-        {
+        if depth == 1 && left_ok && matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'_') {
             let start = i;
             while i < bytes.len()
                 && matches!(bytes[i], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_')
@@ -10675,7 +10671,9 @@ fn transform_register_function_table_form(body: &str) -> Option<String> {
                             m += 1;
                         }
                         fn_body = Some(&after_params[..m]);
-                        i = j + 1 + (after_eq.as_ptr() as usize - body[j + 1..].as_ptr() as usize)
+                        i = j
+                            + 1
+                            + (after_eq.as_ptr() as usize - body[j + 1..].as_ptr() as usize)
                             + (rest.as_ptr() as usize - after_eq.as_ptr() as usize)
                             + k
                             + m;
@@ -11290,7 +11288,11 @@ fn zrandmember(
     // (frankenredis-jnf53) Mirror ZRANGE WITHSCORES wire shape: under
     // RESP3 wrap each (member, score) in a 2-element Array; under RESP2
     // emit flat alternating.
-    zrange_emit_with_resp(pairs, withscores, store.dispatch_client_ctx.resp_protocol_version)
+    zrange_emit_with_resp(
+        pairs,
+        withscores,
+        store.dispatch_client_ctx.resp_protocol_version,
+    )
 }
 
 fn zmscore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -11709,7 +11711,11 @@ fn zrevrangebyscore(
             pairs = pairs.into_iter().skip(offset).collect();
         }
     }
-    zrange_emit_with_resp(pairs, withscores, store.dispatch_client_ctx.resp_protocol_version)
+    zrange_emit_with_resp(
+        pairs,
+        withscores,
+        store.dispatch_client_ctx.resp_protocol_version,
+    )
 }
 
 fn zrangebylex(
@@ -12750,8 +12756,7 @@ fn getex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let mut raw_value: Option<&[u8]> = None;
     let mut options = argv[2..].iter();
     while let Some(option_arg) = options.next() {
-        let option =
-            std::str::from_utf8(option_arg).map_err(|_| CommandError::SyntaxError)?;
+        let option = std::str::from_utf8(option_arg).map_err(|_| CommandError::SyntaxError)?;
         if option.eq_ignore_ascii_case("EX") {
             if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Ex) {
                 return Err(CommandError::SyntaxError);
@@ -12882,9 +12887,7 @@ fn sintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     // the 'numkeys should be greater than 0' msg argument, so 'abc',
     // '0', '-1', and the empty string all share one wording.
     // (frankenredis-sw76v)
-    let bad_numkeys = || {
-        CommandError::Custom("ERR numkeys should be greater than 0".to_string())
-    };
+    let bad_numkeys = || CommandError::Custom("ERR numkeys should be greater than 0".to_string());
     let numkeys_val = match parse_i64_arg(&argv[1]) {
         Ok(v) if v >= 1 => v,
         _ => return Err(bad_numkeys()),
@@ -13346,7 +13349,9 @@ fn zmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                         Some((member, score)) => {
                             popped.push(RespFrame::Array(Some(vec![
                                 RespFrame::BulkString(Some(member)),
-                                RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
+                                RespFrame::BulkString(Some(
+                                    redis_score_to_string(score).into_bytes(),
+                                )),
                             ])));
                         }
                         None => break,
@@ -13642,11 +13647,7 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         // string non-empty if any read fails.
         let os_name = format_info_os_string();
         let _ = write!(info, "os:{os_name}\r\n");
-        let _ = write!(
-            info,
-            "arch_bits:{}\r\n",
-            std::mem::size_of::<usize>() * 8
-        );
+        let _ = write!(info, "arch_bits:{}\r\n", std::mem::size_of::<usize>() * 8);
         info.push_str("monotonic_clock:POSIX clock_gettime\r\n");
         // (frankenredis-ksl7m) Map fr's mio-based eventloop to the
         // syscall names upstream uses for each platform:
@@ -14442,7 +14443,14 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("geohash", -2, "readonly", 1, 1, 1),
     ("georadius", -6, "write denyoom movablekeys", 1, 1, 1),
     ("georadius_ro", -6, "readonly", 1, 1, 1),
-    ("georadiusbymember", -5, "write denyoom movablekeys", 1, 1, 1),
+    (
+        "georadiusbymember",
+        -5,
+        "write denyoom movablekeys",
+        1,
+        1,
+        1,
+    ),
     ("georadiusbymember_ro", -5, "readonly", 1, 1, 1),
     ("geosearch", -7, "readonly", 1, 1, 1),
     ("geosearchstore", -8, "write denyoom", 1, 2, 1),
@@ -14474,31 +14482,143 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("punsubscribe", -1, "pubsub noscript loading stale", 0, 0, 0),
     ("publish", 3, "pubsub loading stale fast", 0, 0, 0),
     ("pubsub", -2, "", 0, 0, 0),
-    ("eval", -3, "noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
-    ("evalsha", -3, "noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
-    ("eval_ro", -3, "readonly noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
-    ("evalsha_ro", -3, "readonly noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
-    ("fcall", -3, "noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
-    ("fcall_ro", -3, "readonly noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
+    (
+        "eval",
+        -3,
+        "noscript stale skip_monitor no_mandatory_keys movablekeys",
+        0,
+        0,
+        0,
+    ),
+    (
+        "evalsha",
+        -3,
+        "noscript stale skip_monitor no_mandatory_keys movablekeys",
+        0,
+        0,
+        0,
+    ),
+    (
+        "eval_ro",
+        -3,
+        "readonly noscript stale skip_monitor no_mandatory_keys movablekeys",
+        0,
+        0,
+        0,
+    ),
+    (
+        "evalsha_ro",
+        -3,
+        "readonly noscript stale skip_monitor no_mandatory_keys movablekeys",
+        0,
+        0,
+        0,
+    ),
+    (
+        "fcall",
+        -3,
+        "noscript stale skip_monitor no_mandatory_keys movablekeys",
+        0,
+        0,
+        0,
+    ),
+    (
+        "fcall_ro",
+        -3,
+        "readonly noscript stale skip_monitor no_mandatory_keys movablekeys",
+        0,
+        0,
+        0,
+    ),
     ("script", -2, "", 0, 0, 0),
-    ("multi", 1, "noscript loading stale fast allow_busy", 0, 0, 0),
+    (
+        "multi",
+        1,
+        "noscript loading stale fast allow_busy",
+        0,
+        0,
+        0,
+    ),
     ("exec", 1, "noscript loading stale skip_slowlog", 0, 0, 0),
-    ("discard", 1, "noscript loading stale fast allow_busy", 0, 0, 0),
-    ("watch", -2, "noscript loading stale fast allow_busy", 1, -1, 1),
-    ("unwatch", 1, "noscript loading stale fast allow_busy", 0, 0, 0),
-    ("auth", -2, "noscript loading stale fast no_auth allow_busy", 0, 0, 0),
-    ("hello", -1, "noscript loading stale fast no_auth allow_busy", 0, 0, 0),
-    ("quit", -1, "noscript loading stale fast no_auth allow_busy", 0, 0, 0),
-    ("reset", 1, "noscript loading stale fast no_auth allow_busy", 0, 0, 0),
+    (
+        "discard",
+        1,
+        "noscript loading stale fast allow_busy",
+        0,
+        0,
+        0,
+    ),
+    (
+        "watch",
+        -2,
+        "noscript loading stale fast allow_busy",
+        1,
+        -1,
+        1,
+    ),
+    (
+        "unwatch",
+        1,
+        "noscript loading stale fast allow_busy",
+        0,
+        0,
+        0,
+    ),
+    (
+        "auth",
+        -2,
+        "noscript loading stale fast no_auth allow_busy",
+        0,
+        0,
+        0,
+    ),
+    (
+        "hello",
+        -1,
+        "noscript loading stale fast no_auth allow_busy",
+        0,
+        0,
+        0,
+    ),
+    (
+        "quit",
+        -1,
+        "noscript loading stale fast no_auth allow_busy",
+        0,
+        0,
+        0,
+    ),
+    (
+        "reset",
+        1,
+        "noscript loading stale fast no_auth allow_busy",
+        0,
+        0,
+        0,
+    ),
     ("info", -1, "loading stale", 0, 0, 0),
     ("config", -2, "", 0, 0, 0),
     ("acl", -2, "", 0, 0, 0),
     ("command", -1, "loading stale", 0, 0, 0),
     ("client", -2, "", 0, 0, 0),
     ("time", 1, "loading stale fast", 0, 0, 0),
-    ("save", 1, "admin noscript no_async_loading no_multi", 0, 0, 0),
+    (
+        "save",
+        1,
+        "admin noscript no_async_loading no_multi",
+        0,
+        0,
+        0,
+    ),
     ("bgsave", -1, "admin noscript no_async_loading", 0, 0, 0),
-    ("bgrewriteaof", 1, "admin noscript no_async_loading", 0, 0, 0),
+    (
+        "bgrewriteaof",
+        1,
+        "admin noscript no_async_loading",
+        0,
+        0,
+        0,
+    ),
     ("lastsave", 1, "loading stale fast", 0, 0, 0),
     ("swapdb", 3, "write fast", 0, 0, 0),
     // (frankenredis-containerkeyspecs) Container — same rationale
@@ -14510,7 +14630,14 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("slowlog", -2, "", 0, 0, 0),
     ("debug", -2, "admin noscript loading stale", 0, 0, 0),
     ("role", 1, "noscript loading stale fast", 0, 0, 0),
-    ("shutdown", -1, "admin noscript loading stale no_multi allow_busy", 0, 0, 0),
+    (
+        "shutdown",
+        -1,
+        "admin noscript loading stale no_multi allow_busy",
+        0,
+        0,
+        0,
+    ),
     ("latency", -2, "", 0, 0, 0),
     ("wait", 3, "", 0, 0, 0),
     ("waitaof", 4, "noscript", 0, 0, 0),
@@ -14523,9 +14650,30 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     // missing the flags on readonly only.
     ("readonly", 1, "loading stale fast", 0, 0, 0),
     ("readwrite", 1, "loading stale fast", 0, 0, 0),
-    ("replconf", -1, "admin noscript loading stale allow_busy", 0, 0, 0),
-    ("psync", -3, "admin noscript no_async_loading no_multi", 0, 0, 0),
-    ("sync", 1, "admin noscript no_async_loading no_multi", 0, 0, 0),
+    (
+        "replconf",
+        -1,
+        "admin noscript loading stale allow_busy",
+        0,
+        0,
+        0,
+    ),
+    (
+        "psync",
+        -3,
+        "admin noscript no_async_loading no_multi",
+        0,
+        0,
+        0,
+    ),
+    (
+        "sync",
+        1,
+        "admin noscript no_async_loading no_multi",
+        0,
+        0,
+        0,
+    ),
     ("monitor", 1, "admin noscript loading stale", 0, 0, 0),
     ("migrate", -6, "write movablekeys", 3, 3, 1),
     ("failover", -1, "admin noscript stale", 0, 0, 0),
@@ -14533,11 +14681,32 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("sentinel", -2, "admin", 0, 0, 0),
     ("pfdebug", 3, "write denyoom admin", 2, 2, 1),
     ("pfselftest", 1, "admin", 0, 0, 0),
-    ("replicaof", 3, "admin noscript stale no_async_loading", 0, 0, 0),
-    ("slaveof", 3, "admin noscript stale no_async_loading", 0, 0, 0),
+    (
+        "replicaof",
+        3,
+        "admin noscript stale no_async_loading",
+        0,
+        0,
+        0,
+    ),
+    (
+        "slaveof",
+        3,
+        "admin noscript stale no_async_loading",
+        0,
+        0,
+        0,
+    ),
     ("function", -2, "", 0, 0, 0),
     ("ssubscribe", -2, "pubsub noscript loading stale", 1, -1, 1),
-    ("sunsubscribe", -1, "pubsub noscript loading stale", 1, -1, 1),
+    (
+        "sunsubscribe",
+        -1,
+        "pubsub noscript loading stale",
+        1,
+        -1,
+        1,
+    ),
     ("spublish", 3, "pubsub loading stale fast", 1, 1, 1),
     ("sort_ro", -2, "readonly movablekeys", 1, 1, 1),
     ("zrangestore", -5, "write denyoom", 1, 2, 1),
@@ -14576,7 +14745,14 @@ const SUBCOMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("acl|list", 2, "admin noscript loading stale", 0, 0, 0),
     ("acl|log", -2, "admin noscript loading stale", 0, 0, 0),
     ("client|help", 2, "loading stale", 0, 0, 0),
-    ("client|no-evict", 3, "admin noscript loading stale", 0, 0, 0),
+    (
+        "client|no-evict",
+        3,
+        "admin noscript loading stale",
+        0,
+        0,
+        0,
+    ),
     ("client|no-touch", 3, "noscript loading stale", 0, 0, 0),
     ("client|setinfo", 4, "noscript loading stale", 0, 0, 0),
     ("client|kill", -3, "admin noscript loading stale", 0, 0, 0),
@@ -14587,16 +14763,44 @@ const SUBCOMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("client|pause", -3, "admin noscript loading stale", 0, 0, 0),
     ("client|trackinginfo", 2, "noscript loading stale", 0, 0, 0),
     ("client|tracking", -3, "noscript loading stale", 0, 0, 0),
-    ("client|unblock", -3, "admin noscript loading stale", 0, 0, 0),
+    (
+        "client|unblock",
+        -3,
+        "admin noscript loading stale",
+        0,
+        0,
+        0,
+    ),
     ("client|getname", 2, "noscript loading stale", 0, 0, 0),
     ("client|getredir", 2, "noscript loading stale", 0, 0, 0),
     ("client|info", 2, "noscript loading stale", 0, 0, 0),
     ("client|setname", 3, "noscript loading stale", 0, 0, 0),
     ("client|unpause", 2, "admin noscript loading stale", 0, 0, 0),
-    ("cluster|bumpepoch", 2, "admin stale no_async_loading", 0, 0, 0),
+    (
+        "cluster|bumpepoch",
+        2,
+        "admin stale no_async_loading",
+        0,
+        0,
+        0,
+    ),
     ("cluster|myshardid", 2, "stale", 0, 0, 0),
-    ("cluster|saveconfig", 2, "admin stale no_async_loading", 0, 0, 0),
-    ("cluster|set-config-epoch", 3, "admin stale no_async_loading", 0, 0, 0),
+    (
+        "cluster|saveconfig",
+        2,
+        "admin stale no_async_loading",
+        0,
+        0,
+        0,
+    ),
+    (
+        "cluster|set-config-epoch",
+        3,
+        "admin stale no_async_loading",
+        0,
+        0,
+        0,
+    ),
     ("cluster|slots", 2, "loading stale", 0, 0, 0),
     ("cluster|count-failure-reports", 3, "admin stale", 0, 0, 0),
     ("cluster|help", 2, "loading stale", 0, 0, 0),
@@ -14604,23 +14808,79 @@ const SUBCOMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("cluster|replicas", 3, "admin stale", 0, 0, 0),
     ("cluster|countkeysinslot", 3, "stale", 0, 0, 0),
     ("cluster|links", 2, "stale", 0, 0, 0),
-    ("cluster|replicate", 3, "admin stale no_async_loading", 0, 0, 0),
+    (
+        "cluster|replicate",
+        3,
+        "admin stale no_async_loading",
+        0,
+        0,
+        0,
+    ),
     ("cluster|forget", 3, "admin stale no_async_loading", 0, 0, 0),
     ("cluster|keyslot", 3, "stale", 0, 0, 0),
-    ("cluster|flushslots", 2, "admin stale no_async_loading", 0, 0, 0),
-    ("cluster|addslots", -3, "admin stale no_async_loading", 0, 0, 0),
-    ("cluster|addslotsrange", -4, "admin stale no_async_loading", 0, 0, 0),
+    (
+        "cluster|flushslots",
+        2,
+        "admin stale no_async_loading",
+        0,
+        0,
+        0,
+    ),
+    (
+        "cluster|addslots",
+        -3,
+        "admin stale no_async_loading",
+        0,
+        0,
+        0,
+    ),
+    (
+        "cluster|addslotsrange",
+        -4,
+        "admin stale no_async_loading",
+        0,
+        0,
+        0,
+    ),
     ("cluster|myid", 2, "stale", 0, 0, 0),
     ("cluster|getkeysinslot", 4, "stale", 0, 0, 0),
     ("cluster|meet", -4, "admin stale no_async_loading", 0, 0, 0),
     ("cluster|info", 2, "stale", 0, 0, 0),
     ("cluster|shards", 2, "loading stale", 0, 0, 0),
     ("cluster|nodes", 2, "stale", 0, 0, 0),
-    ("cluster|delslots", -3, "admin stale no_async_loading", 0, 0, 0),
-    ("cluster|setslot", -4, "admin stale no_async_loading", 0, 0, 0),
-    ("cluster|delslotsrange", -4, "admin stale no_async_loading", 0, 0, 0),
+    (
+        "cluster|delslots",
+        -3,
+        "admin stale no_async_loading",
+        0,
+        0,
+        0,
+    ),
+    (
+        "cluster|setslot",
+        -4,
+        "admin stale no_async_loading",
+        0,
+        0,
+        0,
+    ),
+    (
+        "cluster|delslotsrange",
+        -4,
+        "admin stale no_async_loading",
+        0,
+        0,
+        0,
+    ),
     ("cluster|slaves", 3, "admin stale", 0, 0, 0),
-    ("cluster|failover", -2, "admin stale no_async_loading", 0, 0, 0),
+    (
+        "cluster|failover",
+        -2,
+        "admin stale no_async_loading",
+        0,
+        0,
+        0,
+    ),
     ("command|docs", -2, "loading stale", 0, 0, 0),
     ("command|help", 2, "loading stale", 0, 0, 0),
     ("command|count", 2, "loading stale", 0, 0, 0),
@@ -14629,7 +14889,14 @@ const SUBCOMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("command|list", -2, "loading stale", 0, 0, 0),
     ("command|getkeysandflags", -3, "loading stale", 0, 0, 0),
     ("config|rewrite", 2, "admin noscript loading stale", 0, 0, 0),
-    ("config|resetstat", 2, "admin noscript loading stale", 0, 0, 0),
+    (
+        "config|resetstat",
+        2,
+        "admin noscript loading stale",
+        0,
+        0,
+        0,
+    ),
     ("config|help", 2, "loading stale", 0, 0, 0),
     ("config|get", -3, "admin noscript loading stale", 0, 0, 0),
     ("config|set", -4, "admin noscript loading stale", 0, 0, 0),
@@ -14644,8 +14911,22 @@ const SUBCOMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("function|stats", 2, "noscript allow_busy", 0, 0, 0),
     ("latency|graph", 3, "admin noscript loading stale", 0, 0, 0),
     ("latency|help", 2, "loading stale", 0, 0, 0),
-    ("latency|histogram", -2, "admin noscript loading stale", 0, 0, 0),
-    ("latency|history", 3, "admin noscript loading stale", 0, 0, 0),
+    (
+        "latency|histogram",
+        -2,
+        "admin noscript loading stale",
+        0,
+        0,
+        0,
+    ),
+    (
+        "latency|history",
+        3,
+        "admin noscript loading stale",
+        0,
+        0,
+        0,
+    ),
     ("latency|reset", -2, "admin noscript loading stale", 0, 0, 0),
     ("latency|doctor", 2, "admin noscript loading stale", 0, 0, 0),
     ("latency|latest", 2, "admin noscript loading stale", 0, 0, 0),
@@ -14656,10 +14937,31 @@ const SUBCOMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("memory|stats", 2, "", 0, 0, 0),
     ("memory|purge", 2, "", 0, 0, 0),
     ("module|help", 2, "loading stale", 0, 0, 0),
-    ("module|load", -3, "admin noscript no_async_loading", 0, 0, 0),
+    (
+        "module|load",
+        -3,
+        "admin noscript no_async_loading",
+        0,
+        0,
+        0,
+    ),
     ("module|list", 2, "admin noscript", 0, 0, 0),
-    ("module|loadex", -3, "admin noscript no_async_loading", 0, 0, 0),
-    ("module|unload", 3, "admin noscript no_async_loading", 0, 0, 0),
+    (
+        "module|loadex",
+        -3,
+        "admin noscript no_async_loading",
+        0,
+        0,
+        0,
+    ),
+    (
+        "module|unload",
+        3,
+        "admin noscript no_async_loading",
+        0,
+        0,
+        0,
+    ),
     ("object|help", 2, "loading stale", 0, 0, 0),
     ("object|idletime", 3, "readonly", 2, 2, 1),
     ("object|refcount", 3, "readonly", 2, 2, 1),
@@ -14802,11 +15104,10 @@ include!(concat!(env!("OUT_DIR"), "/acl_categories.rs"));
 const UPSTREAM_COMMAND_DOCS_ARG_TREES_JSON: &str =
     include_str!(concat!(env!("OUT_DIR"), "/docs_arg_trees.json"));
 
-fn upstream_command_docs_arg_trees()
--> &'static std::collections::HashMap<String, serde_json::Value> {
+fn upstream_command_docs_arg_trees() -> &'static std::collections::HashMap<String, serde_json::Value>
+{
     use std::sync::OnceLock;
-    static CACHE: OnceLock<std::collections::HashMap<String, serde_json::Value>> =
-        OnceLock::new();
+    static CACHE: OnceLock<std::collections::HashMap<String, serde_json::Value>> = OnceLock::new();
     CACHE.get_or_init(|| {
         serde_json::from_str(UPSTREAM_COMMAND_DOCS_ARG_TREES_JSON)
             .expect("docs_arg_trees.json must parse")
@@ -14846,27 +15147,30 @@ fn json_arg_to_resp(node: &serde_json::Value) -> RespFrame {
     // COMMAND DOCS replies. JSON tokens may be lowercase
     // (e.g. CLIENT KILL TYPE's "normal"/"master"/"slave"/"replica") so
     // we uppercase on the way out to match vendored byte-for-byte.
-    let token_upper = obj
-        .get("token")
-        .and_then(|v| v.as_str())
-        .map(|t| {
-            // (frankenredis-50j77) Upstream's Python code-gen formats
-            // the token as `"%s"` and the C compiler concatenates
-            // adjacent string literals, so the JSON literal `""` (two
-            // quote chars) becomes the C empty string. MIGRATE's
-            // "empty-string" pure-token uses this trick to indicate
-            // "no token" — vendored emits a zero-byte bulk reply.
-            if t == "\"\"" {
-                String::new()
-            } else {
-                t.to_ascii_uppercase()
-            }
-        });
+    let token_upper = obj.get("token").and_then(|v| v.as_str()).map(|t| {
+        // (frankenredis-50j77) Upstream's Python code-gen formats
+        // the token as `"%s"` and the C compiler concatenates
+        // adjacent string literals, so the JSON literal `""` (two
+        // quote chars) becomes the C empty string. MIGRATE's
+        // "empty-string" pure-token uses this trick to indicate
+        // "no token" — vendored emits a zero-byte bulk reply.
+        if t == "\"\"" {
+            String::new()
+        } else {
+            t.to_ascii_uppercase()
+        }
+    });
     let token = token_upper.as_deref();
     let since = obj.get("since").and_then(|v| v.as_str());
     let deprecated_since = obj.get("deprecated_since").and_then(|v| v.as_str());
-    let optional = obj.get("optional").and_then(|v| v.as_bool()).unwrap_or(false);
-    let multiple = obj.get("multiple").and_then(|v| v.as_bool()).unwrap_or(false);
+    let optional = obj
+        .get("optional")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let multiple = obj
+        .get("multiple")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let multiple_token = obj
         .get("multiple_token")
         .and_then(|v| v.as_bool())
@@ -15606,22 +15910,50 @@ fn command_info_tips(name: &str) -> Vec<RespFrame> {
     // Sourced from upstream src/commands/*.json command_tips field
     // (legacy_redis_code/redis/src/commands), lowercased per addReplyCommandTips.
     match name {
-        "client|info" | "client|list" | "cluster|bumpepoch"
-        | "cluster|count-failure-reports" | "cluster|getkeysinslot" | "cluster|info"
-        | "cluster|links" | "cluster|myshardid" | "cluster|nodes" | "cluster|replicas"
-        | "cluster|shards" | "cluster|slaves" | "cluster|slots" | "dump" | "hrandfield"
-        | "hscan" | "lastsave" | "migrate" | "object|encoding" | "object|freq"
-        | "object|idletime" | "object|refcount" | "pttl" | "spop" | "srandmember"
-        | "sscan" | "time" | "ttl" | "xadd" | "xautoclaim" | "xclaim"
-        | "xinfo|consumers" | "xpending" | "xtrim" | "zrandmember" | "zscan" => {
+        "client|info"
+        | "client|list"
+        | "cluster|bumpepoch"
+        | "cluster|count-failure-reports"
+        | "cluster|getkeysinslot"
+        | "cluster|info"
+        | "cluster|links"
+        | "cluster|myshardid"
+        | "cluster|nodes"
+        | "cluster|replicas"
+        | "cluster|shards"
+        | "cluster|slaves"
+        | "cluster|slots"
+        | "dump"
+        | "hrandfield"
+        | "hscan"
+        | "lastsave"
+        | "migrate"
+        | "object|encoding"
+        | "object|freq"
+        | "object|idletime"
+        | "object|refcount"
+        | "pttl"
+        | "spop"
+        | "srandmember"
+        | "sscan"
+        | "time"
+        | "ttl"
+        | "xadd"
+        | "xautoclaim"
+        | "xclaim"
+        | "xinfo|consumers"
+        | "xpending"
+        | "xtrim"
+        | "zrandmember"
+        | "zscan" => {
             vec![hello_bulk("nondeterministic_output")]
         }
         "command" | "command|docs" | "command|info" | "command|list" | "function|list"
-        | "hgetall" | "hkeys" | "hvals" | "module|list" | "sdiff" | "sinter"
-        | "smembers" | "sunion" => vec![hello_bulk("nondeterministic_output_order")],
+        | "hgetall" | "hkeys" | "hvals" | "module|list" | "sdiff" | "sinter" | "smembers"
+        | "sunion" => vec![hello_bulk("nondeterministic_output_order")],
         "acl|deluser" | "acl|save" | "acl|setuser" | "client|setinfo" | "client|setname"
-        | "config|resetstat" | "config|rewrite" | "config|set" | "script|flush"
-        | "script|load" | "slowlog|reset" => vec![
+        | "config|resetstat" | "config|rewrite" | "config|set" | "script|flush" | "script|load"
+        | "slowlog|reset" => vec![
             hello_bulk("request_policy:all_nodes"),
             hello_bulk("response_policy:all_succeeded"),
         ],
@@ -15636,12 +15968,13 @@ fn command_info_tips(name: &str) -> Vec<RespFrame> {
             hello_bulk("request_policy:all_nodes"),
             hello_bulk("response_policy:special"),
         ],
-        "function|stats" | "info" | "memory|doctor" | "memory|malloc-stats"
-        | "memory|stats" => vec![
-            hello_bulk("nondeterministic_output"),
-            hello_bulk("request_policy:all_shards"),
-            hello_bulk("response_policy:special"),
-        ],
+        "function|stats" | "info" | "memory|doctor" | "memory|malloc-stats" | "memory|stats" => {
+            vec![
+                hello_bulk("nondeterministic_output"),
+                hello_bulk("request_policy:all_shards"),
+                hello_bulk("response_policy:special"),
+            ]
+        }
         "del" | "exists" | "touch" | "unlink" => vec![
             hello_bulk("request_policy:multi_shard"),
             hello_bulk("response_policy:agg_sum"),
@@ -15760,13 +16093,13 @@ fn command_info_keyspec_override(name: &str) -> Option<(&'static str, &'static [
         // CMD_KEY_RO — bare readonly probe (existence/cardinality only).
         // Upstream omits the access flag for these because the value
         // itself is not exposed to the caller.
-        "exists" | "touch" | "type" | "scard" | "hlen" | "hstrlen" | "hexists"
-        | "sismember" | "llen" | "strlen" | "xlen" | "zcard" => &["RO"],
+        "exists" | "touch" | "type" | "scard" | "hlen" | "hstrlen" | "hexists" | "sismember"
+        | "llen" | "strlen" | "xlen" | "zcard" => &["RO"],
 
         // CMD_KEY_RW | CMD_KEY_UPDATE — value mutated in place; key must
         // already exist (or no-op for the EXPIRE family).
-        "expire" | "expireat" | "pexpire" | "pexpireat" | "persist" | "lset"
-        | "xack" | "xclaim" | "xsetid" => &["RW", "update"],
+        "expire" | "expireat" | "pexpire" | "pexpireat" | "persist" | "lset" | "xack"
+        | "xclaim" | "xsetid" => &["RW", "update"],
 
         // HSET / HMSET / GEOADD / ZADD: upstream uses UPDATE here even
         // though they create the key when absent (the heuristic's
@@ -15783,15 +16116,13 @@ fn command_info_keyspec_override(name: &str) -> Option<(&'static str, &'static [
 
         // CMD_KEY_RW | CMD_KEY_ACCESS | CMD_KEY_UPDATE — value read and
         // mutated. Counter and bit-twiddle commands.
-        "incr" | "decr" | "incrby" | "decrby" | "incrbyfloat" | "hincrby"
-        | "hincrbyfloat" | "zincrby" | "setbit" | "getset" | "move" => {
-            &["RW", "access", "update"]
-        }
+        "incr" | "decr" | "incrby" | "decrby" | "incrbyfloat" | "hincrby" | "hincrbyfloat"
+        | "zincrby" | "setbit" | "getset" | "move" => &["RW", "access", "update"],
 
         // CMD_KEY_RW | CMD_KEY_ACCESS | CMD_KEY_DELETE — value read and a
         // member is removed; the key may be deleted when it goes empty.
-        "lpop" | "rpop" | "zpopmin" | "zpopmax" | "spop" | "getdel" | "blpop"
-        | "brpop" | "bzpopmin" | "bzpopmax" => &["RW", "access", "delete"],
+        "lpop" | "rpop" | "zpopmin" | "zpopmax" | "spop" | "getdel" | "blpop" | "brpop"
+        | "bzpopmin" | "bzpopmax" => &["RW", "access", "delete"],
 
         // CMD_KEY_RW | CMD_KEY_DELETE — member removed without exposing
         // the value back to the caller. (frankenredis-n8vpq) Added
@@ -15800,10 +16131,8 @@ fn command_info_keyspec_override(name: &str) -> Option<(&'static str, &'static [
         // member removal that may delete the key when empty); fr's
         // heuristic was emitting 'RW access' which mis-modeled the
         // effect as a read.
-        "hdel" | "srem" | "zrem" | "lrem" | "ltrim" | "xautoclaim" | "xtrim"
-        | "xdel" | "zremrangebyrank" | "zremrangebyscore" | "zremrangebylex" => {
-            &["RW", "delete"]
-        }
+        "hdel" | "srem" | "zrem" | "lrem" | "ltrim" | "xautoclaim" | "xtrim" | "xdel"
+        | "zremrangebyrank" | "zremrangebyscore" | "zremrangebylex" => &["RW", "delete"],
 
         // (frankenredis-n8vpq) WATCH only registers a watcher on the
         // key for the upcoming MULTI/EXEC transaction; it does not
@@ -15830,8 +16159,7 @@ fn command_info_keyspec_override(name: &str) -> Option<(&'static str, &'static [
         // (frankenredis-o3xwt) Per upstream commands.def OBJECT
         // subcommands (object.c::objectCommand) only need RO bare —
         // they read object metadata, not the value bytes.
-        "object|encoding" | "object|freq" | "object|idletime"
-        | "object|refcount" => &["RO"],
+        "object|encoding" | "object|freq" | "object|idletime" | "object|refcount" => &["RO"],
 
         // (frankenredis-o3xwt) Per upstream commands.def XGROUP
         // subcommands (t_stream.c::xgroupCommand). DESTROY/DELCONSUMER
@@ -15899,10 +16227,7 @@ fn command_info_keynum_keyspec(name: &str) -> Option<RespFrame> {
         hello_bulk("type"),
         hello_bulk("index"),
         hello_bulk("spec"),
-        RespFrame::Array(Some(vec![
-            hello_bulk("index"),
-            RespFrame::Integer(2),
-        ])),
+        RespFrame::Array(Some(vec![hello_bulk("index"), RespFrame::Integer(2)])),
     ])));
     entries.push(hello_bulk("find_keys"));
     entries.push(RespFrame::Array(Some(vec![
@@ -15933,9 +16258,7 @@ fn make_keyspec_index_range(
 ) -> RespFrame {
     RespFrame::Array(Some(vec![
         hello_bulk("flags"),
-        RespFrame::Array(Some(
-            flags.iter().copied().map(hello_simple).collect(),
-        )),
+        RespFrame::Array(Some(flags.iter().copied().map(hello_simple).collect())),
         hello_bulk("begin_search"),
         RespFrame::Array(Some(vec![
             hello_bulk("type"),
@@ -15976,9 +16299,7 @@ fn make_keyspec_index_keynum(
 ) -> RespFrame {
     RespFrame::Array(Some(vec![
         hello_bulk("flags"),
-        RespFrame::Array(Some(
-            flags.iter().copied().map(hello_simple).collect(),
-        )),
+        RespFrame::Array(Some(flags.iter().copied().map(hello_simple).collect())),
         hello_bulk("begin_search"),
         RespFrame::Array(Some(vec![
             hello_bulk("type"),
@@ -16161,17 +16482,12 @@ fn command_info_multi_keyspec(name: &str) -> Option<Vec<RespFrame>> {
 /// this for SORT's optional BY/GET and STORE keywords whose key
 /// positions cannot be inferred without inspecting argument values.
 /// Includes a `notes` field for the human-readable explanation.
-fn make_keyspec_unknown_with_notes(
-    notes: &'static str,
-    flags: &[&'static str],
-) -> RespFrame {
+fn make_keyspec_unknown_with_notes(notes: &'static str, flags: &[&'static str]) -> RespFrame {
     RespFrame::Array(Some(vec![
         hello_bulk("notes"),
         RespFrame::BulkString(Some(notes.as_bytes().to_vec())),
         hello_bulk("flags"),
-        RespFrame::Array(Some(
-            flags.iter().copied().map(hello_simple).collect(),
-        )),
+        RespFrame::Array(Some(flags.iter().copied().map(hello_simple).collect())),
         hello_bulk("begin_search"),
         RespFrame::Array(Some(vec![
             hello_bulk("type"),
@@ -16203,9 +16519,7 @@ fn make_keyspec_keyword_range(
 ) -> RespFrame {
     RespFrame::Array(Some(vec![
         hello_bulk("flags"),
-        RespFrame::Array(Some(
-            flags.iter().copied().map(hello_simple).collect(),
-        )),
+        RespFrame::Array(Some(flags.iter().copied().map(hello_simple).collect())),
         hello_bulk("begin_search"),
         RespFrame::Array(Some(vec![
             hello_bulk("type"),
@@ -16251,16 +16565,10 @@ fn command_info_movable_keynum_keyspec(name: &str) -> Option<Vec<RespFrame>> {
         "sintercard" | "zdiff" | "zunion" | "zinter" | "zintercard" => {
             make_keyspec_index_keynum(&["RO", "access"], 1, 0, 1, 1)
         }
-        "zmpop" | "lmpop" => {
-            make_keyspec_index_keynum(&["RW", "access", "delete"], 1, 0, 1, 1)
-        }
-        "blmpop" | "bzmpop" => {
-            make_keyspec_index_keynum(&["RW", "access", "delete"], 2, 0, 1, 1)
-        }
+        "zmpop" | "lmpop" => make_keyspec_index_keynum(&["RW", "access", "delete"], 1, 0, 1, 1),
+        "blmpop" | "bzmpop" => make_keyspec_index_keynum(&["RW", "access", "delete"], 2, 0, 1, 1),
         "xread" => make_keyspec_keyword_range(&["RO", "access"], "STREAMS", 1, -1, 1, 2),
-        "xreadgroup" => {
-            make_keyspec_keyword_range(&["RO", "access"], "STREAMS", 4, -1, 1, 2)
-        }
+        "xreadgroup" => make_keyspec_keyword_range(&["RO", "access"], "STREAMS", 4, -1, 1, 2),
         _ => return None,
     };
     Some(vec![spec])
@@ -16310,13 +16618,7 @@ fn command_info_key_specs(
         vec!["OW", "update"]
     } else if matches!(
         name,
-        "append"
-            | "lpush"
-            | "lpushx"
-            | "rpush"
-            | "rpushx"
-            | "sadd"
-            | "setnx"
+        "append" | "lpush" | "lpushx" | "rpush" | "rpushx" | "sadd" | "setnx"
     ) {
         vec!["RW", "insert"]
     } else {
@@ -16406,21 +16708,8 @@ fn command_info_subcommand_entry(
 /// minus `debug` — vendored's COMMAND INFO DEBUG intentionally suppresses
 /// its admin-flagged subcommands, returning the bare parent entry.
 const SUBCOMMAND_PARENTS_WITH_INFO: &[&str] = &[
-    "acl",
-    "client",
-    "cluster",
-    "command",
-    "config",
-    "function",
-    "latency",
-    "memory",
-    "module",
-    "object",
-    "pubsub",
-    "script",
-    "slowlog",
-    "xgroup",
-    "xinfo",
+    "acl", "client", "cluster", "command", "config", "function", "latency", "memory", "module",
+    "object", "pubsub", "script", "slowlog", "xgroup", "xinfo",
 ];
 
 fn command_info_subcommands(name: &str) -> Vec<RespFrame> {
@@ -16445,22 +16734,8 @@ fn command_info_subcommands(name: &str) -> Vec<RespFrame> {
 /// JSON files. SENTINEL is intentionally omitted (upstream's SENTINEL
 /// container is excluded from COMMAND DOCS for non-sentinel servers).
 const SUBCOMMAND_PARENTS_WITH_DOCS: &[&str] = &[
-    "acl",
-    "client",
-    "cluster",
-    "command",
-    "config",
-    "debug",
-    "function",
-    "latency",
-    "memory",
-    "module",
-    "object",
-    "pubsub",
-    "script",
-    "slowlog",
-    "xgroup",
-    "xinfo",
+    "acl", "client", "cluster", "command", "config", "debug", "function", "latency", "memory",
+    "module", "object", "pubsub", "script", "slowlog", "xgroup", "xinfo",
 ];
 
 fn command_docs_subcommands(name: &str, resp: i64) -> Vec<RespFrame> {
@@ -16563,8 +16838,7 @@ fn command_docs_entry(
     if let Ok(idx) = UPSTREAM_COMMAND_DOCS_DEPRECATION
         .binary_search_by(|(entry_name, _, _, _)| entry_name.cmp(&name))
     {
-        let (_, doc_flags, deprecated_since, replaced_by) =
-            UPSTREAM_COMMAND_DOCS_DEPRECATION[idx];
+        let (_, doc_flags, deprecated_since, replaced_by) = UPSTREAM_COMMAND_DOCS_DEPRECATION[idx];
         if !doc_flags.is_empty() {
             entry.push(hello_bulk("doc_flags"));
             entry.push(RespFrame::Array(Some(
@@ -16768,7 +17042,15 @@ fn command_docs_arg(
 }
 
 fn command_docs_pure_token(name: &str, token: &str, since: Option<&str>) -> RespFrame {
-    command_docs_arg(name, "pure-token", None, Some(token), since, &[], Vec::new())
+    command_docs_arg(
+        name,
+        "pure-token",
+        None,
+        Some(token),
+        since,
+        &[],
+        Vec::new(),
+    )
 }
 
 fn upstream_command_docs_arguments(name: &str) -> Option<Vec<RespFrame>> {
@@ -17129,15 +17411,7 @@ fn upstream_command_docs_arguments(name: &str) -> Option<Vec<RespFrame>> {
                         None,
                         &["optional"],
                         vec![
-                            command_docs_arg(
-                                "end",
-                                "integer",
-                                None,
-                                None,
-                                None,
-                                &[],
-                                Vec::new(),
-                            ),
+                            command_docs_arg("end", "integer", None, None, None, &[], Vec::new()),
                             command_docs_arg(
                                 "unit",
                                 "oneof",
@@ -17328,7 +17602,14 @@ fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
     // had to come with an explicit name-based group rule here.
     if matches!(
         name,
-        "eval" | "evalsha" | "eval_ro" | "evalsha_ro" | "fcall" | "fcall_ro" | "script" | "function"
+        "eval"
+            | "evalsha"
+            | "eval_ro"
+            | "evalsha_ro"
+            | "fcall"
+            | "fcall_ro"
+            | "script"
+            | "function"
     ) {
         "scripting"
     } else if flag_list.contains(&"pubsub")
@@ -17840,6 +18121,7 @@ fn config_collect_store_entries_multi(
 /// called via `dispatch_argv` (e.g., from Lua `redis.call("CONFIG", "GET", ...)`).
 /// Runtime-level parameters (maxmemory, hz, slowlog, etc.) are only available
 /// through the runtime's CONFIG handler.
+#[allow(dead_code)]
 fn config_collect_store_entries(pattern: &str, store: &Store, entries: &mut Vec<RespFrame>) {
     fn matches(pattern: &str, name: &str) -> bool {
         glob_match(pattern.as_bytes(), name.as_bytes())
@@ -18977,9 +19259,7 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             hello_simple("    * LIB-VER: the client lib version."),
             hello_simple("UNBLOCK <clientid> [TIMEOUT|ERROR]"),
             hello_simple("    Unblock the specified blocked client."),
-            hello_simple(
-                "TRACKING (ON|OFF) [REDIRECT <id>] [BCAST] [PREFIX <prefix> [...]]",
-            ),
+            hello_simple("TRACKING (ON|OFF) [REDIRECT <id>] [BCAST] [PREFIX <prefix> [...]]"),
             hello_simple("         [OPTIN] [OPTOUT] [NOLOOP]"),
             hello_simple("    Control server assisted client side caching."),
             hello_simple("TRACKINGINFO"),
@@ -19323,7 +19603,9 @@ fn zscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         let mut result = Vec::with_capacity(pairs.len() * 2);
         for (member, score) in pairs {
             result.push(RespFrame::BulkString(Some(member)));
-            result.push(RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())));
+            result.push(RespFrame::BulkString(Some(
+                redis_score_to_string(score).into_bytes(),
+            )));
         }
         result
     };
@@ -19508,9 +19790,8 @@ fn slowlog_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
         // 'count should be greater than or equal to -1' msg argument
         // (object.c:895-936). Mirror that single canonical wording.
         // (frankenredis-iglto)
-        let bad_count = || {
-            CommandError::Custom("ERR count should be greater than or equal to -1".to_string())
-        };
+        let bad_count =
+            || CommandError::Custom("ERR count should be greater than or equal to -1".to_string());
         let count = match argv.get(2) {
             Some(count_arg) => match parse_i64_arg(count_arg) {
                 Ok(-1) => store.slowlog_len(),
@@ -19570,9 +19851,7 @@ fn slowlog_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
         // '[opt] ' and the standard 'HELP' / '    Print this help.'
         // footer is appended automatically upstream.
         Ok(RespFrame::Array(Some(vec![
-            hello_simple(
-                "SLOWLOG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
-            ),
+            hello_simple("SLOWLOG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
             hello_simple("GET [<count>]"),
             hello_simple(
                 "    Return top <count> entries from the slowlog (default: 10, -1 mean all).",
@@ -19819,9 +20098,7 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
                         RespFrame::Integer(expires_bytes),
                     ),
                     (
-                        RespFrame::BulkString(Some(
-                            b"overhead.hashtable.slot-to-keys".to_vec(),
-                        )),
+                        RespFrame::BulkString(Some(b"overhead.hashtable.slot-to-keys".to_vec())),
                         RespFrame::Integer(0),
                     ),
                 ])));
@@ -19857,8 +20134,7 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         // first cron sample.
         let total_minus_startup = (used - startup_allocated).max(0);
         let dataset_percentage = if total_minus_startup > 0 {
-            100.0
-                * (total_minus_startup - (overhead_total - startup_allocated).max(0)) as f64
+            100.0 * (total_minus_startup - (overhead_total - startup_allocated).max(0)) as f64
                 / total_minus_startup as f64
         } else {
             0.0
@@ -19928,28 +20204,20 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         // is multi-line per subcommand, and the standard footer is
         // appended automatically upstream.
         Ok(RespFrame::Array(Some(vec![
-            hello_simple(
-                "MEMORY <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
-            ),
+            hello_simple("MEMORY <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
             hello_simple("DOCTOR"),
             hello_simple("    Return memory problems reports."),
             hello_simple("MALLOC-STATS"),
-            hello_simple(
-                "    Return internal statistics report from the memory allocator.",
-            ),
+            hello_simple("    Return internal statistics report from the memory allocator."),
             hello_simple("PURGE"),
-            hello_simple(
-                "    Attempt to purge dirty pages for reclamation by the allocator.",
-            ),
+            hello_simple("    Attempt to purge dirty pages for reclamation by the allocator."),
             hello_simple("STATS"),
             hello_simple("    Return information about the memory usage of the server."),
             hello_simple("USAGE <key> [SAMPLES <count>]"),
             hello_simple(
                 "    Return memory in bytes used by <key> and its value. Nested values are",
             ),
-            hello_simple(
-                "    sampled up to <count> times (default: 5, 0 means sample all).",
-            ),
+            hello_simple("    sampled up to <count> times (default: 5, 0 means sample all)."),
             hello_simple("HELP"),
             hello_simple("    Print this help."),
         ])))
@@ -20567,7 +20835,9 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     for (member, score) in result {
         frames.push(RespFrame::BulkString(Some(member)));
         if withscores {
-            frames.push(RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())));
+            frames.push(RespFrame::BulkString(Some(
+                redis_score_to_string(score).into_bytes(),
+            )));
         }
     }
     Ok(RespFrame::Array(Some(frames)))
@@ -20665,7 +20935,9 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     for (member, score) in result {
         frames.push(RespFrame::BulkString(Some(member)));
         if withscores {
-            frames.push(RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())));
+            frames.push(RespFrame::BulkString(Some(
+                redis_score_to_string(score).into_bytes(),
+            )));
         }
     }
     Ok(RespFrame::Array(Some(frames)))
@@ -20716,7 +20988,9 @@ fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     for (member, score) in entries {
         frames.push(RespFrame::BulkString(Some(member)));
         if withscores {
-            frames.push(RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())));
+            frames.push(RespFrame::BulkString(Some(
+                redis_score_to_string(score).into_bytes(),
+            )));
         }
     }
     Ok(RespFrame::Array(Some(frames)))
@@ -21221,11 +21495,11 @@ fn sds_value_header_size(len: usize) -> usize {
 /// `header_size` distinguishes the type (see `sds_*_header_size`).
 fn sds_alloc_field_cap(header_size: usize) -> usize {
     match header_size {
-        1 => 0,                   // SDS_TYPE_5: no alloc field, avail always 0
-        3 => u8::MAX as usize,    // SDS_TYPE_8
-        5 => u16::MAX as usize,   // SDS_TYPE_16
-        9 => u32::MAX as usize,   // SDS_TYPE_32
-        _ => usize::MAX,          // SDS_TYPE_64
+        1 => 0,                 // SDS_TYPE_5: no alloc field, avail always 0
+        3 => u8::MAX as usize,  // SDS_TYPE_8
+        5 => u16::MAX as usize, // SDS_TYPE_16
+        9 => u32::MAX as usize, // SDS_TYPE_32
+        _ => usize::MAX,        // SDS_TYPE_64
     }
 }
 
@@ -21307,8 +21581,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // NOFLUSH preserves keys, MERGE merges loaded keys) are not
         // modelled by the MVP runtime. (frankenredis-ehnk)
         for arg in &argv[2..] {
-            let token =
-                std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            let token = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
             if !token.eq_ignore_ascii_case("MERGE")
                 && !token.eq_ignore_ascii_case("NOFLUSH")
                 && !token.eq_ignore_ascii_case("NOSAVE")
@@ -21430,9 +21703,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // from upstream. (frankenredis-dbgpop)
         let positive_arg = |arg: &[u8]| -> Result<i64, CommandError> {
             let val = parse_i64_arg(arg).map_err(|_| {
-                CommandError::Custom(
-                    "ERR value is out of range, must be positive".to_string(),
-                )
+                CommandError::Custom("ERR value is out of range, must be positive".to_string())
             })?;
             if val < 0 {
                 return Err(CommandError::Custom(
@@ -21487,15 +21758,21 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         Ok(RespFrame::Array(Some(vec![
             hello_simple("DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
             hello_simple("AOF-FLUSH-SLEEP <microsec>"),
-            hello_simple("    Server will sleep before flushing the AOF, this is used for testing."),
+            hello_simple(
+                "    Server will sleep before flushing the AOF, this is used for testing.",
+            ),
             hello_simple("ASSERT"),
             hello_simple("    Crash by assertion failed."),
             hello_simple("CHANGE-REPL-ID"),
             hello_simple("    Change the replication IDs of the instance."),
-            hello_simple("    Dangerous: should be used only for testing the replication subsystem."),
+            hello_simple(
+                "    Dangerous: should be used only for testing the replication subsystem.",
+            ),
             hello_simple("CONFIG-REWRITE-FORCE-ALL"),
             hello_simple("    Like CONFIG REWRITE but writes all configuration options, including"),
-            hello_simple("    keywords not listed in original configuration file or default values."),
+            hello_simple(
+                "    keywords not listed in original configuration file or default values.",
+            ),
             hello_simple("CRASH-AND-RECOVER [<milliseconds>]"),
             hello_simple("    Hard crash and restart after a <milliseconds> delay (default 0)."),
             hello_simple("DIGEST"),
@@ -21503,7 +21780,9 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             hello_simple("DIGEST-VALUE <key> [<key> ...]"),
             hello_simple("    Output a hex signature of the values of all the specified keys."),
             hello_simple("ERROR <string>"),
-            hello_simple("    Return a Redis protocol error with <string> as message. Useful for clients"),
+            hello_simple(
+                "    Return a Redis protocol error with <string> as message. Useful for clients",
+            ),
             hello_simple("    unit tests to simulate Redis errors."),
             hello_simple("LEAK <string>"),
             hello_simple("    Create a memory leak of the input string."),
@@ -21516,7 +21795,9 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             hello_simple("LOADAOF"),
             hello_simple("    Flush the AOF buffers on disk and reload the AOF in memory."),
             hello_simple("REPLICATE <string>"),
-            hello_simple("    Replicates the provided string to replicas, allowing data divergence."),
+            hello_simple(
+                "    Replicates the provided string to replicas, allowing data divergence.",
+            ),
             // (frankenredis-6i6tm) Upstream gates MALLCTL on
             // #ifdef USE_JEMALLOC; vendored Redis 7.2.4 ships with
             // jemalloc, so its DEBUG HELP includes these. fr's HELP
@@ -21529,48 +21810,80 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             hello_simple("OBJECT <key>"),
             hello_simple("    Show low level info about `key` and associated value."),
             hello_simple("DROP-CLUSTER-PACKET-FILTER <packet-type>"),
-            hello_simple("    Drop all packets that match the filtered type. Set to -1 allow all packets."),
+            hello_simple(
+                "    Drop all packets that match the filtered type. Set to -1 allow all packets.",
+            ),
             hello_simple("OOM"),
             hello_simple("    Crash the server simulating an out-of-memory error."),
             hello_simple("PANIC"),
             hello_simple("    Crash the server simulating a panic."),
             hello_simple("POPULATE <count> [<prefix>] [<size>]"),
-            hello_simple("    Create <count> string keys named key:<num>. If <prefix> is specified then"),
+            hello_simple(
+                "    Create <count> string keys named key:<num>. If <prefix> is specified then",
+            ),
             hello_simple("    it is used instead of the 'key' prefix. These are not propagated to"),
-            hello_simple("    replicas. Cluster slots are not respected so keys not belonging to the"),
+            hello_simple(
+                "    replicas. Cluster slots are not respected so keys not belonging to the",
+            ),
             hello_simple("    current node can be created in cluster mode."),
             hello_simple("PROTOCOL <type>"),
-            hello_simple("    Reply with a test value of the specified type. <type> can be: string,"),
-            hello_simple("    integer, double, bignum, null, array, set, map, attrib, push, verbatim,"),
+            hello_simple(
+                "    Reply with a test value of the specified type. <type> can be: string,",
+            ),
+            hello_simple(
+                "    integer, double, bignum, null, array, set, map, attrib, push, verbatim,",
+            ),
             hello_simple("    true, false."),
             hello_simple("RELOAD [option ...]"),
-            hello_simple("    Save the RDB on disk and reload it back to memory. Valid <option> values:"),
+            hello_simple(
+                "    Save the RDB on disk and reload it back to memory. Valid <option> values:",
+            ),
             hello_simple("    * MERGE: conflicting keys will be loaded from RDB."),
-            hello_simple("    * NOFLUSH: the existing database will not be removed before load, but"),
+            hello_simple(
+                "    * NOFLUSH: the existing database will not be removed before load, but",
+            ),
             hello_simple("      conflicting keys will generate an exception and kill the server."),
             hello_simple("    * NOSAVE: the database will be loaded from an existing RDB file."),
             hello_simple("    Examples:"),
-            hello_simple("    * DEBUG RELOAD: verify that the server is able to persist, flush and reload"),
+            hello_simple(
+                "    * DEBUG RELOAD: verify that the server is able to persist, flush and reload",
+            ),
             hello_simple("      the database."),
-            hello_simple("    * DEBUG RELOAD NOSAVE: replace the current database with the contents of an"),
+            hello_simple(
+                "    * DEBUG RELOAD NOSAVE: replace the current database with the contents of an",
+            ),
             hello_simple("      existing RDB file."),
-            hello_simple("    * DEBUG RELOAD NOSAVE NOFLUSH MERGE: add the contents of an existing RDB"),
+            hello_simple(
+                "    * DEBUG RELOAD NOSAVE NOFLUSH MERGE: add the contents of an existing RDB",
+            ),
             hello_simple("      file to the database."),
             hello_simple("RESTART [<milliseconds>]"),
-            hello_simple("    Graceful restart: save config, db, restart after a <milliseconds> delay (default 0)."),
+            hello_simple(
+                "    Graceful restart: save config, db, restart after a <milliseconds> delay (default 0).",
+            ),
             hello_simple("SDSLEN <key>"),
             hello_simple("    Show low level SDS string info representing `key` and value."),
             hello_simple("SEGFAULT"),
             hello_simple("    Crash the server with sigsegv."),
             hello_simple("SET-ACTIVE-EXPIRE <0|1>"),
-            hello_simple("    Setting it to 0 disables expiring keys in background when they are not"),
-            hello_simple("    accessed (otherwise the Redis behavior). Setting it to 1 reenables back the"),
+            hello_simple(
+                "    Setting it to 0 disables expiring keys in background when they are not",
+            ),
+            hello_simple(
+                "    accessed (otherwise the Redis behavior). Setting it to 1 reenables back the",
+            ),
             hello_simple("    default."),
             hello_simple("QUICKLIST-PACKED-THRESHOLD <size>"),
-            hello_simple("    Sets the threshold for elements to be inserted as plain vs packed nodes"),
-            hello_simple("    Default value is 1GB, allows values up to 4GB. Setting to 0 restores to default."),
+            hello_simple(
+                "    Sets the threshold for elements to be inserted as plain vs packed nodes",
+            ),
+            hello_simple(
+                "    Default value is 1GB, allows values up to 4GB. Setting to 0 restores to default.",
+            ),
             hello_simple("SET-SKIP-CHECKSUM-VALIDATION <0|1>"),
-            hello_simple("    Enables or disables checksum checks for RDB files and RESTORE's payload."),
+            hello_simple(
+                "    Enables or disables checksum checks for RDB files and RESTORE's payload.",
+            ),
             hello_simple("SLEEP <seconds>"),
             hello_simple("    Stop the server for <seconds>. Decimals allowed."),
             hello_simple("STRINGMATCH-TEST"),
@@ -21587,13 +21900,21 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             hello_simple("PAUSE-CRON <0|1>"),
             hello_simple("    Stop periodic cron job processing."),
             hello_simple("REPLYBUFFER PEAK-RESET-TIME <NEVER||RESET|time>"),
-            hello_simple("    Sets the time (in milliseconds) to wait between client reply buffer peak resets."),
-            hello_simple("    In case NEVER is provided the last observed peak will never be reset"),
-            hello_simple("    In case RESET is provided the peak reset time will be restored to the default value"),
+            hello_simple(
+                "    Sets the time (in milliseconds) to wait between client reply buffer peak resets.",
+            ),
+            hello_simple(
+                "    In case NEVER is provided the last observed peak will never be reset",
+            ),
+            hello_simple(
+                "    In case RESET is provided the peak reset time will be restored to the default value",
+            ),
             hello_simple("REPLYBUFFER RESIZING <0|1>"),
             hello_simple("    Enable or disable the reply buffer resize cron job"),
             hello_simple("CLUSTERLINK KILL <to|from|all> <node-id>"),
-            hello_simple("    Kills the link based on the direction to/from (both) with the provided node."),
+            hello_simple(
+                "    Kills the link based on the direction to/from (both) with the provided node.",
+            ),
             hello_simple("HELP"),
             hello_simple("    Print this help."),
         ])))
@@ -21628,8 +21949,8 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         if argv.len() != 3 {
             return Err(debug_subcommand_envelope_error(sub));
         }
-        let type_name = std::str::from_utf8(&argv[2])
-            .map_err(|_| CommandError::InvalidUtf8Argument)?;
+        let type_name =
+            std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         let lower = type_name.to_ascii_lowercase();
         match lower.as_str() {
             "string" => Ok(RespFrame::BulkString(Some(b"Hello World".to_vec()))),
@@ -22004,8 +22325,8 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         let sub2 = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if sub2.eq_ignore_ascii_case("PEAK-RESET-TIME") {
             // Validate the value: NEVER / RESET / a parseable integer.
-            let val = std::str::from_utf8(&argv[3])
-                .map_err(|_| CommandError::InvalidUtf8Argument)?;
+            let val =
+                std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?;
             if !val.eq_ignore_ascii_case("NEVER")
                 && !val.eq_ignore_ascii_case("RESET")
                 && val.parse::<i64>().is_err()
@@ -22054,9 +22375,12 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             return Err(debug_subcommand_envelope_error(sub));
         }
         let raw = &argv[2];
-        let bad = || Ok(RespFrame::Error(
-            "ERR argument must be a memory value bigger than 1 and smaller than 4gb".to_string(),
-        ));
+        let bad = || {
+            Ok(RespFrame::Error(
+                "ERR argument must be a memory value bigger than 1 and smaller than 4gb"
+                    .to_string(),
+            ))
+        };
         let (digits_end, mul) = {
             let mut idx = 0;
             while idx < raw.len() && raw[idx].is_ascii_digit() {
@@ -22206,7 +22530,9 @@ fn mix_debug_object_digest(store: &mut Store, key: &[u8], now_ms: u64, digest: &
             }
         }
         Value::SortedSet(_) => {
-            let pairs = store.zrange_withscores(key, 0, -1, now_ms).unwrap_or_default();
+            let pairs = store
+                .zrange_withscores(key, 0, -1, now_ms)
+                .unwrap_or_default();
             for (member, score) in pairs {
                 let mut element_digest = [0u8; 20];
                 mix_digest(&mut element_digest, &member);
@@ -22575,20 +22901,15 @@ fn latency_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
                     .map(|s| s.to_ascii_lowercase())
             })
             .collect();
-        let histograms: Vec<(&str, &fr_store::CommandHistogram)> =
-            if lowered_filter.is_empty() {
-                // Return all histograms (already keyed lowercase)
-                store.all_command_histograms()
-            } else {
-                lowered_filter
-                    .iter()
-                    .filter_map(|cmd| {
-                        store
-                            .get_command_histogram(cmd)
-                            .map(|h| (cmd.as_str(), h))
-                    })
-                    .collect()
-            };
+        let histograms: Vec<(&str, &fr_store::CommandHistogram)> = if lowered_filter.is_empty() {
+            // Return all histograms (already keyed lowercase)
+            store.all_command_histograms()
+        } else {
+            lowered_filter
+                .iter()
+                .filter_map(|cmd| store.get_command_histogram(cmd).map(|h| (cmd.as_str(), h)))
+                .collect()
+        };
 
         // (frankenredis-cgjlc) Mirror upstream latency.c::fillCommandCDF +
         // latencyCommand HISTOGRAM dispatch. Inner CDF is a 2-entry Map of
@@ -22605,9 +22926,7 @@ fn latency_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
                     .into_iter()
                     .map(|(bucket_start_us, count)| {
                         (
-                            RespFrame::Integer(
-                                i64::try_from(bucket_start_us).unwrap_or(i64::MAX),
-                            ),
+                            RespFrame::Integer(i64::try_from(bucket_start_us).unwrap_or(i64::MAX)),
                             RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
                         )
                     })
@@ -24026,8 +24345,7 @@ mod tests {
         CLIENT_TRACKING_OPT_SWITCH_REQUIRES_DISABLE, CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT,
         CLIENT_TRACKING_PREFIX_REQUIRES_BCAST, CLIENT_TRACKING_REDIRECT_MISSING,
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
-        SUBCOMMAND_TABLE,
-        SCRIPT_NOSCRIPT_ERROR, acl_command_selectors_for_argv, classify_command,
+        SCRIPT_NOSCRIPT_ERROR, SUBCOMMAND_TABLE, acl_command_selectors_for_argv, classify_command,
         client_wrong_subcommand_arity, cluster_disabled_error, cluster_reset_with_keys_error,
         cluster_wrong_subcommand_arity, command_acl_categories, commands_in_acl_category,
         dispatch_argv, drain_pubsub_messages, eq_ascii_command, eval_script, execute_migrate,
@@ -24547,15 +24865,14 @@ mod tests {
         assert!(matches!(r, RespFrame::BulkString(None)));
 
         // GET on a key outside the allowed pattern — NOPERM key.
-        let err = dispatch_argv(
-            &[b"GET".to_vec(), b"notallowed".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect_err("GET denied key");
+        let err = dispatch_argv(&[b"GET".to_vec(), b"notallowed".to_vec()], &mut store, 0)
+            .expect_err("GET denied key");
         match err {
             CommandError::Custom(msg) => {
-                assert!(msg.contains("NOPERM No permissions to access a key"), "{msg}")
+                assert!(
+                    msg.contains("NOPERM No permissions to access a key"),
+                    "{msg}"
+                )
             }
             other => panic!("expected NOPERM key, got {other:?}"),
         }
@@ -25741,25 +26058,25 @@ mod tests {
 
         // PTTL stays floor (matches upstream's separate
         // ttlGenericCommand path when output_ms=1).
-        let out_ms = dispatch_argv(&[b"PTTL".to_vec(), b"k".to_vec()], &mut store, 6)
-            .expect("pttl 99994ms");
+        let out_ms =
+            dispatch_argv(&[b"PTTL".to_vec(), b"k".to_vec()], &mut store, 6).expect("pttl 99994ms");
         assert_eq!(out_ms, RespFrame::Integer(99_994));
 
         // 993 ms remaining → rounds half-up to 1s.
         store.set(b"k2".to_vec(), b"v".to_vec(), Some(1_000), 0);
-        let out = dispatch_argv(&[b"TTL".to_vec(), b"k2".to_vec()], &mut store, 7)
-            .expect("ttl 993ms");
+        let out =
+            dispatch_argv(&[b"TTL".to_vec(), b"k2".to_vec()], &mut store, 7).expect("ttl 993ms");
         assert_eq!(out, RespFrame::Integer(1));
 
         // 499 ms remaining → still rounds down to 0 (under the
         // half-second boundary).
-        let out = dispatch_argv(&[b"TTL".to_vec(), b"k2".to_vec()], &mut store, 501)
-            .expect("ttl 499ms");
+        let out =
+            dispatch_argv(&[b"TTL".to_vec(), b"k2".to_vec()], &mut store, 501).expect("ttl 499ms");
         assert_eq!(out, RespFrame::Integer(0));
 
         // 500 ms exactly → rounds up to 1.
-        let out = dispatch_argv(&[b"TTL".to_vec(), b"k2".to_vec()], &mut store, 500)
-            .expect("ttl 500ms");
+        let out =
+            dispatch_argv(&[b"TTL".to_vec(), b"k2".to_vec()], &mut store, 500).expect("ttl 500ms");
         assert_eq!(out, RespFrame::Integer(1));
     }
 
@@ -25786,7 +26103,9 @@ mod tests {
             let err = dispatch_argv(&argv, &mut store, 0).expect_err("extra args");
             assert_eq!(
                 err.to_resp(),
-                RespFrame::Error(format!("ERR wrong number of arguments for '{name}' command")),
+                RespFrame::Error(format!(
+                    "ERR wrong number of arguments for '{name}' command"
+                )),
                 "{cmd:?}"
             );
         }
@@ -26394,12 +26713,7 @@ mod tests {
             i32_overflow
         );
         assert_eq!(
-            dispatch_argv(
-                &[b"SELECT".to_vec(), b"2147483648".to_vec()],
-                &mut store,
-                0,
-            )
-            .unwrap(),
+            dispatch_argv(&[b"SELECT".to_vec(), b"2147483648".to_vec()], &mut store, 0,).unwrap(),
             i32_overflow
         );
         assert_eq!(
@@ -26408,12 +26722,7 @@ mod tests {
         );
 
         // MOVE
-        store.set(
-            fr_store::encode_db_key(0, b"k"),
-            b"v".to_vec(),
-            None,
-            0,
-        );
+        store.set(fr_store::encode_db_key(0, b"k"), b"v".to_vec(), None, 0);
         let err = dispatch_argv(
             &[b"MOVE".to_vec(), b"k".to_vec(), b"99999999999".to_vec()],
             &mut store,
@@ -27881,10 +28190,7 @@ mod tests {
             0,
         )
         .expect_err("list key bad index");
-        assert!(
-            matches!(err, CommandError::InvalidInteger),
-            "got {err:?}"
-        );
+        assert!(matches!(err, CommandError::InvalidInteger), "got {err:?}");
 
         // Regression: list key + valid index still returns the value.
         let out = dispatch_argv(
@@ -28003,10 +28309,7 @@ mod tests {
             0,
         )
         .expect_err("list key bad index");
-        assert!(
-            matches!(err, CommandError::InvalidInteger),
-            "got {err:?}"
-        );
+        assert!(matches!(err, CommandError::InvalidInteger), "got {err:?}");
 
         // List key + overflow index → InvalidInteger (parse_i64 rejects).
         let err = dispatch_argv(
@@ -28020,10 +28323,7 @@ mod tests {
             0,
         )
         .expect_err("list key overflow index");
-        assert!(
-            matches!(err, CommandError::InvalidInteger),
-            "got {err:?}"
-        );
+        assert!(matches!(err, CommandError::InvalidInteger), "got {err:?}");
 
         // Regression: list key + valid index still sets and returns OK.
         let out = dispatch_argv(
@@ -28980,7 +29280,7 @@ mod tests {
             b"(0 ",            // trailing whitespace after number
             b"0 ",             // trailing whitespace, no paren
             b"(NaN",           // NaN rejected
-            b"NaN",             // NaN rejected (no paren)
+            b"NaN",            // NaN rejected (no paren)
         ] {
             let err = dispatch_argv(
                 &[
@@ -30225,7 +30525,13 @@ mod tests {
         // on XRANGE/XREVRANGE start/end bounds. Cross-checked against
         // vendored Redis 7.2.4 on :16380.
         let mut store = Store::new();
-        for (id, _i) in [(b"1-0", 0), (b"1-5", 1), (b"2-0", 2), (b"2-1", 3), (b"3-0", 4)] {
+        for (id, _i) in [
+            (b"1-0", 0),
+            (b"1-5", 1),
+            (b"2-0", 2),
+            (b"2-1", 3),
+            (b"3-0", 4),
+        ] {
             dispatch_argv(
                 &[
                     b"XADD".to_vec(),
@@ -32656,12 +32962,9 @@ mod tests {
 
         // QUIT extra under script: extras are valid per upstream arity,
         // but the noscript guard still fires for QUIT itself.
-        let quit_extra_noscript = dispatch_argv(
-            &[b"QUIT".to_vec(), b"extra".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect_err("quit noscript with extras");
+        let quit_extra_noscript =
+            dispatch_argv(&[b"QUIT".to_vec(), b"extra".to_vec()], &mut store, 0)
+                .expect_err("quit noscript with extras");
         assert_eq!(
             quit_extra_noscript,
             CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
@@ -33177,10 +33480,7 @@ mod tests {
             0,
         )
         .expect_err("count parses before start");
-        assert!(
-            matches!(err, CommandError::InvalidInteger),
-            "got {err:?}",
-        );
+        assert!(matches!(err, CommandError::InvalidInteger), "got {err:?}",);
     }
 
     #[test]
@@ -35091,12 +35391,8 @@ mod tests {
         // tolerates any wall-clock drift in the suite.
         store.server_start_ms = 1_000_000;
         let now_ms = 1_000_000 + 30_000; // 30 seconds later
-        let out = dispatch_argv(
-            &[b"INFO".to_vec(), b"server".to_vec()],
-            &mut store,
-            now_ms,
-        )
-        .expect("INFO server");
+        let out = dispatch_argv(&[b"INFO".to_vec(), b"server".to_vec()], &mut store, now_ms)
+            .expect("INFO server");
         let body = match out {
             RespFrame::BulkString(Some(b)) => String::from_utf8(b).expect("info utf8"),
             other => panic!("expected BulkString from INFO, got {other:?}"),
@@ -35423,11 +35719,7 @@ mod tests {
         let mut s = Store::new();
         s.set(b"k".to_vec(), b"10".to_vec(), None, 0);
         let out = dispatch_argv(
-            &[
-                b"INCRBYFLOAT".to_vec(),
-                b"k".to_vec(),
-                b"1e-1000".to_vec(),
-            ],
+            &[b"INCRBYFLOAT".to_vec(), b"k".to_vec(), b"1e-1000".to_vec()],
             &mut s,
             0,
         )
@@ -35474,9 +35766,7 @@ mod tests {
         .expect_err("zincrby nan");
         assert_eq!(
             zincrby_nan,
-            CommandError::Custom(
-                "ERR resulting score is not a number (NaN)".to_string()
-            )
+            CommandError::Custom("ERR resulting score is not a number (NaN)".to_string())
         );
 
         let zadd_incr_nan = dispatch_argv(
@@ -35493,28 +35783,18 @@ mod tests {
         .expect_err("zadd incr nan");
         assert_eq!(
             zadd_incr_nan,
-            CommandError::Custom(
-                "ERR resulting score is not a number (NaN)".to_string()
-            )
+            CommandError::Custom("ERR resulting score is not a number (NaN)".to_string())
         );
 
         // Sanity: INCRBYFLOAT keeps the original wording.
         dispatch_argv(
-            &[
-                b"SET".to_vec(),
-                b"f".to_vec(),
-                b"inf".to_vec(),
-            ],
+            &[b"SET".to_vec(), b"f".to_vec(), b"inf".to_vec()],
             &mut store,
             0,
         )
         .unwrap();
         let incrbyfloat = dispatch_argv(
-            &[
-                b"INCRBYFLOAT".to_vec(),
-                b"f".to_vec(),
-                b"-inf".to_vec(),
-            ],
+            &[b"INCRBYFLOAT".to_vec(), b"f".to_vec(), b"-inf".to_vec()],
             &mut store,
             0,
         );
@@ -35526,7 +35806,10 @@ mod tests {
             },
             other => panic!("expected error, got {other:?}"),
         };
-        assert_eq!(got, "ERR increment would produce NaN or Infinity".to_string());
+        assert_eq!(
+            got,
+            "ERR increment would produce NaN or Infinity".to_string()
+        );
     }
 
     #[test]
@@ -35572,7 +35855,10 @@ mod tests {
         let mut store = Store::new();
 
         let cases: &[(&[&[u8]], &str)] = &[
-            (&[b"EVAL"], "ERR wrong number of arguments for 'eval' command"),
+            (
+                &[b"EVAL"],
+                "ERR wrong number of arguments for 'eval' command",
+            ),
             (
                 &[b"EVAL_RO"],
                 "ERR wrong number of arguments for 'eval_ro' command",
@@ -35880,12 +36166,8 @@ mod tests {
 
         // No matching pending entry → empty array, no error.
         let cases: &[&[&[u8]]] = &[
-            &[
-                b"XCLAIM", b"s", b"g", b"c", b"0", b"1-1", b"IDLE", b"-100",
-            ],
-            &[
-                b"XCLAIM", b"s", b"g", b"c", b"0", b"1-1", b"TIME", b"-100",
-            ],
+            &[b"XCLAIM", b"s", b"g", b"c", b"0", b"1-1", b"IDLE", b"-100"],
+            &[b"XCLAIM", b"s", b"g", b"c", b"0", b"1-1", b"TIME", b"-100"],
             &[
                 b"XCLAIM",
                 b"s",
@@ -35901,11 +36183,7 @@ mod tests {
             let argv: Vec<Vec<u8>> = argv_in.iter().map(|s| s.to_vec()).collect();
             let out = dispatch_argv(&argv, &mut store, 0)
                 .unwrap_or_else(|e| panic!("argv {argv_in:?}: {e:?}"));
-            assert_eq!(
-                out,
-                RespFrame::Array(Some(vec![])),
-                "argv: {argv_in:?}",
-            );
+            assert_eq!(out, RespFrame::Array(Some(vec![])), "argv: {argv_in:?}",);
         }
 
         // Regression: IDLE without value still errors (Unrecognized).
@@ -36834,12 +37112,8 @@ mod tests {
         .expect("missing key + empty value must short-circuit to 0");
         assert_eq!(out, RespFrame::Integer(0));
         // Must NOT have created the key.
-        let exists = dispatch_argv(
-            &[b"EXISTS".to_vec(), b"nokey".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("exists");
+        let exists =
+            dispatch_argv(&[b"EXISTS".to_vec(), b"nokey".to_vec()], &mut store, 0).expect("exists");
         assert_eq!(exists, RespFrame::Integer(0));
 
         // Existing string, empty value, huge offset → Integer(strlen).
@@ -37027,11 +37301,7 @@ mod tests {
         )
         .expect("LPUSH lk a");
         let err = dispatch_argv(
-            &[
-                b"INCRBYFLOAT".to_vec(),
-                b"lk".to_vec(),
-                b"abc".to_vec(),
-            ],
+            &[b"INCRBYFLOAT".to_vec(), b"lk".to_vec(), b"abc".to_vec()],
             &mut store,
             0,
         )
@@ -37073,11 +37343,7 @@ mod tests {
             )
             .expect("set");
             let out = dispatch_argv(
-                &[
-                    b"INCRBYFLOAT".to_vec(),
-                    b"k".to_vec(),
-                    delta.to_vec(),
-                ],
+                &[b"INCRBYFLOAT".to_vec(), b"k".to_vec(), delta.to_vec()],
                 &mut store,
                 0,
             )
@@ -37570,8 +37836,7 @@ mod tests {
         assert_eq!(
             err.to_resp(),
             RespFrame::Error(
-                "WRONGTYPE Operation against a key holding the wrong kind of value"
-                    .to_string()
+                "WRONGTYPE Operation against a key holding the wrong kind of value".to_string()
             )
         );
 
@@ -38166,11 +38431,7 @@ mod tests {
 
         for cmd in [b"GETBIT".as_slice(), b"SETBIT".as_slice()] {
             // Above 4 GiB bits.
-            let mut argv: Vec<Vec<u8>> = vec![
-                cmd.to_vec(),
-                b"k".to_vec(),
-                b"4294967296".to_vec(),
-            ];
+            let mut argv: Vec<Vec<u8>> = vec![cmd.to_vec(), b"k".to_vec(), b"4294967296".to_vec()];
             if cmd == b"SETBIT" {
                 argv.push(b"1".to_vec());
             }
@@ -38184,11 +38445,7 @@ mod tests {
             );
 
             // Far above (99 billion).
-            let mut argv: Vec<Vec<u8>> = vec![
-                cmd.to_vec(),
-                b"k".to_vec(),
-                b"99999999999".to_vec(),
-            ];
+            let mut argv: Vec<Vec<u8>> = vec![cmd.to_vec(), b"k".to_vec(), b"99999999999".to_vec()];
             if cmd == b"SETBIT" {
                 argv.push(b"1".to_vec());
             }
@@ -38202,11 +38459,7 @@ mod tests {
             );
 
             // Negative.
-            let mut argv: Vec<Vec<u8>> = vec![
-                cmd.to_vec(),
-                b"k".to_vec(),
-                b"-1".to_vec(),
-            ];
+            let mut argv: Vec<Vec<u8>> = vec![cmd.to_vec(), b"k".to_vec(), b"-1".to_vec()];
             if cmd == b"SETBIT" {
                 argv.push(b"1".to_vec());
             }
@@ -38278,11 +38531,7 @@ mod tests {
         // Sanity: bit-arg validation still runs first (must be 0 or 1)
         // so bit=2 errors even before the key-lookup short-circuit.
         let bad_bit = dispatch_argv(
-            &[
-                b"BITPOS".to_vec(),
-                b"nokey".to_vec(),
-                b"2".to_vec(),
-            ],
+            &[b"BITPOS".to_vec(), b"nokey".to_vec(), b"2".to_vec()],
             &mut store,
             0,
         )
@@ -39346,9 +39595,7 @@ mod tests {
             .expect("debug digest");
         assert_eq!(
             one_key_digest,
-            RespFrame::BulkString(Some(
-                b"f501b7e652f1e4874b8a6890245c152b5b89fe96".to_vec()
-            ))
+            RespFrame::BulkString(Some(b"f501b7e652f1e4874b8a6890245c152b5b89fe96".to_vec()))
         );
 
         let k1_value = dispatch_argv(
@@ -39374,9 +39621,7 @@ mod tests {
             .expect("debug digest after k2");
         assert_eq!(
             two_key_digest,
-            RespFrame::BulkString(Some(
-                b"91720c7142b6dfec5df4d6409a6f52e2da2a829f".to_vec()
-            ))
+            RespFrame::BulkString(Some(b"91720c7142b6dfec5df4d6409a6f52e2da2a829f".to_vec()))
         );
         let k2_value = dispatch_argv(
             &[b"DEBUG".to_vec(), b"DIGEST-VALUE".to_vec(), b"k2".to_vec()],
@@ -39408,11 +39653,7 @@ mod tests {
         // <count> must be parseable AND non-negative.
         for bad_count in [b"-1".as_slice(), b"-100", b"abc"] {
             let err = dispatch_argv(
-                &[
-                    b"DEBUG".to_vec(),
-                    b"POPULATE".to_vec(),
-                    bad_count.to_vec(),
-                ],
+                &[b"DEBUG".to_vec(), b"POPULATE".to_vec(), bad_count.to_vec()],
                 &mut store,
                 0,
             )
@@ -40046,7 +40287,12 @@ mod tests {
         // surfacing the generic InvalidInteger reply for non-numeric
         // numkeys values.
         let mut store = Store::new();
-        for bad in [b"abc".as_slice(), b"".as_slice(), b"0".as_slice(), b"-1".as_slice()] {
+        for bad in [
+            b"abc".as_slice(),
+            b"".as_slice(),
+            b"0".as_slice(),
+            b"-1".as_slice(),
+        ] {
             let err = dispatch_argv(
                 &[
                     b"SINTERCARD".to_vec(),
@@ -40260,18 +40506,8 @@ mod tests {
         let mut store = Store::new();
         let big_a = vec![b'a'; 4097];
         let big_b = vec![b'b'; 4097];
-        dispatch_argv(
-            &[b"SET".to_vec(), b"k1".to_vec(), big_a],
-            &mut store,
-            0,
-        )
-        .expect("set k1");
-        dispatch_argv(
-            &[b"SET".to_vec(), b"k2".to_vec(), big_b],
-            &mut store,
-            0,
-        )
-        .expect("set k2");
+        dispatch_argv(&[b"SET".to_vec(), b"k1".to_vec(), big_a], &mut store, 0).expect("set k1");
+        dispatch_argv(&[b"SET".to_vec(), b"k2".to_vec(), big_b], &mut store, 0).expect("set k2");
 
         // Plain LCS path → compute_lcs.
         let err = dispatch_argv(
@@ -40334,10 +40570,7 @@ mod tests {
             panic!("RESP3 LCS IDX must be Map, got {out:?}"); // ubs:ignore — AI triage
         };
         assert_eq!(pairs.len(), 2);
-        assert_eq!(
-            pairs[0].0,
-            RespFrame::BulkString(Some(b"matches".to_vec()))
-        );
+        assert_eq!(pairs[0].0, RespFrame::BulkString(Some(b"matches".to_vec())));
         assert!(matches!(pairs[0].1, RespFrame::Array(Some(_))));
         assert_eq!(pairs[1].0, RespFrame::BulkString(Some(b"len".to_vec())));
         assert!(matches!(pairs[1].1, RespFrame::Integer(_)));
@@ -40785,8 +41018,12 @@ mod tests {
         // without jemalloc. fr previously emitted an invented
         // 'Memory allocator stats not available' string.
         let mut store = Store::new();
-        let out = dispatch_argv(&[b"MEMORY".to_vec(), b"MALLOC-STATS".to_vec()], &mut store, 0)
-            .expect("malloc-stats");
+        let out = dispatch_argv(
+            &[b"MEMORY".to_vec(), b"MALLOC-STATS".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("malloc-stats");
         assert_eq!(
             out,
             RespFrame::BulkString(Some(
@@ -40900,8 +41137,14 @@ mod tests {
         // redis 7.2.4 confirmed both wording and casing.
         let mut store = Store::new();
         let cases: &[(&[u8], &str)] = &[
-            (b"NoSuch", "ERR unknown subcommand 'NoSuch'. Try MEMORY HELP."),
-            (b"nosuch", "ERR unknown subcommand 'nosuch'. Try MEMORY HELP."),
+            (
+                b"NoSuch",
+                "ERR unknown subcommand 'NoSuch'. Try MEMORY HELP.",
+            ),
+            (
+                b"nosuch",
+                "ERR unknown subcommand 'nosuch'. Try MEMORY HELP.",
+            ),
             (b"BOGUS", "ERR unknown subcommand 'BOGUS'. Try MEMORY HELP."),
         ];
         for (sub, expected) in cases {
@@ -41004,7 +41247,9 @@ mod tests {
         // value at the next index.
         let db0_idx = items
             .iter()
-            .position(|frame| matches!(frame, RespFrame::BulkString(Some(b)) if b.as_slice() == b"db.0"))
+            .position(
+                |frame| matches!(frame, RespFrame::BulkString(Some(b)) if b.as_slice() == b"db.0"),
+            )
             .expect("db.0 key present under RESP2");
         let db0_value = &items[db0_idx + 1];
         let RespFrame::Array(Some(db0_inner)) = db0_value else {
@@ -41071,7 +41316,10 @@ mod tests {
         };
         let info = String::from_utf8(bytes).expect("utf8 info");
         let expected = format!("redis_version:{}\r\n", fr_store::REDIS_COMPAT_VERSION);
-        assert!(info.contains(&expected), "expected {expected:?} in {info:?}");
+        assert!(
+            info.contains(&expected),
+            "expected {expected:?} in {info:?}"
+        );
         assert!(
             !info.contains("redis_version:7.2.4-frankenredis\r\n"),
             "INFO server must not append frankenredis suffix: {info:?}"
@@ -41379,12 +41627,7 @@ mod tests {
         // dispatch_argv. Seed db 1 directly via store.set with an
         // encoded key so the swap path can be verified end-to-end.
         let mut store = Store::new();
-        store.set(
-            fr_store::encode_db_key(1, b"k"),
-            b"v".to_vec(),
-            None,
-            0,
-        );
+        store.set(fr_store::encode_db_key(1, b"k"), b"v".to_vec(), None, 0);
         let out = dispatch_argv(
             &[b"SWAPDB".to_vec(), b"0".to_vec(), b"1".to_vec()],
             &mut store,
@@ -41406,7 +41649,11 @@ mod tests {
         );
 
         // Parse failure on argv[1] surfaces the bespoke first-index wording.
-        for bad in [b"abc".as_slice(), b"".as_slice(), b"99999999999999999999".as_slice()] {
+        for bad in [
+            b"abc".as_slice(),
+            b"".as_slice(),
+            b"99999999999999999999".as_slice(),
+        ] {
             let err = dispatch_argv(
                 &[b"SWAPDB".to_vec(), bad.to_vec(), b"0".to_vec()],
                 &mut store,
@@ -42054,11 +42301,7 @@ mod tests {
         );
 
         let err = dispatch_argv(
-            &[
-                b"PUBSUB".to_vec(),
-                b"NUMPAT".to_vec(),
-                b"extra".to_vec(),
-            ],
+            &[b"PUBSUB".to_vec(), b"NUMPAT".to_vec(), b"extra".to_vec()],
             &mut store,
             0,
         )
@@ -42472,9 +42715,7 @@ mod tests {
         // envelope, not the generic syntax-error fallthrough.
         assert_eq!(
             err.to_resp(),
-            RespFrame::Error(
-                "ERR wrong number of arguments for 'pubsub|help' command".to_string()
-            )
+            RespFrame::Error("ERR wrong number of arguments for 'pubsub|help' command".to_string())
         );
 
         let err = dispatch_argv(
@@ -43006,12 +43247,8 @@ mod tests {
         .expect("zrangestore byscore limit -1 0");
         assert_eq!(zrs_byscore_neg, RespFrame::Integer(0));
         // dst should now be deleted (empty pairs branch in zrangestore_cmd).
-        let exists_dst = dispatch_argv(
-            &[b"EXISTS".to_vec(), b"dst".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("exists dst");
+        let exists_dst = dispatch_argv(&[b"EXISTS".to_vec(), b"dst".to_vec()], &mut store, 0)
+            .expect("exists dst");
         assert_eq!(exists_dst, RespFrame::Integer(0));
 
         // Regression: positive LIMIT 0 5 without BYSCORE/BYLEX still
@@ -43072,10 +43309,8 @@ mod tests {
             // Either Err(Custom) or Ok(RespFrame::Error) is acceptable;
             // both serialize identically on the wire.
             let result = dispatch_argv(&argv, &mut Store::new(), 0);
-            let dispatched_via_err =
-                matches!(&result, Err(CommandError::Custom(s)) if s == wanted);
-            let dispatched_via_ok =
-                matches!(&result, Ok(RespFrame::Error(s)) if s == wanted);
+            let dispatched_via_err = matches!(&result, Err(CommandError::Custom(s)) if s == wanted);
+            let dispatched_via_ok = matches!(&result, Ok(RespFrame::Error(s)) if s == wanted);
             assert!(
                 dispatched_via_err || dispatched_via_ok,
                 "{wanted:?} not produced — got {result:?}"
@@ -43535,7 +43770,11 @@ mod tests {
         let mut store = Store::new();
 
         let undef = dispatch_argv(
-            &[b"EVAL".to_vec(), b"return UNDEFINED".to_vec(), b"0".to_vec()],
+            &[
+                b"EVAL".to_vec(),
+                b"return UNDEFINED".to_vec(),
+                b"0".to_vec(),
+            ],
             &mut store,
             0,
         )
@@ -43546,11 +43785,7 @@ mod tests {
         );
 
         let write_global = dispatch_argv(
-            &[
-                b"EVAL".to_vec(),
-                b"X = 5; return X".to_vec(),
-                b"0".to_vec(),
-            ],
+            &[b"EVAL".to_vec(), b"X = 5; return X".to_vec(), b"0".to_vec()],
             &mut store,
             0,
         )
@@ -44380,11 +44615,7 @@ mod tests {
 
         // Seed a string key so LPUSH triggers WRONGTYPE.
         dispatch_argv(
-            &[
-                b"SET".to_vec(),
-                b"sk".to_vec(),
-                b"v".to_vec(),
-            ],
+            &[b"SET".to_vec(), b"sk".to_vec(), b"v".to_vec()],
             &mut store,
             0,
         )
@@ -44392,11 +44623,7 @@ mod tests {
 
         let call_script = b"return redis.call('LPUSH', 'sk', 'a')";
         let out = dispatch_argv(
-            &[
-                b"EVAL".to_vec(),
-                call_script.to_vec(),
-                b"0".to_vec(),
-            ],
+            &[b"EVAL".to_vec(), call_script.to_vec(), b"0".to_vec()],
             &mut store,
             0,
         )
@@ -44415,11 +44642,7 @@ mod tests {
         // pcall variant must NOT carry the envelope (table.err is bare).
         let pcall_script = b"return redis.pcall('LPUSH', 'sk', 'a')";
         let out = dispatch_argv(
-            &[
-                b"EVAL".to_vec(),
-                pcall_script.to_vec(),
-                b"0".to_vec(),
-            ],
+            &[b"EVAL".to_vec(), pcall_script.to_vec(), b"0".to_vec()],
             &mut store,
             0,
         )
@@ -44450,11 +44673,7 @@ mod tests {
         // redis.call wraps in luaCallFunction's runtime envelope.
         let call_script = b"return redis.call('NOPE')";
         let out = dispatch_argv(
-            &[
-                b"EVAL".to_vec(),
-                call_script.to_vec(),
-                b"0".to_vec(),
-            ],
+            &[b"EVAL".to_vec(), call_script.to_vec(), b"0".to_vec()],
             &mut store,
             0,
         )
@@ -44474,11 +44693,7 @@ mod tests {
         // layer, without the runtime envelope.
         let pcall_script = b"return redis.pcall('NOPE')";
         let out = dispatch_argv(
-            &[
-                b"EVAL".to_vec(),
-                pcall_script.to_vec(),
-                b"0".to_vec(),
-            ],
+            &[b"EVAL".to_vec(), pcall_script.to_vec(), b"0".to_vec()],
             &mut store,
             0,
         )
@@ -44600,11 +44815,7 @@ mod tests {
 
         // redis.setresp wrong arity.
         let setresp_bad = dispatch_argv(
-            &[
-                b"EVAL".to_vec(),
-                b"redis.setresp()".to_vec(),
-                b"0".to_vec(),
-            ],
+            &[b"EVAL".to_vec(), b"redis.setresp()".to_vec(), b"0".to_vec()],
             &mut store,
             0,
         )
@@ -44722,7 +44933,11 @@ mod tests {
             let frame = dispatch_argv(
                 &[
                     b"EVAL".to_vec(),
-                    format!("return redis.call('ACL','GENPASS','{}')", String::from_utf8_lossy(bad_range)).into_bytes(),
+                    format!(
+                        "return redis.call('ACL','GENPASS','{}')",
+                        String::from_utf8_lossy(bad_range)
+                    )
+                    .into_bytes(),
                     b"0".to_vec(),
                 ],
                 &mut store,
@@ -44835,9 +45050,7 @@ mod tests {
         .expect("eval");
         assert_eq!(
             ok_sha1hex,
-            RespFrame::BulkString(Some(
-                b"0beec7b5ea3f0fdbc95d0dd47f3c5bc275da8a33".to_vec()
-            ))
+            RespFrame::BulkString(Some(b"0beec7b5ea3f0fdbc95d0dd47f3c5bc275da8a33".to_vec()))
         );
     }
 
@@ -44986,9 +45199,7 @@ mod tests {
         .expect("eval_ro bad shebang");
         assert_eq!(
             out_ro,
-            RespFrame::Error(
-                "ERR Unexpected engine in script shebang: #!python".to_string()
-            )
+            RespFrame::Error("ERR Unexpected engine in script shebang: #!python".to_string())
         );
     }
 
@@ -45093,7 +45304,11 @@ mod tests {
 
         // error({err='x'}) at top level: body is just "x" + script suffix.
         let out = dispatch_argv(
-            &[b"EVAL".to_vec(), b"error({err='x'})".to_vec(), b"0".to_vec()],
+            &[
+                b"EVAL".to_vec(),
+                b"error({err='x'})".to_vec(),
+                b"0".to_vec(),
+            ],
             &mut store,
             0,
         )
@@ -45502,11 +45717,7 @@ mod tests {
         // Sanity: syntactically valid (even if semantically meaningless)
         // scripts must still load and cache.
         let ok = dispatch_argv(
-            &[
-                b"SCRIPT".to_vec(),
-                b"LOAD".to_vec(),
-                b"return 1".to_vec(),
-            ],
+            &[b"SCRIPT".to_vec(), b"LOAD".to_vec(), b"return 1".to_vec()],
             &mut store,
             0,
         )
@@ -45763,7 +45974,7 @@ mod tests {
             b"3g",
             b"4g",
             b"4293918720", // exactly 4GB - 1MB
-            b"",            // empty digit run = 0
+            b"",           // empty digit run = 0
             b"512b",
         ];
         for arg in valid {
@@ -45796,7 +46007,7 @@ mod tests {
             b"-1",
             b"5g",
             b"5gb",
-            b"4gb", // 4 * 1024^3 = 4GB exactly, > 4GB-1MB cap
+            b"4gb",        // 4 * 1024^3 = 4GB exactly, > 4GB-1MB cap
             b"4294967295", // (1<<32) - 1, > cap
             b"100x",
             b"1KIB",
@@ -45936,11 +46147,7 @@ mod tests {
         store.cluster_enabled = true;
         // Wrong arity (3 instead of 5).
         let out = dispatch_argv(
-            &[
-                b"DEBUG".to_vec(),
-                b"CLUSTERLINK".to_vec(),
-                b"KILL".to_vec(),
-            ],
+            &[b"DEBUG".to_vec(), b"CLUSTERLINK".to_vec(), b"KILL".to_vec()],
             &mut store,
             0,
         )
@@ -46103,9 +46310,7 @@ mod tests {
             ("double", RespFrame::BulkString(Some(b"3.141".to_vec()))),
             (
                 "bignum",
-                RespFrame::BulkString(Some(
-                    b"1234567999999999999999999999999999999".to_vec(),
-                )),
+                RespFrame::BulkString(Some(b"1234567999999999999999999999999999999".to_vec())),
             ),
             ("null", RespFrame::BulkString(None)),
             ("true", RespFrame::Integer(1)),
@@ -46139,15 +46344,11 @@ mod tests {
             ),
             (
                 "attrib",
-                RespFrame::BulkString(Some(
-                    b"Some real reply following the attribute".to_vec(),
-                )),
+                RespFrame::BulkString(Some(b"Some real reply following the attribute".to_vec())),
             ),
             (
                 "push",
-                RespFrame::Error(
-                    "ERR RESP2 is not supported by this command".to_string(),
-                ),
+                RespFrame::Error("ERR RESP2 is not supported by this command".to_string()),
             ),
             (
                 "verbatim",
@@ -46170,11 +46371,7 @@ mod tests {
 
         // Bad type name returns the canonical wording.
         let bad = dispatch_argv(
-            &[
-                b"DEBUG".to_vec(),
-                b"PROTOCOL".to_vec(),
-                b"badname".to_vec(),
-            ],
+            &[b"DEBUG".to_vec(), b"PROTOCOL".to_vec(), b"badname".to_vec()],
             &mut store,
             0,
         )
@@ -46188,12 +46385,8 @@ mod tests {
         );
 
         // Wrong-arity routes through the subcommand envelope.
-        let arity_err = dispatch_argv(
-            &[b"DEBUG".to_vec(), b"PROTOCOL".to_vec()],
-            &mut store,
-            0,
-        )
-        .unwrap_err();
+        let arity_err =
+            dispatch_argv(&[b"DEBUG".to_vec(), b"PROTOCOL".to_vec()], &mut store, 0).unwrap_err();
         assert!(
             matches!(&arity_err, CommandError::Custom(s) if s.contains("PROTOCOL")),
             "wrong-arity must surface envelope error, got {arity_err:?}"
@@ -46383,12 +46576,18 @@ mod tests {
             (b"pause-cron", "pause-cron"),
             (b"set-disable-deny-scripts", "set-disable-deny-scripts"),
             (b"aof-flush-sleep", "aof-flush-sleep"),
-            (b"set-skip-checksum-validation", "set-skip-checksum-validation"),
+            (
+                b"set-skip-checksum-validation",
+                "set-skip-checksum-validation",
+            ),
             (b"sdslen", "sdslen"),
             (b"structsize extra", "structsize"),
             (b"listpack", "listpack"),
             (b"quicklist", "quicklist"),
-            (b"config-rewrite-force-all extra", "config-rewrite-force-all"),
+            (
+                b"config-rewrite-force-all extra",
+                "config-rewrite-force-all",
+            ),
             (b"drop-cluster-packet-filter", "drop-cluster-packet-filter"),
             (b"client-eviction extra", "client-eviction"),
             (b"htstats", "htstats"),
@@ -46405,10 +46604,7 @@ mod tests {
         ];
         for (token, expected_in_msg) in cases {
             let argv = if token.contains(&b' ') {
-                let parts: Vec<Vec<u8>> = token
-                    .split(|b| *b == b' ')
-                    .map(|s| s.to_vec())
-                    .collect();
+                let parts: Vec<Vec<u8>> = token.split(|b| *b == b' ').map(|s| s.to_vec()).collect();
                 let mut v = vec![b"DEBUG".to_vec()];
                 v.extend(parts);
                 v
@@ -46448,15 +46644,43 @@ mod tests {
             // Use too-many-args to exercise the SubcommandSyntaxError
             // envelope. The too-few-args path now uses the table-level
             // wording per (frankenredis-clipausearity).
-            (&[b"CLIENT", b"pause", b"100", b"WRITE", b"extra"], "pause", "CLIENT"),
-            (&[b"CLIENT", b"Pause", b"100", b"WRITE", b"extra"], "Pause", "CLIENT"),
+            (
+                &[b"CLIENT", b"pause", b"100", b"WRITE", b"extra"],
+                "pause",
+                "CLIENT",
+            ),
+            (
+                &[b"CLIENT", b"Pause", b"100", b"WRITE", b"extra"],
+                "Pause",
+                "CLIENT",
+            ),
             (&[b"SLOWLOG", b"get", b"1", b"extra"], "get", "SLOWLOG"),
             (&[b"SLOWLOG", b"Get", b"1", b"extra"], "Get", "SLOWLOG"),
-            (&[b"PUBSUB", b"channels", b"a", b"extra"], "channels", "PUBSUB"),
-            (&[b"PUBSUB", b"Channels", b"a", b"extra"], "Channels", "PUBSUB"),
-            (&[b"PUBSUB", b"shardchannels", b"a", b"extra"], "shardchannels", "PUBSUB"),
-            (&[b"FUNCTION", b"flush", b"SYNC", b"extra"], "flush", "FUNCTION"),
-            (&[b"FUNCTION", b"Flush", b"SYNC", b"extra"], "Flush", "FUNCTION"),
+            (
+                &[b"PUBSUB", b"channels", b"a", b"extra"],
+                "channels",
+                "PUBSUB",
+            ),
+            (
+                &[b"PUBSUB", b"Channels", b"a", b"extra"],
+                "Channels",
+                "PUBSUB",
+            ),
+            (
+                &[b"PUBSUB", b"shardchannels", b"a", b"extra"],
+                "shardchannels",
+                "PUBSUB",
+            ),
+            (
+                &[b"FUNCTION", b"flush", b"SYNC", b"extra"],
+                "flush",
+                "FUNCTION",
+            ),
+            (
+                &[b"FUNCTION", b"Flush", b"SYNC", b"extra"],
+                "Flush",
+                "FUNCTION",
+            ),
             (
                 &[b"FUNCTION", b"restore", b"body", b"REPLACE", b"extra"],
                 "restore",
@@ -46608,11 +46832,7 @@ mod tests {
         // Unknown option: dedicated wording, not generic wrong-arity.
         let mut store = Store::new();
         let bad = dispatch_argv(
-            &[
-                b"DEBUG".to_vec(),
-                b"RELOAD".to_vec(),
-                b"BANANA".to_vec(),
-            ],
+            &[b"DEBUG".to_vec(), b"RELOAD".to_vec(), b"BANANA".to_vec()],
             &mut store,
             0,
         )
@@ -46620,8 +46840,7 @@ mod tests {
         assert_eq!(
             bad,
             RespFrame::Error(
-                "ERR DEBUG RELOAD only supports the MERGE, NOFLUSH and NOSAVE options."
-                    .to_string()
+                "ERR DEBUG RELOAD only supports the MERGE, NOFLUSH and NOSAVE options.".to_string()
             )
         );
         assert!(
@@ -46672,11 +46891,7 @@ mod tests {
         )
         .expect("set integer");
         let out = dispatch_argv(
-            &[
-                b"DEBUG".to_vec(),
-                b"OBJECT".to_vec(),
-                b"shared".to_vec(),
-            ],
+            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"shared".to_vec()],
             &mut store,
             1,
         )
@@ -46686,10 +46901,7 @@ mod tests {
             panic!("expected SimpleString"); // ubs:ignore — AI triage
         };
         let expected = format!("refcount:{}", i32::MAX);
-        assert!(
-            info.contains(&expected),
-            "expected {expected} in: {info}"
-        );
+        assert!(info.contains(&expected), "expected {expected} in: {info}");
         assert!(info.contains("encoding:int"), "{info}");
 
         // Integer outside shared range → refcount = 1.
@@ -46890,12 +47102,7 @@ mod tests {
         // strings still take the raw path.
         let mut store = Store::new();
         let long = vec![b'x'; 100];
-        dispatch_argv(
-            &[b"SET".to_vec(), b"k".to_vec(), long],
-            &mut store,
-            0,
-        )
-        .expect("set 100x");
+        dispatch_argv(&[b"SET".to_vec(), b"k".to_vec(), long], &mut store, 0).expect("set 100x");
         let out = dispatch_argv(
             &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"k".to_vec()],
             &mut store,
@@ -46916,12 +47123,7 @@ mod tests {
         // Sanity: a non-compressible 25-byte string still goes raw
         // (LZF would grow the payload, so the 0xC3 path falls back).
         let raw = b"abcdefghijklmnopqrstuvwxy".to_vec(); // 25 bytes
-        dispatch_argv(
-            &[b"SET".to_vec(), b"r".to_vec(), raw],
-            &mut store,
-            0,
-        )
-        .expect("set raw 25");
+        dispatch_argv(&[b"SET".to_vec(), b"r".to_vec(), raw], &mut store, 0).expect("set raw 25");
         let out2 = dispatch_argv(
             &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"r".to_vec()],
             &mut store,
@@ -47084,7 +47286,10 @@ mod tests {
             0,
         )
         .expect("htstats out-of-range returns Error frame");
-        assert_eq!(oor, RespFrame::Error("ERR Out of range database".to_string()));
+        assert_eq!(
+            oor,
+            RespFrame::Error("ERR Out of range database".to_string())
+        );
 
         // Wrong-arity → canonical unknown-subcommand error.
         let bad_arity = dispatch_argv(&[b"DEBUG".to_vec(), b"HTSTATS".to_vec()], &mut store, 0)
@@ -47180,10 +47385,7 @@ mod tests {
         // upstream's strerror(EFAULT) reply when there's no config file
         // loaded (which is always true for fr's purely-in-memory config).
         let crfa = dispatch_argv(
-            &[
-                b"DEBUG".to_vec(),
-                b"CONFIG-REWRITE-FORCE-ALL".to_vec(),
-            ],
+            &[b"DEBUG".to_vec(), b"CONFIG-REWRITE-FORCE-ALL".to_vec()],
             &mut store,
             0,
         )
@@ -47243,10 +47445,7 @@ mod tests {
 
         // DROP-CLUSTER-PACKET-FILTER with no arg → unknown-subcommand error.
         let dcpf_arity = dispatch_argv(
-            &[
-                b"DEBUG".to_vec(),
-                b"DROP-CLUSTER-PACKET-FILTER".to_vec(),
-            ],
+            &[b"DEBUG".to_vec(), b"DROP-CLUSTER-PACKET-FILTER".to_vec()],
             &mut store,
             0,
         )
@@ -47311,7 +47510,10 @@ mod tests {
             panic!("expected BulkString from DEBUG STRUCTSIZE, got {structsize:?}");
         };
         let body = std::str::from_utf8(&bytes).unwrap();
-        assert!(body.starts_with("bits:"), "structsize must start with bits: token, got {body}");
+        assert!(
+            body.starts_with("bits:"),
+            "structsize must start with bits: token, got {body}"
+        );
         assert!(body.contains("robj:"));
         assert!(body.contains("dictentry:"));
         assert!(body.contains("sdshdr5:"));
@@ -47335,11 +47537,7 @@ mod tests {
 
         // LISTPACK / QUICKLIST: missing key → "no such key".
         let lp_missing = dispatch_argv(
-            &[
-                b"DEBUG".to_vec(),
-                b"LISTPACK".to_vec(),
-                b"absent".to_vec(),
-            ],
+            &[b"DEBUG".to_vec(), b"LISTPACK".to_vec(), b"absent".to_vec()],
             &mut store,
             0,
         )
@@ -47347,11 +47545,7 @@ mod tests {
         assert_eq!(lp_missing, RespFrame::Error("ERR no such key".to_string()));
 
         let ql_missing = dispatch_argv(
-            &[
-                b"DEBUG".to_vec(),
-                b"QUICKLIST".to_vec(),
-                b"absent".to_vec(),
-            ],
+            &[b"DEBUG".to_vec(), b"QUICKLIST".to_vec(), b"absent".to_vec()],
             &mut store,
             0,
         )
@@ -47449,11 +47643,7 @@ mod tests {
 
         // Missing key
         let missing = dispatch_argv(
-            &[
-                b"DEBUG".to_vec(),
-                b"SDSLEN".to_vec(),
-                b"absent".to_vec(),
-            ],
+            &[b"DEBUG".to_vec(), b"SDSLEN".to_vec(), b"absent".to_vec()],
             &mut store,
             0,
         )
@@ -47468,11 +47658,7 @@ mod tests {
         )
         .expect("seed int");
         let int_reply = dispatch_argv(
-            &[
-                b"DEBUG".to_vec(),
-                b"SDSLEN".to_vec(),
-                b"int_key".to_vec(),
-            ],
+            &[b"DEBUG".to_vec(), b"SDSLEN".to_vec(), b"int_key".to_vec()],
             &mut store,
             0,
         )
@@ -47490,11 +47676,7 @@ mod tests {
         )
         .expect("seed list");
         let list_reply = dispatch_argv(
-            &[
-                b"DEBUG".to_vec(),
-                b"SDSLEN".to_vec(),
-                b"list_key".to_vec(),
-            ],
+            &[b"DEBUG".to_vec(), b"SDSLEN".to_vec(), b"list_key".to_vec()],
             &mut store,
             0,
         )
@@ -47516,11 +47698,7 @@ mod tests {
         )
         .expect("seed sds");
         let sds_reply = dispatch_argv(
-            &[
-                b"DEBUG".to_vec(),
-                b"SDSLEN".to_vec(),
-                b"sds_key".to_vec(),
-            ],
+            &[b"DEBUG".to_vec(), b"SDSLEN".to_vec(), b"sds_key".to_vec()],
             &mut store,
             0,
         )
@@ -47565,29 +47743,20 @@ mod tests {
             (4, 8, 0, "embstr"),
             (5, 16, 0, "embstr"),
             (44, 48, 0, "embstr"),
-            (45, 56, 7, "raw"),       // 56 - 3 - 45 - 1
-            (47, 56, 5, "raw"),       // 56 - 3 - 47 - 1
-            (100, 112, 8, "raw"),     // 112 - 3 - 100 - 1
-            (200, 224, 20, "raw"),    // 224 - 3 - 200 - 1
-            (255, 320, 0, "raw"),     // 320 - 3 - 1 = 316, capped at 255, 255 - 255 = 0
-            (256, 320, 58, "raw"),    // SDS_TYPE_16 (header 5): 320 - 5 - 1 = 314, 314 - 256 = 58
+            (45, 56, 7, "raw"),    // 56 - 3 - 45 - 1
+            (47, 56, 5, "raw"),    // 56 - 3 - 47 - 1
+            (100, 112, 8, "raw"),  // 112 - 3 - 100 - 1
+            (200, 224, 20, "raw"), // 224 - 3 - 200 - 1
+            (255, 320, 0, "raw"),  // 320 - 3 - 1 = 316, capped at 255, 255 - 255 = 0
+            (256, 320, 58, "raw"), // SDS_TYPE_16 (header 5): 320 - 5 - 1 = 314, 314 - 256 = 58
         ] {
             // Reset key
             dispatch_argv(&[b"DEL".to_vec(), b"k".to_vec()], &mut store, 0).ok();
             let val = vec![b'x'; val_len];
-            dispatch_argv(
-                &[b"SET".to_vec(), b"k".to_vec(), val],
-                &mut store,
-                0,
-            )
-            .expect("seed");
+            dispatch_argv(&[b"SET".to_vec(), b"k".to_vec(), val], &mut store, 0).expect("seed");
             // Sanity-check the encoding (which drives the avail branch).
             let enc_reply = dispatch_argv(
-                &[
-                    b"OBJECT".to_vec(),
-                    b"ENCODING".to_vec(),
-                    b"k".to_vec(),
-                ],
+                &[b"OBJECT".to_vec(), b"ENCODING".to_vec(), b"k".to_vec()],
                 &mut store,
                 0,
             )
@@ -47602,11 +47771,7 @@ mod tests {
             );
 
             let reply = dispatch_argv(
-                &[
-                    b"DEBUG".to_vec(),
-                    b"SDSLEN".to_vec(),
-                    b"k".to_vec(),
-                ],
+                &[b"DEBUG".to_vec(), b"SDSLEN".to_vec(), b"k".to_vec()],
                 &mut store,
                 0,
             )
@@ -47918,10 +48083,7 @@ mod tests {
             0,
         )
         .expect_err("abort mixed with flags should still be NOSCRIPT under script");
-        assert_eq!(
-            err,
-            CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
-        );
+        assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
 
         let err = dispatch_argv(
             &[b"SHUTDOWN".to_vec(), b"SAVE".to_vec(), b"NOSAVE".to_vec()],
@@ -47929,10 +48091,7 @@ mod tests {
             0,
         )
         .expect_err("save and nosave together should still be NOSCRIPT under script");
-        assert_eq!(
-            err,
-            CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
-        );
+        assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
 
         let bare =
             dispatch_argv(&[b"SHUTDOWN".to_vec()], &mut store, 0).expect_err("shutdown noscript");
@@ -48747,10 +48906,40 @@ mod tests {
         // SyntaxError (matching upstream's shared.syntaxerr) for
         // the legacy GEORADIUS and GEORADIUSBYMEMBER commands.
         let trailing_store_cases: &[&[&[u8]]] = &[
-            &[b"GEORADIUS", b"mygeo", b"15", b"37", b"200", b"km", b"STORE"],
-            &[b"GEORADIUS", b"mygeo", b"15", b"37", b"200", b"km", b"STOREDIST"],
-            &[b"GEORADIUSBYMEMBER", b"mygeo", b"Catania", b"200", b"km", b"STORE"],
-            &[b"GEORADIUSBYMEMBER", b"mygeo", b"Catania", b"200", b"km", b"STOREDIST"],
+            &[
+                b"GEORADIUS",
+                b"mygeo",
+                b"15",
+                b"37",
+                b"200",
+                b"km",
+                b"STORE",
+            ],
+            &[
+                b"GEORADIUS",
+                b"mygeo",
+                b"15",
+                b"37",
+                b"200",
+                b"km",
+                b"STOREDIST",
+            ],
+            &[
+                b"GEORADIUSBYMEMBER",
+                b"mygeo",
+                b"Catania",
+                b"200",
+                b"km",
+                b"STORE",
+            ],
+            &[
+                b"GEORADIUSBYMEMBER",
+                b"mygeo",
+                b"Catania",
+                b"200",
+                b"km",
+                b"STOREDIST",
+            ],
         ];
         for argv_slices in trailing_store_cases {
             let argv: Vec<Vec<u8>> = argv_slices.iter().map(|s| s.to_vec()).collect();
@@ -48764,10 +48953,44 @@ mod tests {
         // _RO variants reject STORE/STOREDIST even with a key: upstream
         // sets RADIUS_NOSTORE for GEORADIUS_RO / GEORADIUSBYMEMBER_RO.
         let ro_cases: &[&[&[u8]]] = &[
-            &[b"GEORADIUS_RO", b"mygeo", b"15", b"37", b"200", b"km", b"STORE", b"dst"],
-            &[b"GEORADIUS_RO", b"mygeo", b"15", b"37", b"200", b"km", b"STOREDIST", b"dst"],
-            &[b"GEORADIUSBYMEMBER_RO", b"mygeo", b"Catania", b"200", b"km", b"STORE", b"dst"],
-            &[b"GEORADIUSBYMEMBER_RO", b"mygeo", b"Catania", b"200", b"km", b"STOREDIST", b"dst"],
+            &[
+                b"GEORADIUS_RO",
+                b"mygeo",
+                b"15",
+                b"37",
+                b"200",
+                b"km",
+                b"STORE",
+                b"dst",
+            ],
+            &[
+                b"GEORADIUS_RO",
+                b"mygeo",
+                b"15",
+                b"37",
+                b"200",
+                b"km",
+                b"STOREDIST",
+                b"dst",
+            ],
+            &[
+                b"GEORADIUSBYMEMBER_RO",
+                b"mygeo",
+                b"Catania",
+                b"200",
+                b"km",
+                b"STORE",
+                b"dst",
+            ],
+            &[
+                b"GEORADIUSBYMEMBER_RO",
+                b"mygeo",
+                b"Catania",
+                b"200",
+                b"km",
+                b"STOREDIST",
+                b"dst",
+            ],
         ];
         for argv_slices in ro_cases {
             let argv: Vec<Vec<u8>> = argv_slices.iter().map(|s| s.to_vec()).collect();
@@ -49111,7 +49334,11 @@ mod tests {
             0,
         )
         .unwrap_err();
-        assert!(matches!(err, CommandError::SyntaxError), "expected SyntaxError for FROMLONLAT+FROMMEMBER mix, got {:?}", err);
+        assert!(
+            matches!(err, CommandError::SyntaxError),
+            "expected SyntaxError for FROMLONLAT+FROMMEMBER mix, got {:?}",
+            err
+        );
         // Mixed BYRADIUS + BYBOX must still error.
         let err = dispatch_argv(
             &[
@@ -49132,7 +49359,11 @@ mod tests {
             0,
         )
         .unwrap_err();
-        assert!(matches!(err, CommandError::SyntaxError), "expected SyntaxError for BYRADIUS+BYBOX mix, got {:?}", err);
+        assert!(
+            matches!(err, CommandError::SyntaxError),
+            "expected SyntaxError for BYRADIUS+BYBOX mix, got {:?}",
+            err
+        );
     }
 
     #[test]
@@ -50188,8 +50419,7 @@ mod tests {
         //   BITFIELD k GET i65 0    -> "Invalid bitfield type" (signed > 64)
         //   BITFIELD k OVERFLOW BAD -> "Invalid OVERFLOW type specified"
         let mut store = Store::new();
-        let invalid_type =
-            "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is.";
+        let invalid_type = "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is.";
 
         for argv_in in [
             vec![
@@ -50727,11 +50957,7 @@ mod tests {
         .unwrap();
 
         let smaller = dispatch_argv(
-            &[
-                b"XSETID".to_vec(),
-                b"st".to_vec(),
-                b"50-0".to_vec(),
-            ],
+            &[b"XSETID".to_vec(), b"st".to_vec(), b"50-0".to_vec()],
             &mut store,
             0,
         )
@@ -50746,11 +50972,7 @@ mod tests {
 
         // Sanity: equal-or-greater succeeds.
         let equal = dispatch_argv(
-            &[
-                b"XSETID".to_vec(),
-                b"st".to_vec(),
-                b"100-0".to_vec(),
-            ],
+            &[b"XSETID".to_vec(), b"st".to_vec(), b"100-0".to_vec()],
             &mut store,
             0,
         )
@@ -50758,11 +50980,7 @@ mod tests {
         assert_eq!(equal, RespFrame::SimpleString("OK".to_string()));
 
         let greater = dispatch_argv(
-            &[
-                b"XSETID".to_vec(),
-                b"st".to_vec(),
-                b"200-0".to_vec(),
-            ],
+            &[b"XSETID".to_vec(), b"st".to_vec(), b"200-0".to_vec()],
             &mut store,
             0,
         )
@@ -51001,19 +51219,12 @@ mod tests {
         // Regression: VERSION + non-integer still errors via upstream's
         // getLongFromObjectOrReply path.
         let err = dispatch_argv(
-            &[
-                b"LOLWUT".to_vec(),
-                b"VERSION".to_vec(),
-                b"abc".to_vec(),
-            ],
+            &[b"LOLWUT".to_vec(), b"VERSION".to_vec(), b"abc".to_vec()],
             &mut store,
             0,
         )
         .expect_err("VERSION + non-integer must still error");
-        assert!(
-            matches!(err, CommandError::InvalidInteger),
-            "got {err:?}"
-        );
+        assert!(matches!(err, CommandError::InvalidInteger), "got {err:?}");
     }
 
     // ── WAITAOF test ────────────────────────────────────────────────
@@ -51128,12 +51339,8 @@ mod tests {
         // FAILOVER with an unknown option should also short-circuit
         // to the noscript reply (was returning SyntaxError because
         // the option-parser ran first).
-        let failover_scripted = dispatch_argv(
-            &[b"FAILOVER".to_vec(), b"NOSUCH".to_vec()],
-            &mut store,
-            0,
-        )
-        .unwrap_err();
+        let failover_scripted =
+            dispatch_argv(&[b"FAILOVER".to_vec(), b"NOSUCH".to_vec()], &mut store, 0).unwrap_err();
         assert_eq!(
             failover_scripted,
             CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
@@ -51568,8 +51775,14 @@ mod tests {
             panic!("shard must be 2-entry Map under RESP3"); // ubs:ignore — AI triage
         };
         assert_eq!(shard_pairs.len(), 2);
-        assert_eq!(shard_pairs[0].0, RespFrame::BulkString(Some(b"slots".to_vec())));
-        assert_eq!(shard_pairs[1].0, RespFrame::BulkString(Some(b"nodes".to_vec())));
+        assert_eq!(
+            shard_pairs[0].0,
+            RespFrame::BulkString(Some(b"slots".to_vec()))
+        );
+        assert_eq!(
+            shard_pairs[1].0,
+            RespFrame::BulkString(Some(b"nodes".to_vec()))
+        );
         let RespFrame::Array(Some(nodes)) = &shard_pairs[1].1 else {
             panic!("nodes value must be Array"); // ubs:ignore — AI triage
         };
@@ -51579,7 +51792,10 @@ mod tests {
         };
         assert_eq!(node_pairs.len(), 7);
         assert_eq!(node_pairs[0].0, RespFrame::BulkString(Some(b"id".to_vec())));
-        assert_eq!(node_pairs[6].0, RespFrame::BulkString(Some(b"health".to_vec())));
+        assert_eq!(
+            node_pairs[6].0,
+            RespFrame::BulkString(Some(b"health".to_vec()))
+        );
     }
 
     #[test]
@@ -51771,12 +51987,8 @@ mod tests {
     fn cluster_unknown_subcommand_with_cluster_disabled_reports_unknown_subcommand() {
         let mut store = Store::new();
         // cluster_enabled defaults to false
-        let err = dispatch_argv(
-            &[b"CLUSTER".to_vec(), b"FOOBAR".to_vec()],
-            &mut store,
-            0,
-        )
-        .unwrap_err();
+        let err =
+            dispatch_argv(&[b"CLUSTER".to_vec(), b"FOOBAR".to_vec()], &mut store, 0).unwrap_err();
         assert_eq!(
             err,
             CommandError::Custom("ERR unknown subcommand 'FOOBAR'. Try CLUSTER HELP.".to_string())
@@ -51787,12 +51999,8 @@ mod tests {
     fn cluster_unknown_subcommand_with_cluster_enabled_reports_unknown_subcommand() {
         let mut store = Store::new();
         store.cluster_enabled = true;
-        let err = dispatch_argv(
-            &[b"CLUSTER".to_vec(), b"FOOBAR".to_vec()],
-            &mut store,
-            0,
-        )
-        .unwrap_err();
+        let err =
+            dispatch_argv(&[b"CLUSTER".to_vec(), b"FOOBAR".to_vec()], &mut store, 0).unwrap_err();
         assert_eq!(
             err,
             CommandError::Custom("ERR unknown subcommand 'FOOBAR'. Try CLUSTER HELP.".to_string())
@@ -51899,12 +52107,8 @@ mod tests {
         for cluster_enabled in [false, true] {
             let mut store = Store::new();
             store.cluster_enabled = cluster_enabled;
-            let err = dispatch_argv(
-                &[b"CLUSTER".to_vec(), b"SLOTSTATE".to_vec()],
-                &mut store,
-                0,
-            )
-            .unwrap_err();
+            let err = dispatch_argv(&[b"CLUSTER".to_vec(), b"SLOTSTATE".to_vec()], &mut store, 0)
+                .unwrap_err();
             assert_eq!(
                 err,
                 CommandError::Custom(
@@ -51999,11 +52203,15 @@ mod tests {
             panic!("expected array reply for CLUSTER HELP"); // ubs:ignore — AI triage
         };
         assert!(
-            items.iter().any(|f| matches!(f, RespFrame::SimpleString(s) if s == "HELP")),
+            items
+                .iter()
+                .any(|f| matches!(f, RespFrame::SimpleString(s) if s == "HELP")),
             "HELP entry must appear in CLUSTER HELP output, got {items:?}"
         );
         assert!(
-            items.iter().any(|f| matches!(f, RespFrame::SimpleString(s) if s == "INFO")),
+            items
+                .iter()
+                .any(|f| matches!(f, RespFrame::SimpleString(s) if s == "INFO")),
             "INFO entry must appear in CLUSTER HELP output, got {items:?}"
         );
         // First entry is the standard subcommand envelope.
@@ -52029,11 +52237,7 @@ mod tests {
 
         // NO-EVICT ON flips just the evict flag.
         let ok = dispatch_argv(
-            &[
-                b"CLIENT".to_vec(),
-                b"NO-EVICT".to_vec(),
-                b"ON".to_vec(),
-            ],
+            &[b"CLIENT".to_vec(), b"NO-EVICT".to_vec(), b"ON".to_vec()],
             &mut store,
             0,
         )
@@ -52044,11 +52248,7 @@ mod tests {
 
         // NO-TOUCH ON flips the touch flag without disturbing evict.
         dispatch_argv(
-            &[
-                b"CLIENT".to_vec(),
-                b"NO-TOUCH".to_vec(),
-                b"ON".to_vec(),
-            ],
+            &[b"CLIENT".to_vec(), b"NO-TOUCH".to_vec(), b"ON".to_vec()],
             &mut store,
             0,
         )
@@ -52058,11 +52258,7 @@ mod tests {
 
         // OFF flips back.
         dispatch_argv(
-            &[
-                b"CLIENT".to_vec(),
-                b"NO-EVICT".to_vec(),
-                b"OFF".to_vec(),
-            ],
+            &[b"CLIENT".to_vec(), b"NO-EVICT".to_vec(), b"OFF".to_vec()],
             &mut store,
             0,
         )
@@ -52104,9 +52300,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err,
-            CommandError::Custom(
-                "ERR This instance has cluster support disabled".to_string()
-            ),
+            CommandError::Custom("ERR This instance has cluster support disabled".to_string()),
             "6 args + cluster_disabled must surface 'cluster support disabled', not 'wrong arity'"
         );
 
@@ -52114,11 +52308,7 @@ mod tests {
         // matching upstream's table-level arity rejection that fires
         // before clusterCommand is called at all.
         let arity_err = dispatch_argv(
-            &[
-                b"CLUSTER".to_vec(),
-                b"SETSLOT".to_vec(),
-                b"0".to_vec(),
-            ],
+            &[b"CLUSTER".to_vec(), b"SETSLOT".to_vec(), b"0".to_vec()],
             &mut store,
             0,
         )
@@ -52288,10 +52478,16 @@ mod tests {
         };
         let line = String::from_utf8(text).expect("nodes text utf8");
         assert!(line.contains(" myself,master "), "got line: {line:?}");
-        assert!(line.contains(" 127.0.0.1:6379@16379 "), "got line: {line:?}");
+        assert!(
+            line.contains(" 127.0.0.1:6379@16379 "),
+            "got line: {line:?}"
+        );
         assert!(line.contains(" 0 0 0 connected"), "got line: {line:?}");
         assert!(line.starts_with(&store.server_run_id), "got line: {line:?}");
-        assert!(line.ends_with('\n'), "trailing newline expected, got {line:?}");
+        assert!(
+            line.ends_with('\n'),
+            "trailing newline expected, got {line:?}"
+        );
 
         // Add a contiguous slot range and verify it gets emitted as start-end.
         for slot in 0..=2u16 {
@@ -52377,15 +52573,17 @@ mod tests {
             0,
         )
         .expect("addslots");
-        let RespFrame::Array(Some(ranges)) = dispatch_argv(
-            &[b"CLUSTER".to_vec(), b"SLOTS".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("cluster slots populated") else {
+        let RespFrame::Array(Some(ranges)) =
+            dispatch_argv(&[b"CLUSTER".to_vec(), b"SLOTS".to_vec()], &mut store, 0)
+                .expect("cluster slots populated")
+        else {
             panic!("expected array"); // ubs:ignore — AI triage
         };
-        assert_eq!(ranges.len(), 1, "0..2 merges into one range, got {ranges:?}");
+        assert_eq!(
+            ranges.len(),
+            1,
+            "0..2 merges into one range, got {ranges:?}"
+        );
     }
 
     #[test]
@@ -53010,12 +53208,8 @@ mod tests {
         // PAUSE with arity = -3, so the missing-timeout case never
         // reaches the handler — the table-level arity check emits
         // 'wrong number of arguments for client|pause command'.
-        let err = dispatch_argv(
-            &[b"CLIENT".to_vec(), b"PAUSE".to_vec()],
-            &mut store,
-            0,
-        )
-        .unwrap_err();
+        let err =
+            dispatch_argv(&[b"CLIENT".to_vec(), b"PAUSE".to_vec()], &mut store, 0).unwrap_err();
         assert_eq!(err, client_wrong_subcommand_arity("PAUSE"));
 
         let err = dispatch_argv(
@@ -53443,9 +53637,7 @@ mod tests {
             .unwrap_err();
             assert_eq!(
                 err,
-                CommandError::Custom(
-                    "ERR count should be greater than or equal to -1".to_string()
-                ),
+                CommandError::Custom("ERR count should be greater than or equal to -1".to_string()),
                 "input: {bad:?}"
             );
         }
@@ -53570,7 +53762,10 @@ mod tests {
         assert_eq!(store.slowlog_len(), 0);
         store.record_slowlog(&[b"SET".to_vec(), b"c".to_vec(), b"3".to_vec()], 30, 3_000);
         let entries = store.get_slowlog(1);
-        assert_eq!(entries[0].id, 2, "id counter must NOT reset on SLOWLOG RESET");
+        assert_eq!(
+            entries[0].id, 2,
+            "id counter must NOT reset on SLOWLOG RESET"
+        );
 
         // CONFIG RESETSTAT must not clear the slowlog list (vendored only
         // resets stats counters; the slowlog survives).
@@ -53766,11 +53961,7 @@ mod tests {
             // previously ran both from script contexts and returned
             // the config values / OK silently. Differential probe
             // vs vendored 7.2.4 confirmed the noscript reply.
-            vec![
-                b"CONFIG".to_vec(),
-                b"GET".to_vec(),
-                b"maxmemory".to_vec(),
-            ],
+            vec![b"CONFIG".to_vec(), b"GET".to_vec(), b"maxmemory".to_vec()],
             vec![
                 b"CONFIG".to_vec(),
                 b"SET".to_vec(),
@@ -53962,12 +54153,8 @@ mod tests {
     #[test]
     fn info_memory_emits_maxmemory_triple_after_scripts_human_per_upstream() {
         let mut store = Store::new();
-        let out = dispatch_argv(
-            &[b"INFO".to_vec(), b"memory".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("info memory");
+        let out = dispatch_argv(&[b"INFO".to_vec(), b"memory".to_vec()], &mut store, 0)
+            .expect("info memory");
         let RespFrame::BulkString(Some(bytes)) = out else {
             panic!("expected bulk INFO memory reply"); // ubs:ignore — AI triage
         };
@@ -53990,7 +54177,9 @@ mod tests {
             "used_memory_dataset_perc must precede allocator_allocated; body=\n{body}"
         );
         assert!(
-            alloc_allocated < scripts_human && scripts_human < maxmemory && maxmemory < alloc_frag_ratio,
+            alloc_allocated < scripts_human
+                && scripts_human < maxmemory
+                && maxmemory < alloc_frag_ratio,
             "expected order allocator_allocated < used_memory_scripts_human < maxmemory < allocator_frag_ratio, got {alloc_allocated}/{scripts_human}/{maxmemory}/{alloc_frag_ratio}; body=\n{body}"
         );
     }
@@ -54004,12 +54193,8 @@ mod tests {
         let mut store = Store::new();
 
         // Baseline: empty stores → all three zero.
-        let out = dispatch_argv(
-            &[b"INFO".to_vec(), b"memory".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("info memory baseline");
+        let out = dispatch_argv(&[b"INFO".to_vec(), b"memory".to_vec()], &mut store, 0)
+            .expect("info memory baseline");
         let RespFrame::BulkString(Some(bytes)) = out else {
             panic!("expected bulk string"); // ubs:ignore — AI triage
         };
@@ -54020,11 +54205,7 @@ mod tests {
 
         // Load a script and a function library — counters should reflect them.
         dispatch_argv(
-            &[
-                b"SCRIPT".to_vec(),
-                b"LOAD".to_vec(),
-                b"return 1".to_vec(),
-            ],
+            &[b"SCRIPT".to_vec(), b"LOAD".to_vec(), b"return 1".to_vec()],
             &mut store,
             1,
         )
@@ -54040,12 +54221,8 @@ mod tests {
         )
         .expect("function load");
 
-        let out = dispatch_argv(
-            &[b"INFO".to_vec(), b"memory".to_vec()],
-            &mut store,
-            3,
-        )
-        .expect("info memory loaded");
+        let out = dispatch_argv(&[b"INFO".to_vec(), b"memory".to_vec()], &mut store, 3)
+            .expect("info memory loaded");
         let RespFrame::BulkString(Some(bytes)) = out else {
             panic!("expected bulk string"); // ubs:ignore — AI triage
         };
@@ -54075,12 +54252,8 @@ mod tests {
         let mut store = Store::new();
 
         // Empty: all four counters report 0.
-        let out = dispatch_argv(
-            &[b"INFO".to_vec(), b"memory".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("info memory baseline");
+        let out = dispatch_argv(&[b"INFO".to_vec(), b"memory".to_vec()], &mut store, 0)
+            .expect("info memory baseline");
         let RespFrame::BulkString(Some(bytes)) = out else {
             panic!("expected bulk string"); // ubs:ignore — AI triage
         };
@@ -54095,22 +54268,14 @@ mod tests {
         // sha overhead + body bytes.
         let body = b"return 1";
         dispatch_argv(
-            &[
-                b"SCRIPT".to_vec(),
-                b"LOAD".to_vec(),
-                body.to_vec(),
-            ],
+            &[b"SCRIPT".to_vec(), b"LOAD".to_vec(), body.to_vec()],
             &mut store,
             1,
         )
         .expect("script load");
         let expected = 40 + body.len();
-        let out = dispatch_argv(
-            &[b"INFO".to_vec(), b"memory".to_vec()],
-            &mut store,
-            2,
-        )
-        .expect("info memory loaded");
+        let out = dispatch_argv(&[b"INFO".to_vec(), b"memory".to_vec()], &mut store, 2)
+            .expect("info memory loaded");
         let RespFrame::BulkString(Some(bytes)) = out else {
             panic!("expected bulk string"); // ubs:ignore — AI triage
         };
@@ -54146,12 +54311,8 @@ mod tests {
         // baseline + post-load shapes.
         let mut store = Store::new();
 
-        let out = dispatch_argv(
-            &[b"INFO".to_vec(), b"memory".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("info memory baseline");
+        let out = dispatch_argv(&[b"INFO".to_vec(), b"memory".to_vec()], &mut store, 0)
+            .expect("info memory baseline");
         let RespFrame::BulkString(Some(bytes)) = out else {
             panic!("expected bulk string"); // ubs:ignore — AI triage
         };
@@ -54163,11 +54324,7 @@ mod tests {
         // plus per-library/per-function metadata bytes.
         let body = b"#!lua name=mylib\nredis.register_function('f', function() return 1 end)";
         dispatch_argv(
-            &[
-                b"FUNCTION".to_vec(),
-                b"LOAD".to_vec(),
-                body.to_vec(),
-            ],
+            &[b"FUNCTION".to_vec(), b"LOAD".to_vec(), body.to_vec()],
             &mut store,
             1,
         )
@@ -54182,12 +54339,8 @@ mod tests {
             body.len()
         );
 
-        let out = dispatch_argv(
-            &[b"INFO".to_vec(), b"memory".to_vec()],
-            &mut store,
-            2,
-        )
-        .expect("info memory loaded");
+        let out = dispatch_argv(&[b"INFO".to_vec(), b"memory".to_vec()], &mut store, 2)
+            .expect("info memory loaded");
         let RespFrame::BulkString(Some(bytes)) = out else {
             panic!("expected bulk string"); // ubs:ignore — AI triage
         };
@@ -54213,12 +54366,8 @@ mod tests {
         let mut store = Store::new();
 
         // Baseline: empty store.
-        let out = dispatch_argv(
-            &[b"MEMORY".to_vec(), b"STATS".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("memory stats baseline");
+        let out = dispatch_argv(&[b"MEMORY".to_vec(), b"STATS".to_vec()], &mut store, 0)
+            .expect("memory stats baseline");
         let RespFrame::Array(Some(items)) = out else {
             panic!("expected MEMORY STATS Array under RESP2"); // ubs:ignore — AI triage
         };
@@ -54227,8 +54376,12 @@ mod tests {
         let mut lua_caches: Option<i64> = None;
         let mut functions_caches: Option<i64> = None;
         for chunk in items.chunks(2) {
-            let RespFrame::BulkString(Some(key)) = &chunk[0] else { continue };
-            let RespFrame::Integer(value) = chunk[1] else { continue };
+            let RespFrame::BulkString(Some(key)) = &chunk[0] else {
+                continue;
+            };
+            let RespFrame::Integer(value) = chunk[1] else {
+                continue;
+            };
             match key.as_slice() {
                 b"lua.caches" => lua_caches = Some(value),
                 b"functions.caches" => functions_caches = Some(value),
@@ -54240,11 +54393,7 @@ mod tests {
 
         // Load script + library — counters must reflect live bytes.
         dispatch_argv(
-            &[
-                b"SCRIPT".to_vec(),
-                b"LOAD".to_vec(),
-                b"return 1".to_vec(),
-            ],
+            &[b"SCRIPT".to_vec(), b"LOAD".to_vec(), b"return 1".to_vec()],
             &mut store,
             1,
         )
@@ -54265,20 +54414,20 @@ mod tests {
         assert!(expected_lua > 0);
         assert!(expected_funcs > 0);
 
-        let out = dispatch_argv(
-            &[b"MEMORY".to_vec(), b"STATS".to_vec()],
-            &mut store,
-            3,
-        )
-        .expect("memory stats loaded");
+        let out = dispatch_argv(&[b"MEMORY".to_vec(), b"STATS".to_vec()], &mut store, 3)
+            .expect("memory stats loaded");
         let RespFrame::Array(Some(items)) = out else {
             panic!("expected MEMORY STATS Array under RESP2"); // ubs:ignore — AI triage
         };
         let mut lua_caches: Option<i64> = None;
         let mut functions_caches: Option<i64> = None;
         for chunk in items.chunks(2) {
-            let RespFrame::BulkString(Some(key)) = &chunk[0] else { continue };
-            let RespFrame::Integer(value) = chunk[1] else { continue };
+            let RespFrame::BulkString(Some(key)) = &chunk[0] else {
+                continue;
+            };
+            let RespFrame::Integer(value) = chunk[1] else {
+                continue;
+            };
             match key.as_slice() {
                 b"lua.caches" => lua_caches = Some(value),
                 b"functions.caches" => functions_caches = Some(value),
@@ -54300,22 +54449,20 @@ mod tests {
 
         // 1. Empty store: zero db.<n> entries.
         let mut store = Store::new();
-        let out = dispatch_argv(
-            &[b"MEMORY".to_vec(), b"STATS".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("memory stats empty");
+        let out = dispatch_argv(&[b"MEMORY".to_vec(), b"STATS".to_vec()], &mut store, 0)
+            .expect("memory stats empty");
         let RespFrame::Array(Some(items)) = out else {
             panic!("expected Array under RESP2"); // ubs:ignore — AI triage
         };
         let count_db_entries = |items: &[RespFrame]| -> usize {
             items
                 .iter()
-                .filter(|f| matches!(
-                    f,
-                    RespFrame::BulkString(Some(b)) if b.starts_with(b"db.")
-                ))
+                .filter(|f| {
+                    matches!(
+                        f,
+                        RespFrame::BulkString(Some(b)) if b.starts_with(b"db.")
+                    )
+                })
                 .count()
         };
         assert_eq!(
@@ -54329,18 +54476,9 @@ mod tests {
         // seed the per-db state directly via the store API using
         // encode_db_key.
         let mut store = Store::new();
-        store.set(
-            fr_store::encode_db_key(5, b"k"),
-            b"v".to_vec(),
-            None,
-            0,
-        );
-        let out = dispatch_argv(
-            &[b"MEMORY".to_vec(), b"STATS".to_vec()],
-            &mut store,
-            2,
-        )
-        .expect("memory stats db5");
+        store.set(fr_store::encode_db_key(5, b"k"), b"v".to_vec(), None, 0);
+        let out = dispatch_argv(&[b"MEMORY".to_vec(), b"STATS".to_vec()], &mut store, 2)
+            .expect("memory stats db5");
         let RespFrame::Array(Some(items)) = out else {
             panic!("expected Array under RESP2"); // ubs:ignore — AI triage
         };
@@ -54357,12 +54495,8 @@ mod tests {
         let mut store = Store::new();
         store.set(fr_store::encode_db_key(0, b"k0"), b"v".to_vec(), None, 0);
         store.set(fr_store::encode_db_key(3, b"k3"), b"v".to_vec(), None, 0);
-        let out = dispatch_argv(
-            &[b"MEMORY".to_vec(), b"STATS".to_vec()],
-            &mut store,
-            3,
-        )
-        .expect("memory stats two dbs");
+        let out = dispatch_argv(&[b"MEMORY".to_vec(), b"STATS".to_vec()], &mut store, 3)
+            .expect("memory stats two dbs");
         let RespFrame::Array(Some(items)) = out else {
             panic!("expected Array under RESP2"); // ubs:ignore — AI triage
         };
@@ -54492,10 +54626,7 @@ mod tests {
             panic!("RESP3 inner doc must be Map, got {:?}", outer[0].1); // ubs:ignore — AI triage
         };
         // First inner key is 'summary' (matches f39s3 pin).
-        assert_eq!(
-            inner[0].0,
-            RespFrame::BulkString(Some(b"summary".to_vec()))
-        );
+        assert_eq!(inner[0].0, RespFrame::BulkString(Some(b"summary".to_vec())));
         assert_eq!(
             inner[0].1,
             RespFrame::BulkString(Some(b"Returns the string value of a key.".to_vec()))
@@ -54517,12 +54648,12 @@ mod tests {
             panic!("RESP2 outer must be flat Array, got {out:?}"); // ubs:ignore — AI triage
         };
         assert_eq!(outer_items.len(), 2);
-        assert_eq!(
-            outer_items[0],
-            RespFrame::BulkString(Some(b"get".to_vec()))
-        );
+        assert_eq!(outer_items[0], RespFrame::BulkString(Some(b"get".to_vec())));
         let RespFrame::Array(Some(inner_items)) = &outer_items[1] else {
-            panic!("RESP2 inner doc must be flat Array, got {:?}", outer_items[1]); // ubs:ignore — AI triage
+            panic!(
+                "RESP2 inner doc must be flat Array, got {:?}",
+                outer_items[1]
+            ); // ubs:ignore — AI triage
         };
         assert_eq!(
             inner_items[0],
@@ -54598,10 +54729,7 @@ mod tests {
             panic!("expected doc fields array");
         };
         for chunk in doc_fields.chunks(2) {
-            if let [
-                RespFrame::BulkString(Some(k)),
-                value,
-            ] = chunk
+            if let [RespFrame::BulkString(Some(k)), value] = chunk
                 && k.as_slice() == field
             {
                 return value.clone();
@@ -54878,12 +55006,7 @@ mod tests {
         // Both ZPOPMIN and ZPOPMAX with 4 args -> "ERR syntax error".
         for cmd in [b"ZPOPMIN".to_vec(), b"ZPOPMAX".to_vec()] {
             let err = dispatch_argv(
-                &[
-                    cmd.clone(),
-                    b"z".to_vec(),
-                    b"1".to_vec(),
-                    b"extra".to_vec(),
-                ],
+                &[cmd.clone(), b"z".to_vec(), b"1".to_vec(), b"extra".to_vec()],
                 &mut store,
                 0,
             )
@@ -54893,7 +55016,8 @@ mod tests {
                 panic!("expected error frame, got {resp:?}");
             };
             assert_eq!(
-                s, "ERR syntax error",
+                s,
+                "ERR syntax error",
                 "{} 4 args expected syntax error",
                 std::str::from_utf8(&cmd).unwrap(),
             );
@@ -54916,13 +55040,14 @@ mod tests {
                 panic!("expected error frame, got {resp:?}");
             };
             assert_eq!(
-                s, "ERR syntax error",
+                s,
+                "ERR syntax error",
                 "{} 5 args expected syntax error",
                 std::str::from_utf8(&cmd).unwrap(),
             );
 
             // 1 arg (too few) is still WrongArity — different code path.
-            let err = dispatch_argv(&[cmd.clone()], &mut store, 0)
+            let err = dispatch_argv(std::slice::from_ref(&cmd), &mut store, 0)
                 .expect_err("1-arg call should error (arity)");
             let resp = err.to_resp();
             let RespFrame::Error(s) = &resp else {
@@ -55021,9 +55146,7 @@ mod tests {
         .expect("MIGRATE single + KEYS form returns error frame");
         assert_eq!(
             out,
-            RespFrame::Error(
-                "ERR Invalid arguments specified for command".to_string()
-            )
+            RespFrame::Error("ERR Invalid arguments specified for command".to_string())
         );
 
         // With AUTH / COPY / REPLACE options between key and KEYS, the
@@ -55118,8 +55241,7 @@ mod tests {
             ),
         ];
         for (input, expected) in &cases {
-            let mut argv: Vec<Vec<u8>> =
-                vec![b"COMMAND".to_vec(), b"GETKEYS".to_vec()];
+            let mut argv: Vec<Vec<u8>> = vec![b"COMMAND".to_vec(), b"GETKEYS".to_vec()];
             for arg in input.iter() {
                 argv.push(arg.to_vec());
             }
@@ -55169,7 +55291,8 @@ mod tests {
             match frame {
                 RespFrame::Error(msg) => assert_eq!(
                     msg, "ERR The command has no key arguments",
-                    "unexpected error wording for {:?}", argv,
+                    "unexpected error wording for {:?}",
+                    argv,
                 ),
                 other => panic!("expected error frame for {:?}, got {:?}", argv, other),
             }
@@ -55206,9 +55329,7 @@ mod tests {
         .expect("SET under-arity");
         assert_eq!(
             frame,
-            RespFrame::Error(
-                "ERR Invalid number of arguments specified for command".to_string()
-            ),
+            RespFrame::Error("ERR Invalid number of arguments specified for command".to_string()),
         );
     }
 
@@ -55226,7 +55347,13 @@ mod tests {
         // Seed a stream with 3 entries.
         for v in [b"v1".as_slice(), b"v2", b"v3"] {
             dispatch_argv(
-                &[b"XADD".to_vec(), b"s".to_vec(), b"*".to_vec(), b"k".to_vec(), v.to_vec()],
+                &[
+                    b"XADD".to_vec(),
+                    b"s".to_vec(),
+                    b"*".to_vec(),
+                    b"k".to_vec(),
+                    v.to_vec(),
+                ],
                 &mut store,
                 0,
             )
@@ -55378,14 +55505,24 @@ mod tests {
                     return v.clone();
                 }
             }
-            panic!("group field missing for {:?}", String::from_utf8_lossy(name));
+            panic!(
+                "group field missing for {:?}",
+                String::from_utf8_lossy(name)
+            );
         }
 
         let mut store = Store::new();
 
         // s-prefix string commands (previously fell into the s-prefix
         // → "set" arm).
-        for name in [b"SET".as_slice(), b"SETEX", b"SETNX", b"SETRANGE", b"STRLEN", b"SUBSTR"] {
+        for name in [
+            b"SET".as_slice(),
+            b"SETEX",
+            b"SETNX",
+            b"SETRANGE",
+            b"STRLEN",
+            b"SUBSTR",
+        ] {
             assert_eq!(
                 group_for(&mut store, name),
                 b"string".to_vec(),
@@ -56192,12 +56329,8 @@ mod tests {
         // (commands.def declares arity=-3). Mirrors the
         // GETKEYSANDFLAGS pin above. (frankenredis-tkr0)
         let mut store = Store::new();
-        let out = dispatch_argv(
-            &[b"COMMAND".to_vec(), b"GETKEYS".to_vec()],
-            &mut store,
-            0,
-        )
-        .unwrap();
+        let out =
+            dispatch_argv(&[b"COMMAND".to_vec(), b"GETKEYS".to_vec()], &mut store, 0).unwrap();
         assert_eq!(
             out,
             RespFrame::Error(
@@ -56268,8 +56401,18 @@ mod tests {
 
         // Non-numeric numkeys.
         for argv in [
-            &[b"LMPOP".as_ref(), b"abc".as_ref(), b"k1".as_ref(), b"LEFT".as_ref()][..],
-            &[b"ZMPOP".as_ref(), b"abc".as_ref(), b"k1".as_ref(), b"MIN".as_ref()][..],
+            &[
+                b"LMPOP".as_ref(),
+                b"abc".as_ref(),
+                b"k1".as_ref(),
+                b"LEFT".as_ref(),
+            ][..],
+            &[
+                b"ZMPOP".as_ref(),
+                b"abc".as_ref(),
+                b"k1".as_ref(),
+                b"MIN".as_ref(),
+            ][..],
             &[
                 b"BLMPOP".as_ref(),
                 b"5".as_ref(),
@@ -56277,7 +56420,12 @@ mod tests {
                 b"k1".as_ref(),
                 b"LEFT".as_ref(),
             ][..],
-            &[b"SINTERCARD".as_ref(), b"abc".as_ref(), b"k1".as_ref(), b"k2".as_ref()][..],
+            &[
+                b"SINTERCARD".as_ref(),
+                b"abc".as_ref(),
+                b"k1".as_ref(),
+                b"k2".as_ref(),
+            ][..],
             &[b"ZINTERCARD".as_ref(), b"abc".as_ref(), b"k1".as_ref()][..],
             &[b"ZDIFF".as_ref(), b"abc".as_ref(), b"k1".as_ref()][..],
             &[
@@ -56296,7 +56444,9 @@ mod tests {
                 reply,
                 RespFrame::Error(invalid_args.to_string()),
                 "case {:?}",
-                argv.iter().map(|t| String::from_utf8_lossy(t)).collect::<Vec<_>>()
+                argv.iter()
+                    .map(|t| String::from_utf8_lossy(t))
+                    .collect::<Vec<_>>()
             );
         }
 
@@ -56545,11 +56695,7 @@ mod tests {
         // Bare OBJECT (no subcommand) → no-key-arguments per upstream
         // doesCommandHaveKeys path.
         let bare_object = dispatch_argv(
-            &[
-                b"COMMAND".to_vec(),
-                b"GETKEYS".to_vec(),
-                b"OBJECT".to_vec(),
-            ],
+            &[b"COMMAND".to_vec(), b"GETKEYS".to_vec(), b"OBJECT".to_vec()],
             &mut store,
             0,
         )
@@ -56613,8 +56759,7 @@ mod tests {
         let half = i64::MAX / 2;
         let just_over = (half + 1).to_string().into_bytes();
         let just_under = (-(half) - 1).to_string().into_bytes();
-        let expected_err =
-            CommandError::Custom("ERR value is out of range".to_string());
+        let expected_err = CommandError::Custom("ERR value is out of range".to_string());
 
         // HRANDFIELD WITHVALUES rejects (LONG_MAX/2 + 1).
         let err = dispatch_argv(
@@ -56766,8 +56911,12 @@ mod tests {
         let mut store = Store::new();
 
         // Seed each container so the count handler is reached.
-        dispatch_argv(&[b"SADD".to_vec(), b"s".to_vec(), b"a".to_vec()], &mut store, 0)
-            .expect("sadd");
+        dispatch_argv(
+            &[b"SADD".to_vec(), b"s".to_vec(), b"a".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("sadd");
         dispatch_argv(
             &[
                 b"HSET".to_vec(),
@@ -56842,12 +56991,8 @@ mod tests {
         // record_aof_rewrite calls).
         let mut store = Store::new();
 
-        let out = dispatch_argv(
-            &[b"INFO".to_vec(), b"persistence".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("info persistence baseline");
+        let out = dispatch_argv(&[b"INFO".to_vec(), b"persistence".to_vec()], &mut store, 0)
+            .expect("info persistence baseline");
         let RespFrame::BulkString(Some(bytes)) = out else {
             panic!("expected bulk string"); // ubs:ignore — AI triage
         };
@@ -56997,9 +57142,7 @@ mod tests {
 
         // Trailing HELP block.
         assert!(items.contains(&RespFrame::SimpleString("HELP".to_string())));
-        assert!(items.contains(&RespFrame::SimpleString(
-            "    Print this help.".to_string()
-        )));
+        assert!(items.contains(&RespFrame::SimpleString("    Print this help.".to_string())));
     }
 
     #[test]
@@ -57071,9 +57214,7 @@ mod tests {
 
         // Trailing HELP block.
         assert!(items.contains(&RespFrame::SimpleString("HELP".to_string())));
-        assert!(items.contains(&RespFrame::SimpleString(
-            "    Print this help.".to_string()
-        )));
+        assert!(items.contains(&RespFrame::SimpleString("    Print this help.".to_string())));
     }
 
     #[test]
@@ -57136,9 +57277,7 @@ mod tests {
 
         // Trailing HELP block.
         assert!(items.contains(&RespFrame::SimpleString("HELP".to_string())));
-        assert!(items.contains(&RespFrame::SimpleString(
-            "    Print this help.".to_string()
-        )));
+        assert!(items.contains(&RespFrame::SimpleString("    Print this help.".to_string())));
     }
 
     #[test]
@@ -57179,9 +57318,7 @@ mod tests {
 
         // Trailing HELP block from upstream addReplyHelp.
         assert!(items.contains(&RespFrame::SimpleString("HELP".to_string())));
-        assert!(items.contains(&RespFrame::SimpleString(
-            "    Print this help.".to_string()
-        )));
+        assert!(items.contains(&RespFrame::SimpleString("    Print this help.".to_string())));
     }
 
     // ── REPLICAOF / SLAVEOF tests ───────────────────────────────────
@@ -57261,11 +57398,7 @@ mod tests {
         let mut store = Store::new();
         let library = b"#!lua name=mylib\nredis.register_function('echo', function(keys, args) return args[1] end)";
         dispatch_argv(
-            &[
-                b"FUNCTION".to_vec(),
-                b"LOAD".to_vec(),
-                library.to_vec(),
-            ],
+            &[b"FUNCTION".to_vec(), b"LOAD".to_vec(), library.to_vec()],
             &mut store,
             0,
         )
@@ -57870,8 +58003,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("SORT_RO with STORE flag must surface as Error frame")
-        ;
+        .expect("SORT_RO with STORE flag must surface as Error frame");
         assert_eq!(err, RespFrame::Error("ERR syntax error".to_string()));
     }
 
@@ -58189,7 +58321,12 @@ mod tests {
         // not 'syntax error'. Probe vs vendored 7.2.4 confirmed for
         // BOGUS / YES / NO / lowercase / mixed-case opts.
         let mut store = Store::new();
-        for opt in [b"BOGUS".as_slice(), b"YES".as_slice(), b"NO".as_slice(), b"yes".as_slice()] {
+        for opt in [
+            b"BOGUS".as_slice(),
+            b"YES".as_slice(),
+            b"NO".as_slice(),
+            b"yes".as_slice(),
+        ] {
             let err = dispatch_argv(
                 &[b"CLIENT".to_vec(), b"CACHING".to_vec(), opt.to_vec()],
                 &mut store,
@@ -58554,8 +58691,7 @@ mod tests {
             &[
                 b"FUNCTION".to_vec(),
                 b"LOAD".to_vec(),
-                b"#!lua name=lib\nredis.register_function('f', function() return 1 end)"
-                    .to_vec(),
+                b"#!lua name=lib\nredis.register_function('f', function() return 1 end)".to_vec(),
             ],
             &mut store,
             0,
@@ -58616,12 +58752,8 @@ mod tests {
         );
 
         // Reload library with an explicit error('boom') function 'er' on line 2.
-        dispatch_argv(
-            &[b"FUNCTION".to_vec(), b"FLUSH".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("FUNCTION FLUSH");
+        dispatch_argv(&[b"FUNCTION".to_vec(), b"FLUSH".to_vec()], &mut store, 0)
+            .expect("FUNCTION FLUSH");
         dispatch_argv(
             &[
                 b"FUNCTION".to_vec(),
@@ -58649,12 +58781,8 @@ mod tests {
         // redis.call against unknown command — inner error already
         // carries "ERR " prefix; the script suffix is appended without
         // rewriting a user_function source prefix.
-        dispatch_argv(
-            &[b"FUNCTION".to_vec(), b"FLUSH".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("FUNCTION FLUSH");
+        dispatch_argv(&[b"FUNCTION".to_vec(), b"FLUSH".to_vec()], &mut store, 0)
+            .expect("FUNCTION FLUSH");
         dispatch_argv(
             &[
                 b"FUNCTION".to_vec(),
@@ -58683,12 +58811,8 @@ mod tests {
 
         // redis.error_reply returns 'ERR custom' undecorated — flows
         // through the Ok arm, the script suffix must NOT be appended.
-        dispatch_argv(
-            &[b"FUNCTION".to_vec(), b"FLUSH".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("FUNCTION FLUSH");
+        dispatch_argv(&[b"FUNCTION".to_vec(), b"FLUSH".to_vec()], &mut store, 0)
+            .expect("FUNCTION FLUSH");
         dispatch_argv(
             &[
                 b"FUNCTION".to_vec(),
@@ -58757,17 +58881,11 @@ mod tests {
         .expect_err("script flush extra");
         assert_eq!(
             script_flush_extra,
-            CommandError::Custom(
-                "ERR SCRIPT FLUSH only support SYNC|ASYNC option".to_string()
-            )
+            CommandError::Custom("ERR SCRIPT FLUSH only support SYNC|ASYNC option".to_string())
         );
 
         let function_dump_extra = dispatch_argv(
-            &[
-                b"FUNCTION".to_vec(),
-                b"DUMP".to_vec(),
-                b"extra".to_vec(),
-            ],
+            &[b"FUNCTION".to_vec(), b"DUMP".to_vec(), b"extra".to_vec()],
             &mut store,
             0,
         )
@@ -58780,11 +58898,7 @@ mod tests {
         );
 
         let function_list_bad = dispatch_argv(
-            &[
-                b"FUNCTION".to_vec(),
-                b"LIST".to_vec(),
-                b"NOPE".to_vec(),
-            ],
+            &[b"FUNCTION".to_vec(), b"LIST".to_vec(), b"NOPE".to_vec()],
             &mut store,
             0,
         )
@@ -58837,7 +58951,8 @@ mod tests {
             &[
                 b"FUNCTION".to_vec(),
                 b"LOAD".to_vec(),
-                b"#!lua name=goodmeta\nredis.register_function('f',function() return 1 end)".to_vec(),
+                b"#!lua name=goodmeta\nredis.register_function('f',function() return 1 end)"
+                    .to_vec(),
             ],
             &mut store,
             0,
@@ -58895,16 +59010,10 @@ mod tests {
             "#!LUA name=GOODLUAUPPER",
             "#!Lua name=GoodLuaMixed",
         ] {
-            let code = format!(
-                "{shebang}\nredis.register_function('f',function() return 1 end)"
-            );
+            let code = format!("{shebang}\nredis.register_function('f',function() return 1 end)");
             let mut s = Store::new();
             let ok = dispatch_argv(
-                &[
-                    b"FUNCTION".to_vec(),
-                    b"LOAD".to_vec(),
-                    code.into_bytes(),
-                ],
+                &[b"FUNCTION".to_vec(), b"LOAD".to_vec(), code.into_bytes()],
                 &mut s,
                 0,
             )
@@ -58936,7 +59045,8 @@ mod tests {
                 b"FUNCTION".to_vec(),
                 b"LOAD".to_vec(),
                 b"BANANA".to_vec(),
-                b"#!lua name=ignored\nredis.register_function('f',function() return 1 end)".to_vec(),
+                b"#!lua name=ignored\nredis.register_function('f',function() return 1 end)"
+                    .to_vec(),
             ],
             &mut store,
             0,
@@ -58971,7 +59081,8 @@ mod tests {
             &[
                 b"FUNCTION".to_vec(),
                 b"LOAD".to_vec(),
-                b"#!lua name=goodlib\nredis.register_function('f',function() return 1 end)".to_vec(),
+                b"#!lua name=goodlib\nredis.register_function('f',function() return 1 end)"
+                    .to_vec(),
             ],
             &mut store,
             0,
@@ -59376,7 +59487,9 @@ mod tests {
 
         // Subcommand entries must include a description line. Pick
         // a few key ones to spot-check.
-        assert!(items.contains(&RespFrame::SimpleString("SETINFO <option> <value>".to_string())));
+        assert!(items.contains(&RespFrame::SimpleString(
+            "SETINFO <option> <value>".to_string()
+        )));
         assert!(items.contains(&RespFrame::SimpleString(
             "    Set client meta attr. Options are:".to_string()
         )));
@@ -59390,9 +59503,7 @@ mod tests {
         // Trailing 'HELP' / '    Print this help.' from upstream
         // addReplyHelp.
         assert!(items.contains(&RespFrame::SimpleString("HELP".to_string())));
-        assert!(items.contains(&RespFrame::SimpleString(
-            "    Print this help.".to_string()
-        )));
+        assert!(items.contains(&RespFrame::SimpleString("    Print this help.".to_string())));
 
         // Sanity on length: upstream emits ~50 lines (subcommand +
         // description + options); fr now has 53.
@@ -60847,12 +60958,8 @@ mod tests {
             0,
         )
         .expect("zadd d");
-        let out = dispatch_argv(
-            &[b"ZPOPMIN".to_vec(), b"zs".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("zpopmin no count resp3");
+        let out = dispatch_argv(&[b"ZPOPMIN".to_vec(), b"zs".to_vec()], &mut store, 0)
+            .expect("zpopmin no count resp3");
         assert_eq!(
             out,
             RespFrame::Array(Some(vec![
@@ -61156,7 +61263,11 @@ mod tests {
             RespFrame::Array(Some(vec![])),
         ]));
 
-        for cmd in [b"HSCAN".as_slice(), b"SSCAN".as_slice(), b"ZSCAN".as_slice()] {
+        for cmd in [
+            b"HSCAN".as_slice(),
+            b"SSCAN".as_slice(),
+            b"ZSCAN".as_slice(),
+        ] {
             // Trailing junk is silently ignored when the key is missing.
             let out = dispatch_argv(
                 &[
@@ -61279,16 +61390,11 @@ mod tests {
         )
         .unwrap();
 
-        let expected = CommandError::Custom(
-            "ERR the ANY argument requires COUNT argument".to_string(),
-        );
+        let expected =
+            CommandError::Custom("ERR the ANY argument requires COUNT argument".to_string());
         let cases: &[&[&[u8]]] = &[
-            &[
-                b"GEORADIUS", b"g", b"13.5", b"38.0", b"100", b"km", b"ANY",
-            ],
-            &[
-                b"GEORADIUSBYMEMBER", b"g", b"a", b"100", b"km", b"ANY",
-            ],
+            &[b"GEORADIUS", b"g", b"13.5", b"38.0", b"100", b"km", b"ANY"],
+            &[b"GEORADIUSBYMEMBER", b"g", b"a", b"100", b"km", b"ANY"],
             &[
                 b"GEOSEARCH",
                 b"g",
@@ -61910,9 +62016,7 @@ mod tests {
             .expect_err("error");
             assert_eq!(
                 err,
-                CommandError::Custom(
-                    "ERR value is out of range, must be positive".to_string()
-                ),
+                CommandError::Custom("ERR value is out of range, must be positive".to_string()),
                 "{cmd:?}"
             );
             let err = dispatch_argv(
@@ -61923,9 +62027,7 @@ mod tests {
             .expect_err("error");
             assert_eq!(
                 err,
-                CommandError::Custom(
-                    "ERR value is out of range, must be positive".to_string()
-                ),
+                CommandError::Custom("ERR value is out of range, must be positive".to_string()),
                 "{cmd:?}"
             );
         }
@@ -62504,9 +62606,12 @@ mod tests {
         .ok();
 
         // (1) XINFO STREAM xs (non-FULL) → outer Map under RESP3.
-        let stream_out =
-            dispatch_argv(&[b"XINFO".to_vec(), b"STREAM".to_vec(), b"xs".to_vec()], &mut store, 40)
-                .expect("xinfo stream");
+        let stream_out = dispatch_argv(
+            &[b"XINFO".to_vec(), b"STREAM".to_vec(), b"xs".to_vec()],
+            &mut store,
+            40,
+        )
+        .expect("xinfo stream");
         let RespFrame::Map(Some(stream_pairs)) = stream_out else {
             panic!("XINFO STREAM under RESP3 must be Map, got {stream_out:?}");
         };
@@ -62517,7 +62622,12 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for required in [b"length".as_slice(), b"groups", b"first-entry", b"last-entry"] {
+        for required in [
+            b"length".as_slice(),
+            b"groups",
+            b"first-entry",
+            b"last-entry",
+        ] {
             assert!(
                 keys.contains(&required),
                 "XINFO STREAM Map missing key {:?}; keys={keys:?}",
@@ -62526,20 +62636,26 @@ mod tests {
         }
 
         // (2) XINFO GROUPS xs → outer Array of per-group Maps under RESP3.
-        let groups_out =
-            dispatch_argv(&[b"XINFO".to_vec(), b"GROUPS".to_vec(), b"xs".to_vec()], &mut store, 40)
-                .expect("xinfo groups");
+        let groups_out = dispatch_argv(
+            &[b"XINFO".to_vec(), b"GROUPS".to_vec(), b"xs".to_vec()],
+            &mut store,
+            40,
+        )
+        .expect("xinfo groups");
         let RespFrame::Array(Some(groups)) = groups_out else {
             panic!("XINFO GROUPS outer must be Array, got {groups_out:?}");
         };
         assert_eq!(groups.len(), 1);
         let RespFrame::Map(Some(group_pairs)) = &groups[0] else {
-            panic!("each XINFO GROUPS row must be Map under RESP3, got {:?}", groups[0]);
+            panic!(
+                "each XINFO GROUPS row must be Map under RESP3, got {:?}",
+                groups[0]
+            );
         };
         assert!(
-            group_pairs.iter().any(
-                |(k, _)| matches!(k, RespFrame::BulkString(Some(b)) if b == b"name")
-            ),
+            group_pairs
+                .iter()
+                .any(|(k, _)| matches!(k, RespFrame::BulkString(Some(b)) if b == b"name")),
             "expected `name` key in group Map"
         );
 
@@ -62566,9 +62682,9 @@ mod tests {
             );
         };
         assert!(
-            consumer_pairs.iter().any(
-                |(k, _)| matches!(k, RespFrame::BulkString(Some(b)) if b == b"name")
-            ),
+            consumer_pairs
+                .iter()
+                .any(|(k, _)| matches!(k, RespFrame::BulkString(Some(b)) if b == b"name")),
             "expected `name` key in consumer Map"
         );
 
@@ -64174,11 +64290,7 @@ mod tests {
 
         // Sanity: argv.len() < 4 still surfaces wrong-arity.
         let err = dispatch_argv(
-            &[
-                b"CONFIG".to_vec(),
-                b"SET".to_vec(),
-                b"maxmemory".to_vec(),
-            ],
+            &[b"CONFIG".to_vec(), b"SET".to_vec(), b"maxmemory".to_vec()],
             &mut store,
             0,
         )
@@ -64490,11 +64602,7 @@ mod tests {
         .expect("set big 10000");
         assert_eq!(
             dispatch_argv(
-                &[
-                    b"OBJECT".to_vec(),
-                    b"REFCOUNT".to_vec(),
-                    b"big".to_vec(),
-                ],
+                &[b"OBJECT".to_vec(), b"REFCOUNT".to_vec(), b"big".to_vec(),],
                 &mut store,
                 5,
             )
@@ -64511,11 +64619,7 @@ mod tests {
         .expect("set neg -1");
         assert_eq!(
             dispatch_argv(
-                &[
-                    b"OBJECT".to_vec(),
-                    b"REFCOUNT".to_vec(),
-                    b"neg".to_vec(),
-                ],
+                &[b"OBJECT".to_vec(), b"REFCOUNT".to_vec(), b"neg".to_vec(),],
                 &mut store,
                 7,
             )
@@ -65074,12 +65178,21 @@ mod tests {
                 "ACL|SETUSER",
                 vec!["request_policy:all_nodes", "response_policy:all_succeeded"],
             ),
-            ("DBSIZE", vec!["request_policy:all_shards", "response_policy:agg_sum"]),
-            ("KEYS", vec!["request_policy:all_shards", "nondeterministic_output_order"]),
+            (
+                "DBSIZE",
+                vec!["request_policy:all_shards", "response_policy:agg_sum"],
+            ),
+            (
+                "KEYS",
+                vec!["request_policy:all_shards", "nondeterministic_output_order"],
+            ),
             ("MGET", vec!["request_policy:multi_shard"]),
             (
                 "MSET",
-                vec!["request_policy:multi_shard", "response_policy:all_succeeded"],
+                vec![
+                    "request_policy:multi_shard",
+                    "response_policy:all_succeeded",
+                ],
             ),
             (
                 "PING",
@@ -65129,8 +65242,7 @@ mod tests {
             let RespFrame::Array(Some(rows)) = r else {
                 panic!("expected Array reply for COMMAND INFO {cmd}");
             };
-            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row")
-            else {
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
                 panic!("expected sub-Array entry for {cmd}");
             };
             let RespFrame::Array(Some(tips)) = fields[7].clone() else {
@@ -65139,17 +65251,12 @@ mod tests {
             let got: Vec<String> = tips
                 .iter()
                 .map(|f| match f {
-                    RespFrame::BulkString(Some(b)) => {
-                        String::from_utf8_lossy(b).into_owned()
-                    }
+                    RespFrame::BulkString(Some(b)) => String::from_utf8_lossy(b).into_owned(),
                     other => panic!("expected BulkString tip for {cmd}, got {other:?}"),
                 })
                 .collect();
             let want_strs: Vec<String> = want.iter().map(|s| (*s).to_string()).collect();
-            assert_eq!(
-                got, want_strs,
-                "{cmd} tips must match upstream order"
-            );
+            assert_eq!(got, want_strs, "{cmd} tips must match upstream order");
         }
     }
 
@@ -65275,10 +65382,7 @@ mod tests {
             ),
             ("SCRIPT", &[]),
             ("FUNCTION", &[]),
-            (
-                "EXEC",
-                &["noscript", "loading", "stale", "skip_slowlog"],
-            ),
+            ("EXEC", &["noscript", "loading", "stale", "skip_slowlog"]),
             ("SWAPDB", &["write", "fast"]),
             ("WAIT", &[]),
             ("WAITAOF", &["noscript"]),
@@ -65312,10 +65416,7 @@ mod tests {
                 })
                 .collect();
             let want: Vec<String> = want_flags.iter().map(|s| (*s).to_string()).collect();
-            assert_eq!(
-                got, want,
-                "{cmd} flags must be {want:?}, got {got:?}"
-            );
+            assert_eq!(got, want, "{cmd} flags must be {want:?}, got {got:?}");
         }
     }
 
@@ -65367,13 +65468,7 @@ mod tests {
             ),
             (
                 "REPLCONF",
-                &[
-                    "admin",
-                    "noscript",
-                    "loading",
-                    "stale",
-                    "allow_busy",
-                ],
+                &["admin", "noscript", "loading", "stale", "allow_busy"],
             ),
             ("MONITOR", &["admin", "noscript", "loading", "stale"]),
             ("SELECT", &["loading", "stale", "fast"]),
@@ -65480,11 +65575,7 @@ mod tests {
                 RespFrame::Integer(0),
                 "{cmd} first_key must be 0"
             );
-            assert_eq!(
-                fields[4],
-                RespFrame::Integer(0),
-                "{cmd} last_key must be 0"
-            );
+            assert_eq!(fields[4], RespFrame::Integer(0), "{cmd} last_key must be 0");
             assert_eq!(fields[5], RespFrame::Integer(0), "{cmd} step must be 0");
             // key_specs sub-array is empty when first/last/step are 0.
             let RespFrame::Array(Some(key_specs)) = &fields[8] else {
@@ -65501,16 +65592,8 @@ mod tests {
         // (Confirms the (0,0,0) triple change didn't regress
         // ACL/cluster key resolution.)
         for argv in [
-            vec![
-                b"OBJECT".to_vec(),
-                b"ENCODING".to_vec(),
-                b"mykey".to_vec(),
-            ],
-            vec![
-                b"XINFO".to_vec(),
-                b"STREAM".to_vec(),
-                b"mystream".to_vec(),
-            ],
+            vec![b"OBJECT".to_vec(), b"ENCODING".to_vec(), b"mykey".to_vec()],
+            vec![b"XINFO".to_vec(), b"STREAM".to_vec(), b"mystream".to_vec()],
             vec![
                 b"XGROUP".to_vec(),
                 b"CREATE".to_vec(),
@@ -65687,8 +65770,8 @@ mod tests {
     /// because their tabular first/last/step are 0/0/0 and the fn early-
     /// returned before adding the keynum find_keys spec.
     #[test]
-    fn command_info_key_specs_notes_and_flags_for_set_xadd_getex_bitfield_pfcount_eval_fcall_match_upstream(
-    ) {
+    fn command_info_key_specs_notes_and_flags_for_set_xadd_getex_bitfield_pfcount_eval_fcall_match_upstream()
+     {
         let mut store = Store::new();
         let cases: &[(&str, &str, &[&str])] = &[
             (
@@ -65751,9 +65834,7 @@ mod tests {
             let RespFrame::Array(Some(rows)) = r else {
                 panic!("expected Array reply for COMMAND INFO {cmd}");
             };
-            let RespFrame::Array(Some(fields)) =
-                rows.into_iter().next().expect("one row")
-            else {
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
                 panic!("expected sub-Array entry for {cmd}");
             };
             let RespFrame::Array(Some(specs)) = &fields[8] else {
@@ -65790,8 +65871,7 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            let expected: Vec<String> =
-                expected_flags.iter().map(|s| (*s).to_string()).collect();
+            let expected: Vec<String> = expected_flags.iter().map(|s| (*s).to_string()).collect();
             assert_eq!(actual_flags, expected, "{cmd} flag set must match upstream");
         }
     }
@@ -65890,9 +65970,7 @@ mod tests {
             let RespFrame::Array(Some(rows)) = r else {
                 panic!("expected Array reply for COMMAND INFO {cmd}");
             };
-            let RespFrame::Array(Some(fields)) =
-                rows.into_iter().next().expect("one row")
-            else {
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
                 panic!("expected sub-Array entry for {cmd}");
             };
             let RespFrame::Array(Some(specs)) = &fields[8] else {
@@ -65922,8 +66000,7 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            let expected: Vec<String> =
-                expected_flags.iter().map(|s| (*s).to_string()).collect();
+            let expected: Vec<String> = expected_flags.iter().map(|s| (*s).to_string()).collect();
             assert_eq!(actual_flags, expected, "{cmd} flag set must match upstream");
         }
     }
@@ -65945,38 +66022,23 @@ mod tests {
             ("COPY", &[(&["RO", "access"], 1), (&["OW", "update"], 2)]),
             (
                 "RENAME",
-                &[
-                    (&["RW", "access", "delete"], 1),
-                    (&["OW", "update"], 2),
-                ],
+                &[(&["RW", "access", "delete"], 1), (&["OW", "update"], 2)],
             ),
             (
                 "RENAMENX",
-                &[
-                    (&["RW", "access", "delete"], 1),
-                    (&["OW", "insert"], 2),
-                ],
+                &[(&["RW", "access", "delete"], 1), (&["OW", "insert"], 2)],
             ),
             (
                 "LMOVE",
-                &[
-                    (&["RW", "access", "delete"], 1),
-                    (&["RW", "insert"], 2),
-                ],
+                &[(&["RW", "access", "delete"], 1), (&["RW", "insert"], 2)],
             ),
             (
                 "RPOPLPUSH",
-                &[
-                    (&["RW", "access", "delete"], 1),
-                    (&["RW", "insert"], 2),
-                ],
+                &[(&["RW", "access", "delete"], 1), (&["RW", "insert"], 2)],
             ),
             (
                 "PFMERGE",
-                &[
-                    (&["RW", "access", "insert"], 1),
-                    (&["RO", "access"], 2),
-                ],
+                &[(&["RW", "access", "insert"], 1), (&["RO", "access"], 2)],
             ),
             ("BITOP", &[(&["OW", "update"], 2), (&["RO", "access"], 3)]),
             (
@@ -66029,9 +66091,7 @@ mod tests {
             let RespFrame::Array(Some(rows)) = r else {
                 panic!("expected Array reply for COMMAND INFO {cmd}");
             };
-            let RespFrame::Array(Some(fields)) =
-                rows.into_iter().next().expect("one row")
-            else {
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
                 panic!("expected sub-Array entry for {cmd}");
             };
             let RespFrame::Array(Some(specs)) = &fields[8] else {
@@ -66085,8 +66145,8 @@ mod tests {
                     }
                     j += 2;
                 }
-                let actual_flags = spec_flags
-                    .unwrap_or_else(|| panic!("{cmd}[{i}] missing flags field"));
+                let actual_flags =
+                    spec_flags.unwrap_or_else(|| panic!("{cmd}[{i}] missing flags field"));
                 let actual_idx = spec_begin_index
                     .unwrap_or_else(|| panic!("{cmd}[{i}] missing begin_search index"));
                 let expected_flag_strs: Vec<String> =
@@ -66136,9 +66196,7 @@ mod tests {
             let RespFrame::Array(Some(rows)) = r else {
                 panic!("expected Array reply for COMMAND INFO {cmd}");
             };
-            let RespFrame::Array(Some(fields)) =
-                rows.into_iter().next().expect("one row")
-            else {
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
                 panic!("expected sub-Array entry for {cmd}");
             };
             let RespFrame::Array(Some(specs)) = &fields[8] else {
@@ -66206,9 +66264,7 @@ mod tests {
             let RespFrame::Array(Some(rows)) = r else {
                 panic!("expected Array reply for {cmd}");
             };
-            let RespFrame::Array(Some(fields)) =
-                rows.into_iter().next().expect("one row")
-            else {
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
                 panic!("expected sub-Array entry for {cmd}");
             };
             let RespFrame::Array(Some(specs)) = &fields[8] else {
@@ -66244,11 +66300,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"STREAMS".to_vec())),
                 "{cmd} keyword"
             );
-            assert_eq!(
-                bspec[3],
-                RespFrame::Integer(*startfrom),
-                "{cmd} startfrom"
-            );
+            assert_eq!(bspec[3], RespFrame::Integer(*startfrom), "{cmd} startfrom");
         }
     }
 
@@ -66272,8 +66324,7 @@ mod tests {
         let RespFrame::Array(Some(rows)) = r else {
             panic!("expected Array");
         };
-        let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row")
-        else {
+        let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
             panic!("expected sub-Array");
         };
         let RespFrame::Array(Some(specs)) = &fields[8] else {
@@ -66291,8 +66342,7 @@ mod tests {
         let RespFrame::Array(Some(rows)) = r else {
             panic!("expected Array");
         };
-        let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row")
-        else {
+        let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
             panic!("expected sub-Array");
         };
         let RespFrame::Array(Some(specs)) = &fields[8] else {
@@ -66394,20 +66444,14 @@ mod tests {
             let RespFrame::Array(Some(rows)) = r else {
                 panic!("expected Array reply for {cmd}");
             };
-            let RespFrame::Array(Some(fields)) =
-                rows.into_iter().next().expect("one row")
-            else {
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
                 panic!("expected sub-Array for {cmd}");
             };
             // fields[9] = subcommands array
             let RespFrame::Array(Some(subs)) = &fields[9] else {
                 panic!("{cmd} expected subcommands Array");
             };
-            assert_eq!(
-                subs.len(),
-                expected_subs.len(),
-                "{cmd} subcommand count"
-            );
+            assert_eq!(subs.len(), expected_subs.len(), "{cmd} subcommand count");
             let actual_names: Vec<String> = subs
                 .iter()
                 .map(|sub| {
@@ -66725,9 +66769,7 @@ mod tests {
             let RespFrame::Array(Some(rows)) = r else {
                 panic!("expected Array reply for {cmd}");
             };
-            let RespFrame::Array(Some(fields)) =
-                rows.into_iter().next().expect("one row")
-            else {
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
                 panic!("expected sub-Array for {cmd}");
             };
             let RespFrame::Array(Some(cats_arr)) = &fields[6] else {
@@ -67101,12 +67143,8 @@ mod tests {
         );
 
         // COMMAND COUNT must NOT count sentinel.
-        let count = dispatch_argv(
-            &[b"COMMAND".to_vec(), b"COUNT".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("command count");
+        let count = dispatch_argv(&[b"COMMAND".to_vec(), b"COUNT".to_vec()], &mut store, 0)
+            .expect("command count");
         let RespFrame::Integer(n) = count else {
             panic!("expected Integer, got {count:?}");
         };
@@ -67117,12 +67155,8 @@ mod tests {
         );
 
         // COMMAND LIST must NOT contain sentinel.
-        let list = dispatch_argv(
-            &[b"COMMAND".to_vec(), b"LIST".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("command list");
+        let list = dispatch_argv(&[b"COMMAND".to_vec(), b"LIST".to_vec()], &mut store, 0)
+            .expect("command list");
         let RespFrame::Array(Some(items)) = list else {
             panic!("expected Array, got {list:?}");
         };
@@ -67140,25 +67174,20 @@ mod tests {
 
         // COMMAND INFO sentinel must return nil bulk string.
         let info = dispatch_argv(
-            &[
-                b"COMMAND".to_vec(),
-                b"INFO".to_vec(),
-                b"sentinel".to_vec(),
-            ],
+            &[b"COMMAND".to_vec(), b"INFO".to_vec(), b"sentinel".to_vec()],
             &mut store,
             0,
         )
         .expect("command info sentinel");
-        assert_eq!(info, RespFrame::Array(Some(vec![RespFrame::BulkString(None)])));
+        assert_eq!(
+            info,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(None)]))
+        );
 
         // Sanity: a real command (e.g. GET) is still reachable via
         // COMMAND INFO so the filter doesn't over-hide.
         let info_get = dispatch_argv(
-            &[
-                b"COMMAND".to_vec(),
-                b"INFO".to_vec(),
-                b"get".to_vec(),
-            ],
+            &[b"COMMAND".to_vec(), b"INFO".to_vec(), b"get".to_vec()],
             &mut store,
             0,
         )
@@ -67171,12 +67200,9 @@ mod tests {
         // When sentinel_mode is on (e.g. fr-sentinel binary), the row
         // becomes visible again. Toggle and re-check COUNT.
         store.sentinel_mode = true;
-        let count_sentinel = dispatch_argv(
-            &[b"COMMAND".to_vec(), b"COUNT".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("command count in sentinel mode");
+        let count_sentinel =
+            dispatch_argv(&[b"COMMAND".to_vec(), b"COUNT".to_vec()], &mut store, 0)
+                .expect("command count in sentinel mode");
         let RespFrame::Integer(n) = count_sentinel else {
             panic!("expected Integer");
         };
@@ -67198,12 +67224,8 @@ mod tests {
         // (commandCountCommand only counts the top-level dict).
         let mut store = Store::new();
 
-        let list = dispatch_argv(
-            &[b"COMMAND".to_vec(), b"LIST".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("command list");
+        let list = dispatch_argv(&[b"COMMAND".to_vec(), b"LIST".to_vec()], &mut store, 0)
+            .expect("command list");
         let RespFrame::Array(Some(items)) = list else {
             panic!("expected Array, got {list:?}");
         };
@@ -67248,12 +67270,8 @@ mod tests {
         // COMMAND COUNT must stay at the top-level row count
         // (subcommands are advertised via LIST but not counted —
         // upstream commandCountCommand returns dictSize(commands) only).
-        let count = dispatch_argv(
-            &[b"COMMAND".to_vec(), b"COUNT".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("command count");
+        let count = dispatch_argv(&[b"COMMAND".to_vec(), b"COUNT".to_vec()], &mut store, 0)
+            .expect("command count");
         let RespFrame::Integer(n) = count else {
             panic!("expected Integer");
         };

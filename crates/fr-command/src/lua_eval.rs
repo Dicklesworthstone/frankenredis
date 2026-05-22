@@ -256,6 +256,7 @@ impl LuaTable {
     fn hash_pairs(&self) -> Vec<(LuaValue, LuaValue)> {
         self.inner.borrow().hash_pairs()
     }
+    #[allow(dead_code)]
     fn hash_is_empty(&self) -> bool {
         self.inner.borrow().hash_is_empty()
     }
@@ -455,6 +456,7 @@ fn set_positional_array_slot(table: &LuaTable, slot: usize, value: LuaValue) {
 ///   - any other chunkname → wrap in `[string "NAME"]`
 ///   - no chunkname → use the first line of the source, truncated with
 ///     `"..."` if the source spans multiple lines, wrapped in `[string "..."]`
+///
 /// (frankenredis-cfflo)
 fn format_lua_chunk_label(chunkname: Option<&[u8]>, source: &[u8]) -> String {
     if let Some(name) = chunkname {
@@ -516,14 +518,15 @@ fn lua_raw_equal(a: &LuaValue, b: &LuaValue) -> bool {
 ///   - Direct AST call (e.g. `ipairs(nil)`): inv_name=Some("ipairs"),
 ///     output `user_script:1: bad argument #1 to 'ipairs' (...)`.
 ///   - Indirect via pcall: inv_name=None, output `bad argument #1 to '?' (...)`.
+///
 /// The got-label helper distinguishes "no value" (missing arg) from
 /// explicit "nil".
 fn lua_bad_table_arg(inv_name: Option<&str>, index: usize, value: Option<&LuaValue>) -> String {
     let got = lua_arg_got_label(value);
     match inv_name {
-        Some(name) => format!(
-            "user_script:1: bad argument #{index} to '{name}' (table expected, got {got})"
-        ),
+        Some(name) => {
+            format!("user_script:1: bad argument #{index} to '{name}' (table expected, got {got})")
+        }
         None => format!("bad argument #{index} to '?' (table expected, got {got})"),
     }
 }
@@ -531,9 +534,9 @@ fn lua_bad_table_arg(inv_name: Option<&str>, index: usize, value: Option<&LuaVal
 fn lua_bad_number_arg(inv_name: Option<&str>, index: usize, value: Option<&LuaValue>) -> String {
     let got = lua_arg_got_label(value);
     match inv_name {
-        Some(name) => format!(
-            "user_script:1: bad argument #{index} to '{name}' (number expected, got {got})"
-        ),
+        Some(name) => {
+            format!("user_script:1: bad argument #{index} to '{name}' (number expected, got {got})")
+        }
         None => format!("bad argument #{index} to '?' (number expected, got {got})"),
     }
 }
@@ -583,9 +586,7 @@ fn lua_optional_integer_arg(
 fn lua_check_table_key(key: &LuaValue) -> Result<(), String> {
     match key {
         LuaValue::Nil => Err("user_script:1: table index is nil".to_string()),
-        LuaValue::Number(n) if n.is_nan() => {
-            Err("user_script:1: table index is NaN".to_string())
-        }
+        LuaValue::Number(n) if n.is_nan() => Err("user_script:1: table index is NaN".to_string()),
         _ => Ok(()),
     }
 }
@@ -614,7 +615,12 @@ fn lua_arg_got_label(value: Option<&LuaValue>) -> &'static str {
 /// messages they assemble themselves, but it is NOT used in the
 /// rendered output — vendored's luaL_argerror always uses lua_getinfo
 /// "n.name" which is None for pcall-invoked C closures.
-fn lua_format_argerror(inv_name: Option<&str>, _fallback_name: &str, idx: usize, reason: &str) -> String {
+fn lua_format_argerror(
+    inv_name: Option<&str>,
+    _fallback_name: &str,
+    idx: usize,
+    reason: &str,
+) -> String {
     match inv_name {
         Some(name) => format!("user_script:1: bad argument #{idx} to '{name}' ({reason})"),
         None => format!("bad argument #{idx} to '?' ({reason})"),
@@ -750,9 +756,7 @@ impl LuaValue {
                 }
             }
             LuaValue::Str(s) => Ok(s.clone()),
-            _ => Err(
-                "Lua redis lib command arguments must be strings or integers".to_string(),
-            ),
+            _ => Err("Lua redis lib command arguments must be strings or integers".to_string()),
         }
     }
 
@@ -779,11 +783,7 @@ impl LuaValue {
                 // integer literal.
                 let abs = n.abs();
                 let needs_scientific = abs >= 1e14;
-                if !is_neg_zero
-                    && !needs_scientific
-                    && *n == (*n as i64) as f64
-                    && n.is_finite()
-                {
+                if !is_neg_zero && !needs_scientific && *n == (*n as i64) as f64 && n.is_finite() {
                     format!("{}", *n as i64).into_bytes()
                 } else {
                     lua_number_to_string(*n).into_bytes()
@@ -1111,9 +1111,7 @@ impl<'a> Lexer<'a> {
                         // Drain to EOF before erroring so the caller
                         // sees the end-of-input position.
                         self.pos = self.src.len();
-                        return Err(
-                            "unfinished long comment near '<eof>'".to_string()
-                        );
+                        return Err("unfinished long comment near '<eof>'".to_string());
                     }
                 } else {
                     // Line comment
@@ -1997,7 +1995,10 @@ impl Parser {
             // (frankenredis-luabarestmt)
             match &expr {
                 Expr::Call(_, _) | Expr::MethodCall(_, _, _) => Ok(Stmt::Expression(expr)),
-                _ => Err(format!("'=' expected near '{}'", token_display(self.peek()))),
+                _ => Err(format!(
+                    "'=' expected near '{}'",
+                    token_display(self.peek())
+                )),
             }
         }
     }
@@ -2807,7 +2808,9 @@ impl<'a> LuaState<'a> {
 
         // Table library
         let table_lib = LuaTable::new();
-        for name in &["insert", "remove", "concat", "sort", "getn", "maxn", "foreach", "foreachi"] {
+        for name in &[
+            "insert", "remove", "concat", "sort", "getn", "maxn", "foreach", "foreachi",
+        ] {
             table_lib.set(
                 LuaValue::Str(name.as_bytes().to_vec()),
                 LuaValue::RustFunction(format!("table.{name}")),
@@ -2866,10 +2869,7 @@ impl<'a> LuaState<'a> {
         // interpreter has no real Lua heap accounting so gcinfo /
         // collectgarbage('count') return a stable placeholder value
         // and the control variants of collectgarbage are no-ops.
-        globals.insert(
-            "_VERSION".to_string(),
-            LuaValue::Str(b"Lua 5.1".to_vec()),
-        );
+        globals.insert("_VERSION".to_string(), LuaValue::Str(b"Lua 5.1".to_vec()));
         globals.insert(
             "rawequal".to_string(),
             LuaValue::RustFunction("rawequal".to_string()),
@@ -2932,6 +2932,7 @@ impl<'a> LuaState<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn next_rand(&mut self) -> u64 {
         self.rng_seed = self
             .rng_seed
@@ -3055,7 +3056,10 @@ impl<'a> LuaState<'a> {
         let mut parser = Parser::new(tokens);
         let stmts = parser.parse_block()?;
         if !parser.check(&Token::Eof) {
-            return Err(format!("'<eof>' expected near '{}'", token_display(parser.peek())));
+            return Err(format!(
+                "'<eof>' expected near '{}'",
+                token_display(parser.peek())
+            ));
         }
         // (frankenredis-j02x9) Lock the globals table — from this point
         // forward any user-script write to globals raises a readonly-
@@ -3081,9 +3085,7 @@ impl<'a> LuaState<'a> {
         let outcome = self.exec_block(&stmts, &mut env, &mut varargs);
         self.lua_frame_kinds.pop();
         match outcome {
-            Ok(ControlFlow::Return(vals)) => {
-                Ok(vals.into_iter().next().unwrap_or(LuaValue::Nil))
-            }
+            Ok(ControlFlow::Return(vals)) => Ok(vals.into_iter().next().unwrap_or(LuaValue::Nil)),
             Ok(_) => Ok(LuaValue::Nil),
             // (frankenredis-cxmsu) An uncaught `error({...})` /
             // `error(true)` / `error(nil)` escapes through the
@@ -3401,7 +3403,10 @@ impl<'a> LuaState<'a> {
             }
         };
         if !matches!(current, LuaValue::Table(_)) {
-            return Err(format!("user_script:1: attempt to index a {} value", current.type_name()));
+            return Err(format!(
+                "user_script:1: attempt to index a {} value",
+                current.type_name()
+            ));
         }
         // Navigate to the parent table
         let mut path: Vec<LuaValue> = vec![current.clone()];
@@ -3409,11 +3414,17 @@ impl<'a> LuaState<'a> {
             let next = match &current {
                 LuaValue::Table(t) => t.get(&LuaValue::Str(name.as_bytes().to_vec())),
                 other => {
-                    return Err(format!("user_script:1: attempt to index a {} value", other.type_name()));
+                    return Err(format!(
+                        "user_script:1: attempt to index a {} value",
+                        other.type_name()
+                    ));
                 }
             };
             if !matches!(next, LuaValue::Table(_)) {
-                return Err(format!("user_script:1: attempt to index a {} value", next.type_name()));
+                return Err(format!(
+                    "user_script:1: attempt to index a {} value",
+                    next.type_name()
+                ));
             }
             current = next;
             path.push(current.clone());
@@ -3525,6 +3536,7 @@ impl<'a> LuaState<'a> {
     ///     to index a TYPE value" (vendored behavior; e.g.
     ///     __newindex='nope' tries to index the string).
     ///   - Else → direct write.
+    ///
     /// Cap the cascade at 16 hops, matching the __index depth limit.
     /// (frankenredis-9f16h)
     fn table_assign_with_newindex(
@@ -3558,12 +3570,10 @@ impl<'a> LuaState<'a> {
                     current = next;
                     continue;
                 }
-                callable
-                    @ (LuaValue::RustFunction(_)
-                    | LuaValue::Function(_)
-                    | LuaValue::WrappedCoroutine(_)) => {
-                    let mut args =
-                        vec![LuaValue::Table(current.clone()), key, value];
+                callable @ (LuaValue::RustFunction(_)
+                | LuaValue::Function(_)
+                | LuaValue::WrappedCoroutine(_)) => {
+                    let mut args = vec![LuaValue::Table(current.clone()), key, value];
                     self.call_function(&callable, &mut args, env, varargs)?;
                     return Ok(());
                 }
@@ -3693,21 +3703,16 @@ impl<'a> LuaState<'a> {
                         // value" error via call_function — that's the
                         // wording vendored emits for e.g. __concat=42.
                         if matches!(op, BinOp::Concat) {
-                            let lhs_simple =
-                                matches!(lv, LuaValue::Str(_) | LuaValue::Number(_));
-                            let rhs_simple =
-                                matches!(rv, LuaValue::Str(_) | LuaValue::Number(_));
+                            let lhs_simple = matches!(lv, LuaValue::Str(_) | LuaValue::Number(_));
+                            let rhs_simple = matches!(rv, LuaValue::Str(_) | LuaValue::Number(_));
                             if !(lhs_simple && rhs_simple) {
                                 if let Some(handler) =
                                     self.lookup_binop_metamethod(&lv, &rv, "__concat")
                                 {
                                     let mut args = vec![lv, rv];
-                                    let results = self.call_function(
-                                        &handler, &mut args, env, varargs,
-                                    )?;
-                                    return Ok(
-                                        results.into_iter().next().unwrap_or(LuaValue::Nil),
-                                    );
+                                    let results =
+                                        self.call_function(&handler, &mut args, env, varargs)?;
+                                    return Ok(results.into_iter().next().unwrap_or(LuaValue::Nil));
                                 }
                                 // (frankenredis-22c3u) No __concat handler:
                                 // emit Lua 5.1's accessor-aware wording.
@@ -3757,16 +3762,12 @@ impl<'a> LuaState<'a> {
                                 _ => unreachable!(),
                             };
                             if lv.to_number().is_none() || rv.to_number().is_none() {
-                                if let Some(handler) =
-                                    self.lookup_binop_metamethod(&lv, &rv, name)
+                                if let Some(handler) = self.lookup_binop_metamethod(&lv, &rv, name)
                                 {
                                     let mut args = vec![lv, rv];
-                                    let results = self.call_function(
-                                        &handler, &mut args, env, varargs,
-                                    )?;
-                                    return Ok(
-                                        results.into_iter().next().unwrap_or(LuaValue::Nil),
-                                    );
+                                    let results =
+                                        self.call_function(&handler, &mut args, env, varargs)?;
+                                    return Ok(results.into_iter().next().unwrap_or(LuaValue::Nil));
                                 }
                                 // (frankenredis-9ckvq) No metamethod; emit
                                 // the accessor-aware "attempt to perform
@@ -3793,118 +3794,100 @@ impl<'a> LuaState<'a> {
                         // dispatch. For </>/<=/>= on tables: try __lt or
                         // __le; > and >= swap args; <= falls back to
                         // `not __lt(rhs, lhs)` when __le is missing.
-                        if matches!(op, BinOp::Eq | BinOp::Ne) {
-                            if let (LuaValue::Table(la), LuaValue::Table(rb)) = (&lv, &rv) {
-                                if !Rc::ptr_eq(&la.inner, &rb.inner) {
-                                    // Lua 5.1 calls __eq only when both
-                                    // tables share a __eq metamethod. fr
-                                    // models that as: both tables point at
-                                    // the SAME metatable LuaTable (Rc), or
-                                    // both __eq slots are raw-equal (covers
-                                    // RustFunction-by-name plus the
-                                    // shared-metatable cases via
-                                    // lua_raw_equal). A LuaValue::Function
-                                    // lacks identity in fr, so two
-                                    // syntactically-identical-but-separate
-                                    // function literals are still treated
-                                    // as distinct (matching upstream).
-                                    let mt_a = la.inner.borrow().metatable.clone();
-                                    let mt_b = rb.inner.borrow().metatable.clone();
-                                    let shared_mt = match (&mt_a, &mt_b) {
-                                        (Some(ma), Some(mb)) => Rc::ptr_eq(&ma.inner, &mb.inner),
-                                        _ => false,
-                                    };
-                                    let eq_a = mt_a
-                                        .as_ref()
-                                        .map(|mt| mt.get(&LuaValue::Str(b"__eq".to_vec())))
-                                        .unwrap_or(LuaValue::Nil);
-                                    let eq_b = mt_b
-                                        .as_ref()
-                                        .map(|mt| mt.get(&LuaValue::Str(b"__eq".to_vec())))
-                                        .unwrap_or(LuaValue::Nil);
-                                    let same_eq = shared_mt
-                                        || (!matches!(eq_a, LuaValue::Nil)
-                                            && lua_raw_equal(&eq_a, &eq_b));
-                                    if !matches!(eq_a, LuaValue::Nil) && same_eq {
-                                        let mut args = vec![lv.clone(), rv.clone()];
-                                        let results = self.call_function(
-                                            &eq_a, &mut args, env, varargs,
-                                        )?;
-                                        let raw = results
-                                            .into_iter()
-                                            .next()
-                                            .unwrap_or(LuaValue::Nil);
-                                        let is_eq = raw.is_truthy();
-                                        return Ok(LuaValue::Bool(match op {
-                                            BinOp::Eq => is_eq,
-                                            BinOp::Ne => !is_eq,
-                                            _ => unreachable!(),
-                                        }));
-                                    }
-                                }
+                        if matches!(op, BinOp::Eq | BinOp::Ne)
+                            && let (LuaValue::Table(la), LuaValue::Table(rb)) = (&lv, &rv)
+                            && !Rc::ptr_eq(&la.inner, &rb.inner)
+                        {
+                            // Lua 5.1 calls __eq only when both
+                            // tables share a __eq metamethod. fr
+                            // models that as: both tables point at
+                            // the SAME metatable LuaTable (Rc), or
+                            // both __eq slots are raw-equal (covers
+                            // RustFunction-by-name plus the
+                            // shared-metatable cases via
+                            // lua_raw_equal). A LuaValue::Function
+                            // lacks identity in fr, so two
+                            // syntactically-identical-but-separate
+                            // function literals are still treated
+                            // as distinct (matching upstream).
+                            let mt_a = la.inner.borrow().metatable.clone();
+                            let mt_b = rb.inner.borrow().metatable.clone();
+                            let shared_mt = match (&mt_a, &mt_b) {
+                                (Some(ma), Some(mb)) => Rc::ptr_eq(&ma.inner, &mb.inner),
+                                _ => false,
+                            };
+                            let eq_a = mt_a
+                                .as_ref()
+                                .map(|mt| mt.get(&LuaValue::Str(b"__eq".to_vec())))
+                                .unwrap_or(LuaValue::Nil);
+                            let eq_b = mt_b
+                                .as_ref()
+                                .map(|mt| mt.get(&LuaValue::Str(b"__eq".to_vec())))
+                                .unwrap_or(LuaValue::Nil);
+                            let same_eq = shared_mt
+                                || (!matches!(eq_a, LuaValue::Nil) && lua_raw_equal(&eq_a, &eq_b));
+                            if !matches!(eq_a, LuaValue::Nil) && same_eq {
+                                let mut args = vec![lv.clone(), rv.clone()];
+                                let results = self.call_function(&eq_a, &mut args, env, varargs)?;
+                                let raw = results.into_iter().next().unwrap_or(LuaValue::Nil);
+                                let is_eq = raw.is_truthy();
+                                return Ok(LuaValue::Bool(match op {
+                                    BinOp::Eq => is_eq,
+                                    BinOp::Ne => !is_eq,
+                                    _ => unreachable!(),
+                                }));
                             }
                         }
                         if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
-                            let both_numbers = matches!(
-                                (&lv, &rv),
-                                (LuaValue::Number(_), LuaValue::Number(_))
-                            );
-                            let both_strings = matches!(
-                                (&lv, &rv),
-                                (LuaValue::Str(_), LuaValue::Str(_))
-                            );
-                            if !both_numbers && !both_strings {
-                                if let (LuaValue::Table(_), LuaValue::Table(_)) = (&lv, &rv)
+                            let both_numbers =
+                                matches!((&lv, &rv), (LuaValue::Number(_), LuaValue::Number(_)));
+                            let both_strings =
+                                matches!((&lv, &rv), (LuaValue::Str(_), LuaValue::Str(_)));
+                            if !both_numbers
+                                && !both_strings
+                                && let (LuaValue::Table(_), LuaValue::Table(_)) = (&lv, &rv)
+                            {
+                                // __lt for </>; for <=/>= prefer __le but
+                                // fall back to `not __lt(swapped)`.
+                                let (primary, swap, invert) = match op {
+                                    BinOp::Lt => ("__lt", false, false),
+                                    BinOp::Gt => ("__lt", true, false),
+                                    BinOp::Le => ("__le", false, false),
+                                    BinOp::Ge => ("__le", true, false),
+                                    _ => unreachable!(),
+                                };
+                                if let Some(handler) =
+                                    self.lookup_binop_metamethod(&lv, &rv, primary)
                                 {
-                                    // __lt for </>; for <=/>= prefer __le but
-                                    // fall back to `not __lt(swapped)`.
-                                    let (primary, swap, invert) = match op {
-                                        BinOp::Lt => ("__lt", false, false),
-                                        BinOp::Gt => ("__lt", true, false),
-                                        BinOp::Le => ("__le", false, false),
-                                        BinOp::Ge => ("__le", true, false),
+                                    let mut args = if swap {
+                                        vec![rv.clone(), lv.clone()]
+                                    } else {
+                                        vec![lv.clone(), rv.clone()]
+                                    };
+                                    let results =
+                                        self.call_function(&handler, &mut args, env, varargs)?;
+                                    let raw = results.into_iter().next().unwrap_or(LuaValue::Nil);
+                                    let truthy = raw.is_truthy();
+                                    return Ok(LuaValue::Bool(if invert {
+                                        !truthy
+                                    } else {
+                                        truthy
+                                    }));
+                                }
+                                // __le fallback: `a <= b` => `not (b < a)`.
+                                if matches!(op, BinOp::Le | BinOp::Ge)
+                                    && let Some(handler) =
+                                        self.lookup_binop_metamethod(&lv, &rv, "__lt")
+                                {
+                                    let mut args = match op {
+                                        BinOp::Le => vec![rv.clone(), lv.clone()],
+                                        BinOp::Ge => vec![lv.clone(), rv.clone()],
                                         _ => unreachable!(),
                                     };
-                                    if let Some(handler) =
-                                        self.lookup_binop_metamethod(&lv, &rv, primary)
-                                    {
-                                        let mut args = if swap {
-                                            vec![rv.clone(), lv.clone()]
-                                        } else {
-                                            vec![lv.clone(), rv.clone()]
-                                        };
-                                        let results = self.call_function(
-                                            &handler, &mut args, env, varargs,
-                                        )?;
-                                        let raw = results
-                                            .into_iter()
-                                            .next()
-                                            .unwrap_or(LuaValue::Nil);
-                                        let truthy = raw.is_truthy();
-                                        return Ok(LuaValue::Bool(
-                                            if invert { !truthy } else { truthy },
-                                        ));
-                                    }
-                                    // __le fallback: `a <= b` => `not (b < a)`.
-                                    if matches!(op, BinOp::Le | BinOp::Ge) {
-                                        if let Some(handler) =
-                                            self.lookup_binop_metamethod(&lv, &rv, "__lt")
-                                        {
-                                            let mut args = match op {
-                                                BinOp::Le => vec![rv.clone(), lv.clone()],
-                                                BinOp::Ge => vec![lv.clone(), rv.clone()],
-                                                _ => unreachable!(),
-                                            };
-                                            let results = self.call_function(
-                                                &handler, &mut args, env, varargs,
-                                            )?;
-                                            let raw = results
-                                                .into_iter()
-                                                .next()
-                                                .unwrap_or(LuaValue::Nil);
-                                            return Ok(LuaValue::Bool(!raw.is_truthy()));
-                                        }
-                                    }
+                                    let results =
+                                        self.call_function(&handler, &mut args, env, varargs)?;
+                                    let raw = results.into_iter().next().unwrap_or(LuaValue::Nil);
+                                    return Ok(LuaValue::Bool(!raw.is_truthy()));
                                 }
                             }
                         }
@@ -3922,25 +3905,22 @@ impl<'a> LuaState<'a> {
                         // return value; non-callable handlers naturally
                         // produce "attempt to call a TYPE value" via
                         // call_function.
-                        if val.to_number().is_none() {
-                            if let LuaValue::Table(t) = &val {
-                                let handler = {
-                                    let inner = t.inner.borrow();
-                                    inner
-                                        .metatable
-                                        .as_ref()
-                                        .map(|mt| mt.get(&LuaValue::Str(b"__unm".to_vec())))
-                                        .unwrap_or(LuaValue::Nil)
-                                };
-                                if !matches!(handler, LuaValue::Nil) {
-                                    let mut args = vec![val.clone()];
-                                    let results = self.call_function(
-                                        &handler, &mut args, env, varargs,
-                                    )?;
-                                    return Ok(
-                                        results.into_iter().next().unwrap_or(LuaValue::Nil),
-                                    );
-                                }
+                        if val.to_number().is_none()
+                            && let LuaValue::Table(t) = &val
+                        {
+                            let handler = {
+                                let inner = t.inner.borrow();
+                                inner
+                                    .metatable
+                                    .as_ref()
+                                    .map(|mt| mt.get(&LuaValue::Str(b"__unm".to_vec())))
+                                    .unwrap_or(LuaValue::Nil)
+                            };
+                            if !matches!(handler, LuaValue::Nil) {
+                                let mut args = vec![val.clone()];
+                                let results =
+                                    self.call_function(&handler, &mut args, env, varargs)?;
+                                return Ok(results.into_iter().next().unwrap_or(LuaValue::Nil));
                             }
                         }
                         // (frankenredis-7w22v) Use the operand's actual
@@ -3949,12 +3929,7 @@ impl<'a> LuaState<'a> {
                         // (frankenredis-9ckvq) Label the operand by its
                         // syntactic accessor when available.
                         let n = val.to_number().ok_or_else(|| {
-                            self.type_error_with_label(
-                                "perform arithmetic on",
-                                inner,
-                                &val,
-                                env,
-                            )
+                            self.type_error_with_label("perform arithmetic on", inner, &val, env)
                         })?;
                         Ok(LuaValue::Number(-n))
                     }
@@ -3972,12 +3947,7 @@ impl<'a> LuaState<'a> {
                         }
                         // (frankenredis-7w22v / frankenredis-9ckvq) Prepend
                         // user_script:1: prefix and label the bad operand.
-                        _ => Err(self.type_error_with_label(
-                            "get length of",
-                            inner,
-                            &val,
-                            env,
-                        )),
+                        _ => Err(self.type_error_with_label("get length of", inner, &val, env)),
                     },
                 }
             }
@@ -3988,9 +3958,7 @@ impl<'a> LuaState<'a> {
                     // (frankenredis-vhbp3) Route through the full __index
                     // metamethod chain so function-valued __index is
                     // invoked rather than silently returning nil.
-                    LuaValue::Table(t) => {
-                        self.table_lookup_with_index_meta(t, &key, env, varargs)
-                    }
+                    LuaValue::Table(t) => self.table_lookup_with_index_meta(t, &key, env, varargs),
                     // (frankenredis-tbu4k) Lua 5.1 sets the string library
                     // as the metatable __index for strings, so indexing a
                     // string with a string key looks up that field in the
@@ -4012,8 +3980,9 @@ impl<'a> LuaState<'a> {
                     // (frankenredis-tbu4k) Same string-as-metatable behavior
                     // as Expr::Index — `s.upper` returns string.upper,
                     // `s.fld` for unknown field returns nil.
-                    LuaValue::Str(_) => Ok(self
-                        .lookup_string_field(&LuaValue::Str(field.as_bytes().to_vec()))),
+                    LuaValue::Str(_) => {
+                        Ok(self.lookup_string_field(&LuaValue::Str(field.as_bytes().to_vec())))
+                    }
                     _ => Err(self.type_error_with_label("index", table_expr, &table, env)),
                 }
             }
@@ -4239,15 +4208,17 @@ impl<'a> LuaState<'a> {
                             // (frankenredis-tbu4k) String receivers route
                             // through the string library, same as the
                             // single-call MethodCall arm above.
-                            LuaValue::Str(_) => self
-                                .lookup_string_field(&LuaValue::Str(method.as_bytes().to_vec())),
+                            LuaValue::Str(_) => {
+                                self.lookup_string_field(&LuaValue::Str(method.as_bytes().to_vec()))
+                            }
                             // (frankenredis-aaudb) Non-table receivers
                             // fail at the index step BEFORE the call —
                             // mirror upstream's accessor-aware
                             // "attempt to index local 'x' (a TYPE value)".
                             _ => {
-                                return Err(self
-                                    .type_error_with_label("index", obj_expr, &obj, env));
+                                return Err(
+                                    self.type_error_with_label("index", obj_expr, &obj, env)
+                                );
                             }
                         };
                         let mut arg_vals = vec![obj];
@@ -4613,10 +4584,9 @@ impl<'a> LuaState<'a> {
                     current = next;
                     continue;
                 }
-                callable
-                    @ (LuaValue::RustFunction(_)
-                    | LuaValue::Function(_)
-                    | LuaValue::WrappedCoroutine(_)) => {
+                callable @ (LuaValue::RustFunction(_)
+                | LuaValue::Function(_)
+                | LuaValue::WrappedCoroutine(_)) => {
                     let mut args = vec![LuaValue::Table(current.clone()), key.clone()];
                     let results = self.call_function(&callable, &mut args, env, varargs)?;
                     return Ok(results.into_iter().next().unwrap_or(LuaValue::Nil));
@@ -4703,7 +4673,12 @@ impl<'a> LuaState<'a> {
     /// the `user_script:1:` source prefix. When invoked indirectly
     /// (e.g. `pcall(select, ...)`), the C closure has no debug name —
     /// vendored emits `'?'` and no source prefix. (frankenredis-557p3)
-    fn format_builtin_argerror(&self, _fallback_name: &str, arg_idx: usize, reason: &str) -> String {
+    fn format_builtin_argerror(
+        &self,
+        _fallback_name: &str,
+        arg_idx: usize,
+        reason: &str,
+    ) -> String {
         // (frankenredis-rbec9) Method-style invocation (`t:f(args)`) is
         // desugared to `t.f(t, args...)`. Lua 5.1 reports arg #1 type
         // failures with the `calling 'f' on bad self (...)` wording
@@ -4714,14 +4689,10 @@ impl<'a> LuaState<'a> {
             && self.current_invocation_is_method
             && let Some(name) = &self.current_invocation_name
         {
-            return format!(
-                "user_script:1: calling '{name}' on bad self ({reason})"
-            );
+            return format!("user_script:1: calling '{name}' on bad self ({reason})");
         }
         match &self.current_invocation_name {
-            Some(name) => format!(
-                "user_script:1: bad argument #{arg_idx} to '{name}' ({reason})"
-            ),
+            Some(name) => format!("user_script:1: bad argument #{arg_idx} to '{name}' ({reason})"),
             None => format!("bad argument #{arg_idx} to '?' ({reason})"),
         }
     }
@@ -4738,9 +4709,7 @@ impl<'a> LuaState<'a> {
             Expr::Name(n) => Some(n.clone()),
             Expr::Field(_, f) => Some(f.clone()),
             Expr::Index(_, key) => match key.as_ref() {
-                Expr::Str(s) if !s.is_empty() => {
-                    std::str::from_utf8(s).ok().map(str::to_string)
-                }
+                Expr::Str(s) if !s.is_empty() => std::str::from_utf8(s).ok().map(str::to_string),
                 _ => None,
             },
             _ => None,
@@ -4853,9 +4822,9 @@ impl<'a> LuaState<'a> {
             mt.get(&LuaValue::Str(b"__call".to_vec()))
         };
         match handler {
-            LuaValue::RustFunction(_)
-            | LuaValue::Function(_)
-            | LuaValue::WrappedCoroutine(_) => Some(handler),
+            LuaValue::RustFunction(_) | LuaValue::Function(_) | LuaValue::WrappedCoroutine(_) => {
+                Some(handler)
+            }
             _ => None,
         }
     }
@@ -4889,7 +4858,8 @@ impl<'a> LuaState<'a> {
         // can walk `level` entries back through the kind stack to decide
         // whether to prepend the user_script:1 source-location prefix.
         // LuaValue::Function is the only kind that counts as a Lua frame.
-        self.lua_frame_kinds.push(matches!(func, LuaValue::Function(_)));
+        self.lua_frame_kinds
+            .push(matches!(func, LuaValue::Function(_)));
         // (frankenredis-2c7hj) Tables with a callable `__call` metamethod
         // act like the underlying function with the table prepended as
         // the first arg. Handled here so internal callers (iterators,
@@ -5095,7 +5065,7 @@ impl<'a> LuaState<'a> {
                 // (3). NaN, negative, or > LL_WARNING all raise the
                 // same "Invalid debug level." error.
                 let level_i = level_f as i64;
-                if !level_f.is_finite() || level_i < 0 || level_i > 3 {
+                if !level_f.is_finite() || !(0..=3).contains(&level_i) {
                     return Err("ERR Invalid debug level.".to_string());
                 }
                 Ok(vec![LuaValue::Nil])
@@ -5207,9 +5177,7 @@ impl<'a> LuaState<'a> {
                     }
                 };
                 if !crate::is_known_command(&cmd_bytes) {
-                    return Err(
-                        "ERR Invalid command passed to redis.acl_check_cmd()".to_string(),
-                    );
+                    return Err("ERR Invalid command passed to redis.acl_check_cmd()".to_string());
                 }
                 // Standalone mode without per-call ACL gating: assume
                 // the command is allowed.
@@ -5313,34 +5281,33 @@ impl<'a> LuaState<'a> {
                 // parses in the given base. So tonumber(5, 3) sees the
                 // string "5" and fails to parse a base-3 digit ('5' >=
                 // '3'), returning nil — not the unchanged number 5.
-                if base.is_some() && matches!(val, LuaValue::Number(_)) {
-                    if let LuaValue::Number(n) = &val {
-                        let s = if *n == (*n as i64) as f64 && n.is_finite() {
-                            format!("{}", *n as i64)
-                        } else {
-                            lua_number_to_string(*n)
-                        };
-                        let trimmed = s.trim();
-                        let base = base.unwrap();
-                        let (sign, body) = match trimmed.as_bytes().first() {
-                            Some(b'-') => (-1i64, &trimmed[1..]),
-                            Some(b'+') => (1i64, &trimmed[1..]),
-                            _ => (1i64, trimmed),
-                        };
-                        let stripped: &str = if base == 16 {
-                            body.strip_prefix("0x")
-                                .or_else(|| body.strip_prefix("0X"))
-                                .unwrap_or(body)
-                        } else {
-                            body
-                        };
-                        return match u64::from_str_radix(stripped, base) {
-                            Ok(n) => Ok(vec![LuaValue::Number(
-                                lua_tonumber_strtoul_result(sign, n, base),
-                            )]),
-                            Err(_) => Ok(vec![LuaValue::Nil]),
-                        };
-                    }
+                if let Some(base) = base
+                    && let LuaValue::Number(n) = &val
+                {
+                    let s = if *n == (*n as i64) as f64 && n.is_finite() {
+                        format!("{}", *n as i64)
+                    } else {
+                        lua_number_to_string(*n)
+                    };
+                    let trimmed = s.trim();
+                    let (sign, body) = match trimmed.as_bytes().first() {
+                        Some(b'-') => (-1i64, &trimmed[1..]),
+                        Some(b'+') => (1i64, &trimmed[1..]),
+                        _ => (1i64, trimmed),
+                    };
+                    let stripped: &str = if base == 16 {
+                        body.strip_prefix("0x")
+                            .or_else(|| body.strip_prefix("0X"))
+                            .unwrap_or(body)
+                    } else {
+                        body
+                    };
+                    return match u64::from_str_radix(stripped, base) {
+                        Ok(n) => Ok(vec![LuaValue::Number(lua_tonumber_strtoul_result(
+                            sign, n, base,
+                        ))]),
+                        Err(_) => Ok(vec![LuaValue::Nil]),
+                    };
                 }
                 match &val {
                     LuaValue::Number(n) => Ok(vec![LuaValue::Number(*n)]),
@@ -5366,9 +5333,9 @@ impl<'a> LuaState<'a> {
                                 body
                             };
                             match u64::from_str_radix(stripped, base) {
-                                Ok(n) => Ok(vec![LuaValue::Number(
-                                    lua_tonumber_strtoul_result(sign, n, base),
-                                )]),
+                                Ok(n) => Ok(vec![LuaValue::Number(lua_tonumber_strtoul_result(
+                                    sign, n, base,
+                                ))]),
                                 Err(_) => Ok(vec![LuaValue::Nil]),
                             }
                         } else {
@@ -5416,11 +5383,7 @@ impl<'a> LuaState<'a> {
                 let val = match args.first().cloned() {
                     Some(v) => v,
                     None => {
-                        return Err(self.format_builtin_argerror(
-                            "tostring",
-                            1,
-                            "value expected",
-                        ));
+                        return Err(self.format_builtin_argerror("tostring", 1, "value expected"));
                     }
                 };
                 let handler = match &val {
@@ -5441,12 +5404,8 @@ impl<'a> LuaState<'a> {
                 };
                 if !matches!(handler, LuaValue::Nil) {
                     let mut meta_args = vec![val.clone()];
-                    let results = self.call_function(
-                        &handler,
-                        &mut meta_args,
-                        env,
-                        &mut Vec::new(),
-                    )?;
+                    let results =
+                        self.call_function(&handler, &mut meta_args, env, &mut Vec::new())?;
                     return Ok(vec![results.into_iter().next().unwrap_or(LuaValue::Nil)]);
                 }
                 Ok(vec![LuaValue::Str(val.to_display_string())])
@@ -5458,11 +5417,7 @@ impl<'a> LuaState<'a> {
                 let val = match args.first().cloned() {
                     Some(v) => v,
                     None => {
-                        return Err(self.format_builtin_argerror(
-                            "type",
-                            1,
-                            "value expected",
-                        ));
+                        return Err(self.format_builtin_argerror("type", 1, "value expected"));
                     }
                 };
                 Ok(vec![LuaValue::Str(val.type_name().as_bytes().to_vec())])
@@ -5553,11 +5508,7 @@ impl<'a> LuaState<'a> {
                 // raises "bad argument #1 to ? (value expected)" rather
                 // than "assertion failed!".
                 if args.is_empty() {
-                    return Err(self.format_builtin_argerror(
-                        "assert",
-                        1,
-                        "value expected",
-                    ));
+                    return Err(self.format_builtin_argerror("assert", 1, "value expected"));
                 }
                 let val = &args[0];
                 if val.is_truthy() {
@@ -5643,7 +5594,10 @@ impl<'a> LuaState<'a> {
                     let mut parser = Parser::new(tokens);
                     let stmts = parser.parse_block()?;
                     if !parser.check(&Token::Eof) {
-                        return Err(format!("'<eof>' expected near '{}'", token_display(parser.peek())));
+                        return Err(format!(
+                            "'<eof>' expected near '{}'",
+                            token_display(parser.peek())
+                        ));
                     }
                     Ok(stmts)
                 }) {
@@ -5663,9 +5617,7 @@ impl<'a> LuaState<'a> {
                     })]),
                     Err(msg) => Ok(vec![
                         LuaValue::Nil,
-                        LuaValue::Str(
-                            format!("{chunk_label}:1: {msg}").into_bytes(),
-                        ),
+                        LuaValue::Str(format!("{chunk_label}:1: {msg}").into_bytes()),
                     ]),
                 }
             }
@@ -5716,8 +5668,7 @@ impl<'a> LuaState<'a> {
                 // "n.name" for C closures invoked via lua_pcall, so any
                 // C-builtin errors raised inside use '?' as the name.
                 let prev_inv = self.current_invocation_name.take();
-                let prev_method =
-                    std::mem::replace(&mut self.current_invocation_is_method, false);
+                let prev_method = std::mem::replace(&mut self.current_invocation_is_method, false);
                 let result = self.call_function(&func, &mut call_args_vec, env, &mut Vec::new());
                 self.current_invocation_name = prev_inv;
                 self.current_invocation_is_method = prev_method;
@@ -5771,19 +5722,14 @@ impl<'a> LuaState<'a> {
                 // "bad argument #2 to ? (value expected)" — fr
                 // previously silently substituted nil.
                 if args.len() < 2 {
-                    return Err(self.format_builtin_argerror(
-                        "xpcall",
-                        2,
-                        "value expected",
-                    ));
+                    return Err(self.format_builtin_argerror("xpcall", 2, "value expected"));
                 }
                 let func = args.first().cloned().unwrap_or(LuaValue::Nil);
                 let err_handler = args.get(1).cloned().unwrap_or(LuaValue::Nil);
                 let mut call_args_vec = args.get(2..).unwrap_or(&[]).to_vec();
                 // (frankenredis-557p3) Same AST-context clear as pcall.
                 let prev_inv = self.current_invocation_name.take();
-                let prev_method =
-                    std::mem::replace(&mut self.current_invocation_is_method, false);
+                let prev_method = std::mem::replace(&mut self.current_invocation_is_method, false);
                 let result = self.call_function(&func, &mut call_args_vec, env, &mut Vec::new());
                 self.current_invocation_name = prev_inv;
                 self.current_invocation_is_method = prev_method;
@@ -6057,10 +6003,7 @@ impl<'a> LuaState<'a> {
                             self.format_builtin_argerror(
                                 "select",
                                 1,
-                                &format!(
-                                    "number expected, got {}",
-                                    lua_arg_got_label(idx_opt),
-                                ),
+                                &format!("number expected, got {}", lua_arg_got_label(idx_opt),),
                             )
                         })?;
                         let arg_count = rest.len() as i64;
@@ -6119,11 +6062,7 @@ impl<'a> LuaState<'a> {
                     }
                 };
                 if key_opt.is_none() {
-                    return Err(self.format_builtin_argerror(
-                        "rawget",
-                        2,
-                        "value expected",
-                    ));
+                    return Err(self.format_builtin_argerror("rawget", 2, "value expected"));
                 }
                 let key = key_opt.cloned().unwrap();
                 Ok(vec![table.get(&key)])
@@ -6179,7 +6118,9 @@ impl<'a> LuaState<'a> {
                         ));
                     }
                 };
-                let LuaValue::Table(t) = &table else { unreachable!() };
+                let LuaValue::Table(t) = &table else {
+                    unreachable!()
+                };
                 // (frankenredis-fnh42) Upstream luaL_argcheck rejects a
                 // missing #2 arg (LUA_TNONE) as "nil or table expected"
                 // — only an explicit nil or a table passes. fr was
@@ -6266,11 +6207,7 @@ impl<'a> LuaState<'a> {
                 // luaL_checkany so a zero-arg call raises
                 // "bad argument #1 to ? (value expected)".
                 if args.is_empty() {
-                    return Err(self.format_builtin_argerror(
-                        "getmetatable",
-                        1,
-                        "value expected",
-                    ));
+                    return Err(self.format_builtin_argerror("getmetatable", 1, "value expected"));
                 }
                 match &args[0] {
                     LuaValue::Table(t) => {
@@ -6362,10 +6299,8 @@ impl<'a> LuaState<'a> {
                 let inv = self.current_invocation_name.as_deref();
                 let new_env = lua_table_arg(inv, 2, args.get(1))?.clone();
                 let cannot_change = || match inv {
-                    Some(_) => {
-                        "user_script:1: 'setfenv' cannot change environment of given object"
-                            .to_string()
-                    }
+                    Some(_) => "user_script:1: 'setfenv' cannot change environment of given object"
+                        .to_string(),
                     None => "'setfenv' cannot change environment of given object".to_string(),
                 };
                 match args.first() {
@@ -6388,12 +6323,7 @@ impl<'a> LuaState<'a> {
                             ));
                         }
                         if level > 1 {
-                            return Err(lua_format_argerror(
-                                inv,
-                                "setfenv",
-                                1,
-                                "invalid level",
-                            ));
+                            return Err(lua_format_argerror(inv, "setfenv", 1, "invalid level"));
                         }
                         env.set_global_env(new_env);
                         if level == 0 {
@@ -6421,7 +6351,8 @@ impl<'a> LuaState<'a> {
             }
             // ── Math library ────────────────────────────────────────────
             "math.floor" => {
-                let n = lua_check_number(self.current_invocation_name.as_deref(), args, 0, "floor")?;
+                let n =
+                    lua_check_number(self.current_invocation_name.as_deref(), args, 0, "floor")?;
                 Ok(vec![LuaValue::Number(n.floor())])
             }
             "math.ceil" => {
@@ -6452,7 +6383,8 @@ impl<'a> LuaState<'a> {
                 }
                 let mut max = f64::NEG_INFINITY;
                 for (i, _) in args.iter().enumerate() {
-                    let n = lua_check_number(self.current_invocation_name.as_deref(), args, i, "max")?;
+                    let n =
+                        lua_check_number(self.current_invocation_name.as_deref(), args, i, "max")?;
                     if n > max {
                         max = n;
                     }
@@ -6474,7 +6406,8 @@ impl<'a> LuaState<'a> {
                 }
                 let mut min = f64::INFINITY;
                 for (i, _) in args.iter().enumerate() {
-                    let n = lua_check_number(self.current_invocation_name.as_deref(), args, i, "min")?;
+                    let n =
+                        lua_check_number(self.current_invocation_name.as_deref(), args, i, "min")?;
                     if n < min {
                         min = n;
                     }
@@ -6612,8 +6545,10 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Number(n.atan())])
             }
             "math.atan2" => {
-                let x = lua_check_number(self.current_invocation_name.as_deref(), args, 1, "atan2")?;
-                let y = lua_check_number(self.current_invocation_name.as_deref(), args, 0, "atan2")?;
+                let x =
+                    lua_check_number(self.current_invocation_name.as_deref(), args, 1, "atan2")?;
+                let y =
+                    lua_check_number(self.current_invocation_name.as_deref(), args, 0, "atan2")?;
                 Ok(vec![LuaValue::Number(y.atan2(x))])
             }
             // (frankenredis-9dmqr) Five additional math helpers Lua 5.1
@@ -6640,7 +6575,8 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Number(n.tanh())])
             }
             "math.log10" => {
-                let n = lua_check_number(self.current_invocation_name.as_deref(), args, 0, "log10")?;
+                let n =
+                    lua_check_number(self.current_invocation_name.as_deref(), args, 0, "log10")?;
                 Ok(vec![LuaValue::Number(n.log10())])
             }
             "math.modf" => {
@@ -6650,7 +6586,8 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Number(trunc), LuaValue::Number(frac)])
             }
             "math.frexp" => {
-                let n = lua_check_number(self.current_invocation_name.as_deref(), args, 0, "frexp")?;
+                let n =
+                    lua_check_number(self.current_invocation_name.as_deref(), args, 0, "frexp")?;
                 if n == 0.0 {
                     Ok(vec![LuaValue::Number(0.0), LuaValue::Number(0.0)])
                 } else {
@@ -6675,8 +6612,10 @@ impl<'a> LuaState<'a> {
                 }
             }
             "math.ldexp" => {
-                let e = lua_check_number(self.current_invocation_name.as_deref(), args, 1, "ldexp")? as i32;
-                let m = lua_check_number(self.current_invocation_name.as_deref(), args, 0, "ldexp")?;
+                let e = lua_check_number(self.current_invocation_name.as_deref(), args, 1, "ldexp")?
+                    as i32;
+                let m =
+                    lua_check_number(self.current_invocation_name.as_deref(), args, 0, "ldexp")?;
                 Ok(vec![LuaValue::Number(m * 2f64.powi(e))])
             }
             "math.randomseed" => {
@@ -6691,11 +6630,9 @@ impl<'a> LuaState<'a> {
                 // bogus input, masking the error.
                 let arg_opt = args.first();
                 let n = match arg_opt {
-                    Some(v) => lua_required_integer_arg(
-                        self.current_invocation_name.as_deref(),
-                        1,
-                        v,
-                    )?,
+                    Some(v) => {
+                        lua_required_integer_arg(self.current_invocation_name.as_deref(), 1, v)?
+                    }
                     None => {
                         return Err(lua_bad_number_arg(
                             self.current_invocation_name.as_deref(),
@@ -6824,7 +6761,9 @@ impl<'a> LuaState<'a> {
             "string.sub" => {
                 let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "sub")?;
                 let len = s.len() as i64;
-                let mut i = lua_check_number(self.current_invocation_name.as_deref(), args, 1, "sub")? as i64;
+                let mut i =
+                    lua_check_number(self.current_invocation_name.as_deref(), args, 1, "sub")?
+                        as i64;
                 // (frankenredis-v2ipw) Upstream luaB_sub uses
                 // luaL_optinteger for the j arg, raising 'bad
                 // argument #3 (number expected, got TYPE)' for
@@ -6860,7 +6799,8 @@ impl<'a> LuaState<'a> {
             }
             "string.rep" => {
                 let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "rep")?;
-                let n_val = lua_check_number(self.current_invocation_name.as_deref(), args, 1, "rep")?;
+                let n_val =
+                    lua_check_number(self.current_invocation_name.as_deref(), args, 1, "rep")?;
                 if n_val < 0.0 {
                     return Ok(vec![LuaValue::Str(Vec::new())]);
                 }
@@ -6888,15 +6828,18 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Str(result)])
             }
             "string.lower" => {
-                let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "lower")?;
+                let s =
+                    lua_check_string(self.current_invocation_name.as_deref(), args, 0, "lower")?;
                 Ok(vec![LuaValue::Str(s.to_ascii_lowercase())])
             }
             "string.upper" => {
-                let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "upper")?;
+                let s =
+                    lua_check_string(self.current_invocation_name.as_deref(), args, 0, "upper")?;
                 Ok(vec![LuaValue::Str(s.to_ascii_uppercase())])
             }
             "string.reverse" => {
-                let mut s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "reverse")?;
+                let mut s =
+                    lua_check_string(self.current_invocation_name.as_deref(), args, 0, "reverse")?;
                 s.reverse();
                 Ok(vec![LuaValue::Str(s)])
             }
@@ -6905,9 +6848,7 @@ impl<'a> LuaState<'a> {
             // interpreter has no bytecode representation, so the
             // function is registered (so `type(string.dump)` returns
             // 'function') but errors when invoked.
-            "string.dump" => Err(
-                "user_script:1: unable to dump given function".to_string(),
-            ),
+            "string.dump" => Err("user_script:1: unable to dump given function".to_string()),
             "string.byte" => {
                 // (frankenredis-ii6en) Upstream string.byte applies
                 // luaL_optint to the optional i and j args, which
@@ -6947,16 +6888,14 @@ impl<'a> LuaState<'a> {
                 let inv = self.current_invocation_name.as_deref();
                 let mut result = Vec::new();
                 for (i, a) in args.iter().enumerate() {
-                    let n = a
-                        .to_number()
-                        .ok_or_else(|| {
-                            lua_format_argerror(
-                                inv,
-                                "char",
-                                i + 1,
-                                &format!("number expected, got {}", a.type_name()),
-                            )
-                        })? as i64;
+                    let n = a.to_number().ok_or_else(|| {
+                        lua_format_argerror(
+                            inv,
+                            "char",
+                            i + 1,
+                            &format!("number expected, got {}", a.type_name()),
+                        )
+                    })? as i64;
                     if !(0..=255).contains(&n) {
                         return Err(lua_format_argerror(inv, "char", i + 1, "invalid value"));
                     }
@@ -7009,7 +6948,8 @@ impl<'a> LuaState<'a> {
             }
             "string.find" => {
                 let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "find")?;
-                let pattern = lua_check_string(self.current_invocation_name.as_deref(), args, 1, "find")?;
+                let pattern =
+                    lua_check_string(self.current_invocation_name.as_deref(), args, 1, "find")?;
                 // (frankenredis-izta5) Upstream luaB_str_find_aux uses
                 // luaL_optinteger for the init arg, which raises 'bad
                 // argument #3 (number expected, got TYPE)' when the
@@ -7039,10 +6979,7 @@ impl<'a> LuaState<'a> {
                 // pcall(string.find,…,bad) drops the user_script:1:
                 // prefix to match the anonymous C-builtin shape.
                 if !plain {
-                    lua_pattern_validate_named(
-                        self.current_invocation_name.as_deref(),
-                        &pattern,
-                    )?;
+                    lua_pattern_validate_named(self.current_invocation_name.as_deref(), &pattern)?;
                 }
                 if plain {
                     // Plain substring search
@@ -7090,8 +7027,10 @@ impl<'a> LuaState<'a> {
                 }
             }
             "string.match" => {
-                let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "match")?;
-                let pattern = lua_check_string(self.current_invocation_name.as_deref(), args, 1, "match")?;
+                let s =
+                    lua_check_string(self.current_invocation_name.as_deref(), args, 0, "match")?;
+                let pattern =
+                    lua_check_string(self.current_invocation_name.as_deref(), args, 1, "match")?;
                 // (frankenredis-izta5) Same init-arg validation as
                 // string.find — upstream luaB_str_find_aux raises
                 // 'bad argument #3' for non-number-convertible init.
@@ -7108,10 +7047,7 @@ impl<'a> LuaState<'a> {
                 };
                 // (frankenredis-vfv8s) Validate pattern eagerly.
                 // (frankenredis-uqnq6) inv_name routes the prefix.
-                lua_pattern_validate_named(
-                    self.current_invocation_name.as_deref(),
-                    &pattern,
-                )?;
+                lua_pattern_validate_named(self.current_invocation_name.as_deref(), &pattern)?;
                 if let Some(m) = lua_pattern_find(&s, &pattern, init) {
                     Ok(lua_match_captures(&s, &m))
                 } else {
@@ -7121,16 +7057,15 @@ impl<'a> LuaState<'a> {
             "string.gmatch" => {
                 // Returns an iterator function. Each call returns next match.
                 // We collect all matches and return a closure-like iterator via a table.
-                let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "gmatch")?;
-                let pattern = lua_check_string(self.current_invocation_name.as_deref(), args, 1, "gmatch")?;
+                let s =
+                    lua_check_string(self.current_invocation_name.as_deref(), args, 0, "gmatch")?;
+                let pattern =
+                    lua_check_string(self.current_invocation_name.as_deref(), args, 1, "gmatch")?;
                 // (frankenredis-vfv8s) Validate pattern eagerly so the
                 // iterator constructor surfaces malformed patterns the
                 // same way upstream's gmatch does.
                 // (frankenredis-uqnq6) inv_name routes the prefix.
-                lua_pattern_validate_named(
-                    self.current_invocation_name.as_deref(),
-                    &pattern,
-                )?;
+                lua_pattern_validate_named(self.current_invocation_name.as_deref(), &pattern)?;
                 // Collect all matches
                 let mut matches: Vec<Vec<LuaValue>> = Vec::new();
                 let mut pos = 0;
@@ -7250,24 +7185,20 @@ impl<'a> LuaState<'a> {
                         // by the 1st capture or whole match, function
                         // is called with captures.
                         let replacement: Vec<u8> = match &repl {
-                            LuaValue::Str(repl_bytes) => {
-                                lua_gsub_replace(&s, &m, repl_bytes)?
-                            }
+                            LuaValue::Str(repl_bytes) => lua_gsub_replace(&s, &m, repl_bytes)?,
                             LuaValue::Table(t) => {
                                 let key_bytes = lua_gsub_capture_key(&s, &m);
                                 let key = LuaValue::Str(key_bytes);
                                 let val = t.get(&key);
                                 lua_gsub_normalise_repl(&s, &m, &val)?
                             }
-                            LuaValue::Function(_) | LuaValue::RustFunction(_) | LuaValue::WrappedCoroutine(_) => {
+                            LuaValue::Function(_)
+                            | LuaValue::RustFunction(_)
+                            | LuaValue::WrappedCoroutine(_) => {
                                 let mut call_args = lua_gsub_capture_args(&s, &m);
                                 let mut varargs = Vec::new();
-                                let ret = self.call_function(
-                                    &repl,
-                                    &mut call_args,
-                                    env,
-                                    &mut varargs,
-                                )?;
+                                let ret =
+                                    self.call_function(&repl, &mut call_args, env, &mut varargs)?;
                                 let first = ret.into_iter().next().unwrap_or(LuaValue::Nil);
                                 lua_gsub_normalise_repl(&s, &m, &first)?
                             }
@@ -7429,8 +7360,7 @@ impl<'a> LuaState<'a> {
                 // now retains them.
                 let array_len = t.inner.borrow().border_len() as i64;
                 let start = lua_optional_integer_arg(inv, 3, args.get(2), 1)?;
-                let end =
-                    lua_optional_integer_arg(inv, 4, args.get(3), array_len)?;
+                let end = lua_optional_integer_arg(inv, 4, args.get(3), array_len)?;
                 // (frankenredis-jwkhc) Upstream ltablib.c::tconcat validates
                 // each element in [start, end] and raises 'invalid value (nil
                 // | <type>) at index N in table for concat' for any non-
@@ -7494,12 +7424,10 @@ impl<'a> LuaState<'a> {
                 let comp_fn = match args.get(1) {
                     None | Some(LuaValue::Nil) => None,
                     Some(v) => {
-                        let callable = matches!(
-                            v,
-                            LuaValue::Function(_)
-                                | LuaValue::RustFunction(_)
-                        ) || (matches!(v, LuaValue::Table(_))
-                            && self.metatable_call_handler(v).is_some());
+                        let callable =
+                            matches!(v, LuaValue::Function(_) | LuaValue::RustFunction(_))
+                                || (matches!(v, LuaValue::Table(_))
+                                    && self.metatable_call_handler(v).is_some());
                         if !callable {
                             return Err(self.format_builtin_argerror(
                                 "sort",
@@ -7550,16 +7478,15 @@ impl<'a> LuaState<'a> {
                             let mut j = i;
                             while j > 0 {
                                 let order = match (&key, &arr[j - 1]) {
-                                    (LuaValue::Number(a), LuaValue::Number(b)) => a
-                                        .partial_cmp(b)
-                                        .ok_or_else(|| {
+                                    (LuaValue::Number(a), LuaValue::Number(b)) => {
+                                        a.partial_cmp(b).ok_or_else(|| {
                                             // (frankenredis-b2cmq) Errors from the
                                             // C-level default sort do NOT carry the
                                             // user_script:1 prefix; vendored emits
                                             // the bare wording.
-                                            "attempt to compare two number values"
-                                                .to_string()
-                                        })?,
+                                            "attempt to compare two number values".to_string()
+                                        })?
+                                    }
                                     (LuaValue::Str(a), LuaValue::Str(b)) => a.cmp(b),
                                     (a, b) => {
                                         return Err(format!(
@@ -7592,12 +7519,7 @@ impl<'a> LuaState<'a> {
                 // non-table arg (including missing/nil). fr previously
                 // silently returned 0 for bogus inputs, matching the
                 // table.maxn fix already in place.
-                let t = lua_check_table(
-                    self.current_invocation_name.as_deref(),
-                    args,
-                    0,
-                    "getn",
-                )?;
+                let t = lua_check_table(self.current_invocation_name.as_deref(), args, 0, "getn")?;
                 Ok(vec![LuaValue::Number(t.len() as f64)])
             }
             "table.maxn" => {
@@ -7636,21 +7558,22 @@ impl<'a> LuaState<'a> {
                 let inv = self.current_invocation_name.as_deref();
                 let table = lua_check_table(inv, args, 0, "foreach")?;
                 let func = match args.get(1) {
-                    Some(v) if matches!(
-                        v,
-                        LuaValue::Function(_)
-                            | LuaValue::RustFunction(_)
-                            | LuaValue::WrappedCoroutine(_)
-                    ) || (matches!(v, LuaValue::Table(_))
-                        && self.metatable_call_handler(v).is_some()) => v.clone(),
+                    Some(v)
+                        if matches!(
+                            v,
+                            LuaValue::Function(_)
+                                | LuaValue::RustFunction(_)
+                                | LuaValue::WrappedCoroutine(_)
+                        ) || (matches!(v, LuaValue::Table(_))
+                            && self.metatable_call_handler(v).is_some()) =>
+                    {
+                        v.clone()
+                    }
                     other => {
                         return Err(self.format_builtin_argerror(
                             "foreach",
                             2,
-                            &format!(
-                                "function expected, got {}",
-                                lua_arg_got_label(other),
-                            ),
+                            &format!("function expected, got {}", lua_arg_got_label(other),),
                         ));
                     }
                 };
@@ -7659,10 +7582,8 @@ impl<'a> LuaState<'a> {
                     if matches!(v, LuaValue::Nil) {
                         continue;
                     }
-                    let mut call_args =
-                        vec![LuaValue::Number((i + 1) as f64), v.clone()];
-                    let result =
-                        self.call_function(&func, &mut call_args, env, &mut Vec::new())?;
+                    let mut call_args = vec![LuaValue::Number((i + 1) as f64), v.clone()];
+                    let result = self.call_function(&func, &mut call_args, env, &mut Vec::new())?;
                     if let Some(first) = result.first()
                         && !matches!(first, LuaValue::Nil)
                     {
@@ -7672,8 +7593,7 @@ impl<'a> LuaState<'a> {
                 let hash_pairs = table.hash_pairs();
                 for (k, v) in hash_pairs {
                     let mut call_args = vec![k, v];
-                    let result =
-                        self.call_function(&func, &mut call_args, env, &mut Vec::new())?;
+                    let result = self.call_function(&func, &mut call_args, env, &mut Vec::new())?;
                     if let Some(first) = result.first()
                         && !matches!(first, LuaValue::Nil)
                     {
@@ -7686,21 +7606,22 @@ impl<'a> LuaState<'a> {
                 let inv = self.current_invocation_name.as_deref();
                 let table = lua_check_table(inv, args, 0, "foreachi")?;
                 let func = match args.get(1) {
-                    Some(v) if matches!(
-                        v,
-                        LuaValue::Function(_)
-                            | LuaValue::RustFunction(_)
-                            | LuaValue::WrappedCoroutine(_)
-                    ) || (matches!(v, LuaValue::Table(_))
-                        && self.metatable_call_handler(v).is_some()) => v.clone(),
+                    Some(v)
+                        if matches!(
+                            v,
+                            LuaValue::Function(_)
+                                | LuaValue::RustFunction(_)
+                                | LuaValue::WrappedCoroutine(_)
+                        ) || (matches!(v, LuaValue::Table(_))
+                            && self.metatable_call_handler(v).is_some()) =>
+                    {
+                        v.clone()
+                    }
                     other => {
                         return Err(self.format_builtin_argerror(
                             "foreachi",
                             2,
-                            &format!(
-                                "function expected, got {}",
-                                lua_arg_got_label(other),
-                            ),
+                            &format!("function expected, got {}", lua_arg_got_label(other),),
                         ));
                     }
                 };
@@ -7708,8 +7629,7 @@ impl<'a> LuaState<'a> {
                 for i in 1..=n {
                     let v = table.inner.borrow().array[i - 1].clone();
                     let mut call_args = vec![LuaValue::Number(i as f64), v];
-                    let result =
-                        self.call_function(&func, &mut call_args, env, &mut Vec::new())?;
+                    let result = self.call_function(&func, &mut call_args, env, &mut Vec::new())?;
                     if let Some(first) = result.first()
                         && !matches!(first, LuaValue::Nil)
                     {
@@ -7725,7 +7645,7 @@ impl<'a> LuaState<'a> {
                 // raises 'bad argument #N to rawequal (value expected)'.
                 // (frankenredis-i18ug) Funnel through format_builtin_argerror
                 // so the prefix/name reflect AST vs indirect-pcall callers.
-                if args.first().is_none() {
+                if args.is_empty() {
                     return Err(self.format_builtin_argerror("rawequal", 1, "value expected"));
                 }
                 if args.get(1).is_none() {
@@ -7898,7 +7818,13 @@ impl<'a> LuaState<'a> {
                     format!("{x:0width$x}", width = abs_n)
                 };
                 let trimmed: String = if s.len() > abs_n {
-                    s.chars().rev().take(abs_n).collect::<String>().chars().rev().collect()
+                    s.chars()
+                        .rev()
+                        .take(abs_n)
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect()
                 } else {
                     s
                 };
@@ -7914,12 +7840,7 @@ impl<'a> LuaState<'a> {
                 // fr previously silently ignored the surplus.
                 let inv = self.current_invocation_name.as_deref();
                 if args.len() != 1 {
-                    return Err(lua_format_argerror(
-                        inv,
-                        "encode",
-                        1,
-                        "expected 1 argument",
-                    ));
+                    return Err(lua_format_argerror(inv, "encode", 1, "expected 1 argument"));
                 }
                 let val = args.first().cloned().unwrap_or(LuaValue::Nil);
                 // (frankenredis-bum6y) Upstream cjson raises via luaL_error,
@@ -7946,12 +7867,7 @@ impl<'a> LuaState<'a> {
                 // lua_format_argerror for dual direct/pcall shape.
                 let inv = self.current_invocation_name.as_deref();
                 if args.is_empty() {
-                    return Err(lua_format_argerror(
-                        inv,
-                        "decode",
-                        1,
-                        "expected 1 argument",
-                    ));
+                    return Err(lua_format_argerror(inv, "decode", 1, "expected 1 argument"));
                 }
                 let data = match args.first() {
                     Some(LuaValue::Str(s)) => s.clone(),
@@ -7978,9 +7894,9 @@ impl<'a> LuaState<'a> {
                 // (frankenredis-pt4d4) Reject an empty buffer the same
                 // way upstream's json_next_token does.
                 if s.trim().is_empty() {
-                    return Err(format!(
-                        "user_script:1: Expected value but found T_END at character 1"
-                    ));
+                    return Err(
+                        "user_script:1: Expected value but found T_END at character 1".to_string(),
+                    );
                 }
                 // (frankenredis-9pvke) Map fr's generic `invalid JSON:`
                 // fallback onto upstream lua_cjson's parse-failure shape
@@ -8632,11 +8548,13 @@ fn lua_single_match(pat: &[u8], pi: usize, ch: u8) -> bool {
 ///   - "malformed pattern (missing ']')" — `[...]` set whose closing
 ///     `]` is absent (respecting `]` immediately after `[` or `[^` as
 ///     literal, just like upstream singlematchclass).
+///
 /// (frankenredis-vfv8s)
 /// Validates a Lua match pattern eagerly and routes the upstream
 /// `<source>:<line>: ` prefix through `inv_name`:
 ///   - `Some("...")` → prepend "user_script:1: " (named/direct-call shape)
 ///   - `None`        → no prefix (anonymous pcall(C-builtin) shape)
+///
 /// (frankenredis-uqnq6) Matches luaL_error's behavior: luaL_where(L,1) is
 /// "" when the caller of the C-builtin is itself a C frame (pcall).
 fn lua_pattern_validate_named(inv_name: Option<&str>, pat: &[u8]) -> Result<(), String> {
@@ -9119,16 +9037,12 @@ fn lua_gsub_capture_args(s: &[u8], m: &LuaPatMatch) -> Vec<LuaValue> {
 /// value to its replacement bytes per Lua 5.1 spec: nil/false leaves
 /// the match unchanged, strings/numbers are coerced as expected,
 /// other types raise the standard "invalid replacement value" error.
-fn lua_gsub_normalise_repl(
-    s: &[u8],
-    m: &LuaPatMatch,
-    val: &LuaValue,
-) -> Result<Vec<u8>, String> {
+fn lua_gsub_normalise_repl(s: &[u8], m: &LuaPatMatch, val: &LuaValue) -> Result<Vec<u8>, String> {
     match val {
         LuaValue::Nil | LuaValue::Bool(false) => Ok(s[m.start..m.end].to_vec()),
-        LuaValue::Bool(true) => Err(
-            "user_script:1: invalid replacement value (a boolean)".to_string(),
-        ),
+        LuaValue::Bool(true) => {
+            Err("user_script:1: invalid replacement value (a boolean)".to_string())
+        }
         LuaValue::Str(b) => Ok(b.clone()),
         LuaValue::Number(n) => {
             if *n == (*n as i64) as f64 && n.is_finite() {
@@ -9182,9 +9096,7 @@ fn lua_gsub_replace(s: &[u8], m: &LuaPatMatch, repl: &[u8]) -> Result<Vec<u8>, S
                     // skipped the reference, producing surprising
                     // empty-match output (e.g. gsub('abc','(.)','%5')
                     // would erase every byte instead of erroring).
-                    return Err(
-                        "user_script:1: invalid capture index".to_string(),
-                    );
+                    return Err("user_script:1: invalid capture index".to_string());
                 }
                 i += 2;
             } else if next == b'%' {
@@ -9381,7 +9293,9 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
                     if matches!(value, LuaValue::Nil) {
                         continue;
                     }
-                    items.push(RespFrame::Integer(i64::try_from(idx + 1).unwrap_or(i64::MAX)));
+                    items.push(RespFrame::Integer(
+                        i64::try_from(idx + 1).unwrap_or(i64::MAX),
+                    ));
                 }
                 // String hash keys.
                 for k in inner_borrow.string_hash.keys() {
@@ -9553,7 +9467,8 @@ fn lua_string_format(
                 // specs like '%100d' / '%999d' that vendored rejects.
                 if w_str.len() > 2 {
                     return Err(match inv_name {
-                        Some(_) => "user_script:1: invalid format (width or precision too long)".to_string(),
+                        Some(_) => "user_script:1: invalid format (width or precision too long)"
+                            .to_string(),
                         None => "invalid format (width or precision too long)".to_string(),
                     });
                 }
@@ -9576,7 +9491,10 @@ fn lua_string_format(
                     // (frankenredis-94zyf) Same 2-digit cap as width.
                     if p_str.len() > 2 {
                         return Err(match inv_name {
-                            Some(_) => "user_script:1: invalid format (width or precision too long)".to_string(),
+                            Some(_) => {
+                                "user_script:1: invalid format (width or precision too long)"
+                                    .to_string()
+                            }
                             None => "invalid format (width or precision too long)".to_string(),
                         });
                     }
@@ -9634,8 +9552,7 @@ fn lua_string_format(
                             // mirror x86_64 UB explicitly for parity.
                             let raw = require_number(&arg)?;
                             let n = if raw.is_finite()
-                                && (raw >= 9223372036854775808.0
-                                    || raw < -9223372036854775808.0)
+                                && !(-9223372036854775808.0..9223372036854775808.0).contains(&raw)
                             {
                                 i64::MIN
                             } else {
@@ -9946,11 +9863,7 @@ fn lua_string_format(
                             // contains nothing. fr's String accumulator would
                             // preserve the NUL, so suppress it explicitly to
                             // match vendored.
-                            if n == 0 {
-                                Vec::new()
-                            } else {
-                                vec![n]
-                            }
+                            if n == 0 { Vec::new() } else { vec![n] }
                         }
                         _ => {
                             // (frankenredis-be7o1) Upstream lstrlib.c:str_format
@@ -9976,12 +9889,7 @@ fn lua_string_format(
     Ok(result)
 }
 
-fn lua_fmt_pad_bytes(
-    s: Vec<u8>,
-    width: Option<usize>,
-    left_align: bool,
-    pad: u8,
-) -> Vec<u8> {
+fn lua_fmt_pad_bytes(s: Vec<u8>, width: Option<usize>, left_align: bool, pad: u8) -> Vec<u8> {
     let mut w = match width {
         Some(w) if w > s.len() => w,
         _ => return s,
@@ -10034,7 +9942,11 @@ fn lua_fmt_pad(s: &str, width: Option<usize>, left_align: bool, pad: char) -> St
 fn lua_fmt_nonfinite(n: f64, upper: bool) -> Option<String> {
     if n.is_infinite() {
         Some(if n.is_sign_negative() {
-            if upper { "-INF".to_string() } else { "-inf".to_string() }
+            if upper {
+                "-INF".to_string()
+            } else {
+                "-inf".to_string()
+            }
         } else if upper {
             "INF".to_string()
         } else {
@@ -10042,7 +9954,11 @@ fn lua_fmt_nonfinite(n: f64, upper: bool) -> Option<String> {
         })
     } else if n.is_nan() {
         Some(if n.is_sign_negative() {
-            if upper { "-NAN".to_string() } else { "-nan".to_string() }
+            if upper {
+                "-NAN".to_string()
+            } else {
+                "-nan".to_string()
+            }
         } else if upper {
             "NAN".to_string()
         } else {
@@ -10132,11 +10048,7 @@ fn cmsgpack_pack_value(value: &LuaValue, out: &mut Vec<u8>, depth: usize) -> Res
 }
 
 fn cmsgpack_pack_number(n: f64, out: &mut Vec<u8>) {
-    if n.is_finite()
-        && n.fract() == 0.0
-        && n >= i64::MIN as f64
-        && n <= i64::MAX as f64
-    {
+    if n.is_finite() && n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
         cmsgpack_pack_int(n as i64, out);
     } else {
         let f = n as f32;
@@ -10252,11 +10164,7 @@ fn cmsgpack_table_shape(table: &LuaTable) -> (Option<Vec<LuaValue>>, Vec<(LuaVal
 
     for (key, value) in &hash_pairs {
         match key {
-            LuaValue::Number(n)
-                if n.is_finite()
-                    && *n > 0.0
-                    && *n == (*n as i64) as f64 =>
-            {
+            LuaValue::Number(n) if n.is_finite() && *n > 0.0 && *n == (*n as i64) as f64 => {
                 let key = *n as i64;
                 numeric_values.insert(key, value.clone());
                 count += 1;
@@ -10272,11 +10180,7 @@ fn cmsgpack_table_shape(table: &LuaTable) -> (Option<Vec<LuaValue>>, Vec<(LuaVal
     if all_positive_integer_keys && max == count {
         let mut values = Vec::with_capacity(max as usize);
         for idx in 1..=max {
-            values.push(
-                numeric_values
-                    .remove(&idx)
-                    .unwrap_or(LuaValue::Nil),
-            );
+            values.push(numeric_values.remove(&idx).unwrap_or(LuaValue::Nil));
         }
         return (Some(values), Vec::new());
     }
@@ -10305,7 +10209,11 @@ fn cmsgpack_unpack_values(
         values.push(cursor.decode_value()?);
     }
     if include_offset {
-        let next = if cursor.is_eof() { -1.0 } else { cursor.pos as f64 };
+        let next = if cursor.is_eof() {
+            -1.0
+        } else {
+            cursor.pos as f64
+        };
         values.insert(0, LuaValue::Number(next));
     }
     Ok(values)
@@ -10382,8 +10290,7 @@ impl<'a> MsgpackCursor<'a> {
     fn read_u64(&mut self) -> Result<u64, String> {
         let bytes = self.read_exact(8)?;
         Ok(u64::from_be_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]))
     }
 
@@ -10509,7 +10416,11 @@ pub(crate) fn lua_number_to_string(n: f64) -> String {
         };
     }
     if n.is_infinite() {
-        return if n > 0.0 { "inf".to_string() } else { "-inf".to_string() };
+        return if n > 0.0 {
+            "inf".to_string()
+        } else {
+            "-inf".to_string()
+        };
     }
     if n == 0.0 {
         // (frankenredis-n4eln) Preserve the sign of -0.0 so
@@ -10529,7 +10440,7 @@ pub(crate) fn lua_number_to_string(n: f64) -> String {
     // X is the rounded exponent. Approximating with log10().floor()
     // is safe for everything except boundary cases right at 10^k;
     // the formatted output is checked via the format! result below.
-    if exponent < -4 || exponent >= PRECISION {
+    if !(-4..PRECISION).contains(&exponent) {
         // Scientific: %.13e style (13 fractional digits = 14 sig figs).
         let formatted = format!("{:.*e}", (PRECISION - 1) as usize, n);
         // Rust emits '1.2e5'; C %g emits '1.2e+05' for positive exponents
@@ -10625,7 +10536,7 @@ fn lua_struct_pack(
         let mut size = lua_struct_optsize(inv_name, opt, fmt, &mut fmt_idx)?;
         let to_align = lua_struct_to_align(totalsize, &header, opt, size);
         totalsize = totalsize.saturating_add(to_align);
-        out.extend(std::iter::repeat(0).take(to_align));
+        out.extend(std::iter::repeat_n(0, to_align));
 
         match opt {
             b'b' | b'B' | b'h' | b'H' | b'l' | b'L' | b'T' | b'i' | b'I' => {
@@ -10751,12 +10662,17 @@ fn lua_struct_unpack(
             }
             b's' => {
                 let Some(end_rel) = data[data_pos..].iter().position(|b| *b == 0) else {
-                    return Err(lua_struct_runtime_error(inv_name, "unfinished string in data"));
+                    return Err(lua_struct_runtime_error(
+                        inv_name,
+                        "unfinished string in data",
+                    ));
                 };
                 size = end_rel + 1;
                 results.push(LuaValue::Str(data[data_pos..data_pos + end_rel].to_vec()));
             }
-            _ => lua_struct_control_option(inv_name, "unpack", opt, fmt, &mut fmt_idx, &mut header)?,
+            _ => {
+                lua_struct_control_option(inv_name, "unpack", opt, fmt, &mut fmt_idx, &mut header)?
+            }
         }
         data_pos = data_pos.saturating_add(size);
     }
@@ -10846,8 +10762,7 @@ fn lua_struct_getnum(
         && byte.is_ascii_digit()
     {
         let digit = (byte - b'0') as usize;
-        if value > (i32::MAX as usize / 10)
-            || value.saturating_mul(10) > i32::MAX as usize - digit
+        if value > (i32::MAX as usize / 10) || value.saturating_mul(10) > i32::MAX as usize - digit
         {
             return Err(lua_struct_runtime_error(inv_name, "integral size overflow"));
         }
@@ -11035,13 +10950,7 @@ fn lua_value_to_u32_for_bitop(
             if !f.is_finite() {
                 // LuaJIT permits NaN/inf — lj_num2int rounds NaN/±inf
                 // to 0x80000000 (INT32_MIN). Match that here.
-                return Ok(if f.is_nan() {
-                    0x8000_0000u32
-                } else if *f > 0.0 {
-                    0x8000_0000u32
-                } else {
-                    0x8000_0000u32
-                });
+                return Ok(0x8000_0000u32);
             }
             // Banker's rounding (round-half-to-even). Rust's `f64::
             // round_ties_even` does exactly this.
@@ -11054,10 +10963,10 @@ fn lua_value_to_u32_for_bitop(
             if let Ok(n) = trimmed.parse::<i64>() {
                 return Ok(n as i32 as u32);
             }
-            if let Ok(f) = trimmed.parse::<f64>() {
-                if f.is_finite() {
-                    return Ok((f.round_ties_even() as i64 as i32) as u32);
-                }
+            if let Ok(f) = trimmed.parse::<f64>()
+                && f.is_finite()
+            {
+                return Ok((f.round_ties_even() as i64 as i32) as u32);
             }
             Err(bad("string"))
         }
@@ -11143,10 +11052,9 @@ fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
                 }
             }
 
-            let candidate_array = !has_non_int_key
-                && (array_len > 0 || !hash_pairs.is_empty());
-            let array_ok = candidate_array
-                && (max_int_key <= 10 || int_key_count * 2 >= max_int_key);
+            let candidate_array = !has_non_int_key && (array_len > 0 || !hash_pairs.is_empty());
+            let array_ok =
+                candidate_array && (max_int_key <= 10 || int_key_count * 2 >= max_int_key);
 
             // (frankenredis-pt4d4) Pure-integer-key tables that fail
             // the sparse threshold are rejected by Lua-bundled cjson
@@ -11154,9 +11062,7 @@ fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
             // Mixed/string-key tables fall through to object form
             // unchanged.
             if candidate_array && !array_ok {
-                return Err(
-                    "Cannot serialise table: excessively sparse array".to_string(),
-                );
+                return Err("Cannot serialise table: excessively sparse array".to_string());
             }
 
             if array_ok {
@@ -11369,9 +11275,7 @@ impl<'a> JsonParser<'a> {
             self.pos += 2;
             if let Some(low) = self.parse_hex4() {
                 if (0xDC00..=0xDFFF).contains(&low) {
-                    codepoint = 0x10000
-                        + ((codepoint - 0xD800) << 10)
-                        + (low - 0xDC00);
+                    codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00);
                 } else {
                     self.pos = saved;
                 }
@@ -11524,10 +11428,18 @@ impl<'a> JsonParser<'a> {
                 ));
             }
         }
-        let text = std::str::from_utf8(&self.bytes[start..self.pos])
-            .map_err(|_| format!("Expected value but found invalid token at character {}", start + 1))?;
-        text.parse::<f64>()
-            .map_err(|_| format!("Expected value but found invalid token at character {}", start + 1))
+        let text = std::str::from_utf8(&self.bytes[start..self.pos]).map_err(|_| {
+            format!(
+                "Expected value but found invalid token at character {}",
+                start + 1
+            )
+        })?;
+        text.parse::<f64>().map_err(|_| {
+            format!(
+                "Expected value but found invalid token at character {}",
+                start + 1
+            )
+        })
     }
 }
 
@@ -11605,10 +11517,16 @@ fn downconvert_lua_reply_to_resp2(frame: RespFrame) -> RespFrame {
         }
         RespFrame::Map(None) => RespFrame::Array(None),
         RespFrame::Array(Some(items)) => RespFrame::Array(Some(
-            items.into_iter().map(downconvert_lua_reply_to_resp2).collect(),
+            items
+                .into_iter()
+                .map(downconvert_lua_reply_to_resp2)
+                .collect(),
         )),
         RespFrame::Push(items) => RespFrame::Array(Some(
-            items.into_iter().map(downconvert_lua_reply_to_resp2).collect(),
+            items
+                .into_iter()
+                .map(downconvert_lua_reply_to_resp2)
+                .collect(),
         )),
         other => other,
     }
@@ -11638,7 +11556,10 @@ pub fn compile_check(script: &[u8]) -> Result<(), String> {
     let mut parser = Parser::new(tokens);
     let _ = parser.parse_block()?;
     if !parser.check(&Token::Eof) {
-        return Err(format!("'<eof>' expected near '{}'", token_display(parser.peek())));
+        return Err(format!(
+            "'<eof>' expected near '{}'",
+            token_display(parser.peek())
+        ));
     }
     Ok(())
 }
@@ -11662,8 +11583,7 @@ mod tests {
         //
         // Hash table → keys are strings.
         let mut store = Store::new();
-        let frame =
-            eval_script(b"return {set={a=true, b=true}}", &[], &[], &mut store, 0).unwrap();
+        let frame = eval_script(b"return {set={a=true, b=true}}", &[], &[], &mut store, 0).unwrap();
         match frame {
             RespFrame::Array(Some(items)) => {
                 assert_eq!(items.len(), 2);
@@ -11736,15 +11656,22 @@ mod tests {
         //
         // RESP2 (default): {map={a=1,b=2}} -> flat 4-element Array.
         let mut store = Store::new();
-        let frame =
-            eval_script(b"return {map={a=1, b=2}}", &[], &[], &mut store, 0).unwrap();
+        let frame = eval_script(b"return {map={a=1, b=2}}", &[], &[], &mut store, 0).unwrap();
         match frame {
             RespFrame::Array(Some(items)) => {
-                assert_eq!(items.len(), 4, "expected flat 4-element array, got {items:?}");
+                assert_eq!(
+                    items.len(),
+                    4,
+                    "expected flat 4-element array, got {items:?}"
+                );
                 // Key ordering depends on Lua's hash iteration but for two
                 // string keys the entries must still be paired k/v.
-                assert!(matches!(&items[0], RespFrame::BulkString(Some(s)) if s == b"a" || s == b"b"));
-                assert!(matches!(&items[2], RespFrame::BulkString(Some(s)) if s == b"a" || s == b"b"));
+                assert!(
+                    matches!(&items[0], RespFrame::BulkString(Some(s)) if s == b"a" || s == b"b")
+                );
+                assert!(
+                    matches!(&items[2], RespFrame::BulkString(Some(s)) if s == b"a" || s == b"b")
+                );
             }
             other => panic!("expected Array, got {other:?}"),
         }
@@ -11752,8 +11679,7 @@ mod tests {
         // RESP3: same script returns a Map(2) frame, no downconvert.
         let mut store = Store::new();
         store.dispatch_client_ctx.resp_protocol_version = 3;
-        let frame =
-            eval_script(b"return {map={a=1, b=2}}", &[], &[], &mut store, 0).unwrap();
+        let frame = eval_script(b"return {map={a=1, b=2}}", &[], &[], &mut store, 0).unwrap();
         match frame {
             RespFrame::Map(Some(entries)) => {
                 assert_eq!(entries.len(), 2, "expected 2-entry map, got {entries:?}");
@@ -11776,8 +11702,13 @@ mod tests {
                 assert_eq!(items.len(), 4);
                 // One of the values is itself a flat 2-element array
                 // ({map={x=1}} downconverted).
-                let any_nested = items.iter().any(|v| matches!(v, RespFrame::Array(Some(inner)) if inner.len() == 2));
-                assert!(any_nested, "expected one nested 2-element array, got {items:?}");
+                let any_nested = items
+                    .iter()
+                    .any(|v| matches!(v, RespFrame::Array(Some(inner)) if inner.len() == 2));
+                assert!(
+                    any_nested,
+                    "expected one nested 2-element array, got {items:?}"
+                );
             }
             other => panic!("expected Array, got {other:?}"),
         }
@@ -11930,14 +11861,7 @@ mod tests {
 
         // Direct out-of-range double also hits lua_to_resp's
         // cvttsd2si mimic.
-        let frame = eval_script(
-            b"return 1.8446744073709552e19",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .unwrap();
+        let frame = eval_script(b"return 1.8446744073709552e19", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::Integer(i64::MIN));
     }
 
@@ -12007,20 +11931,16 @@ mod tests {
         let mut store = Store::new();
 
         // local on LHS: tracked as 'local' inside the current function.
-        let err = eval_script(
-            b"local t = {}; return t .. 'x'",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected concat error");
+        let err = eval_script(b"local t = {}; return t .. 'x'", &[], &[], &mut store, 0)
+            .expect_err("expected concat error");
         assert!(
             err.contains("attempt to concatenate local 't' (a table value)"),
             "wrong wording for local LHS: {err:?}"
         );
 
         // local on RHS still produces the accessor label.
-        let err = eval_script(
-            b"local t = {}; return 'x' .. t",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected concat error");
+        let err = eval_script(b"local t = {}; return 'x' .. t", &[], &[], &mut store, 0)
+            .expect_err("expected concat error");
         assert!(
             err.contains("attempt to concatenate local 't' (a table value)"),
             "wrong wording for local RHS: {err:?}"
@@ -12029,8 +11949,12 @@ mod tests {
         // Field-access prefix.
         let err = eval_script(
             b"local obj = {fld = {}}; return obj.fld .. 'x'",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected concat error");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("expected concat error");
         assert!(
             err.contains("attempt to concatenate field 'fld' (a table value)"),
             "wrong wording for field: {err:?}"
@@ -12039,8 +11963,12 @@ mod tests {
         // Numeric-index access → field '?'.
         let err = eval_script(
             b"local arr = {{}}; return arr[1] .. 'x'",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected concat error");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("expected concat error");
         assert!(
             err.contains("attempt to concatenate field '?' (a table value)"),
             "wrong wording for numeric index: {err:?}"
@@ -12049,8 +11977,12 @@ mod tests {
         // String-literal index resolves to the field name.
         let err = eval_script(
             b"local obj = {fld = {}}; return obj['fld'] .. 'x'",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected concat error");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("expected concat error");
         assert!(
             err.contains("attempt to concatenate field 'fld' (a table value)"),
             "wrong wording for string-index: {err:?}"
@@ -12059,8 +11991,12 @@ mod tests {
         // Call result has no accessor — falls back to anonymous form.
         let err = eval_script(
             b"local function g() return {} end; return g() .. 'x'",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected concat error");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("expected concat error");
         assert!(
             err.contains("attempt to concatenate a table value"),
             "wrong wording for call result: {err:?}"
@@ -12089,8 +12025,12 @@ mod tests {
         // assert() with no args.
         let frame = eval_script(
             b"local ok, err = pcall(assert); return err",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         let body = match frame {
             RespFrame::BulkString(Some(b)) => b,
             other => panic!("expected bulk string, got {other:?}"),
@@ -12098,8 +12038,8 @@ mod tests {
         assert_eq!(body, b"bad argument #1 to '?' (value expected)");
 
         // assert() direct call uses 'assert' as the name.
-        let err = eval_script(b"return assert()", &[], &[], &mut store, 0)
-            .expect_err("expected error");
+        let err =
+            eval_script(b"return assert()", &[], &[], &mut store, 0).expect_err("expected error");
         assert!(
             err.contains("user_script:1: bad argument #1 to 'assert' (value expected)"),
             "assert direct: {err:?}"
@@ -12108,8 +12048,12 @@ mod tests {
         // xpcall(f) with no msgh.
         let frame = eval_script(
             b"local ok, err = pcall(xpcall, function() end); return err",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         let body = match frame {
             RespFrame::BulkString(Some(b)) => b,
             other => panic!("expected bulk string, got {other:?}"),
@@ -12119,19 +12063,30 @@ mod tests {
         // rawget() with no args → "table expected, got no value".
         let frame = eval_script(
             b"local ok, err = pcall(rawget); return err",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         let body = match frame {
             RespFrame::BulkString(Some(b)) => b,
             other => panic!("expected bulk string, got {other:?}"),
         };
-        assert_eq!(body, b"bad argument #1 to '?' (table expected, got no value)");
+        assert_eq!(
+            body,
+            b"bad argument #1 to '?' (table expected, got no value)"
+        );
 
         // rawget(t) with no key → "value expected" at slot 2.
         let frame = eval_script(
             b"local ok, err = pcall(rawget, {}); return err",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         let body = match frame {
             RespFrame::BulkString(Some(b)) => b,
             other => panic!("expected bulk string, got {other:?}"),
@@ -12141,19 +12096,30 @@ mod tests {
         // setmetatable() with no args.
         let frame = eval_script(
             b"local ok, err = pcall(setmetatable); return err",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         let body = match frame {
             RespFrame::BulkString(Some(b)) => b,
             other => panic!("expected bulk string, got {other:?}"),
         };
-        assert_eq!(body, b"bad argument #1 to '?' (table expected, got no value)");
+        assert_eq!(
+            body,
+            b"bad argument #1 to '?' (table expected, got no value)"
+        );
 
         // getmetatable() with no args.
         let frame = eval_script(
             b"local ok, err = pcall(getmetatable); return err",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         let body = match frame {
             RespFrame::BulkString(Some(b)) => b,
             other => panic!("expected bulk string, got {other:?}"),
@@ -12163,8 +12129,12 @@ mod tests {
         // Regression: good args still work.
         let frame = eval_script(
             b"local t = {x = 1}; return rawget(t, 'x')",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::Integer(1));
     }
 
@@ -12179,17 +12149,15 @@ mod tests {
         let mut store = Store::new();
 
         // Direct call: name resolves to 'tostring' / 'type'.
-        let err = eval_script(
-            b"return tostring()",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected error");
+        let err =
+            eval_script(b"return tostring()", &[], &[], &mut store, 0).expect_err("expected error");
         assert!(
             err.contains("user_script:1: bad argument #1 to 'tostring' (value expected)"),
             "tostring direct: {err:?}"
         );
 
-        let err = eval_script(b"return type()", &[], &[], &mut store, 0)
-            .expect_err("expected error");
+        let err =
+            eval_script(b"return type()", &[], &[], &mut store, 0).expect_err("expected error");
         assert!(
             err.contains("user_script:1: bad argument #1 to 'type' (value expected)"),
             "type direct: {err:?}"
@@ -12198,8 +12166,12 @@ mod tests {
         // pcall callback: name is '?' with no prefix.
         let frame = eval_script(
             b"local ok, err = pcall(tostring); return err",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         let body = match frame {
             RespFrame::BulkString(Some(b)) => b,
             other => panic!("expected bulk string, got {other:?}"),
@@ -12231,10 +12203,8 @@ mod tests {
         let mut store = Store::new();
 
         // Direct call.
-        let err = eval_script(
-            b"return select(0, 'a')",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected error");
+        let err = eval_script(b"return select(0, 'a')", &[], &[], &mut store, 0)
+            .expect_err("expected error");
         assert!(
             err.contains("user_script:1: bad argument #1 to 'select' (index out of range)"),
             "direct call wording: {err:?}"
@@ -12243,8 +12213,12 @@ mod tests {
         // Local alias surfaces the local variable's name.
         let err = eval_script(
             b"local f = select; return f(0, 'a')",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected error");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("expected error");
         assert!(
             err.contains("user_script:1: bad argument #1 to 'f' (index out of range)"),
             "alias wording: {err:?}"
@@ -12253,8 +12227,12 @@ mod tests {
         // Field call uses the field name.
         let err = eval_script(
             b"local t = {s = select}; return t.s(0, 'a')",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected error");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("expected error");
         assert!(
             err.contains("user_script:1: bad argument #1 to 's' (index out of range)"),
             "field-call wording: {err:?}"
@@ -12264,8 +12242,12 @@ mod tests {
         // no user_script:1: prefix.
         let frame = eval_script(
             b"local ok, err = pcall(select, 0, 'a'); return err",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         let body = match frame {
             RespFrame::BulkString(Some(b)) => b,
             other => panic!("expected bulk string, got {other:?}"),
@@ -12288,8 +12270,12 @@ mod tests {
         // Direct error: nonexistent global access in the chunk.
         let frame = eval_script(
             b"local f = loadstring('return undef'); local ok, err = pcall(f); return err",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         let body = match frame {
             RespFrame::BulkString(Some(b)) => b,
             other => panic!("expected bulk string, got {other:?}"),
@@ -12318,8 +12304,12 @@ mod tests {
         // `=NAME` prefix strips the brackets.
         let frame = eval_script(
             b"local f = loadstring('return undef', '=mn'); local ok, err = pcall(f); return err",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         let body = match frame {
             RespFrame::BulkString(Some(b)) => b,
             other => panic!("expected bulk string, got {other:?}"),
@@ -12348,8 +12338,12 @@ mod tests {
         // Errors raised OUTSIDE any loaded chunk still use user_script:.
         let frame = eval_script(
             b"local ok, err = pcall(function() return undef end); return err",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         let body = match frame {
             RespFrame::BulkString(Some(b)) => b,
             other => panic!("expected bulk string, got {other:?}"),
@@ -12402,25 +12396,26 @@ mod tests {
         }
 
         // Fractional truncation: select(1.5, 'a', 'b') is select(1, ...).
-        let frame =
-            eval_script(b"return select(1.5, 'a', 'b')", &[], &[], &mut store, 0).unwrap();
+        let frame = eval_script(b"return select(1.5, 'a', 'b')", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"a".to_vec())));
 
         // Happy paths still work.
-        let frame = eval_script(
-            b"return select(2, 'a', 'b', 'c')",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+        let frame =
+            eval_script(b"return select(2, 'a', 'b', 'c')", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"b".to_vec())));
 
-        let frame =
-            eval_script(b"return select('#', 'a', 'b', 'c')", &[], &[], &mut store, 0).unwrap();
+        let frame = eval_script(
+            b"return select('#', 'a', 'b', 'c')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::Integer(3));
 
-        let frame = eval_script(
-            b"return select(-1, 'a', 'b', 'c')",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+        let frame =
+            eval_script(b"return select(-1, 'a', 'b', 'c')", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"c".to_vec())));
     }
 
@@ -12442,14 +12437,10 @@ mod tests {
         let frame = eval_script(b"return type(_G)", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"table".to_vec())));
 
-        let frame = eval_script(
-            b"return tostring(_G._G == _G)",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+        let frame = eval_script(b"return tostring(_G._G == _G)", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"true".to_vec())));
 
-        let frame =
-            eval_script(b"return type(_G.tostring)", &[], &[], &mut store, 0).unwrap();
+        let frame = eval_script(b"return type(_G.tostring)", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"function".to_vec())));
 
         let err = eval_script(b"return _G.undef_xyz", &[], &[], &mut store, 0)
@@ -12472,8 +12463,12 @@ mod tests {
         // returned to Redis becomes Integer(1).
         let frame = eval_script(
             b"local count = 0; for k, v in pairs(_G) do count = count + 1 end; return count > 20",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::Integer(1));
     }
 
@@ -12496,14 +12491,20 @@ mod tests {
 
         let frame = eval_script(
             b"setfenv(1, {answer = 42}); return answer",
-            &[], &[], &mut store, 0,
+            &[],
+            &[],
+            &mut store,
+            0,
         )
         .unwrap();
         assert_eq!(frame, RespFrame::Integer(42));
 
         let frame = eval_script(
             b"local env = {answer = 41}; setfenv(1, env); answer = answer + 1; return env.answer",
-            &[], &[], &mut store, 0,
+            &[],
+            &[],
+            &mut store,
+            0,
         )
         .unwrap();
         assert_eq!(frame, RespFrame::Integer(42));
@@ -12517,7 +12518,10 @@ mod tests {
 
         let frame = eval_script(
             b"local ok, e = pcall(setfenv, 2, {}); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
+            &[],
+            &[],
+            &mut store,
+            0,
         )
         .unwrap();
         assert_eq!(
@@ -12557,8 +12561,12 @@ mod tests {
         // prefix; the hash suffix is non-deterministic).
         let frame = eval_script(
             b"local t = {}; return tostring(t):sub(1, 7)",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"table: ".to_vec())));
 
         // Numbers / strings keep their existing tostring path.
@@ -12644,8 +12652,12 @@ mod tests {
         // when the table has __lt.
         let err = eval_script(
             b"local t = setmetatable({}, {__lt=function() return true end}); return t < 1",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected error for cross-type compare");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("expected error for cross-type compare");
         assert!(
             err.contains("attempt to compare") && err.contains("table") && err.contains("number"),
             "wrong wording for cross-type compare: {err:?}"
@@ -12664,8 +12676,12 @@ mod tests {
         // Plain number compare keeps working with zero overhead.
         let frame = eval_script(
             b"return tostring(1 < 2) .. ',' .. tostring(3 >= 3)",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"true,true".to_vec())));
     }
 
@@ -12682,28 +12698,38 @@ mod tests {
             b"local t = setmetatable({}, {__add=function(a, b) return type(a) .. '+' .. type(b) end}); return t + 1",
             &[], &[], &mut store, 0,
         ).unwrap();
-        assert_eq!(
-            frame,
-            RespFrame::BulkString(Some(b"table+number".to_vec()))
-        );
+        assert_eq!(frame, RespFrame::BulkString(Some(b"table+number".to_vec())));
 
         // RHS-only metatable still fires.
         let frame = eval_script(
             b"local t = setmetatable({}, {__add=function(a, b) return type(a) .. '+' .. type(b) end}); return 1 + t",
             &[], &[], &mut store, 0,
         ).unwrap();
-        assert_eq!(
-            frame,
-            RespFrame::BulkString(Some(b"number+table".to_vec()))
-        );
+        assert_eq!(frame, RespFrame::BulkString(Some(b"number+table".to_vec())));
 
         // Other binary arithmetic ops.
         for (src, want) in [
-            (b"local t = setmetatable({}, {__sub=function() return 's' end}); return t - 1" as &[u8], b"s" as &[u8]),
-            (b"local t = setmetatable({}, {__mul=function() return 'm' end}); return t * 2", b"m"),
-            (b"local t = setmetatable({}, {__div=function() return 'd' end}); return t / 2", b"d"),
-            (b"local t = setmetatable({}, {__mod=function() return 'o' end}); return t % 2", b"o"),
-            (b"local t = setmetatable({}, {__pow=function() return 'p' end}); return t ^ 2", b"p"),
+            (
+                b"local t = setmetatable({}, {__sub=function() return 's' end}); return t - 1"
+                    as &[u8],
+                b"s" as &[u8],
+            ),
+            (
+                b"local t = setmetatable({}, {__mul=function() return 'm' end}); return t * 2",
+                b"m",
+            ),
+            (
+                b"local t = setmetatable({}, {__div=function() return 'd' end}); return t / 2",
+                b"d",
+            ),
+            (
+                b"local t = setmetatable({}, {__mod=function() return 'o' end}); return t % 2",
+                b"o",
+            ),
+            (
+                b"local t = setmetatable({}, {__pow=function() return 'p' end}); return t ^ 2",
+                b"p",
+            ),
         ] {
             let frame = eval_script(src, &[], &[], &mut store, 0).unwrap();
             assert_eq!(
@@ -12717,8 +12743,12 @@ mod tests {
         // __unm (unary minus) receives the operand as its sole arg.
         let frame = eval_script(
             b"local t = setmetatable({}, {__unm=function(a) return type(a) end}); return -t",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"table".to_vec())));
 
         // LHS metatable wins when both have __add.
@@ -12732,8 +12762,12 @@ mod tests {
         // OTHER operand fails to_number (the str is numeric, table is not).
         let frame = eval_script(
             b"local t = setmetatable({}, {__add=function() return 'META' end}); return '1' + t",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"META".to_vec())));
 
         // Pure-number arithmetic doesn't pay the metamethod-lookup cost.
@@ -12743,8 +12777,12 @@ mod tests {
         // Non-callable __add raises the standard "attempt to call" error.
         let err = eval_script(
             b"local t = setmetatable({}, {__add='nope'}); return t + 1",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected error for string-__add");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("expected error for string-__add");
         assert!(
             err.contains("attempt to call") && err.contains("string"),
             "non-callable __add should raise call-error: {err:?}"
@@ -12785,10 +12823,7 @@ mod tests {
             b"local t = setmetatable({}, {__concat=function(a, b) return type(a) .. '+' .. type(b) end}); return t .. 42",
             &[], &[], &mut store, 0,
         ).unwrap();
-        assert_eq!(
-            frame,
-            RespFrame::BulkString(Some(b"table+number".to_vec()))
-        );
+        assert_eq!(frame, RespFrame::BulkString(Some(b"table+number".to_vec())));
 
         // Multi-return: only the first value is used (matches Lua 5.1).
         let frame = eval_script(
@@ -12809,8 +12844,12 @@ mod tests {
         // a TYPE value" (matches vendored).
         let err = eval_script(
             b"local t = setmetatable({}, {__concat='nope'}); return t .. 'x'",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected error for string-__concat");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("expected error for string-__concat");
         assert!(
             err.contains("attempt to call") && err.contains("string"),
             "non-callable __concat should raise call-error: {err:?}"
@@ -12858,8 +12897,12 @@ mod tests {
         // Non-callable __newindex (e.g. string) errors per vendored.
         let err = eval_script(
             b"local t = setmetatable({}, {__newindex='nope'}); t.x = 1",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected error for string-__newindex");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("expected error for string-__newindex");
         assert!(
             err.contains("attempt to index") && err.contains("string"),
             "wrong wording for non-callable __newindex: {err:?}"
@@ -12870,10 +12913,7 @@ mod tests {
             b"local back = {}; local mid = setmetatable({}, {__newindex=back}); local outer = setmetatable({}, {__newindex=mid}); outer.x = 1; return tostring(back.x)..','..tostring(rawget(mid, 'x'))..','..tostring(rawget(outer, 'x'))",
             &[], &[], &mut store, 0,
         ).unwrap();
-        assert_eq!(
-            frame,
-            RespFrame::BulkString(Some(b"1,nil,nil".to_vec()))
-        );
+        assert_eq!(frame, RespFrame::BulkString(Some(b"1,nil,nil".to_vec())));
 
         // Bracket-style assignment also triggers __newindex.
         let frame = eval_script(
@@ -12897,8 +12937,12 @@ mod tests {
         // Basic call: table with __call function.
         let frame = eval_script(
             b"local t = setmetatable({}, {__call=function(_, a) return a*2 end}); return t(21)",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::Integer(42));
 
         // The table itself is passed as the first arg (self).
@@ -12926,7 +12970,10 @@ mod tests {
         // __call=non_function → same error wording, NOT chained.
         let err = eval_script(
             b"local t = setmetatable({}, {__call='nope'}); return t()",
-            &[], &[], &mut store, 0,
+            &[],
+            &[],
+            &mut store,
+            0,
         )
         .expect_err("expected error for string-__call");
         assert!(
@@ -12971,8 +13018,12 @@ mod tests {
         // Existing keys bypass __index.
         let frame = eval_script(
             b"local t = setmetatable({x=10}, {__index=function(_, k) return 99 end}); return t.x",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::Integer(10));
 
         // Bracket-style indexing also triggers __index.
@@ -13030,37 +13081,57 @@ mod tests {
         // Last-positional `...` expands to all varargs.
         let frame = eval_script(
             b"local function f(...) local t = {...}; return #t end; return f('a','b','c')",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::Integer(3));
 
         // Last-positional `...` after explicit fields: existing entries
         // plus the expanded varargs.
         let frame = eval_script(
             b"local function f(...) local t = {1, 2, ...}; return #t end; return f('a','b','c')",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::Integer(5));
 
         // Non-last `...` takes only the first value.
         let frame = eval_script(
             b"local function f(...) local t = {..., 99}; return #t end; return f('a','b','c')",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::Integer(2));
 
         // Last-positional function call expands all return values.
         let frame = eval_script(
             b"local function g() return 1, 2, 3 end; local t = {g()}; return #t",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::Integer(3));
 
         // Non-last function call takes only the first return value.
         let frame = eval_script(
             b"local function g() return 1, 2, 3 end; local t = {g(), 99}; return #t",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::Integer(2));
 
         // Method call as last positional also expands (single value
@@ -13069,10 +13140,7 @@ mod tests {
             b"local s = 'abc'; local t = {'x', s:upper()}; return tostring(t[1])..','..tostring(t[2])",
             &[], &[], &mut store, 0,
         ).unwrap();
-        assert_eq!(
-            frame,
-            RespFrame::BulkString(Some(b"x,ABC".to_vec()))
-        );
+        assert_eq!(frame, RespFrame::BulkString(Some(b"x,ABC".to_vec())));
 
         // Named fields don't count toward # but coexist with positional
         // varargs expansion.
@@ -13080,16 +13148,17 @@ mod tests {
             b"local function f(...) local t = {x=1, ...}; return #t..':'..tostring(t.x) end; return f('a','b','c')",
             &[], &[], &mut store, 0,
         ).unwrap();
-        assert_eq!(
-            frame,
-            RespFrame::BulkString(Some(b"3:1".to_vec()))
-        );
+        assert_eq!(frame, RespFrame::BulkString(Some(b"3:1".to_vec())));
 
         // Empty varargs yields an empty table.
         let frame = eval_script(
             b"local function f(...) local t = {...}; return #t end; return f()",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::Integer(0));
 
         // When `...` is NOT the last field (a named field follows it),
@@ -13098,10 +13167,7 @@ mod tests {
             b"local function f(...) local t = {..., x=1}; return #t..':'..tostring(t.x) end; return f('a','b','c')",
             &[], &[], &mut store, 0,
         ).unwrap();
-        assert_eq!(
-            frame,
-            RespFrame::BulkString(Some(b"1:1".to_vec()))
-        );
+        assert_eq!(frame, RespFrame::BulkString(Some(b"1:1".to_vec())));
     }
 
     #[test]
@@ -13115,22 +13181,34 @@ mod tests {
         // Success path: simple chunk returning a constant.
         let frame = eval_script(
             b"local f = loadstring('return 42'); return f()",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::Integer(42));
 
         // Success path: chunk that uses varargs.
         let frame = eval_script(
             b"local f = loadstring('local a,b=...; return a+b'); return f(2, 3)",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::Integer(5));
 
         // Parse failure: returns nil + a chunk-labelled error string.
         let frame = eval_script(
             b"local f, err = loadstring('!!!'); return tostring(f) .. ';' .. tostring(err)",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         let body = match frame {
             RespFrame::BulkString(Some(b)) => b,
             other => panic!("expected bulk string, got {other:?}"),
@@ -13145,8 +13223,12 @@ mod tests {
         // Custom chunk name produces `[string "NAME"]:1:` brackets.
         let frame = eval_script(
             b"local f, err = loadstring('!!!', 'myname'); return tostring(err)",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         let body = match frame {
             RespFrame::BulkString(Some(b)) => b,
             other => panic!("expected bulk string, got {other:?}"),
@@ -13159,11 +13241,9 @@ mod tests {
 
         // `=NAME` and `@NAME` prefixes strip the brackets.
         for prefix in ["=", "@"] {
-            let src = format!(
-                "local f, err = loadstring('!!!', '{prefix}myname'); return tostring(err)"
-            );
-            let frame =
-                eval_script(src.as_bytes(), &[], &[], &mut store, 0).unwrap();
+            let src =
+                format!("local f, err = loadstring('!!!', '{prefix}myname'); return tostring(err)");
+            let frame = eval_script(src.as_bytes(), &[], &[], &mut store, 0).unwrap();
             let body = match frame {
                 RespFrame::BulkString(Some(b)) => b,
                 other => panic!("expected bulk string, got {other:?}"),
@@ -13179,8 +13259,12 @@ mod tests {
         // first line with `...`.
         let frame = eval_script(
             b"local f, err = loadstring('return 1\nreturn 2\n!!!'); return tostring(err)",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         let body = match frame {
             RespFrame::BulkString(Some(b)) => b,
             other => panic!("expected bulk string, got {other:?}"),
@@ -13206,8 +13290,12 @@ mod tests {
         // pcall-invoked: '?' name, no prefix.
         let frame = eval_script(
             b"local ok, err = pcall(load, 'src'); return tostring(err)",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         let body = match frame {
             RespFrame::BulkString(Some(b)) => b,
             other => panic!("expected bulk string, got {other:?}"),
@@ -13219,22 +13307,22 @@ mod tests {
         );
 
         // Direct call: 'load' name with user_script:1: prefix.
-        let frame = eval_script(
-            b"return type(load(nil))",
-            &[], &[], &mut store, 0,
-        );
+        let frame = eval_script(b"return type(load(nil))", &[], &[], &mut store, 0);
         let err = frame.expect_err("direct load(nil) should error");
         assert!(
-            err.contains("user_script:1: bad argument #1 to 'load'")
-                && err.contains("got nil"),
+            err.contains("user_script:1: bad argument #1 to 'load'") && err.contains("got nil"),
             "expected direct-call wording, got {err:?}"
         );
 
         // load != loadstring (separate function values).
         let frame = eval_script(
             b"return tostring(load == loadstring)",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"false".to_vec())));
     }
 
@@ -13261,26 +13349,35 @@ mod tests {
         // boolean preserves type.
         let frame = eval_script(
             b"local ok,err=pcall(function() error(true) end); return type(err)..':'..tostring(err)",
-            &[], &[], &mut store, 0,
-        ).unwrap();
-        assert_eq!(
-            frame,
-            RespFrame::BulkString(Some(b"boolean:true".to_vec()))
-        );
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"boolean:true".to_vec())));
 
         // nil preserves type.
         let frame = eval_script(
             b"local ok,err=pcall(function() error(nil) end); return type(err)",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"nil".to_vec())));
 
         // Default-level number is coerced to a prefixed string (Lua
         // 5.1's lua_isstring-on-number quirk).
         let frame = eval_script(
             b"local ok,err=pcall(function() error(42) end); return type(err)..':'..tostring(err)",
-            &[], &[], &mut store, 0,
-        ).unwrap();
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(
             frame,
             RespFrame::BulkString(Some(b"string:user_script:1: 42".to_vec()))
@@ -13289,12 +13386,13 @@ mod tests {
         // level=0 with a number preserves the number type.
         let frame = eval_script(
             b"local ok,err=pcall(function() error(42,0) end); return type(err)..':'..tostring(err)",
-            &[], &[], &mut store, 0,
-        ).unwrap();
-        assert_eq!(
-            frame,
-            RespFrame::BulkString(Some(b"number:42".to_vec()))
-        );
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"number:42".to_vec())));
 
         // Nested pcall: inner consumes its own typed error; outer's
         // typed error round-trips independently.
@@ -13302,10 +13400,7 @@ mod tests {
             b"local ok,err=pcall(function() pcall(function() error({}) end); error({deep=true}) end); return type(err)..':'..tostring(err.deep)",
             &[], &[], &mut store, 0,
         ).unwrap();
-        assert_eq!(
-            frame,
-            RespFrame::BulkString(Some(b"table:true".to_vec()))
-        );
+        assert_eq!(frame, RespFrame::BulkString(Some(b"table:true".to_vec())));
 
         // pending_error_value cleared by a successful pcall, so a later
         // pcall around a string error doesn't accidentally surface
@@ -13324,10 +13419,7 @@ mod tests {
             b"local ok,err=xpcall(function() error({m='hi'}) end, function(e) return e end); return type(err)..':'..tostring(err.m)",
             &[], &[], &mut store, 0,
         ).unwrap();
-        assert_eq!(
-            frame,
-            RespFrame::BulkString(Some(b"table:hi".to_vec()))
-        );
+        assert_eq!(frame, RespFrame::BulkString(Some(b"table:hi".to_vec())));
 
         // Top-level escape (uncaught typed error) renders to a string
         // for the Redis error reply.
@@ -13362,8 +13454,8 @@ mod tests {
         assert_eq!(frame, RespFrame::BulkString(Some(b"ABC".to_vec())));
 
         // s.len via colon returns 3.
-        let frame = eval_script(b"local s = 'abc'; return s:len()", &[], &[], &mut store, 0)
-            .unwrap();
+        let frame =
+            eval_script(b"local s = 'abc'; return s:len()", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::Integer(3));
 
         // Unknown field returns nil instead of erroring.
@@ -13413,14 +13505,8 @@ mod tests {
 
         // Calling an unknown field still produces the "attempt to call
         // field 'fld' (a nil value)" wording (matches frankenredis-md71j).
-        let err = eval_script(
-            b"local s = 'abc'; s.fld()",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .expect_err("expected error for s.fld()");
+        let err = eval_script(b"local s = 'abc'; s.fld()", &[], &[], &mut store, 0)
+            .expect_err("expected error for s.fld()");
         assert!(
             err.contains("attempt to call field 'fld' (a nil value)"),
             "wrong wording for s.fld(): {err:?}"
@@ -13459,10 +13545,7 @@ mod tests {
         //   "(function() return nil end)()()" → "attempt to call a nil value"
         let mut store = Store::new();
         let cases: &[(&[u8], &str)] = &[
-            (
-                b"local x; x()",
-                "attempt to call local 'x' (a nil value)",
-            ),
+            (b"local x; x()", "attempt to call local 'x' (a nil value)"),
             (
                 b"local x = 42; x()",
                 "attempt to call local 'x' (a number value)",
@@ -13677,7 +13760,11 @@ mod tests {
             .expect("map hint resp2 should not error");
         match frame {
             RespFrame::Array(Some(items)) => {
-                assert_eq!(items.len(), 4, "expected flat 4-element array, got {items:?}");
+                assert_eq!(
+                    items.len(),
+                    4,
+                    "expected flat 4-element array, got {items:?}"
+                );
             }
             other => panic!("expected Array for resp2 map hint, got {other:?}"),
         }
@@ -13697,10 +13784,7 @@ mod tests {
         // {double = 3.14} → BulkString of the formatted double.
         let frame = eval_script(b"return {double = 3.14}", &[], &[], &mut store, 0)
             .expect("double hint should not error");
-        assert_eq!(
-            frame,
-            RespFrame::BulkString(Some(b"3.14".to_vec()))
-        );
+        assert_eq!(frame, RespFrame::BulkString(Some(b"3.14".to_vec())));
 
         // {big_number = "12345..."} → BulkString of the bignum.
         let frame = eval_script(
@@ -13777,15 +13861,25 @@ mod tests {
         for (src, expected) in cases {
             let frame = eval_script(src, &[], &[], &mut store, 0)
                 .unwrap_or_else(|e| panic!("eval {:?} failed: {e}", String::from_utf8_lossy(src)));
-            let LuaValue::Number(want) = expected else { unreachable!() };
+            let LuaValue::Number(want) = expected else {
+                unreachable!()
+            };
             match frame {
-                RespFrame::Integer(got) => assert_eq!(got as f64, *want, "src = {:?}", String::from_utf8_lossy(src)),
+                RespFrame::Integer(got) => assert_eq!(
+                    got as f64,
+                    *want,
+                    "src = {:?}",
+                    String::from_utf8_lossy(src)
+                ),
                 RespFrame::BulkString(Some(bytes)) => {
                     let s = String::from_utf8_lossy(&bytes);
                     let got: f64 = s.parse().expect("numeric reply");
                     assert_eq!(got, *want, "src = {:?}", String::from_utf8_lossy(src));
                 }
-                other => panic!("expected number reply for {:?}, got {other:?}", String::from_utf8_lossy(src)),
+                other => panic!(
+                    "expected number reply for {:?}, got {other:?}",
+                    String::from_utf8_lossy(src)
+                ),
             }
         }
 
@@ -13800,7 +13894,12 @@ mod tests {
         ] {
             let frame = eval_script(src, &[], &[], &mut store, 0)
                 .unwrap_or_else(|e| panic!("eval {:?} failed: {e}", String::from_utf8_lossy(src)));
-            assert_eq!(frame, RespFrame::Integer(1), "src = {:?}", String::from_utf8_lossy(src));
+            assert_eq!(
+                frame,
+                RespFrame::Integer(1),
+                "src = {:?}",
+                String::from_utf8_lossy(src)
+            );
         }
 
         // Decimal / scientific tonumber paths remain unaffected (use
@@ -13846,14 +13945,22 @@ mod tests {
             // assert on bit.band's result here (it isn't part of fr's
             // sandbox), but we can confirm the parser at least gets
             // past the call-args boundary via a synthetic 2-arg call.
-            (b"local function f(a,b) return a + b end return f(0xFF, 0x0F)", 270),
+            (
+                b"local function f(a,b) return a + b end return f(0xFF, 0x0F)",
+                270,
+            ),
         ];
         for (src, expected) in cases {
             let frame = eval_script(src, &[], &[], &mut store, 0)
                 .unwrap_or_else(|e| panic!("eval {:?} failed: {e}", String::from_utf8_lossy(src)));
             match frame {
-                RespFrame::Integer(got) => assert_eq!(got, *expected, "src = {:?}", String::from_utf8_lossy(src)),
-                other => panic!("expected Integer({expected}) for {:?}, got {other:?}", String::from_utf8_lossy(src)),
+                RespFrame::Integer(got) => {
+                    assert_eq!(got, *expected, "src = {:?}", String::from_utf8_lossy(src))
+                }
+                other => panic!(
+                    "expected Integer({expected}) for {:?}, got {other:?}",
+                    String::from_utf8_lossy(src)
+                ),
             }
         }
 
@@ -13890,8 +13997,8 @@ mod tests {
             ("nil", "unexpected symbol near 'nil'"),
         ];
         for (src, expected) in cases {
-            let err = compile_check(src.as_bytes())
-                .expect_err(&format!("expected error for {src:?}"));
+            let err =
+                compile_check(src.as_bytes()).expect_err(&format!("expected error for {src:?}"));
             assert_eq!(err, *expected, "wrong wording for {src:?}: {err}");
         }
         // Bare Names continue to use the '=' expected wording (covered
@@ -13900,8 +14007,7 @@ mod tests {
         assert_eq!(err, "'=' expected near '<eof>'");
         // Function calls and parenthesized prefixexps remain valid.
         for src in ["f()", "(function() end)()", "f(1)", "obj:m()"] {
-            compile_check(src.as_bytes())
-                .unwrap_or_else(|e| panic!("{src:?} should compile: {e}"));
+            compile_check(src.as_bytes()).unwrap_or_else(|e| panic!("{src:?} should compile: {e}"));
         }
     }
 
@@ -13925,12 +14031,9 @@ mod tests {
             ("a.b", "'=' expected near '<eof>'"),
             ("t[1]", "'=' expected near '<eof>'"),
         ] {
-            let err = compile_check(src.as_bytes())
-                .expect_err(&format!("expected error for {src:?}"));
-            assert_eq!(
-                err, expected_near,
-                "wrong wording for {src:?}: {err}"
-            );
+            let err =
+                compile_check(src.as_bytes()).expect_err(&format!("expected error for {src:?}"));
+            assert_eq!(err, expected_near, "wrong wording for {src:?}: {err}");
         }
 
         // Regression: legitimate function-call statements still parse.
@@ -13949,8 +14052,7 @@ mod tests {
             "for i = 1, 5 do end",
             "do return 1 end",
         ] {
-            compile_check(src.as_bytes())
-                .unwrap_or_else(|e| panic!("{src:?} should compile: {e}"));
+            compile_check(src.as_bytes()).unwrap_or_else(|e| panic!("{src:?} should compile: {e}"));
         }
     }
 
@@ -14649,8 +14751,14 @@ mod tests {
 
         // `==` identity: two distinct function definitions are NOT equal,
         // but a function references itself == itself.
-        let same = eval_script(b"local k=function() end; return tostring(k == k)", &[], &[], &mut store, 0)
-            .expect("self-eq");
+        let same = eval_script(
+            b"local k=function() end; return tostring(k == k)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("self-eq");
         assert_eq!(same, RespFrame::BulkString(Some(b"true".to_vec())));
         let diff = eval_script(
             b"local a=function() end; local b=function() end; return tostring(a == b)",
@@ -14927,15 +15035,11 @@ mod tests {
         // 2^53+1 is not exactly representable as f64 — it rounds to
         // 2^53, so the encoded value is the same.
         assert_eq!(
-            lua_value_to_json(&LuaValue::Number(((1u64 << 53) + 1) as f64))
-                .expect("2^53+1"),
+            lua_value_to_json(&LuaValue::Number(((1u64 << 53) + 1) as f64)).expect("2^53+1"),
             "9.007199254741e+15"
         );
         // Small integers still emit as bare decimals (matching %.14g).
-        assert_eq!(
-            lua_value_to_json(&LuaValue::Number(1.0)).expect("one"),
-            "1"
-        );
+        assert_eq!(lua_value_to_json(&LuaValue::Number(1.0)).expect("one"), "1");
         assert_eq!(
             lua_value_to_json(&LuaValue::Number(123.0)).expect("123"),
             "123"
@@ -14979,7 +15083,8 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{bad} unexpected error: {e}"));
             match frame {
                 RespFrame::BulkString(Some(bytes)) => assert_eq!(
-                    bytes, b"false",
+                    bytes,
+                    b"false",
                     "{bad}: expected pcall to return false (got {})",
                     String::from_utf8_lossy(&bytes)
                 ),
@@ -15032,14 +15137,16 @@ mod tests {
             ),
         ];
         for (script, expected) in cases {
-            let err = eval_script(script, &[], &[], &mut store, 0)
-                .unwrap_err();
+            let err = eval_script(script, &[], &[], &mut store, 0).unwrap_err();
             assert_eq!(&err, expected, "script={}", String::from_utf8_lossy(script));
         }
 
         let frame = eval_script(
             br#"return cjson.decode('{"a":[1,true,false,null],"b":"\/"}').b"#,
-            &[], &[], &mut store, 0,
+            &[],
+            &[],
+            &mut store,
+            0,
         )
         .expect("valid nested json still decodes");
         assert_eq!(frame, RespFrame::BulkString(Some(b"/".to_vec())));
@@ -15054,7 +15161,10 @@ mod tests {
 
         let frame = eval_script(
             b"return type(cmsgpack)..':'..type(cmsgpack.pack)..':'..type(cmsgpack.unpack)",
-            &[], &[], &mut store, 0,
+            &[],
+            &[],
+            &mut store,
+            0,
         )
         .unwrap();
         assert_eq!(
@@ -15079,7 +15189,10 @@ mod tests {
 
         let frame = eval_script(
             b"return string.byte(cmsgpack.pack(1), 1)",
-            &[], &[], &mut store, 0,
+            &[],
+            &[],
+            &mut store,
+            0,
         )
         .unwrap();
         assert_eq!(frame, RespFrame::Integer(1));
@@ -15132,14 +15245,20 @@ mod tests {
 
         let frame = eval_script(
             b"local t=cmsgpack.unpack(cmsgpack.pack({1,2,3})); return cjson.encode(t)",
-            &[], &[], &mut store, 0,
+            &[],
+            &[],
+            &mut store,
+            0,
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"[1,2,3]".to_vec())));
 
         let frame = eval_script(
             b"local m=cmsgpack.unpack(cmsgpack.pack({a='x', b=2})); return m.a..':'..m.b",
-            &[], &[], &mut store, 0,
+            &[],
+            &[],
+            &mut store,
+            0,
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"x:2".to_vec())));
@@ -15160,7 +15279,10 @@ mod tests {
 
         let frame = eval_script(
             b"local ok,e=pcall(cmsgpack.unpack, string.char(0xc1)); return tostring(e)",
-            &[], &[], &mut store, 0,
+            &[],
+            &[],
+            &mut store,
+            0,
         )
         .unwrap();
         assert_eq!(
@@ -15201,26 +15323,33 @@ mod tests {
 
         let frame = eval_script(
             b"return tostring(struct.size('!4bi'))..':'..tostring(struct.size('>i2xB'))",
-            &[], &[], &mut store, 0,
+            &[],
+            &[],
+            &mut store,
+            0,
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"8:4".to_vec())));
 
         let frame = eval_script(
             b"local ok,e=pcall(struct.unpack, 'c0', ''); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
+            &[],
+            &[],
+            &mut store,
+            0,
         )
         .unwrap();
         assert_eq!(
             frame,
-            RespFrame::BulkString(Some(
-                b"false:format 'c0' needs a previous size".to_vec()
-            ))
+            RespFrame::BulkString(Some(b"false:format 'c0' needs a previous size".to_vec()))
         );
 
         let frame = eval_script(
             b"local ok,e=pcall(struct.size, 's'); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
+            &[],
+            &[],
+            &mut store,
+            0,
         )
         .unwrap();
         assert_eq!(
@@ -15270,20 +15399,26 @@ mod tests {
             RespFrame::BulkString(Some(b"userdata:userdata:true".to_vec()))
         );
 
-        let frame = eval_script(b"return cjson.encode(cjson.null)", &[], &[], &mut store, 0)
-            .unwrap();
+        let frame =
+            eval_script(b"return cjson.encode(cjson.null)", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"null".to_vec())));
 
         let frame = eval_script(
             b"return cjson.encode(cjson.decode('[null,true]'))",
-            &[], &[], &mut store, 0,
+            &[],
+            &[],
+            &mut store,
+            0,
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"[null,true]".to_vec())));
 
         let frame = eval_script(
             b"return cjson.encode(cjson.decode('{\"a\":null}'))",
-            &[], &[], &mut store, 0,
+            &[],
+            &[],
+            &mut store,
+            0,
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"{\"a\":null}".to_vec())));
@@ -15318,11 +15453,17 @@ mod tests {
             &[], &[], &mut store, 0,
         )
         .unwrap();
-        assert_eq!(frame, RespFrame::BulkString(Some(b"proxy:false:true".to_vec())));
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"proxy:false:true".to_vec()))
+        );
 
         let frame = eval_script(
             b"local ok,e=pcall(newproxy, {}); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
+            &[],
+            &[],
+            &mut store,
+            0,
         )
         .unwrap();
         assert_eq!(
@@ -15392,14 +15533,8 @@ mod tests {
         .expect("string.len");
         assert_eq!(len, RespFrame::Integer(9), "literal 9 chars: x00x01xff");
 
-        let first_byte = eval_script(
-            b"return string.byte('\\xff')",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .expect("string.byte");
+        let first_byte = eval_script(b"return string.byte('\\xff')", &[], &[], &mut store, 0)
+            .expect("string.byte");
         assert_eq!(
             first_byte,
             RespFrame::Integer(120),
@@ -15429,13 +15564,7 @@ mod tests {
         // near-suffix: "escape sequence too large near '<delim>'"
         // where <delim> is the opening quote rendering. Pin both
         // ' and " variants.
-        let too_big_single = eval_script(
-            b"return '\\256'",
-            &[],
-            &[],
-            &mut store,
-            0,
-        );
+        let too_big_single = eval_script(b"return '\\256'", &[], &[], &mut store, 0);
         match too_big_single {
             Err(msg) => assert!(
                 msg.contains("escape sequence too large near '''"),
@@ -15443,13 +15572,7 @@ mod tests {
             ),
             Ok(other) => panic!("\\256 must error, got {other:?}"),
         }
-        let too_big_double = eval_script(
-            b"return \"\\256\"",
-            &[],
-            &[],
-            &mut store,
-            0,
-        );
+        let too_big_double = eval_script(b"return \"\\256\"", &[], &[], &mut store, 0);
         match too_big_double {
             Err(msg) => assert!(
                 msg.contains("escape sequence too large near '\"'"),
@@ -15470,9 +15593,7 @@ mod tests {
         .expect("sha1hex");
         assert_eq!(
             sha,
-            RespFrame::BulkString(Some(
-                b"8e4d7558499d94310d39f185778734645ca58577".to_vec()
-            )),
+            RespFrame::BulkString(Some(b"8e4d7558499d94310d39f185778734645ca58577".to_vec())),
             "sha1 over literal \"x00x01xff\" must match vendored Redis 7.2.4"
         );
     }
@@ -15568,7 +15689,8 @@ mod tests {
         // 0 bytes for %c 256) requires fr's lua_string_format to return
         // Vec<u8> instead of String — out of scope for this DOS-focused fix.
         let mut store = Store::new();
-        let r = eval_script(b"return string.format('%c', 65)", &[], &[], &mut store, 0).expect("c 65");
+        let r =
+            eval_script(b"return string.format('%c', 65)", &[], &[], &mut store, 0).expect("c 65");
         let RespFrame::BulkString(Some(bytes)) = r else {
             panic!("expected bulk")
         };
@@ -15583,49 +15705,163 @@ mod tests {
         let mut store = Store::new();
         let cases: &[(&[u8], &str)] = &[
             // math.* — unary number
-            (b"return math.abs()",   "user_script:1: bad argument #1 to 'abs' (number expected, got no value)"),
-            (b"return math.ceil()",  "user_script:1: bad argument #1 to 'ceil' (number expected, got no value)"),
-            (b"return math.floor()", "user_script:1: bad argument #1 to 'floor' (number expected, got no value)"),
-            (b"return math.sqrt()",  "user_script:1: bad argument #1 to 'sqrt' (number expected, got no value)"),
-            (b"return math.exp()",   "user_script:1: bad argument #1 to 'exp' (number expected, got no value)"),
-            (b"return math.log()",   "user_script:1: bad argument #1 to 'log' (number expected, got no value)"),
-            (b"return math.log10()", "user_script:1: bad argument #1 to 'log10' (number expected, got no value)"),
-            (b"return math.sin()",   "user_script:1: bad argument #1 to 'sin' (number expected, got no value)"),
-            (b"return math.cos()",   "user_script:1: bad argument #1 to 'cos' (number expected, got no value)"),
-            (b"return math.tan()",   "user_script:1: bad argument #1 to 'tan' (number expected, got no value)"),
-            (b"return math.deg()",   "user_script:1: bad argument #1 to 'deg' (number expected, got no value)"),
-            (b"return math.rad()",   "user_script:1: bad argument #1 to 'rad' (number expected, got no value)"),
-            (b"return math.modf()",  "user_script:1: bad argument #1 to 'modf' (number expected, got no value)"),
-            (b"return math.frexp()", "user_script:1: bad argument #1 to 'frexp' (number expected, got no value)"),
+            (
+                b"return math.abs()",
+                "user_script:1: bad argument #1 to 'abs' (number expected, got no value)",
+            ),
+            (
+                b"return math.ceil()",
+                "user_script:1: bad argument #1 to 'ceil' (number expected, got no value)",
+            ),
+            (
+                b"return math.floor()",
+                "user_script:1: bad argument #1 to 'floor' (number expected, got no value)",
+            ),
+            (
+                b"return math.sqrt()",
+                "user_script:1: bad argument #1 to 'sqrt' (number expected, got no value)",
+            ),
+            (
+                b"return math.exp()",
+                "user_script:1: bad argument #1 to 'exp' (number expected, got no value)",
+            ),
+            (
+                b"return math.log()",
+                "user_script:1: bad argument #1 to 'log' (number expected, got no value)",
+            ),
+            (
+                b"return math.log10()",
+                "user_script:1: bad argument #1 to 'log10' (number expected, got no value)",
+            ),
+            (
+                b"return math.sin()",
+                "user_script:1: bad argument #1 to 'sin' (number expected, got no value)",
+            ),
+            (
+                b"return math.cos()",
+                "user_script:1: bad argument #1 to 'cos' (number expected, got no value)",
+            ),
+            (
+                b"return math.tan()",
+                "user_script:1: bad argument #1 to 'tan' (number expected, got no value)",
+            ),
+            (
+                b"return math.deg()",
+                "user_script:1: bad argument #1 to 'deg' (number expected, got no value)",
+            ),
+            (
+                b"return math.rad()",
+                "user_script:1: bad argument #1 to 'rad' (number expected, got no value)",
+            ),
+            (
+                b"return math.modf()",
+                "user_script:1: bad argument #1 to 'modf' (number expected, got no value)",
+            ),
+            (
+                b"return math.frexp()",
+                "user_script:1: bad argument #1 to 'frexp' (number expected, got no value)",
+            ),
             // math.* — arg-#2 missing
-            (b"return math.fmod()",  "user_script:1: bad argument #2 to 'fmod' (number expected, got no value)"),
-            (b"return math.fmod(1)", "user_script:1: bad argument #2 to 'fmod' (number expected, got no value)"),
-            (b"return math.pow(1)",  "user_script:1: bad argument #2 to 'pow' (number expected, got no value)"),
-            (b"return math.atan2(1)","user_script:1: bad argument #2 to 'atan2' (number expected, got no value)"),
-            (b"return math.ldexp(1)","user_script:1: bad argument #2 to 'ldexp' (number expected, got no value)"),
+            (
+                b"return math.fmod()",
+                "user_script:1: bad argument #2 to 'fmod' (number expected, got no value)",
+            ),
+            (
+                b"return math.fmod(1)",
+                "user_script:1: bad argument #2 to 'fmod' (number expected, got no value)",
+            ),
+            (
+                b"return math.pow(1)",
+                "user_script:1: bad argument #2 to 'pow' (number expected, got no value)",
+            ),
+            (
+                b"return math.atan2(1)",
+                "user_script:1: bad argument #2 to 'atan2' (number expected, got no value)",
+            ),
+            (
+                b"return math.ldexp(1)",
+                "user_script:1: bad argument #2 to 'ldexp' (number expected, got no value)",
+            ),
             // string.* — arg #1 string missing
-            (b"return string.len()",     "user_script:1: bad argument #1 to 'len' (string expected, got no value)"),
-            (b"return string.lower()",   "user_script:1: bad argument #1 to 'lower' (string expected, got no value)"),
-            (b"return string.upper()",   "user_script:1: bad argument #1 to 'upper' (string expected, got no value)"),
-            (b"return string.reverse()", "user_script:1: bad argument #1 to 'reverse' (string expected, got no value)"),
-            (b"return string.rep()",     "user_script:1: bad argument #1 to 'rep' (string expected, got no value)"),
-            (b"return string.byte()",    "user_script:1: bad argument #1 to 'byte' (string expected, got no value)"),
-            (b"return string.find()",    "user_script:1: bad argument #1 to 'find' (string expected, got no value)"),
-            (b"return string.match()",   "user_script:1: bad argument #1 to 'match' (string expected, got no value)"),
-            (b"return string.gmatch()",  "user_script:1: bad argument #1 to 'gmatch' (string expected, got no value)"),
-            (b"return string.gsub()",    "user_script:1: bad argument #1 to 'gsub' (string expected, got no value)"),
+            (
+                b"return string.len()",
+                "user_script:1: bad argument #1 to 'len' (string expected, got no value)",
+            ),
+            (
+                b"return string.lower()",
+                "user_script:1: bad argument #1 to 'lower' (string expected, got no value)",
+            ),
+            (
+                b"return string.upper()",
+                "user_script:1: bad argument #1 to 'upper' (string expected, got no value)",
+            ),
+            (
+                b"return string.reverse()",
+                "user_script:1: bad argument #1 to 'reverse' (string expected, got no value)",
+            ),
+            (
+                b"return string.rep()",
+                "user_script:1: bad argument #1 to 'rep' (string expected, got no value)",
+            ),
+            (
+                b"return string.byte()",
+                "user_script:1: bad argument #1 to 'byte' (string expected, got no value)",
+            ),
+            (
+                b"return string.find()",
+                "user_script:1: bad argument #1 to 'find' (string expected, got no value)",
+            ),
+            (
+                b"return string.match()",
+                "user_script:1: bad argument #1 to 'match' (string expected, got no value)",
+            ),
+            (
+                b"return string.gmatch()",
+                "user_script:1: bad argument #1 to 'gmatch' (string expected, got no value)",
+            ),
+            (
+                b"return string.gsub()",
+                "user_script:1: bad argument #1 to 'gsub' (string expected, got no value)",
+            ),
             // string.* — arg-#2 missing
-            (b"return string.sub('abc')",   "user_script:1: bad argument #2 to 'sub' (number expected, got no value)"),
-            (b"return string.rep('a')",     "user_script:1: bad argument #2 to 'rep' (number expected, got no value)"),
-            (b"return string.find('abc')",  "user_script:1: bad argument #2 to 'find' (string expected, got no value)"),
-            (b"return string.match('abc')", "user_script:1: bad argument #2 to 'match' (string expected, got no value)"),
-            (b"return string.gmatch('abc')","user_script:1: bad argument #2 to 'gmatch' (string expected, got no value)"),
-            (b"return string.gsub('abc')",  "user_script:1: bad argument #2 to 'gsub' (string expected, got no value)"),
+            (
+                b"return string.sub('abc')",
+                "user_script:1: bad argument #2 to 'sub' (number expected, got no value)",
+            ),
+            (
+                b"return string.rep('a')",
+                "user_script:1: bad argument #2 to 'rep' (number expected, got no value)",
+            ),
+            (
+                b"return string.find('abc')",
+                "user_script:1: bad argument #2 to 'find' (string expected, got no value)",
+            ),
+            (
+                b"return string.match('abc')",
+                "user_script:1: bad argument #2 to 'match' (string expected, got no value)",
+            ),
+            (
+                b"return string.gmatch('abc')",
+                "user_script:1: bad argument #2 to 'gmatch' (string expected, got no value)",
+            ),
+            (
+                b"return string.gsub('abc')",
+                "user_script:1: bad argument #2 to 'gsub' (string expected, got no value)",
+            ),
             // table.*
-            (b"return table.sort()",  "user_script:1: bad argument #1 to 'sort' (table expected, got no value)"),
-            (b"return table.maxn()",  "user_script:1: bad argument #1 to 'maxn' (table expected, got no value)"),
+            (
+                b"return table.sort()",
+                "user_script:1: bad argument #1 to 'sort' (table expected, got no value)",
+            ),
+            (
+                b"return table.maxn()",
+                "user_script:1: bad argument #1 to 'maxn' (table expected, got no value)",
+            ),
             // base
-            (b"return tonumber()",    "user_script:1: bad argument #1 to 'tonumber' (value expected)"),
+            (
+                b"return tonumber()",
+                "user_script:1: bad argument #1 to 'tonumber' (value expected)",
+            ),
         ];
         for (script, expected) in cases {
             let err = eval_script(script, &[], &[], &mut store, 0).unwrap_err();
@@ -15645,11 +15881,14 @@ mod tests {
         // Happy-path regressions: each function still works correctly.
         let happy_pairs: &[(&[u8], RespFrame)] = &[
             (b"return math.floor(3.7)", RespFrame::Integer(3)),
-            (b"return math.abs(-5)",    RespFrame::Integer(5)),
-            (b"return math.fmod(7,3)",  RespFrame::Integer(1)),
-            (b"return math.pow(2,3)",   RespFrame::Integer(8)),
+            (b"return math.abs(-5)", RespFrame::Integer(5)),
+            (b"return math.fmod(7,3)", RespFrame::Integer(1)),
+            (b"return math.pow(2,3)", RespFrame::Integer(8)),
             (b"return string.len('abc')", RespFrame::Integer(3)),
-            (b"return string.upper('abc')", RespFrame::BulkString(Some(b"ABC".to_vec()))),
+            (
+                b"return string.upper('abc')",
+                RespFrame::BulkString(Some(b"ABC".to_vec())),
+            ),
         ];
         for (script, expected) in happy_pairs {
             let r = eval_script(script, &[], &[], &mut store, 0).expect("happy");
@@ -15783,14 +16022,7 @@ mod tests {
         // the next non-nil slot — for {1,nil,3}, next(t,1) returns key=3.
         // (EVAL top-level return discards values beyond the first per
         // Redis's lua-to-RESP conversion, so we only check the key.)
-        let r = eval_script(
-            b"return ({next({1,nil,3}, 1)})[1]",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .unwrap();
+        let r = eval_script(b"return ({next({1,nil,3}, 1)})[1]", &[], &[], &mut store, 0).unwrap();
         match r {
             RespFrame::Integer(n) => assert_eq!(n, 3, "next must skip nil slot to key 3"),
             other => panic!("expected Integer(3), got {:?}", other),
@@ -15814,14 +16046,8 @@ mod tests {
         assert_eq!(r, RespFrame::BulkString(Some(b"123".to_vec())));
 
         // missing separator equally OK.
-        let r = eval_script(
-            b"return table.concat({1,2,3})",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .expect("default sep");
+        let r = eval_script(b"return table.concat({1,2,3})", &[], &[], &mut store, 0)
+            .expect("default sep");
         assert_eq!(r, RespFrame::BulkString(Some(b"123".to_vec())));
 
         // nil hole inside an explicit iteration range raises with the
@@ -15896,14 +16122,8 @@ mod tests {
         assert_eq!(r, RespFrame::BulkString(Some(Vec::new())));
 
         // Empty table is empty.
-        let r = eval_script(
-            b"return table.concat({})",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .expect("empty table");
+        let r =
+            eval_script(b"return table.concat({})", &[], &[], &mut store, 0).expect("empty table");
         assert_eq!(r, RespFrame::BulkString(Some(Vec::new())));
 
         // Non-string non-number entry raises with the type name.
@@ -15932,8 +16152,14 @@ mod tests {
         assert_eq!(err, "user_script:1: wrong number of arguments to 'insert'");
 
         // 4+ args also rejected with same wording.
-        let err = eval_script(b"table.insert({}, 1, 'x', 'extra')", &[], &[], &mut store, 0)
-            .unwrap_err();
+        let err = eval_script(
+            b"table.insert({}, 1, 'x', 'extra')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
         assert_eq!(err, "user_script:1: wrong number of arguments to 'insert'");
 
         // 2-arg append still works.
@@ -16059,7 +16285,8 @@ mod tests {
         }
 
         // 9. Happy paths still work.
-        let r = eval_script(b"return rawequal(1, 1)", &[], &[], &mut store, 0).expect("rawequal ok");
+        let r =
+            eval_script(b"return rawequal(1, 1)", &[], &[], &mut store, 0).expect("rawequal ok");
         assert_eq!(r, RespFrame::Integer(1));
         let r = eval_script(
             b"local t={}; rawset(t, 'k', 42); return t.k",
@@ -16070,14 +16297,8 @@ mod tests {
         )
         .expect("rawset ok");
         assert_eq!(r, RespFrame::Integer(42));
-        let r = eval_script(
-            b"return collectgarbage('count')",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .expect("count");
+        let r =
+            eval_script(b"return collectgarbage('count')", &[], &[], &mut store, 0).expect("count");
         assert_eq!(r, RespFrame::Integer(32));
     }
 
@@ -16514,7 +16735,10 @@ mod tests {
         ] {
             let result = eval_script(body, &[], &[], &mut store, 0).expect("eval");
             let RespFrame::Error(msg) = result else {
-                panic!("expected error for {:?}, got {result:?}", String::from_utf8_lossy(body));
+                panic!(
+                    "expected error for {:?}, got {result:?}",
+                    String::from_utf8_lossy(body)
+                );
             };
             assert!(
                 msg.contains("wrong number or type of arguments"),
@@ -16524,7 +16748,8 @@ mod tests {
         }
 
         // Sanity: exactly-one-string args still produce the table.
-        let ok = eval_script(b"return redis.status_reply('OK')", &[], &[], &mut store, 0).expect("status_reply ok");
+        let ok = eval_script(b"return redis.status_reply('OK')", &[], &[], &mut store, 0)
+            .expect("status_reply ok");
         assert_eq!(ok, RespFrame::SimpleString("OK".to_string()));
     }
 
@@ -16539,7 +16764,7 @@ mod tests {
             b"redis.log(-1, 'msg') return 1".as_slice(),
             b"redis.log(4, 'msg') return 1".as_slice(),
             b"redis.log(99, 'msg') return 1".as_slice(),
-            b"redis.log(0/0, 'msg') return 1".as_slice(),  // NaN
+            b"redis.log(0/0, 'msg') return 1".as_slice(), // NaN
         ] {
             let result = eval_script(body, &[], &[], &mut store, 0);
             let err = result.expect_err(&format!(
@@ -16574,23 +16799,35 @@ mod tests {
         // 1-capture pattern, %5 referenced.
         let err = eval_script(
             b"return string.gsub('abc', '(.)', '%5')",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected invalid capture");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("expected invalid capture");
         assert_eq!(err, "user_script:1: invalid capture index");
 
         // 2-capture pattern, %3 referenced.
         let err = eval_script(
             b"return string.gsub('a1', '(%a)(%d)', '%3')",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected invalid capture");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("expected invalid capture");
         assert_eq!(err, "user_script:1: invalid capture index");
 
         // 0-capture pattern, %1: upstream special-cases this to mean
         // "whole match" (push_onecapture when i == 0 and level == 0).
         let r = eval_script(
             b"return string.gsub('abc', '.', '%1')",
-            &[], &[], &mut store, 0,
-        ).expect("%1 with 0 captures = whole match");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("%1 with 0 captures = whole match");
         let s = match r {
             RespFrame::Array(Some(rows)) => match rows.first() {
                 Some(RespFrame::BulkString(Some(bytes))) => bytes.clone(),
@@ -16604,8 +16841,12 @@ mod tests {
         // %0 (whole match) always valid even with no captures.
         let r = eval_script(
             b"return string.gsub('abc', '.', '<%0>')",
-            &[], &[], &mut store, 0,
-        ).expect("valid %0");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("valid %0");
         // gsub returns two values; first is the substituted string.
         match r {
             RespFrame::Array(Some(rows)) => match rows.first() {
@@ -16621,8 +16862,12 @@ mod tests {
         // %1 with a valid 1-capture pattern still works.
         let r = eval_script(
             b"return string.gsub('hello', '(l)', '<%1>')",
-            &[], &[], &mut store, 0,
-        ).expect("valid %1");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("valid %1");
         let s = match r {
             RespFrame::Array(Some(rows)) => match rows.first() {
                 Some(RespFrame::BulkString(Some(bytes))) => bytes.clone(),
@@ -16648,22 +16893,33 @@ mod tests {
             (b"return math.max(1, 'a')".as_slice(), "max", 2, "string"),
             (b"return math.min({}, 1)".as_slice(), "min", 1, "table"),
             (b"return math.max(nil, 1)".as_slice(), "max", 1, "nil"),
-            (b"return math.min(1, 2, true)".as_slice(), "min", 3, "boolean"),
+            (
+                b"return math.min(1, 2, true)".as_slice(),
+                "min",
+                3,
+                "boolean",
+            ),
         ] {
-            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
-                &format!("expected wrong-type error for {:?}", String::from_utf8_lossy(body)),
-            );
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(&format!(
+                "expected wrong-type error for {:?}",
+                String::from_utf8_lossy(body)
+            ));
             let expected = format!(
                 "user_script:1: bad argument #{idx} to '{fname}' (number expected, got {ty})"
             );
-            assert_eq!(err, expected, "wrong error for {:?}", String::from_utf8_lossy(body));
+            assert_eq!(
+                err,
+                expected,
+                "wrong error for {:?}",
+                String::from_utf8_lossy(body)
+            );
         }
 
         // No-arg form continues to report arg #1 with "got no value".
         for fname in &["min", "max"] {
             let body = format!("return math.{fname}()");
-            let err = eval_script(body.as_bytes(), &[], &[], &mut store, 0)
-                .expect_err("no-arg error");
+            let err =
+                eval_script(body.as_bytes(), &[], &[], &mut store, 0).expect_err("no-arg error");
             assert_eq!(
                 err,
                 format!(
@@ -16673,9 +16929,11 @@ mod tests {
         }
 
         // Valid calls still work.
-        let r = eval_script(b"return math.min(3, 1, 2)", &[], &[], &mut store, 0).expect("valid min");
+        let r =
+            eval_script(b"return math.min(3, 1, 2)", &[], &[], &mut store, 0).expect("valid min");
         assert_eq!(r, RespFrame::Integer(1));
-        let r = eval_script(b"return math.max(3, 1, 2)", &[], &[], &mut store, 0).expect("valid max");
+        let r =
+            eval_script(b"return math.max(3, 1, 2)", &[], &[], &mut store, 0).expect("valid max");
         assert_eq!(r, RespFrame::Integer(3));
     }
 
@@ -16718,10 +16976,8 @@ mod tests {
         );
 
         // assert(truthy) returns its args unchanged.
-        let r = eval_script(
-            b"return assert(42, 'msg')",
-            &[], &[], &mut store, 0,
-        ).expect("assert truthy");
+        let r = eval_script(b"return assert(42, 'msg')", &[], &[], &mut store, 0)
+            .expect("assert truthy");
         // 42 is returned; multi-return collapses through eval_script.
         match r {
             RespFrame::Integer(n) => assert_eq!(n, 42),
@@ -16772,13 +17028,19 @@ mod tests {
             (b"return table.remove()", "remove"),
         ];
         for (body, fname) in no_arg {
-            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
-                &format!("expected no-value error for {:?}", String::from_utf8_lossy(body)),
-            );
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(&format!(
+                "expected no-value error for {:?}",
+                String::from_utf8_lossy(body)
+            ));
             let expected = format!(
                 "user_script:1: bad argument #1 to '{fname}' (table expected, got no value)"
             );
-            assert_eq!(err, expected, "wrong error for {:?}", String::from_utf8_lossy(body));
+            assert_eq!(
+                err,
+                expected,
+                "wrong error for {:?}",
+                String::from_utf8_lossy(body)
+            );
         }
 
         // Explicit-nil cases — same builtins report "got nil" with prefix.
@@ -16791,13 +17053,18 @@ mod tests {
             (b"return table.remove(nil)", "remove"),
         ];
         for (body, fname) in nil_arg {
-            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
-                &format!("expected nil error for {:?}", String::from_utf8_lossy(body)),
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(&format!(
+                "expected nil error for {:?}",
+                String::from_utf8_lossy(body)
+            ));
+            let expected =
+                format!("user_script:1: bad argument #1 to '{fname}' (table expected, got nil)");
+            assert_eq!(
+                err,
+                expected,
+                "wrong error for {:?}",
+                String::from_utf8_lossy(body)
             );
-            let expected = format!(
-                "user_script:1: bad argument #1 to '{fname}' (table expected, got nil)"
-            );
-            assert_eq!(err, expected, "wrong error for {:?}", String::from_utf8_lossy(body));
         }
 
         // Wrong-type still reports the actual type with prefix.
@@ -16826,11 +17093,12 @@ mod tests {
             b"return tonumber('ff', 16)".as_slice(),
             b"return tonumber('FF', 16)".as_slice(),
         ] {
-            let r = eval_script(body, &[], &[], &mut store, 0).expect(
-                &format!("expected number for {:?}", String::from_utf8_lossy(body)),
-            );
+            let r = eval_script(body, &[], &[], &mut store, 0).unwrap_or_else(|_| {
+                panic!("expected number for {:?}", String::from_utf8_lossy(body))
+            });
             assert_eq!(
-                r, RespFrame::Integer(255),
+                r,
+                RespFrame::Integer(255),
                 "wrong result for {:?}",
                 String::from_utf8_lossy(body),
             );
@@ -16839,8 +17107,8 @@ mod tests {
         // Negative hex string with explicit base wraps via strtoul.
         // Pinned in detail by frankenredis-8reid — round-trips to
         // INT64_MIN through lua_to_resp's cvttsd2si mimic.
-        let r = eval_script(b"return tonumber('-ff', 16)", &[], &[], &mut store, 0)
-            .expect("neg hex");
+        let r =
+            eval_script(b"return tonumber('-ff', 16)", &[], &[], &mut store, 0).expect("neg hex");
         assert_eq!(r, RespFrame::Integer(i64::MIN));
 
         // Float base truncates to integer.
@@ -16849,8 +17117,8 @@ mod tests {
         assert_eq!(r, RespFrame::Integer(10));
 
         // Explicit nil base defaults to no base (string-as-decimal).
-        let r = eval_script(b"return tonumber('10', nil)", &[], &[], &mut store, 0)
-            .expect("nil base");
+        let r =
+            eval_script(b"return tonumber('10', nil)", &[], &[], &mut store, 0).expect("nil base");
         assert_eq!(r, RespFrame::Integer(10));
 
         // Base out of range: 1, 37, -1, 0 all error with the prefix.
@@ -16860,9 +17128,10 @@ mod tests {
             b"return tonumber('0', -1)".as_slice(),
             b"return tonumber('0', 0)".as_slice(),
         ] {
-            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
-                &format!("expected base-out-of-range for {:?}", String::from_utf8_lossy(body)),
-            );
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(&format!(
+                "expected base-out-of-range for {:?}",
+                String::from_utf8_lossy(body)
+            ));
             assert_eq!(
                 err,
                 "user_script:1: bad argument #2 to 'tonumber' (base out of range)",
@@ -16907,13 +17176,18 @@ mod tests {
                 "function",
             ),
         ] {
-            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
-                &format!("expected type-error for {:?}", String::from_utf8_lossy(body)),
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(&format!(
+                "expected type-error for {:?}",
+                String::from_utf8_lossy(body)
+            ));
+            let expected =
+                format!("user_script:1: bad argument #2 to 'format' (string expected, got {ty})");
+            assert_eq!(
+                err,
+                expected,
+                "wrong error for {:?}",
+                String::from_utf8_lossy(body)
             );
-            let expected = format!(
-                "user_script:1: bad argument #2 to 'format' (string expected, got {ty})"
-            );
-            assert_eq!(err, expected, "wrong error for {:?}", String::from_utf8_lossy(body));
         }
 
         // %q with strings and numbers still works.
@@ -16942,8 +17216,12 @@ mod tests {
         // wording (not the generic "attempt to call" message).
         let err = eval_script(
             b"local t={1,2,3}; table.sort(t, 'bad'); return t",
-            &[], &[], &mut store, 0,
-        ).expect_err("string comparator");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("string comparator");
         assert_eq!(
             err,
             "user_script:1: bad argument #2 to 'sort' (function expected, got string)"
@@ -16953,27 +17231,37 @@ mod tests {
         // (no user_script:1 prefix — C-level error origin).
         let r = eval_script(
             b"local t={'a',{b=2}}; local ok,e=pcall(table.sort, t); return tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("mixed types");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("mixed types");
         assert_eq!(
             r,
-            RespFrame::BulkString(Some(
-                b"attempt to compare table with string".to_vec()
-            ))
+            RespFrame::BulkString(Some(b"attempt to compare table with string".to_vec()))
         );
         // Direct (not via pcall) — same bare wording.
         let err = eval_script(
             b"local t={'a',{b=2}}; table.sort(t); return t",
-            &[], &[], &mut store, 0,
-        ).expect_err("direct mixed");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("direct mixed");
         assert_eq!(err, "attempt to compare table with string");
 
         // Numbers + strings together still raise from the default
         // sort (not silently treated as equal).
         let r = eval_script(
             b"local t={1,'a',2}; local ok,e=pcall(table.sort, t); return tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("number+string mix");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("number+string mix");
         assert!(
             matches!(&r, RespFrame::BulkString(Some(b)) if String::from_utf8_lossy(b).contains("attempt to compare")),
             "expected compare-error, got {r:?}"
@@ -16982,13 +17270,21 @@ mod tests {
         // Positive controls: pure numeric / pure string still sort.
         let r = eval_script(
             b"local t={3,1,2}; table.sort(t); return t[1]..t[2]..t[3]",
-            &[], &[], &mut store, 0,
-        ).expect("numeric sort");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("numeric sort");
         assert_eq!(r, RespFrame::BulkString(Some(b"123".to_vec())));
         let r = eval_script(
             b"local t={'c','a','b'}; table.sort(t); return t[1]..t[2]..t[3]",
-            &[], &[], &mut store, 0,
-        ).expect("string sort");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("string sort");
         assert_eq!(r, RespFrame::BulkString(Some(b"abc".to_vec())));
 
         // Custom callable still works.
@@ -17001,8 +17297,12 @@ mod tests {
         // Pcall-indirect variant uses '?' name.
         let r = eval_script(
             b"local ok,e=pcall(table.sort, {1,2}, 'bad'); return tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall sort bad cmp");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall sort bad cmp");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(
@@ -17019,23 +17319,23 @@ mod tests {
         // Probed against vendored Redis 7.2.4 on :16380.
         let mut store = Store::new();
         let cases: &[(&[u8], &str)] = &[
-            (b"return string.format('%10.5d', 42)",   "     00042"),
-            (b"return string.format('%5.3d', 42)",    "  042"),
-            (b"return string.format('%.5d', 42)",     "00042"),
-            (b"return string.format('%.0d', 0)",      ""),
-            (b"return string.format('%.0d', 5)",      "5"),
-            (b"return string.format('%05.3d', 42)",   "  042"),  // precision suppresses 0-flag
-            (b"return string.format('%5d', 42)",      "   42"),
-            (b"return string.format('%d', 42)",       "42"),
-            (b"return string.format('%.4x', 255)",    "00ff"),
-            (b"return string.format('%.4X', 255)",    "00FF"),
-            (b"return string.format('%#.4x', 255)",   "0x00ff"),
-            (b"return string.format('%.6o', 8)",      "000010"),
-            (b"return string.format('%5.4d', -42)",   "-0042"),
-            (b"return string.format('%.5u', 42)",     "00042"),
-            (b"return string.format('%.0x', 0)",      ""),
-            (b"return string.format('%.0o', 0)",      ""),
-            (b"return string.format('%.0u', 0)",      ""),
+            (b"return string.format('%10.5d', 42)", "     00042"),
+            (b"return string.format('%5.3d', 42)", "  042"),
+            (b"return string.format('%.5d', 42)", "00042"),
+            (b"return string.format('%.0d', 0)", ""),
+            (b"return string.format('%.0d', 5)", "5"),
+            (b"return string.format('%05.3d', 42)", "  042"), // precision suppresses 0-flag
+            (b"return string.format('%5d', 42)", "   42"),
+            (b"return string.format('%d', 42)", "42"),
+            (b"return string.format('%.4x', 255)", "00ff"),
+            (b"return string.format('%.4X', 255)", "00FF"),
+            (b"return string.format('%#.4x', 255)", "0x00ff"),
+            (b"return string.format('%.6o', 8)", "000010"),
+            (b"return string.format('%5.4d', -42)", "-0042"),
+            (b"return string.format('%.5u', 42)", "00042"),
+            (b"return string.format('%.0x', 0)", ""),
+            (b"return string.format('%.0o', 0)", ""),
+            (b"return string.format('%.0u', 0)", ""),
         ];
         for (body, expected) in cases {
             let r = eval_script(body, &[], &[], &mut store, 0)
@@ -17058,8 +17358,12 @@ mod tests {
         // %b() matches a balanced parenthesized substring.
         let r = eval_script(
             b"return string.match('(a)(b)(c)', '%b()')",
-            &[], &[], &mut store, 0,
-        ).expect("balanced ()");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("balanced ()");
         assert_eq!(r, RespFrame::BulkString(Some(b"(a)".to_vec())));
 
         // %b[] matches a balanced bracketed substring — and the inner
@@ -17067,39 +17371,67 @@ mod tests {
         // of a set.
         let r = eval_script(
             b"return string.match('foo[bar]baz', '%b[]')",
-            &[], &[], &mut store, 0,
-        ).expect("balanced []");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("balanced []");
         assert_eq!(r, RespFrame::BulkString(Some(b"[bar]".to_vec())));
 
         // Degenerate: %bxy where open == close just matches a 2-char run.
         let r = eval_script(
             b"return string.match('xx', '%bxx')",
-            &[], &[], &mut store, 0,
-        ).expect("degenerate balanced");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("degenerate balanced");
         assert_eq!(r, RespFrame::BulkString(Some(b"xx".to_vec())));
 
         // No balanced match → nil.
         let r = eval_script(
             b"return string.match('(unbal', '%b()')",
-            &[], &[], &mut store, 0,
-        ).expect("unbalanced");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("unbalanced");
         assert_eq!(r, RespFrame::BulkString(None));
 
         // Nested balanced.
         let r = eval_script(
             b"return string.match('(a(b)c)d', '%b()')",
-            &[], &[], &mut store, 0,
-        ).expect("nested balanced");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("nested balanced");
         assert_eq!(r, RespFrame::BulkString(Some(b"(a(b)c)".to_vec())));
 
         // Capture validation: unclosed '(' raises "unfinished capture".
-        let err = eval_script(b"return string.match('abc', '(.*')", &[], &[], &mut store, 0)
-            .expect_err("unfinished");
+        let err = eval_script(
+            b"return string.match('abc', '(.*')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("unfinished");
         assert_eq!(err, "user_script:1: unfinished capture");
 
         // Extra ')' raises "invalid pattern capture".
-        let err = eval_script(b"return string.match('abc', '.*)')", &[], &[], &mut store, 0)
-            .expect_err("invalid capture");
+        let err = eval_script(
+            b"return string.match('abc', '.*)')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("invalid capture");
         assert_eq!(err, "user_script:1: invalid pattern capture");
     }
 
@@ -17122,29 +17454,35 @@ mod tests {
         // F0 9F 98 80.
         let r = eval_script(
             b"return cjson.decode('\"\\\\uD83D\\\\uDE00\"')",
-            &[], &[], &mut store, 0,
-        ).expect("surrogate pair");
-        assert_eq!(
-            r,
-            RespFrame::BulkString(Some(vec![0xF0, 0x9F, 0x98, 0x80]))
-        );
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("surrogate pair");
+        assert_eq!(r, RespFrame::BulkString(Some(vec![0xF0, 0x9F, 0x98, 0x80])));
 
         // Basic single-codepoint escapes still work.
         let r = eval_script(
             b"return cjson.decode('\"\\\\u0041\"')",
-            &[], &[], &mut store, 0,
-        ).expect("ASCII u-escape");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("ASCII u-escape");
         assert_eq!(r, RespFrame::BulkString(Some(b"A".to_vec())));
 
         // Another supplementary plane test: U+10000 → D800 DC00 → F0 90 80 80
         let r = eval_script(
             b"return cjson.decode('\"\\\\uD800\\\\uDC00\"')",
-            &[], &[], &mut store, 0,
-        ).expect("U+10000");
-        assert_eq!(
-            r,
-            RespFrame::BulkString(Some(vec![0xF0, 0x90, 0x80, 0x80]))
-        );
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("U+10000");
+        assert_eq!(r, RespFrame::BulkString(Some(vec![0xF0, 0x90, 0x80, 0x80])));
     }
 
     #[test]
@@ -17156,26 +17494,26 @@ mod tests {
         let mut store = Store::new();
 
         // Sparse array encoding (gaps → null).
-        let r = eval_script(
-            b"return cjson.encode({1,nil,3})",
-            &[], &[], &mut store, 0,
-        ).expect("sparse encode 1,nil,3");
+        let r = eval_script(b"return cjson.encode({1,nil,3})", &[], &[], &mut store, 0)
+            .expect("sparse encode 1,nil,3");
         assert_eq!(r, RespFrame::BulkString(Some(b"[1,null,3]".to_vec())));
 
         let r = eval_script(
             b"local x={1}; x[4]='gap'; return cjson.encode(x)",
-            &[], &[], &mut store, 0,
-        ).expect("sparse encode trailing gap");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("sparse encode trailing gap");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(b"[1,null,null,\"gap\"]".to_vec()))
         );
 
         // Boolean key rejection.
-        let err = eval_script(
-            b"return cjson.encode({[true]=1})",
-            &[], &[], &mut store, 0,
-        ).expect_err("bool key");
+        let err = eval_script(b"return cjson.encode({[true]=1})", &[], &[], &mut store, 0)
+            .expect_err("bool key");
         assert!(
             err.contains("Cannot serialise boolean: table key must be a number or string"),
             "wrong: {err}"
@@ -17215,19 +17553,18 @@ mod tests {
         };
         assert!(
             bytes == b"{\"a\":1,\"b\":2}" || bytes == b"{\"b\":2,\"a\":1}",
-            "got {:?}", String::from_utf8_lossy(&bytes),
+            "got {:?}",
+            String::from_utf8_lossy(&bytes),
         );
         // Empty table still encodes as object (cjson default).
-        let r = eval_script(b"return cjson.encode({})", &[], &[], &mut store, 0)
-            .expect("empty table");
+        let r =
+            eval_script(b"return cjson.encode({})", &[], &[], &mut store, 0).expect("empty table");
         assert_eq!(r, RespFrame::BulkString(Some(b"{}".to_vec())));
         // Sparse-ratio guard: max_int_key way larger than count →
         // upstream raises 'excessively sparse array' under its default
         // encode_sparse_convert=false setting.
-        let err = eval_script(
-            b"return cjson.encode({[100]='x'})",
-            &[], &[], &mut store, 0,
-        ).expect_err("sparse rejected");
+        let err = eval_script(b"return cjson.encode({[100]='x'})", &[], &[], &mut store, 0)
+            .expect_err("sparse rejected");
         assert!(
             err.contains("Cannot serialise table: excessively sparse array"),
             "wrong: {err}"
@@ -17266,8 +17603,8 @@ mod tests {
         }
 
         // Missing-arg / type errors with upstream wording.
-        let err = eval_script(b"return bit.band()", &[], &[], &mut store, 0)
-            .expect_err("band() no args");
+        let err =
+            eval_script(b"return bit.band()", &[], &[], &mut store, 0).expect_err("band() no args");
         assert!(
             err.contains("bad argument #1 to 'band' (number expected, got no value)"),
             "wrong: {err}"
@@ -17306,8 +17643,12 @@ mod tests {
         // Indirect pcall drops prefix and uses '?' name.
         let r = eval_script(
             b"local ok,e=pcall(bit.band); return tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall(bit.band)");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall(bit.band)");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(
@@ -17326,32 +17667,35 @@ mod tests {
         let cases: &[(&[u8], &str)] = &[
             // self.expect() now produces upstream wording for all
             // keyword-expected and punctuation-expected paths.
-            (b"function f end",         "'(' expected near 'end'"),
-            (b"if true do end",         "'then' expected near 'do'"),
+            (b"function f end", "'(' expected near 'end'"),
+            (b"if true do end", "'then' expected near 'do'"),
             (b"if true print('x') end", "'then' expected near 'print'"),
-            (b"repeat end",             "'until' expected near 'end'"),
-            (b"do",                     "'end' expected near '<eof>'"),
+            (b"repeat end", "'until' expected near 'end'"),
+            (b"do", "'end' expected near '<eof>'"),
             // name-expected paths use the '<name>' literal slot.
-            (b"local nil = 1",          "'<name>' expected near 'nil'"),
-            (b"function 1() end",       "'<name>' expected near '1'"),
+            (b"local nil = 1", "'<name>' expected near 'nil'"),
+            (b"function 1() end", "'<name>' expected near '1'"),
             // unexpected symbol in expression-start.
-            (b"if then end",            "unexpected symbol near 'then'"),
-            (b"while do end",           "unexpected symbol near 'do'"),
-            (b"for x= do",              "unexpected symbol near 'do'"),
-            (b"return 1+",              "unexpected symbol near '<eof>'"),
-            (b"(((",                    "unexpected symbol near '<eof>'"),
-            (b"::label::",              "unexpected symbol near ':'"),
-            (b"[",                      "unexpected symbol near '['"),
+            (b"if then end", "unexpected symbol near 'then'"),
+            (b"while do end", "unexpected symbol near 'do'"),
+            (b"for x= do", "unexpected symbol near 'do'"),
+            (b"return 1+", "unexpected symbol near '<eof>'"),
+            (b"(((", "unexpected symbol near '<eof>'"),
+            (b"::label::", "unexpected symbol near ':'"),
+            (b"[", "unexpected symbol near '['"),
             // Top-of-chunk "extra tokens" → '<eof>' expected near 'X'.
-            (b"elseif x then return end", "'<eof>' expected near 'elseif'"),
-            (b"else return end",          "'<eof>' expected near 'else'"),
-            (b"end",                      "'<eof>' expected near 'end'"),
+            (
+                b"elseif x then return end",
+                "'<eof>' expected near 'elseif'",
+            ),
+            (b"else return end", "'<eof>' expected near 'else'"),
+            (b"end", "'<eof>' expected near 'end'"),
             // `break` outside a loop now raises.
-            (b"break",                  "no loop to break near '<eof>'"),
+            (b"break", "no loop to break near '<eof>'"),
         ];
         for (body, expected) in cases {
-            let err = eval_script(body, &[], &[], &mut store, 0)
-                .expect_err("parser error expected");
+            let err =
+                eval_script(body, &[], &[], &mut store, 0).expect_err("parser error expected");
             assert!(
                 err.contains(expected),
                 "wrong error for {:?}: got {err:?}",
@@ -17362,8 +17706,12 @@ mod tests {
         // Regression: break inside a loop still parses.
         let r = eval_script(
             b"for i=1,3 do if i==2 then break end end; return 'ok'",
-            &[], &[], &mut store, 0,
-        ).expect("break-in-loop");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("break-in-loop");
         assert_eq!(r, RespFrame::BulkString(Some(b"ok".to_vec())));
     }
 
@@ -17377,13 +17725,13 @@ mod tests {
         let mut store = Store::new();
 
         // Base 3: "5" is not a valid base-3 digit, parser fails → nil.
-        let r = eval_script(b"return tonumber(5, 3)", &[], &[], &mut store, 0)
-            .expect("tonumber(5,3)");
+        let r =
+            eval_script(b"return tonumber(5, 3)", &[], &[], &mut store, 0).expect("tonumber(5,3)");
         assert_eq!(r, RespFrame::BulkString(None));
 
         // Base 2: "7" is not a valid base-2 digit → nil.
-        let r = eval_script(b"return tonumber(7, 2)", &[], &[], &mut store, 0)
-            .expect("tonumber(7,2)");
+        let r =
+            eval_script(b"return tonumber(7, 2)", &[], &[], &mut store, 0).expect("tonumber(7,2)");
         assert_eq!(r, RespFrame::BulkString(None));
 
         // Base 16: "15" parses as 0x15 = 21.
@@ -17392,8 +17740,7 @@ mod tests {
         assert_eq!(r, RespFrame::Integer(21));
 
         // No base: number passes through unchanged.
-        let r = eval_script(b"return tonumber(15)", &[], &[], &mut store, 0)
-            .expect("tonumber(15)");
+        let r = eval_script(b"return tonumber(15)", &[], &[], &mut store, 0).expect("tonumber(15)");
         assert_eq!(r, RespFrame::Integer(15));
 
         // Nil base behaves like no base.
@@ -17423,26 +17770,42 @@ mod tests {
         let mut store = Store::new();
         let cases: &[(&[u8], &str)] = &[
             // assert via pcall: no prefix.
-            (b"local ok,e=pcall(assert, false); return tostring(e)",
-             "assertion failed!"),
-            (b"local ok,e=pcall(assert, false, 'msg'); return tostring(e)",
-             "msg"),
-            (b"local ok,e=pcall(assert, nil); return tostring(e)",
-             "assertion failed!"),
-            (b"local ok,e=pcall(assert, nil, 'x'); return tostring(e)",
-             "x"),
+            (
+                b"local ok,e=pcall(assert, false); return tostring(e)",
+                "assertion failed!",
+            ),
+            (
+                b"local ok,e=pcall(assert, false, 'msg'); return tostring(e)",
+                "msg",
+            ),
+            (
+                b"local ok,e=pcall(assert, nil); return tostring(e)",
+                "assertion failed!",
+            ),
+            (
+                b"local ok,e=pcall(assert, nil, 'x'); return tostring(e)",
+                "x",
+            ),
             // assert called from inside a Lua function: prefix added.
-            (b"local ok,e=pcall(function() assert(false) end); return tostring(e)",
-             "user_script:1: assertion failed!"),
+            (
+                b"local ok,e=pcall(function() assert(false) end); return tostring(e)",
+                "user_script:1: assertion failed!",
+            ),
             // tonumber via pcall: '?' name, no prefix.
-            (b"local ok,e=pcall(tonumber); return tostring(e)",
-             "bad argument #1 to '?' (value expected)"),
+            (
+                b"local ok,e=pcall(tonumber); return tostring(e)",
+                "bad argument #1 to '?' (value expected)",
+            ),
             // tonumber direct: 'tonumber' name with prefix.
-            (b"local ok,e=pcall(function() return tonumber() end); return tostring(e)",
-             "user_script:1: bad argument #1 to 'tonumber' (value expected)"),
+            (
+                b"local ok,e=pcall(function() return tonumber() end); return tostring(e)",
+                "user_script:1: bad argument #1 to 'tonumber' (value expected)",
+            ),
             // select with no args reports 'got no value' not 'got nil'.
-            (b"local ok,e=pcall(function() return select() end); return tostring(e)",
-             "user_script:1: bad argument #1 to 'select' (number expected, got no value)"),
+            (
+                b"local ok,e=pcall(function() return select() end); return tostring(e)",
+                "user_script:1: bad argument #1 to 'select' (number expected, got no value)",
+            ),
         ];
         for (body, expected) in cases {
             let r = eval_script(body, &[], &[], &mut store, 0)
@@ -17467,26 +17830,46 @@ mod tests {
         // Probed against vendored Redis 7.2.4 on :16380.
         let mut store = Store::new();
         let cases: &[(&[u8], &str)] = &[
-            (b"local ok,e=pcall(ipairs, nil); return tostring(e)",
-             "bad argument #1 to '?' (table expected, got nil)"),
-            (b"local ok,e=pcall(pairs, nil); return tostring(e)",
-             "bad argument #1 to '?' (table expected, got nil)"),
-            (b"local ok,e=pcall(next, nil); return tostring(e)",
-             "bad argument #1 to '?' (table expected, got nil)"),
-            (b"local ok,e=pcall(table.insert, nil); return tostring(e)",
-             "bad argument #1 to '?' (table expected, got nil)"),
-            (b"local ok,e=pcall(table.remove, nil); return tostring(e)",
-             "bad argument #1 to '?' (table expected, got nil)"),
-            (b"local ok,e=pcall(unpack, nil); return tostring(e)",
-             "bad argument #1 to '?' (table expected, got nil)"),
-            (b"local ok,e=pcall(rawset, nil); return tostring(e)",
-             "bad argument #1 to '?' (table expected, got nil)"),
-            (b"local ok,e=pcall(rawequal); return tostring(e)",
-             "bad argument #1 to '?' (value expected)"),
-            (b"local ok,e=pcall(math.floor, 'abc'); return tostring(e)",
-             "bad argument #1 to '?' (number expected, got string)"),
-            (b"local ok,e=pcall(math.abs, 'abc'); return tostring(e)",
-             "bad argument #1 to '?' (number expected, got string)"),
+            (
+                b"local ok,e=pcall(ipairs, nil); return tostring(e)",
+                "bad argument #1 to '?' (table expected, got nil)",
+            ),
+            (
+                b"local ok,e=pcall(pairs, nil); return tostring(e)",
+                "bad argument #1 to '?' (table expected, got nil)",
+            ),
+            (
+                b"local ok,e=pcall(next, nil); return tostring(e)",
+                "bad argument #1 to '?' (table expected, got nil)",
+            ),
+            (
+                b"local ok,e=pcall(table.insert, nil); return tostring(e)",
+                "bad argument #1 to '?' (table expected, got nil)",
+            ),
+            (
+                b"local ok,e=pcall(table.remove, nil); return tostring(e)",
+                "bad argument #1 to '?' (table expected, got nil)",
+            ),
+            (
+                b"local ok,e=pcall(unpack, nil); return tostring(e)",
+                "bad argument #1 to '?' (table expected, got nil)",
+            ),
+            (
+                b"local ok,e=pcall(rawset, nil); return tostring(e)",
+                "bad argument #1 to '?' (table expected, got nil)",
+            ),
+            (
+                b"local ok,e=pcall(rawequal); return tostring(e)",
+                "bad argument #1 to '?' (value expected)",
+            ),
+            (
+                b"local ok,e=pcall(math.floor, 'abc'); return tostring(e)",
+                "bad argument #1 to '?' (number expected, got string)",
+            ),
+            (
+                b"local ok,e=pcall(math.abs, 'abc'); return tostring(e)",
+                "bad argument #1 to '?' (number expected, got string)",
+            ),
         ];
         for (body, expected) in cases {
             let r = eval_script(body, &[], &[], &mut store, 0)
@@ -17502,8 +17885,8 @@ mod tests {
         // Regression: direct AST call still uses the prefix and the
         // call-site name (which equals the internal name for unaliased
         // calls).
-        let err = eval_script(b"return ipairs(nil)", &[], &[], &mut store, 0)
-            .expect_err("direct ipairs");
+        let err =
+            eval_script(b"return ipairs(nil)", &[], &[], &mut store, 0).expect_err("direct ipairs");
         assert_eq!(
             err,
             "user_script:1: bad argument #1 to 'ipairs' (table expected, got nil)"
@@ -17532,10 +17915,10 @@ mod tests {
             ),
         ];
         for (body, expected) in cases {
-            let err = eval_script(body, &[], &[], &mut store, 0)
-                .expect_err("for-loop type error");
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err("for-loop type error");
             assert_eq!(
-                err, *expected,
+                err,
+                *expected,
                 "wrong error for {:?}",
                 String::from_utf8_lossy(body),
             );
@@ -17543,7 +17926,7 @@ mod tests {
     }
 
     #[test]
-    fn lua_attempt_to_X_errors_include_accessor_label_9ckvq() {
+    fn lua_attempt_to_x_errors_include_accessor_label_9ckvq() {
         // (frankenredis-9ckvq) Lua 5.1's lvm.c::luaG_typeerror reports
         // the variable name of the offending operand alongside the type.
         // The Concat and Call paths in fr already do this; verify Index
@@ -17552,40 +17935,68 @@ mod tests {
         let mut store = Store::new();
 
         let cases: &[(&[u8], &str)] = &[
-            (b"local t=nil; return t.field",
-             "user_script:1: attempt to index local 't' (a nil value)"),
-            (b"local t=nil; return t[1]",
-             "user_script:1: attempt to index local 't' (a nil value)"),
-            (b"local mylocal=nil; return mylocal.f",
-             "user_script:1: attempt to index local 'mylocal' (a nil value)"),
-            (b"local t={a=nil}; return t.a.b",
-             "user_script:1: attempt to index field 'a' (a nil value)"),
-            (b"local t={}; return t.missing.deep",
-             "user_script:1: attempt to index field 'missing' (a nil value)"),
-            (b"local b=true; return b.f",
-             "user_script:1: attempt to index local 'b' (a boolean value)"),
-            (b"local nm=5; return nm.f",
-             "user_script:1: attempt to index local 'nm' (a number value)"),
-            (b"local x=nil; return x+1",
-             "user_script:1: attempt to perform arithmetic on local 'x' (a nil value)"),
-            (b"local y=nil; return 1+y",
-             "user_script:1: attempt to perform arithmetic on local 'y' (a nil value)"),
-            (b"local z=nil; return -z",
-             "user_script:1: attempt to perform arithmetic on local 'z' (a nil value)"),
-            (b"local s=nil; return #s",
-             "user_script:1: attempt to get length of local 's' (a nil value)"),
-            (b"local t={}; return #t.missing",
-             "user_script:1: attempt to get length of field 'missing' (a nil value)"),
-            (b"local t={}; return t+1",
-             "user_script:1: attempt to perform arithmetic on local 't' (a table value)"),
-            (b"local n='abc'; return n+1",
-             "user_script:1: attempt to perform arithmetic on local 'n' (a string value)"),
+            (
+                b"local t=nil; return t.field",
+                "user_script:1: attempt to index local 't' (a nil value)",
+            ),
+            (
+                b"local t=nil; return t[1]",
+                "user_script:1: attempt to index local 't' (a nil value)",
+            ),
+            (
+                b"local mylocal=nil; return mylocal.f",
+                "user_script:1: attempt to index local 'mylocal' (a nil value)",
+            ),
+            (
+                b"local t={a=nil}; return t.a.b",
+                "user_script:1: attempt to index field 'a' (a nil value)",
+            ),
+            (
+                b"local t={}; return t.missing.deep",
+                "user_script:1: attempt to index field 'missing' (a nil value)",
+            ),
+            (
+                b"local b=true; return b.f",
+                "user_script:1: attempt to index local 'b' (a boolean value)",
+            ),
+            (
+                b"local nm=5; return nm.f",
+                "user_script:1: attempt to index local 'nm' (a number value)",
+            ),
+            (
+                b"local x=nil; return x+1",
+                "user_script:1: attempt to perform arithmetic on local 'x' (a nil value)",
+            ),
+            (
+                b"local y=nil; return 1+y",
+                "user_script:1: attempt to perform arithmetic on local 'y' (a nil value)",
+            ),
+            (
+                b"local z=nil; return -z",
+                "user_script:1: attempt to perform arithmetic on local 'z' (a nil value)",
+            ),
+            (
+                b"local s=nil; return #s",
+                "user_script:1: attempt to get length of local 's' (a nil value)",
+            ),
+            (
+                b"local t={}; return #t.missing",
+                "user_script:1: attempt to get length of field 'missing' (a nil value)",
+            ),
+            (
+                b"local t={}; return t+1",
+                "user_script:1: attempt to perform arithmetic on local 't' (a table value)",
+            ),
+            (
+                b"local n='abc'; return n+1",
+                "user_script:1: attempt to perform arithmetic on local 'n' (a string value)",
+            ),
         ];
         for (body, expected) in cases {
-            let err = eval_script(body, &[], &[], &mut store, 0)
-                .expect_err("error expected");
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err("error expected");
             assert_eq!(
-                err, *expected,
+                err,
+                *expected,
                 "wrong error for {:?}",
                 String::from_utf8_lossy(body),
             );
@@ -17596,8 +18007,12 @@ mod tests {
         // no resolvable variable, e.g. a function-call result).
         let err = eval_script(
             b"return (function() return nil end)() + 1",
-            &[], &[], &mut store, 0,
-        ).expect_err("no label");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("no label");
         assert_eq!(
             err,
             "user_script:1: attempt to perform arithmetic on a nil value"
@@ -17614,16 +18029,24 @@ mod tests {
         // getmetatable returns __metatable when present.
         let r = eval_script(
             b"return getmetatable(setmetatable({}, {__metatable='locked'}))",
-            &[], &[], &mut store, 0,
-        ).expect("getmetatable masked");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("getmetatable masked");
         assert_eq!(r, RespFrame::BulkString(Some(b"locked".to_vec())));
 
         // getmetatable still returns the real metatable when
         // __metatable is absent (existing behavior must not regress).
         let r = eval_script(
             b"local mt={}; setmetatable({}, mt); return type(getmetatable(setmetatable({},mt)))",
-            &[], &[], &mut store, 0,
-        ).expect("getmetatable plain");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("getmetatable plain");
         assert_eq!(r, RespFrame::BulkString(Some(b"table".to_vec())));
 
         // setmetatable on a protected table errors. Called directly
@@ -17653,8 +18076,12 @@ mod tests {
         // expected" rather than silently treating arg #2 as nil.
         let r = eval_script(
             b"local ok,e=pcall(setmetatable, {}); return tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("setmetatable arity");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("setmetatable arity");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(
@@ -17685,23 +18112,35 @@ mod tests {
         // no prefix. fr previously incorrectly emitted user_script:1: msg.
         let r = eval_script(
             b"local ok,err=pcall(error, 'msg'); return type(err)..':'..tostring(err)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall(error,'msg')");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall(error,'msg')");
         assert_eq!(r, RespFrame::BulkString(Some(b"string:msg".to_vec())));
 
         // pcall(error, 42): same — number coerced to string, no prefix.
         let r = eval_script(
             b"local ok,err=pcall(error, 42); return type(err)..':'..tostring(err)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall(error,42)");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall(error,42)");
         assert_eq!(r, RespFrame::BulkString(Some(b"string:42".to_vec())));
 
         // pcall(error, 'msg', 2): level 2 walks past pcall (C) to the
         // script chunk (Lua) → prefix added.
         let r = eval_script(
             b"local ok,err=pcall(error, 'msg', 2); return type(err)..':'..tostring(err)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall(error,'msg',2)");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall(error,'msg',2)");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(b"string:user_script:1: msg".to_vec()))
@@ -17755,52 +18194,50 @@ mod tests {
         let mut store = Store::new();
 
         // Direct t[nil]=1 syntax raises before storing.
-        let err = eval_script(
-            b"local t={} t[nil]=1",
-            &[], &[], &mut store, 0,
-        ).expect_err("nil key");
+        let err =
+            eval_script(b"local t={} t[nil]=1", &[], &[], &mut store, 0).expect_err("nil key");
         assert_eq!(err, "user_script:1: table index is nil");
 
         // Direct t[0/0]=1 syntax raises with NaN message.
-        let err = eval_script(
-            b"local t={} t[0/0]=1",
-            &[], &[], &mut store, 0,
-        ).expect_err("NaN key");
+        let err =
+            eval_script(b"local t={} t[0/0]=1", &[], &[], &mut store, 0).expect_err("NaN key");
         assert_eq!(err, "user_script:1: table index is NaN");
 
         // -NaN must also be rejected (sign bit doesn't help).
-        let err = eval_script(
-            b"local t={} t[-(0/0)]=1",
-            &[], &[], &mut store, 0,
-        ).expect_err("-NaN key");
+        let err =
+            eval_script(b"local t={} t[-(0/0)]=1", &[], &[], &mut store, 0).expect_err("-NaN key");
         assert_eq!(err, "user_script:1: table index is NaN");
 
         // Table constructor {[nil]=1} raises at construction time.
-        let err = eval_script(
-            b"return {[nil]=1}",
-            &[], &[], &mut store, 0,
-        ).expect_err("ctor nil key");
+        let err =
+            eval_script(b"return {[nil]=1}", &[], &[], &mut store, 0).expect_err("ctor nil key");
         assert_eq!(err, "user_script:1: table index is nil");
 
         // Table constructor {[0/0]=1} raises at construction time.
-        let err = eval_script(
-            b"return {[0/0]=1}",
-            &[], &[], &mut store, 0,
-        ).expect_err("ctor NaN key");
+        let err =
+            eval_script(b"return {[0/0]=1}", &[], &[], &mut store, 0).expect_err("ctor NaN key");
         assert_eq!(err, "user_script:1: table index is NaN");
 
         // Positive infinity is a valid key — must NOT raise.
         let r = eval_script(
             b"local t={} t[1/0]=42 return t[1/0]",
-            &[], &[], &mut store, 0,
-        ).expect("inf key ok");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("inf key ok");
         assert_eq!(r, RespFrame::Integer(42));
 
         // Negative infinity is a valid key — must NOT raise.
         let r = eval_script(
             b"local t={} t[-1/0]=42 return t[-1/0]",
-            &[], &[], &mut store, 0,
-        ).expect("-inf key ok");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("-inf key ok");
         assert_eq!(r, RespFrame::Integer(42));
     }
 
@@ -17820,15 +18257,23 @@ mod tests {
         // Zero-width match at start: 'T' is %a, "before pos 0" is \0.
         let r = eval_script(
             b"return string.find('THE (QUICK)', '%f[%a]')",
-            &[], &[], &mut store, 0,
-        ).expect("frontier find");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("frontier find");
         assert_eq!(r, RespFrame::Integer(1));
 
         // Multiple matches via gsub at every word boundary.
         let r = eval_script(
             b"return string.gsub('THE QUICK BROWN', '%f[%a]', '|')",
-            &[], &[], &mut store, 0,
-        ).expect("frontier gsub many");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("frontier gsub many");
         // Returns (result, count) — the script returns the string only,
         // which is the first multi-return value.
         if let RespFrame::BulkString(Some(bytes)) = r {
@@ -17839,22 +18284,34 @@ mod tests {
 
         let r = eval_script(
             b"return string.gsub('a b c', '%f[%a]', '!')",
-            &[], &[], &mut store, 0,
-        ).expect("frontier gsub a b c");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("frontier gsub a b c");
         assert_eq!(r, RespFrame::BulkString(Some(b"!a !b !c".to_vec())));
 
         // match returns the captured word at the first word boundary.
         let r = eval_script(
             b"return string.match('Hello World', '%f[%w]%w+')",
-            &[], &[], &mut store, 0,
-        ).expect("frontier match");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("frontier match");
         assert_eq!(r, RespFrame::BulkString(Some(b"Hello".to_vec())));
 
         // Anchored frontier still works.
         let r = eval_script(
             b"return string.find('abc', '^%f[%a]')",
-            &[], &[], &mut store, 0,
-        ).expect("anchored frontier");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("anchored frontier");
         assert_eq!(r, RespFrame::Integer(1));
 
         // Malformed: %f without trailing [set] must raise the upstream
@@ -17945,9 +18402,10 @@ mod tests {
             b"return string.gsub('hello', '%', 'X')",
         ];
         for body in trailing_pct {
-            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
-                &format!("expected malformed-pattern error for {:?}", String::from_utf8_lossy(body)),
-            );
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(&format!(
+                "expected malformed-pattern error for {:?}",
+                String::from_utf8_lossy(body)
+            ));
             assert_eq!(
                 err,
                 "user_script:1: malformed pattern (ends with '%')",
@@ -17962,9 +18420,10 @@ mod tests {
             b"return string.gsub('hello', '[abc', 'X')",
         ];
         for body in missing_bracket {
-            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
-                &format!("expected missing-] error for {:?}", String::from_utf8_lossy(body)),
-            );
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(&format!(
+                "expected missing-] error for {:?}",
+                String::from_utf8_lossy(body)
+            ));
             assert_eq!(
                 err,
                 "user_script:1: malformed pattern (missing ']')",
@@ -17978,18 +18437,30 @@ mod tests {
         // doesn't raise the pattern-malformed error.
         let _ = eval_script(
             b"return string.find('a%b', '%', 1, true)",
-            &[], &[], &mut store, 0,
-        ).expect("plain find must not validate pattern");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("plain find must not validate pattern");
 
         // Valid patterns continue to match without error.
         let _ = eval_script(
             b"return string.find('hello123', '%d+')",
-            &[], &[], &mut store, 0,
-        ).expect("valid pattern must match");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("valid pattern must match");
         let _ = eval_script(
             b"return string.gsub('hello', '(l)', '<%1>')",
-            &[], &[], &mut store, 0,
-        ).expect("valid gsub must match");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("valid gsub must match");
     }
 
     #[test]
@@ -18002,8 +18473,14 @@ mod tests {
         let mut store = Store::new();
 
         // Boundary: 5 distinct flags still works.
-        let r = eval_script(b"return string.format('%-+ #0d', 1)", &[], &[], &mut store, 0)
-            .expect("5 flag chars must work");
+        let r = eval_script(
+            b"return string.format('%-+ #0d', 1)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("5 flag chars must work");
         assert_eq!(r, RespFrame::BulkString(Some(b"+1".to_vec())));
 
         // 6 flag chars (one repeated) raises the upstream wording.
@@ -18013,16 +18490,18 @@ mod tests {
         ).expect("pcall wrapper");
         assert_eq!(
             r,
-            RespFrame::BulkString(Some(
-                b"false:invalid format (repeated flags)".to_vec()
-            ))
+            RespFrame::BulkString(Some(b"false:invalid format (repeated flags)".to_vec()))
         );
 
         // Direct call (no pcall) carries the user_script:1: prefix.
         let err = eval_script(
             b"return string.format('%-+ #00d', 1)",
-            &[], &[], &mut store, 0,
-        ).expect_err("direct call must raise");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("direct call must raise");
         assert!(
             err.contains("user_script:1: invalid format (repeated flags)"),
             "got: {err}"
@@ -18058,8 +18537,12 @@ mod tests {
         // width=100 same.
         let r = eval_script(
             b"local ok,e = pcall(string.format, '%100d', 1); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall wrapper");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall wrapper");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(
@@ -18082,8 +18565,12 @@ mod tests {
         // Direct call (no pcall) keeps the user_script:1: prefix.
         let err = eval_script(
             b"return string.format('%.100d', 1)",
-            &[], &[], &mut store, 0,
-        ).expect_err("direct call must raise");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("direct call must raise");
         assert!(
             err.contains("user_script:1: invalid format (width or precision too long)"),
             "got: {err}"
@@ -18106,8 +18593,12 @@ mod tests {
         // Bad-type args raise the anonymous-C pcall wording.
         let r = eval_script(
             b"local ok,e = pcall(table.getn, nil); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall wrapper");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall wrapper");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(
@@ -18116,8 +18607,12 @@ mod tests {
         );
         let r = eval_script(
             b"local ok,e = pcall(table.getn); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall wrapper");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall wrapper");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(
@@ -18126,8 +18621,12 @@ mod tests {
         );
         let r = eval_script(
             b"local ok,e = pcall(table.getn, 42); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall wrapper");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall wrapper");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(
@@ -18136,8 +18635,12 @@ mod tests {
         );
         let r = eval_script(
             b"local ok,e = pcall(table.getn, 'abc'); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall wrapper");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall wrapper");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(
@@ -18158,8 +18661,12 @@ mod tests {
         // %w → w (one w per match).
         let r = eval_script(
             b"return string.gsub('abc', '(.)', '%w')",
-            &[], &[], &mut store, 0,
-        ).expect("gsub %w");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("gsub %w");
         // Note: gsub returns (s, n). EVAL surfaces multi-return as
         // top-of-stack first, so this returns just the string.
         assert_eq!(r, RespFrame::BulkString(Some(b"www".to_vec())));
@@ -18167,35 +18674,55 @@ mod tests {
         // %x → x, %A → A — same rule for any non-digit, non-%.
         let r = eval_script(
             b"return string.gsub('abc', '.', '%x')",
-            &[], &[], &mut store, 0,
-        ).expect("gsub %x");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("gsub %x");
         assert_eq!(r, RespFrame::BulkString(Some(b"xxx".to_vec())));
 
         let r = eval_script(
             b"return string.gsub('abc', '.', '%A')",
-            &[], &[], &mut store, 0,
-        ).expect("gsub %A");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("gsub %A");
         assert_eq!(r, RespFrame::BulkString(Some(b"AAA".to_vec())));
 
         // %! → ! (non-letter punctuation after %).
         let r = eval_script(
             b"return string.gsub('abc', '.', '%!')",
-            &[], &[], &mut store, 0,
-        ).expect("gsub %!");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("gsub %!");
         assert_eq!(r, RespFrame::BulkString(Some(b"!!!".to_vec())));
 
         // Numeric capture refs still work — %1 with captures.
         let r = eval_script(
             b"return string.gsub('abc', '(.)', '<%1>')",
-            &[], &[], &mut store, 0,
-        ).expect("gsub %1");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("gsub %1");
         assert_eq!(r, RespFrame::BulkString(Some(b"<a><b><c>".to_vec())));
 
         // %% still emits a literal %.
         let r = eval_script(
             b"return string.gsub('a', '.', '%%')",
-            &[], &[], &mut store, 0,
-        ).expect("gsub %%");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("gsub %%");
         assert_eq!(r, RespFrame::BulkString(Some(b"%".to_vec())));
     }
 
@@ -18249,14 +18776,22 @@ mod tests {
         // Numeric / numeric-string n still work.
         let r = eval_script(
             b"local s,n = string.gsub('aaaa', 'a', 'X', 2); return s..':'..n",
-            &[], &[], &mut store, 0,
-        ).expect("numeric n");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("numeric n");
         assert_eq!(r, RespFrame::BulkString(Some(b"XXaa:2".to_vec())));
 
         let r = eval_script(
             b"local s,n = string.gsub('aaaa', 'a', 'X', '2'); return s..':'..n",
-            &[], &[], &mut store, 0,
-        ).expect("numeric-string n");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("numeric-string n");
         assert_eq!(r, RespFrame::BulkString(Some(b"XXaa:2".to_vec())));
 
         // Bad-n types raise the anonymous-C pcall wording.
@@ -18328,8 +18863,12 @@ mod tests {
         // through an __index table.
         let r = eval_script(
             b"local fallback = {x=42}; local t = setmetatable({}, {__index=fallback}); return t.x",
-            &[], &[], &mut store, 0,
-        ).expect("__index fallback must work");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("__index fallback must work");
         assert_eq!(r, RespFrame::Integer(42));
 
         // __index function returning nil still yields nil (no loop).
@@ -18350,29 +18889,45 @@ mod tests {
 
         let r = eval_script(
             b"return string.format('%q', '\\0')",
-            &[], &[], &mut store, 0,
-        ).expect("nul-only quote");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("nul-only quote");
         assert_eq!(r, RespFrame::BulkString(Some(b"\"\\000\"".to_vec())));
 
         let r = eval_script(
             b"return string.format('%q', 'a\\0b')",
-            &[], &[], &mut store, 0,
-        ).expect("nul-in-middle quote");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("nul-in-middle quote");
         assert_eq!(r, RespFrame::BulkString(Some(b"\"a\\000b\"".to_vec())));
 
         // NUL followed by digit is the disambiguation case the
         // three-digit form preserves.
         let r = eval_script(
             b"return string.format('%q', '\\0' .. '1')",
-            &[], &[], &mut store, 0,
-        ).expect("nul-then-digit quote");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("nul-then-digit quote");
         assert_eq!(r, RespFrame::BulkString(Some(b"\"\\0001\"".to_vec())));
 
         // Non-nul escapes unchanged.
         let r = eval_script(
             b"return string.format('%q', 'a\\rb')",
-            &[], &[], &mut store, 0,
-        ).expect("cr escape");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("cr escape");
         assert_eq!(r, RespFrame::BulkString(Some(b"\"a\\rb\"".to_vec())));
     }
 
@@ -18413,8 +18968,12 @@ mod tests {
         // Bad args raise the anonymous-C pcall wording.
         let r = eval_script(
             b"local ok,e = pcall(math.randomseed, nil); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall wrapper");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall wrapper");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(
@@ -18423,8 +18982,12 @@ mod tests {
         );
         let r = eval_script(
             b"local ok,e = pcall(math.randomseed); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall wrapper");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall wrapper");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(
@@ -18433,8 +18996,12 @@ mod tests {
         );
         let r = eval_script(
             b"local ok,e = pcall(math.randomseed, {}); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall wrapper");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall wrapper");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(
@@ -18443,8 +19010,12 @@ mod tests {
         );
         let r = eval_script(
             b"local ok,e = pcall(math.randomseed, true); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall wrapper");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall wrapper");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(
@@ -18453,8 +19024,12 @@ mod tests {
         );
         let r = eval_script(
             b"local ok,e = pcall(math.randomseed, 'bad'); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall wrapper");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall wrapper");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(
@@ -18473,25 +19048,29 @@ mod tests {
         let mut store = Store::new();
 
         // Numeric / numeric-string / nil / missing still work.
-        let r = eval_script(
-            b"return string.sub('hello', 1, 3)",
-            &[], &[], &mut store, 0,
-        ).expect("numeric j");
+        let r = eval_script(b"return string.sub('hello', 1, 3)", &[], &[], &mut store, 0)
+            .expect("numeric j");
         assert_eq!(r, RespFrame::BulkString(Some(b"hel".to_vec())));
         let r = eval_script(
             b"return string.sub('hello', 1, '3')",
-            &[], &[], &mut store, 0,
-        ).expect("numeric-string j");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("numeric-string j");
         assert_eq!(r, RespFrame::BulkString(Some(b"hel".to_vec())));
         let r = eval_script(
             b"return string.sub('hello', 1, nil)",
-            &[], &[], &mut store, 0,
-        ).expect("nil j");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("nil j");
         assert_eq!(r, RespFrame::BulkString(Some(b"hello".to_vec())));
-        let r = eval_script(
-            b"return string.sub('hello', 1)",
-            &[], &[], &mut store, 0,
-        ).expect("missing j");
+        let r = eval_script(b"return string.sub('hello', 1)", &[], &[], &mut store, 0)
+            .expect("missing j");
         assert_eq!(r, RespFrame::BulkString(Some(b"hello".to_vec())));
 
         // Bad-j types raise the anonymous-C pcall wording.
@@ -18507,8 +19086,12 @@ mod tests {
         );
         let r = eval_script(
             b"local ok,e = pcall(string.sub,'hello',1,{}); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall wrapper");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall wrapper");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(
@@ -18517,8 +19100,12 @@ mod tests {
         );
         let r = eval_script(
             b"local ok,e = pcall(string.sub,'hello',1,true); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall wrapper");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall wrapper");
         assert_eq!(
             r,
             RespFrame::BulkString(Some(
@@ -18539,13 +19126,21 @@ mod tests {
         // Numeric and numeric-string still work (Lua coerces "2"→2).
         let r = eval_script(
             b"return string.match('hello', 'l', 2)",
-            &[], &[], &mut store, 0,
-        ).expect("numeric init must succeed");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("numeric init must succeed");
         assert_eq!(r, RespFrame::BulkString(Some(b"l".to_vec())));
         let r = eval_script(
             b"return string.match('hello', 'l', '2')",
-            &[], &[], &mut store, 0,
-        ).expect("numeric-string init must succeed");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("numeric-string init must succeed");
         assert_eq!(r, RespFrame::BulkString(Some(b"l".to_vec())));
 
         // Bad-init cases (string / table / bool) raise the upstream
@@ -18602,28 +19197,20 @@ mod tests {
         // f64 which emits 'NaN'. Pin lowercase parity for NaN; inf
         // / -inf already match (both formatters lowercase).
         let mut store = Store::new();
-        let r = eval_script(
-            b"return {double=0/0}",
-            &[], &[], &mut store, 0,
-        ).expect("double nan reply");
+        let r =
+            eval_script(b"return {double=0/0}", &[], &[], &mut store, 0).expect("double nan reply");
         assert_eq!(r, RespFrame::BulkString(Some(b"nan".to_vec())));
 
-        let r = eval_script(
-            b"return {double=1/0}",
-            &[], &[], &mut store, 0,
-        ).expect("double +inf reply");
+        let r = eval_script(b"return {double=1/0}", &[], &[], &mut store, 0)
+            .expect("double +inf reply");
         assert_eq!(r, RespFrame::BulkString(Some(b"inf".to_vec())));
 
-        let r = eval_script(
-            b"return {double=-1/0}",
-            &[], &[], &mut store, 0,
-        ).expect("double -inf reply");
+        let r = eval_script(b"return {double=-1/0}", &[], &[], &mut store, 0)
+            .expect("double -inf reply");
         assert_eq!(r, RespFrame::BulkString(Some(b"-inf".to_vec())));
 
-        let r = eval_script(
-            b"return {double=3.14}",
-            &[], &[], &mut store, 0,
-        ).expect("regular double");
+        let r =
+            eval_script(b"return {double=3.14}", &[], &[], &mut store, 0).expect("regular double");
         assert_eq!(r, RespFrame::BulkString(Some(b"3.14".to_vec())));
     }
 
@@ -18640,36 +19227,50 @@ mod tests {
         // Both subfields present and string — emits BulkString.
         let r = eval_script(
             b"return {verbatim_string={format='txt', string='hi'}}",
-            &[], &[], &mut store, 0,
-        ).expect("valid verbatim_string");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("valid verbatim_string");
         assert_eq!(r, RespFrame::BulkString(Some(b"hi".to_vec())));
 
         // Format missing — fall through, empty array.
         let r = eval_script(
             b"return {verbatim_string={string='hi'}}",
-            &[], &[], &mut store, 0,
-        ).expect("verbatim_string missing format");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("verbatim_string missing format");
         assert_eq!(r, RespFrame::Array(Some(vec![])));
 
         // String missing — fall through, empty array.
         let r = eval_script(
             b"return {verbatim_string={format='txt'}}",
-            &[], &[], &mut store, 0,
-        ).expect("verbatim_string missing string");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("verbatim_string missing string");
         assert_eq!(r, RespFrame::Array(Some(vec![])));
 
         // Format is non-string (number) — fall through.
         let r = eval_script(
             b"return {verbatim_string={format=42, string='hi'}}",
-            &[], &[], &mut store, 0,
-        ).expect("verbatim_string number format");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("verbatim_string number format");
         assert_eq!(r, RespFrame::Array(Some(vec![])));
 
         // verbatim_string itself is not a table — fall through.
-        let r = eval_script(
-            b"return {verbatim_string='hi'}",
-            &[], &[], &mut store, 0,
-        ).expect("verbatim_string not a table");
+        let r = eval_script(b"return {verbatim_string='hi'}", &[], &[], &mut store, 0)
+            .expect("verbatim_string not a table");
         assert_eq!(r, RespFrame::Array(Some(vec![])));
     }
 
@@ -18683,46 +19284,39 @@ mod tests {
         let mut store = Store::new();
 
         // Both fields present, ok first in source: err still wins.
-        let r = eval_script(
-            b"return {ok='okay', err='oops'}",
-            &[], &[], &mut store, 0,
-        ).expect("ok+err return must reach the wire as an error frame");
+        let r = eval_script(b"return {ok='okay', err='oops'}", &[], &[], &mut store, 0)
+            .expect("ok+err return must reach the wire as an error frame");
         assert_eq!(r, RespFrame::Error("oops".to_string()));
 
         // Both fields present, err first in source: err still wins
         // (priority is field-driven, not iteration-order driven).
-        let r = eval_script(
-            b"return {err='oops', ok='okay'}",
-            &[], &[], &mut store, 0,
-        ).expect("err+ok return must reach the wire as an error frame");
+        let r = eval_script(b"return {err='oops', ok='okay'}", &[], &[], &mut store, 0)
+            .expect("err+ok return must reach the wire as an error frame");
         assert_eq!(r, RespFrame::Error("oops".to_string()));
 
         // err only — unchanged.
-        let r = eval_script(
-            b"return {err='just_err'}",
-            &[], &[], &mut store, 0,
-        ).expect("err-only must reach the wire as an error frame");
+        let r = eval_script(b"return {err='just_err'}", &[], &[], &mut store, 0)
+            .expect("err-only must reach the wire as an error frame");
         assert_eq!(r, RespFrame::Error("just_err".to_string()));
 
         // ok only — unchanged.
-        let r = eval_script(
-            b"return {ok='just_ok'}",
-            &[], &[], &mut store, 0,
-        ).expect("ok-only must reach the wire as a status frame");
+        let r = eval_script(b"return {ok='just_ok'}", &[], &[], &mut store, 0)
+            .expect("ok-only must reach the wire as a status frame");
         assert_eq!(r, RespFrame::SimpleString("just_ok".to_string()));
 
         // Non-string err/ok values fall through to the regular table
         // serialisation path; neither field triggers the special arms.
-        let r = eval_script(
-            b"return {ok=1, err=2}",
-            &[], &[], &mut store, 0,
-        ).expect("numeric ok/err must not trigger the special arms");
+        let r = eval_script(b"return {ok=1, err=2}", &[], &[], &mut store, 0)
+            .expect("numeric ok/err must not trigger the special arms");
         // Upstream collapses a table whose array part is empty to an
         // empty array; the hash entries (ok/err) are discarded by
         // luaReplyToRedisReply because it only converts integer-keyed
         // entries. fr's lua_to_resp does the same — verify it's not
         // accidentally returning the numeric err/ok values.
-        assert!(matches!(r, RespFrame::Array(_) | RespFrame::BulkString(None)));
+        assert!(matches!(
+            r,
+            RespFrame::Array(_) | RespFrame::BulkString(None)
+        ));
     }
 
     #[test]
@@ -18797,8 +19391,12 @@ mod tests {
         // Bad function arg: same anonymous-C-function shape, arg #2.
         let err = eval_script(
             b"local ok,e = pcall(table.foreach, {1}, nil); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall wrapper must not bubble");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall wrapper must not bubble");
         assert_eq!(
             err,
             RespFrame::BulkString(Some(
@@ -18807,8 +19405,12 @@ mod tests {
         );
         let err = eval_script(
             b"local ok,e = pcall(table.foreachi, {1}, nil); return tostring(ok)..':'..tostring(e)",
-            &[], &[], &mut store, 0,
-        ).expect("pcall wrapper must not bubble");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall wrapper must not bubble");
         assert_eq!(
             err,
             RespFrame::BulkString(Some(
@@ -18832,8 +19434,12 @@ mod tests {
         let mut store = Store::new();
         let direct = eval_script(
             b"return string.gmatch('abc def', '%a+')()",
-            &[], &[], &mut store, 0,
-        ).expect("direct gmatch call must not error");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("direct gmatch call must not error");
         assert_eq!(
             direct,
             RespFrame::BulkString(Some(b"abc".to_vec())),
@@ -18841,8 +19447,12 @@ mod tests {
         );
         let three = eval_script(
             b"local g=string.gmatch('a b c', '%a'); return g()..g()..g()",
-            &[], &[], &mut store, 0,
-        ).expect("three successive gmatch calls must not error");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("three successive gmatch calls must not error");
         assert_eq!(
             three,
             RespFrame::BulkString(Some(b"abc".to_vec())),
@@ -18850,8 +19460,12 @@ mod tests {
         );
         let exhausted = eval_script(
             b"local g=string.gmatch('a', '%a'); g(); return g()",
-            &[], &[], &mut store, 0,
-        ).expect("exhausted gmatch must return nil cleanly");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("exhausted gmatch must return nil cleanly");
         assert_eq!(
             exhausted,
             RespFrame::BulkString(None),
@@ -18884,34 +19498,39 @@ mod tests {
             (b"return table.concat({1,2,3}, false)", "boolean"),
         ];
         for (body, ty) in cases {
-            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
-                &format!("expected concat error for {:?}", String::from_utf8_lossy(body)),
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(&format!(
+                "expected concat error for {:?}",
+                String::from_utf8_lossy(body)
+            ));
+            let expected =
+                format!("user_script:1: bad argument #2 to 'concat' (string expected, got {ty})");
+            assert_eq!(
+                err,
+                expected,
+                "wrong error for {:?}",
+                String::from_utf8_lossy(body)
             );
-            let expected = format!(
-                "user_script:1: bad argument #2 to 'concat' (string expected, got {ty})"
-            );
-            assert_eq!(err, expected, "wrong error for {:?}", String::from_utf8_lossy(body));
         }
 
         // Number separator coerces to its string representation.
-        let ok = eval_script(
-            b"return table.concat({1,2,3}, 5)",
-            &[], &[], &mut store, 0,
-        ).expect("number sep should work");
+        let ok = eval_script(b"return table.concat({1,2,3}, 5)", &[], &[], &mut store, 0)
+            .expect("number sep should work");
         assert_eq!(ok, RespFrame::BulkString(Some(b"15253".to_vec())));
 
         // String separator works.
         let ok = eval_script(
             b"return table.concat({1,2,3}, ', ')",
-            &[], &[], &mut store, 0,
-        ).expect("string sep should work");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("string sep should work");
         assert_eq!(ok, RespFrame::BulkString(Some(b"1, 2, 3".to_vec())));
 
         // Missing/nil sep -> empty separator (unchanged jwkhc behavior).
-        let ok = eval_script(
-            b"return table.concat({1,2,3})",
-            &[], &[], &mut store, 0,
-        ).expect("nil sep");
+        let ok =
+            eval_script(b"return table.concat({1,2,3})", &[], &[], &mut store, 0).expect("nil sep");
         assert_eq!(ok, RespFrame::BulkString(Some(b"123".to_vec())));
     }
 
@@ -18929,8 +19548,12 @@ mod tests {
         // 1-arg, m<1 -> arg #1 with prefix.
         let err = eval_script(
             b"math.randomseed(1); return math.random(0)",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected interval-empty error");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("expected interval-empty error");
         assert_eq!(
             err,
             "user_script:1: bad argument #1 to 'random' (interval is empty)",
@@ -18939,31 +19562,35 @@ mod tests {
         // 2-arg, m>n -> arg #2 with prefix.
         let err = eval_script(
             b"math.randomseed(1); return math.random(5, 1)",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected interval-empty error");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("expected interval-empty error");
         assert_eq!(
             err,
             "user_script:1: bad argument #2 to 'random' (interval is empty)",
         );
 
         // 3+ args -> wrong number of arguments.
-        let err = eval_script(
-            b"return math.random(1, 2, 3)",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected wrong-number-of-args error");
+        let err = eval_script(b"return math.random(1, 2, 3)", &[], &[], &mut store, 0)
+            .expect_err("expected wrong-number-of-args error");
         assert_eq!(err, "user_script:1: wrong number of arguments");
 
-        let err = eval_script(
-            b"return math.random(1, 2, 3, 4)",
-            &[], &[], &mut store, 0,
-        ).expect_err("expected wrong-number-of-args error");
+        let err = eval_script(b"return math.random(1, 2, 3, 4)", &[], &[], &mut store, 0)
+            .expect_err("expected wrong-number-of-args error");
         assert_eq!(err, "user_script:1: wrong number of arguments");
 
         // Valid calls still produce values in the expected range.
         let r = eval_script(
             b"math.randomseed(42); local v = math.random(1, 10); return v",
-            &[], &[], &mut store, 0,
-        ).expect("valid call");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("valid call");
         let RespFrame::Integer(n) = r else {
             panic!("expected integer, got {r:?}");
         };
@@ -18972,8 +19599,12 @@ mod tests {
         // 1-arg valid call.
         let r = eval_script(
             b"math.randomseed(42); local v = math.random(5); return v",
-            &[], &[], &mut store, 0,
-        ).expect("valid 1-arg call");
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("valid 1-arg call");
         let RespFrame::Integer(n) = r else {
             panic!("expected integer, got {r:?}");
         };
@@ -18991,13 +19622,7 @@ mod tests {
         // drifted from upstream.
         let mut store = Store::new();
         // (seed, body, expected) for math.random(1,100).
-        let cases_2arg: &[(i32, i64)] = &[
-            (1, 5),
-            (42, 75),
-            (100, 26),
-            (12345, 23),
-            (999, 11),
-        ];
+        let cases_2arg: &[(i32, i64)] = &[(1, 5), (42, 75), (100, 26), (12345, 23), (999, 11)];
         for (seed, expected) in cases_2arg {
             let body = format!("math.randomseed({seed}); return math.random(1,100)");
             let r = eval_script(body.as_bytes(), &[], &[], &mut store, 0)
@@ -19123,9 +19748,10 @@ mod tests {
             b"return string.char(-1)".as_slice(),
             b"return string.char(99999)".as_slice(),
         ] {
-            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
-                &format!("expected error for {:?}", String::from_utf8_lossy(body)),
-            );
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(&format!(
+                "expected error for {:?}",
+                String::from_utf8_lossy(body)
+            ));
             assert!(
                 err.starts_with("user_script:1: bad argument #1 to 'char' (invalid value)"),
                 "missing prefix for {:?}: {err}",
@@ -19161,18 +19787,25 @@ mod tests {
         ] {
             let result = eval_script(body, &[], &[], &mut store, 0).expect("eval");
             let RespFrame::BulkString(Some(bytes)) = result else {
-                panic!("expected bulk string for {:?}, got {result:?}", String::from_utf8_lossy(body));
+                panic!(
+                    "expected bulk string for {:?}, got {result:?}",
+                    String::from_utf8_lossy(body)
+                );
             };
             let hex = String::from_utf8(bytes).unwrap();
             assert_eq!(
-                hex, sha1_empty,
+                hex,
+                sha1_empty,
                 "non-string types must hash to empty for {:?}",
                 String::from_utf8_lossy(body),
             );
         }
         // Strings and numbers continue to hash their byte representation.
-        let ok = eval_script(b"return redis.sha1hex('hello')", &[], &[], &mut store, 0).expect("eval");
-        let RespFrame::BulkString(Some(bytes)) = ok else { panic!("expected sha bulk") };
+        let ok =
+            eval_script(b"return redis.sha1hex('hello')", &[], &[], &mut store, 0).expect("eval");
+        let RespFrame::BulkString(Some(bytes)) = ok else {
+            panic!("expected sha bulk")
+        };
         assert_eq!(
             String::from_utf8(bytes).unwrap(),
             "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d", // sha1("hello")
@@ -19216,11 +19849,15 @@ mod tests {
             let frame = eval_script(body, &[], &[], &mut store, 0)
                 .unwrap_or_else(|e| panic!("eval {:?} failed: {e}", String::from_utf8_lossy(body)));
             let RespFrame::BulkString(Some(bytes)) = frame else {
-                panic!("expected bulk string for {:?}, got {frame:?}", String::from_utf8_lossy(body));
+                panic!(
+                    "expected bulk string for {:?}, got {frame:?}",
+                    String::from_utf8_lossy(body)
+                );
             };
             let s = String::from_utf8_lossy(&bytes);
             assert_eq!(
-                s, *want_substr,
+                s,
+                *want_substr,
                 "body={:?} got {s}",
                 String::from_utf8_lossy(body)
             );
@@ -19240,8 +19877,8 @@ mod tests {
             b"return redis.sha1hex('a','b')",
             b"return redis.sha1hex('a','b','c')",
         ] {
-            let err = eval_script(body, &[], &[], &mut store, 0)
-                .expect_err("expected wrong-arity error");
+            let err =
+                eval_script(body, &[], &[], &mut store, 0).expect_err("expected wrong-arity error");
             assert!(
                 err.contains("wrong number of arguments"),
                 "body={:?} got {err:?}",
@@ -19566,14 +20203,7 @@ mod tests {
         assert_eq!(frame, RespFrame::Integer(1));
         let frame = eval_script(b"return ('abc'):upper()", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"ABC".to_vec())));
-        let frame = eval_script(
-            b"local t={a=1}; return t.a",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .unwrap();
+        let frame = eval_script(b"local t={a=1}; return t.a", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::Integer(1));
         let frame = eval_script(
             b"local function f() return 'x' end; return f()",
@@ -19611,7 +20241,10 @@ mod tests {
             // Level 0 still works.
             (b"return [[basic]]", b"basic"),
             // Embedded brackets at lower levels survive.
-            (b"return [=[contains [[brackets]]]=]", b"contains [[brackets]]"),
+            (
+                b"return [=[contains [[brackets]]]=]",
+                b"contains [[brackets]]",
+            ),
         ];
         for (body, expected) in cases {
             let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
@@ -19624,23 +20257,9 @@ mod tests {
         }
 
         // Long comments with level markers should be skipped.
-        let frame = eval_script(
-            b"--[=[ level 1 ]=] return 2",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .unwrap();
+        let frame = eval_script(b"--[=[ level 1 ]=] return 2", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::Integer(2));
-        let frame = eval_script(
-            b"--[==[ level 2 ]==] return 3",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .unwrap();
+        let frame = eval_script(b"--[==[ level 2 ]==] return 3", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::Integer(3));
 
         // Unterminated long comment surfaces the upstream wording.
@@ -19649,8 +20268,7 @@ mod tests {
             err.contains("unfinished long comment near '<eof>'"),
             "got {err:?}"
         );
-        let err =
-            eval_script(b"--[=[ unterminated", &[], &[], &mut store, 0).unwrap_err();
+        let err = eval_script(b"--[=[ unterminated", &[], &[], &mut store, 0).unwrap_err();
         assert!(
             err.contains("unfinished long comment near '<eof>'"),
             "got {err:?}"
@@ -19669,9 +20287,15 @@ mod tests {
         let cases: &[(&[u8], &str)] = &[
             (b"return 'unterminated", "unfinished string near '<eof>'"),
             (b"return \"unterminated", "unfinished string near '<eof>'"),
-            (b"return [[unterminated", "unfinished long string near '<eof>'"),
+            (
+                b"return [[unterminated",
+                "unfinished long string near '<eof>'",
+            ),
             (b"return (1+1))", "'<eof>' expected near ')'"),
-            (b"return foo:bar", "function arguments expected near '<eof>'"),
+            (
+                b"return foo:bar",
+                "function arguments expected near '<eof>'",
+            ),
         ];
         for (body, expected_msg) in cases {
             let err = eval_script(body, &[], &[], &mut store, 0).unwrap_err();
@@ -19736,12 +20360,7 @@ mod tests {
             (b"return 1.5+0.5", RespFrame::Integer(2)),
         ] {
             let got = eval_script(body, &[], &[], &mut store, 0).unwrap();
-            assert_eq!(
-                &got,
-                expected,
-                "body={:?}",
-                String::from_utf8_lossy(body)
-            );
+            assert_eq!(&got, expected, "body={:?}", String::from_utf8_lossy(body));
         }
     }
 
@@ -19828,10 +20447,7 @@ mod tests {
         ] {
             let err = eval_script(body, &[], &[], &mut store, 0).unwrap_err();
             let expected = format!("user_script:1: bad argument #1 to '{fname}' ({msg})");
-            assert!(
-                err.contains(&expected),
-                "got {err:?} expected {expected:?}"
-            );
+            assert!(err.contains(&expected), "got {err:?} expected {expected:?}");
         }
     }
 
@@ -20012,8 +20628,8 @@ mod tests {
         }
 
         // Direct-call regressions: named/prefixed shape preserved.
-        let err = eval_script(b"return table.insert({1,2,3})", &[], &[], &mut store, 0)
-            .unwrap_err();
+        let err =
+            eval_script(b"return table.insert({1,2,3})", &[], &[], &mut store, 0).unwrap_err();
         assert!(
             err.contains("user_script:1: wrong number of arguments to 'insert'"),
             "got {err:?}"
@@ -20071,28 +20687,18 @@ mod tests {
         }
 
         // Direct-call regression: named/prefixed shape preserved.
-        let err = eval_script(
-            b"return collectgarbage('invalid')",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .unwrap_err();
+        let err =
+            eval_script(b"return collectgarbage('invalid')", &[], &[], &mut store, 0).unwrap_err();
         assert!(
-            err.contains("user_script:1: bad argument #1 to 'collectgarbage' (invalid option 'invalid')"),
+            err.contains(
+                "user_script:1: bad argument #1 to 'collectgarbage' (invalid option 'invalid')"
+            ),
             "got {err:?}"
         );
 
         // Sanity: known options still work.
-        let frame = eval_script(
-            b"return collectgarbage('count')",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .unwrap();
+        let frame =
+            eval_script(b"return collectgarbage('count')", &[], &[], &mut store, 0).unwrap();
         assert!(matches!(frame, RespFrame::Integer(_)), "got {frame:?}");
     }
 
@@ -20169,8 +20775,7 @@ mod tests {
             err.contains("user_script:1: bad argument #1 to 'random' (interval is empty)"),
             "got {err:?}"
         );
-        let err = eval_script(b"return math.random(1,2,3)", &[], &[], &mut store, 0)
-            .unwrap_err();
+        let err = eval_script(b"return math.random(1,2,3)", &[], &[], &mut store, 0).unwrap_err();
         assert!(
             err.contains("user_script:1: wrong number of arguments"),
             "got {err:?}"
@@ -20228,8 +20833,8 @@ mod tests {
         }
 
         // Direct-call regression: prefix preserved.
-        let err = eval_script(b"return string.find('abc','(')", &[], &[], &mut store, 0)
-            .unwrap_err();
+        let err =
+            eval_script(b"return string.find('abc','(')", &[], &[], &mut store, 0).unwrap_err();
         assert!(
             err.contains("user_script:1: unfinished capture"),
             "got {err:?}"
@@ -20342,10 +20947,11 @@ mod tests {
         }
 
         // Direct-call (named/prefixed shape).
-        let err = eval_script(b"return string.gsub('a','b')", &[], &[], &mut store, 0)
-            .unwrap_err();
+        let err = eval_script(b"return string.gsub('a','b')", &[], &[], &mut store, 0).unwrap_err();
         assert!(
-            err.contains("user_script:1: bad argument #3 to 'gsub' (string/function/table expected)"),
+            err.contains(
+                "user_script:1: bad argument #3 to 'gsub' (string/function/table expected)"
+            ),
             "got {err:?}"
         );
 
@@ -20362,14 +20968,8 @@ mod tests {
         assert_eq!(frame, RespFrame::BulkString(Some(b"xxx".to_vec())));
 
         // Number repl is accepted (coerced to string).
-        let frame = eval_script(
-            b"return string.gsub('aaa','a',1)",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .unwrap();
+        let frame =
+            eval_script(b"return string.gsub('aaa','a',1)", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"111".to_vec())));
 
         // Multi-return reaches inner Lua code.
@@ -20516,20 +21116,16 @@ mod tests {
 
         // Regression: direct calls (named-shape) still match the
         // user_script:1: bad argument #N to 'format' (...) wording.
-        let err = eval_script(
-            b"return string.format('%d','hi')",
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .unwrap_err();
+        let err =
+            eval_script(b"return string.format('%d','hi')", &[], &[], &mut store, 0).unwrap_err();
         assert!(
-            err.contains("user_script:1: bad argument #2 to 'format' (number expected, got string)"),
+            err.contains(
+                "user_script:1: bad argument #2 to 'format' (number expected, got string)"
+            ),
             "direct call got {err:?}"
         );
-        let err = eval_script(b"return string.format('%K',5)", &[], &[], &mut store, 0)
-            .unwrap_err();
+        let err =
+            eval_script(b"return string.format('%K',5)", &[], &[], &mut store, 0).unwrap_err();
         assert!(
             err.contains("user_script:1: invalid option '%K' to 'format'"),
             "direct call got {err:?}"
@@ -20833,9 +21429,18 @@ mod tests {
 
         // Existing typed-error regressions still pass.
         for body in &[
-            (b"local ok,e = pcall(error, 42); return type(e)..'-'..tostring(e)".as_slice(), "string-42"),
-            (b"local ok,e = pcall(error, true); return type(e)..'-'..tostring(e)", "boolean-true"),
-            (b"local ok,e = pcall(error, nil); return type(e)..'-'..tostring(e)", "nil-nil"),
+            (
+                b"local ok,e = pcall(error, 42); return type(e)..'-'..tostring(e)".as_slice(),
+                "string-42",
+            ),
+            (
+                b"local ok,e = pcall(error, true); return type(e)..'-'..tostring(e)",
+                "boolean-true",
+            ),
+            (
+                b"local ok,e = pcall(error, nil); return type(e)..'-'..tostring(e)",
+                "nil-nil",
+            ),
         ] {
             let frame = eval_script(body.0, &[], &[], &mut store, 0).unwrap();
             assert_eq!(
