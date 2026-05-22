@@ -7893,21 +7893,34 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    let Some(score) = zs.get_score(member) else {
-                        return Ok(None);
-                    };
-                    let rank = zs
-                        .iter_desc()
-                        .take_while(|&(m, s)| score_member_lt(score, member, *s, m))
-                        .count();
-                    entry.touch(now_ms);
-                    Ok(Some(rank))
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let Some(score) = zs.get_score(member) else {
+                            return Ok(None);
+                        };
+                        let rank = zs
+                            .iter_desc()
+                            .take_while(|&(m, s)| score_member_lt(score, member, *s, m))
+                            .count();
+                        entry.touch(now_ms);
+                        Ok(Some(rank))
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(None),
         }
     }
@@ -8161,27 +8174,40 @@ impl Store {
         if score_bound_value(min) > score_bound_value(max) {
             return Ok(0);
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    let lower = match min {
-                        ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
-                        ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
-                    };
-                    let upper = match max {
-                        ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
-                        ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
-                    };
-                    let result = zs
-                        .ordered
-                        .range((lower, upper))
-                        .filter(|(sm, _)| sm.member.as_actual().is_some())
-                        .count();
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let lower = match min {
+                            ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
+                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
+                        };
+                        let upper = match max {
+                            ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
+                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
+                        };
+                        let result = zs
+                            .ordered
+                            .range((lower, upper))
+                            .filter(|(sm, _)| sm.member.as_actual().is_some())
+                            .count();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(0),
         }
     }
@@ -8728,18 +8754,31 @@ impl Store {
     ) -> Result<usize, StoreError> {
         validate_lex_range_bounds(min, max)?;
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    let result = zs
-                        .iter_asc()
-                        .filter(|(m, _)| lex_in_range(m, min, max))
-                        .count();
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let result = zs
+                            .iter_asc()
+                            .filter(|(m, _)| lex_in_range(m, min, max))
+                            .count();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(0),
         }
     }
@@ -9017,16 +9056,29 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<Option<f64>>, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    let result: Vec<Option<f64>> =
-                        members.iter().map(|m| zs.get_score(m)).collect();
-                    entry.touch(now_ms);
-                    Ok(result)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let result: Vec<Option<f64>> =
+                            members.iter().map(|m| zs.get_score(m)).collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(members.iter().map(|_| None).collect()),
         }
     }
