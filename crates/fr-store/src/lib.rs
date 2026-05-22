@@ -8998,7 +8998,6 @@ impl Store {
                     }
                     if remove_groups_key {
                         self.stream_groups.remove(key);
-                        self.stream_last_ids.remove(key);
                     }
                     if removed {
                         self.dirty = self.dirty.saturating_add(1);
@@ -19841,6 +19840,50 @@ mod tests {
             store.xgroup_destroy(b"str", b"g1", 0),
             Err(StoreError::WrongType)
         );
+    }
+
+    #[test]
+    fn xgroup_destroy_preserves_empty_stream_last_id() -> Result<(), String> {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (5, 0), &[(b"f".to_vec(), b"v".to_vec())], 0)
+            .map_err(|err| format!("seed stream: {err:?}"))?;
+        let created = store
+            .xgroup_create(b"s", b"g", (0, 0), false, 0)
+            .map_err(|err| format!("create group: {err:?}"))?;
+        if !created {
+            return Err("group should be created".to_string());
+        }
+        let removed = store
+            .xdel(b"s", &[(5, 0)], 0)
+            .map_err(|err| format!("delete stream entry: {err:?}"))?;
+        if removed != 1 {
+            return Err(format!("expected one deleted entry, got {removed}"));
+        }
+        let before_destroy = store
+            .xlast_id(b"s", 0)
+            .map_err(|err| format!("last ID before destroy: {err:?}"))?;
+        if before_destroy != Some((5, 0)) {
+            return Err(format!(
+                "empty stream should retain 5-0 before destroy, got {before_destroy:?}"
+            ));
+        }
+        let destroyed = store
+            .xgroup_destroy(b"s", b"g", 0)
+            .map_err(|err| format!("destroy group: {err:?}"))?;
+        if !destroyed {
+            return Err("group should be destroyed".to_string());
+        }
+        let after_destroy = store
+            .xlast_id(b"s", 0)
+            .map_err(|err| format!("last ID after destroy: {err:?}"))?;
+        if after_destroy != Some((5, 0)) {
+            return Err(format!(
+                "XGROUP DESTROY must preserve empty-stream last ID, got {after_destroy:?}"
+            ));
+        }
+
+        Ok(())
     }
 
     #[test]
