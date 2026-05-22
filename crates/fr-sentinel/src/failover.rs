@@ -111,11 +111,23 @@ fn compare_slaves(a: &SlaveScore, b: &SlaveScore) -> std::cmp::Ordering {
     }
 
     match (&a.runid, &b.runid) {
-        (Some(ra), Some(rb)) => ra.cmp(rb),
+        (Some(ra), Some(rb)) => cmp_ascii_case_insensitive(ra, rb),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
     }
+}
+
+fn cmp_ascii_case_insensitive(left: &str, right: &str) -> std::cmp::Ordering {
+    for (left_byte, right_byte) in left.bytes().zip(right.bytes()) {
+        let ordering = left_byte
+            .to_ascii_lowercase()
+            .cmp(&right_byte.to_ascii_lowercase());
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    left.len().cmp(&right.len())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,6 +370,21 @@ mod tests {
         if let Some(slave) = master.slaves.get_mut("10.0.0.10:6379") {
             slave.slave_priority = 50;
         }
+        let selected = select_slave(&master).unwrap();
+        assert_eq!(selected, "10.0.0.10:6379");
+    }
+
+    #[test]
+    fn select_slave_breaks_runid_ties_case_insensitively() {
+        let mut master = make_master_with_slaves();
+        let slave1 = master.slaves.get_mut("10.0.0.10:6379").unwrap();
+        slave1.slave_repl_offset = 1000;
+        slave1.runid = Some("a-runid".to_string());
+
+        let slave2 = master.slaves.get_mut("10.0.0.11:6379").unwrap();
+        slave2.slave_repl_offset = 1000;
+        slave2.runid = Some("B-runid".to_string());
+
         let selected = select_slave(&master).unwrap();
         assert_eq!(selected, "10.0.0.10:6379");
     }
