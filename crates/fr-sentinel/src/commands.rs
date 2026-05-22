@@ -222,14 +222,14 @@ fn cmd_monitor(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     }
     let name = String::from_utf8_lossy(args[0]);
     let ip = String::from_utf8_lossy(args[1]);
-    let port: u16 = match parse_monitor_port(&String::from_utf8_lossy(args[2])) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
     let quorum_raw = String::from_utf8_lossy(args[3]);
     let quorum = match parse_monitor_quorum(&quorum_raw) {
         Ok(q) => q,
         Err(error) => return error,
+    };
+    let port: u16 = match parse_monitor_port(&String::from_utf8_lossy(args[2])) {
+        Ok(p) => p,
+        Err(e) => return e,
     };
     if !monitor_address_is_allowed(state, &ip) {
         return RespFrame::Error("ERR Invalid IP address or hostname specified".into());
@@ -2051,6 +2051,31 @@ mod tests {
             RespFrame::Error("ERR Invalid quorum number".into())
         );
         assert!(state.get_master("malformed").is_none());
+    }
+
+    #[test]
+    fn sentinel_monitor_validates_quorum_before_port_like_upstream() {
+        let mut state = SentinelState::new();
+
+        let malformed_quorum = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"malformed", b"127.0.0.1", b"NaN", b"also-NaN"],
+        );
+        assert_eq!(
+            malformed_quorum,
+            RespFrame::Error("ERR Invalid quorum number".into())
+        );
+        assert!(state.get_master("malformed").is_none());
+
+        let non_positive_quorum = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"zero", b"127.0.0.1", b"NaN", b"0"],
+        );
+        assert_eq!(
+            non_positive_quorum,
+            RespFrame::Error("ERR Quorum must be 1 or greater.".into())
+        );
+        assert!(state.get_master("zero").is_none());
     }
 
     #[test]

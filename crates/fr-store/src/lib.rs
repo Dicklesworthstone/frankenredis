@@ -12619,11 +12619,12 @@ impl Store {
                                 logical_key.clone(),
                                 group_name.clone(),
                                 id.into_bytes(),
+                                b"ENTRIESREAD".to_vec(),
                             ];
-                            if let Some(entries_read) = group.entries_read {
-                                create.push(b"ENTRIESREAD".to_vec());
-                                create.push(entries_read.to_string().into_bytes());
-                            }
+                            create.push(group.entries_read.map_or_else(
+                                || b"-1".to_vec(),
+                                |entries_read| entries_read.to_string().into_bytes(),
+                            ));
                             commands.push(create);
 
                             for consumer in &group.consumers {
@@ -22810,6 +22811,8 @@ mod tests {
                     (b"s".as_slice(), "key"),
                     (b"g".as_slice(), "group"),
                     (b"0-0".as_slice(), "last id"),
+                    (b"ENTRIESREAD".as_slice(), "entries-read keyword"),
+                    (b"-1".as_slice(), "default entries-read"),
                 ],
             ),
         ];
@@ -22909,11 +22912,18 @@ mod tests {
         assert_eq!(cmds[2][4], b"0-0");
         assert_eq!(cmds[2][5], b"ENTRIESREAD");
         assert_eq!(cmds[2][6], b"0");
-        assert_eq!(cmds[3][0], b"XGROUP");
-        assert_eq!(cmds[3][1], b"CREATE");
-        assert_eq!(cmds[3][2], b"s");
-        assert_eq!(cmds[3][3], b"grp2");
-        assert_eq!(cmds[3][4], b"1-0");
+        assert_eq!(
+            cmds[3],
+            vec![
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"grp2".to_vec(),
+                b"1-0".to_vec(),
+                b"ENTRIESREAD".to_vec(),
+                b"-1".to_vec(),
+            ]
+        );
     }
 
     #[test]
@@ -25900,7 +25910,11 @@ mod tests {
                     if eq_ascii_ci(&argv[1], b"CREATE") {
                         let entries_read =
                             if argv.len() == 7 && eq_ascii_ci(&argv[5], b"ENTRIESREAD") {
-                                Some(parse_u64_arg(&argv[6]))
+                                if argv[6].as_slice().cmp(b"-1").is_eq() {
+                                    None
+                                } else {
+                                    Some(parse_u64_arg(&argv[6]))
+                                }
                             } else {
                                 None
                             };
