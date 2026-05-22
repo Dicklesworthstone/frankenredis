@@ -12220,7 +12220,7 @@ impl Store {
                 }
                 restored_stream_last_id = watermark.or_else(|| entries.keys().next_back().copied());
                 restored_stream_entries_added = entries_added;
-                restored_stream_groups = Some(restore_stream_groups(groups));
+                restored_stream_groups = Some(restore_stream_groups(groups)?);
                 Value::Stream(entries)
             }
             RDB_TYPE_LIST_ZIPLIST => {
@@ -12822,45 +12822,53 @@ fn dump_stream_entries(entries: &StreamEntries) -> Vec<fr_persist::StreamEntry> 
         .collect()
 }
 
-fn restore_stream_groups(groups: Vec<fr_persist::RdbStreamConsumerGroup>) -> StreamGroupState {
-    groups
-        .into_iter()
-        .map(|group| {
-            let pending = group
-                .pending
-                .into_iter()
-                .map(|pending| {
-                    (
-                        (pending.entry_id_ms, pending.entry_id_seq),
-                        StreamPendingEntry {
-                            consumer: pending.consumer,
-                            deliveries: pending.deliveries,
-                            last_delivered_ms: pending.last_delivered_ms,
-                        },
-                    )
-                })
-                .collect();
-            let consumers_set: BTreeSet<Vec<u8>> = group.consumers.into_iter().collect();
-            // (frankenredis-p4dpj) Persisted dumps don't carry
-            // per-consumer timestamps yet; seed with defaults so
-            // XINFO CONSUMERS still produces a stable shape.
-            let consumer_metadata = consumers_set
-                .iter()
-                .cloned()
-                .map(|name| (name, StreamConsumerMetadata::default()))
-                .collect();
-            (
-                group.name,
-                StreamGroup {
-                    last_delivered_id: (group.last_delivered_id_ms, group.last_delivered_id_seq),
-                    entries_read: group.entries_read,
-                    consumers: consumers_set,
-                    consumer_metadata,
-                    pending,
-                },
-            )
-        })
-        .collect()
+fn restore_stream_groups(
+    groups: Vec<fr_persist::RdbStreamConsumerGroup>,
+) -> Result<StreamGroupState, StoreError> {
+    let mut restored = StreamGroupState::new();
+    for group in groups {
+        let mut consumers_set = BTreeSet::new();
+        for consumer in group.consumers {
+            if !consumers_set.insert(consumer) {
+                return Err(StoreError::InvalidDumpPayload);
+            }
+        }
+
+        let pending = group
+            .pending
+            .into_iter()
+            .map(|pending| {
+                (
+                    (pending.entry_id_ms, pending.entry_id_seq),
+                    StreamPendingEntry {
+                        consumer: pending.consumer,
+                        deliveries: pending.deliveries,
+                        last_delivered_ms: pending.last_delivered_ms,
+                    },
+                )
+            })
+            .collect();
+        // (frankenredis-p4dpj) Persisted dumps don't carry
+        // per-consumer timestamps yet; seed with defaults so
+        // XINFO CONSUMERS still produces a stable shape.
+        let consumer_metadata = consumers_set
+            .iter()
+            .cloned()
+            .map(|name| (name, StreamConsumerMetadata::default()))
+            .collect();
+        let group_name = group.name;
+        let restored_group = StreamGroup {
+            last_delivered_id: (group.last_delivered_id_ms, group.last_delivered_id_seq),
+            entries_read: group.entries_read,
+            consumers: consumers_set,
+            consumer_metadata,
+            pending,
+        };
+        if restored.insert(group_name, restored_group).is_some() {
+            return Err(StoreError::InvalidDumpPayload);
+        }
+    }
+    Ok(restored)
 }
 
 fn encode_integer_rdb_string(data: &[u8]) -> Option<Vec<u8>> {
@@ -22181,6 +22189,67 @@ mod tests {
         assert_eq!(pending.1, Some((1, 0)));
         assert_eq!(pending.2, Some((2, 0)));
         assert_eq!(pending.3, vec![(b"alice".to_vec(), 2)]);
+    }
+
+    #[test]
+    fn restore_rejects_duplicate_stream_groups_and_consumers() -> Result<(), String> {
+        fn group(name: &[u8], consumers: &[&[u8]]) -> fr_persist::RdbStreamConsumerGroup {
+            fr_persist::RdbStreamConsumerGroup {
+                name: name.to_vec(),
+                last_delivered_id_ms: 1,
+                last_delivered_id_seq: 0,
+                entries_read: Some(1),
+                consumers: consumers.iter().map(|consumer| consumer.to_vec()).collect(),
+                pending: Vec::new(),
+            }
+        }
+
+        fn stream_dump_with_groups(
+            groups: Vec<fr_persist::RdbStreamConsumerGroup>,
+        ) -> Result<Vec<u8>, String> {
+            let entries = vec![(1, 0, vec![(b"f".to_vec(), b"v".to_vec())])];
+            let stream_payload = fr_persist::encode_upstream_stream_listpacks3_payload(
+                &entries,
+                Some((1, 0)),
+                &groups,
+                Some(1),
+            )
+            .ok_or_else(|| "stream payload encoding failed".to_string())?;
+            let mut body = vec![RDB_TYPE_STREAM_LISTPACKS_3];
+            body.extend_from_slice(&stream_payload);
+            Ok(append_dump_footer(body))
+        }
+
+        fn expect_invalid_restore(label: &[u8], payload: &[u8]) -> Result<(), String> {
+            let mut store = Store::new();
+            match store.restore_key(label, 0, payload, false, 100) {
+                Err(StoreError::InvalidDumpPayload) => Ok(()),
+                other => Err(format!(
+                    "stream dump with duplicate metadata should fail, got {other:?}"
+                )),
+            }
+        }
+
+        let duplicate_groups = stream_dump_with_groups(vec![
+            group(b"g", &[b"alice".as_slice()]),
+            group(b"g", &[b"bob".as_slice()]),
+        ])?;
+        expect_invalid_restore(b"duplicate-groups", &duplicate_groups)?;
+
+        let duplicate_consumers = stream_dump_with_groups(vec![group(
+            b"g",
+            &[b"alice".as_slice(), b"alice".as_slice()],
+        )])?;
+        expect_invalid_restore(b"duplicate-consumers", &duplicate_consumers)?;
+
+        let valid_payload =
+            stream_dump_with_groups(vec![group(b"g", &[b"alice".as_slice(), b"bob".as_slice()])])?;
+        let mut store = Store::new();
+        store
+            .restore_key(b"valid", 0, &valid_payload, false, 100)
+            .map_err(|err| format!("valid stream groups must restore: {err:?}"))?;
+
+        Ok(())
     }
 
     #[test]
