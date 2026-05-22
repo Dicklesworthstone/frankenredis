@@ -55,7 +55,10 @@ pub fn create_hello_message(state: &SentinelState, master: &SentinelRedisInstanc
         .announce_ip
         .clone()
         .unwrap_or_else(|| "127.0.0.1".to_string());
-    let sentinel_port = state.announce_port.unwrap_or(26379);
+    let sentinel_port = state
+        .announce_port
+        .filter(|port| *port != 0)
+        .unwrap_or(26379);
 
     HelloMessage {
         sentinel_ip,
@@ -372,6 +375,29 @@ mod tests {
         assert_eq!(msg.master_name, "mymaster");
         assert_eq!(msg.master_ip, "10.0.0.1");
         assert_eq!(msg.master_port, 6379);
+    }
+
+    #[test]
+    fn create_hello_message_treats_zero_announce_port_as_default() {
+        let mut state = SentinelState::new();
+        state.announce_port = Some(0);
+        state.monitor("mymaster", "10.0.0.1", 6379, 2).unwrap();
+        let master = state.get_master("mymaster").unwrap();
+
+        let msg = create_hello_message(&state, master);
+        assert_eq!(msg.sentinel_port, 26379);
+
+        let result = crate::commands::dispatch_sentinel_command(
+            &mut state,
+            &[b"CONFIG", b"GET", b"announce-port"],
+        );
+        assert_eq!(
+            result,
+            fr_protocol::RespFrame::Map(Some(vec![(
+                fr_protocol::RespFrame::BulkString(Some(b"announce-port".to_vec())),
+                fr_protocol::RespFrame::BulkString(Some(b"0".to_vec())),
+            )]))
+        );
     }
 
     #[test]
