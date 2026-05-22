@@ -152,6 +152,13 @@ pub fn apply_discovery_action(state: &mut SentinelState, action: DiscoveryAction
             master_addr,
             master_config_epoch,
         } => {
+            let should_update_runid_address =
+                state.get_master(&master_name).is_some_and(|master| {
+                    master
+                        .sentinels
+                        .values()
+                        .any(|sentinel| sentinel.runid.as_deref() == Some(runid.as_str()))
+                });
             let obsolete_runid = state
                 .get_master(&master_name)
                 .and_then(|master| master.sentinels.get(&sentinel_key))
@@ -163,14 +170,18 @@ pub fn apply_discovery_action(state: &mut SentinelState, action: DiscoveryAction
             advance_current_epoch(state, current_epoch);
             if let Some(master) = state.get_master_mut(&master_name) {
                 remove_matching_sentinel_from_master(master, &runid);
-                let mut sentinel = SentinelRedisInstance::new_master(&sentinel_key, addr, 0);
+                let mut sentinel =
+                    SentinelRedisInstance::new_master(&sentinel_key, addr.clone(), 0);
                 sentinel.flags = InstanceFlags::SENTINEL;
                 sentinel.down_after_period = master.down_after_period;
                 sentinel.initialize_created_link_state(now);
-                sentinel.runid = Some(runid);
+                sentinel.runid = Some(runid.clone());
                 sentinel.last_hello_time = now;
-                master.sentinels.insert(sentinel_key, sentinel);
+                master.sentinels.insert(sentinel_key.clone(), sentinel);
                 apply_master_config_from_hello(master, master_addr, master_config_epoch);
+            }
+            if should_update_runid_address {
+                update_sentinel_address_in_all_masters(state, &runid, &sentinel_key, &addr);
             }
         }
         DiscoveryAction::UpdateSentinel {
@@ -204,6 +215,33 @@ fn remove_matching_sentinel_from_master(master: &mut SentinelRedisInstance, runi
     master
         .sentinels
         .retain(|_, sentinel| sentinel.runid.as_deref() != Some(runid));
+}
+
+fn update_sentinel_address_in_all_masters(
+    state: &mut SentinelState,
+    runid: &str,
+    sentinel_key: &str,
+    addr: &SentinelAddr,
+) {
+    for master in state.masters.values_mut() {
+        let stale_keys: Vec<String> = master
+            .sentinels
+            .iter()
+            .filter(|(key, sentinel)| {
+                key.as_str() != sentinel_key && sentinel.runid.as_deref() == Some(runid)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        for stale_key in stale_keys {
+            let Some(mut sentinel) = master.sentinels.remove(&stale_key) else {
+                continue;
+            };
+            sentinel.name = sentinel_key.to_string();
+            sentinel.addr = addr.clone();
+            master.sentinels.insert(sentinel_key.to_string(), sentinel);
+        }
+    }
 }
 
 fn advance_current_epoch(state: &mut SentinelState, current_epoch: u64) {
@@ -568,6 +606,63 @@ mod tests {
         let moved = master.sentinels.get("192.168.1.3:26379").unwrap();
         assert_eq!(moved.runid.as_deref(), Some("same-runid"));
         assert_eq!(master.sentinels.len(), 1);
+    }
+
+    #[test]
+    fn process_hello_updates_same_runid_address_across_masters() {
+        let mut state = SentinelState::new();
+        state.monitor("mymaster", "10.0.0.1", 6379, 2).unwrap();
+        state.monitor("othermaster", "10.0.0.2", 6379, 2).unwrap();
+
+        let old_key = "192.168.1.2:26379".to_string();
+        for master_name in ["mymaster", "othermaster"] {
+            let mut old_sentinel = SentinelRedisInstance::new_master(
+                &old_key,
+                SentinelAddr::new("192.168.1.2", 26379),
+                0,
+            );
+            old_sentinel.flags = InstanceFlags::SENTINEL;
+            old_sentinel.runid = Some("same-runid".to_string());
+            old_sentinel.leader = Some(format!("{master_name}-leader"));
+            state
+                .get_master_mut(master_name)
+                .unwrap()
+                .sentinels
+                .insert(old_key.clone(), old_sentinel);
+        }
+
+        let hello = HelloMessage {
+            sentinel_ip: "192.168.1.3".to_string(),
+            sentinel_port: 26379,
+            sentinel_runid: "same-runid".to_string(),
+            current_epoch: 1,
+            master_name: "mymaster".to_string(),
+            master_ip: "10.0.0.1".to_string(),
+            master_port: 6379,
+            master_config_epoch: 0,
+        };
+
+        let action = process_hello_message(&state, &hello, 1000);
+        assert!(matches!(action, DiscoveryAction::AddSentinel { .. }));
+        apply_discovery_action(&mut state, action, 1000);
+
+        let new_key = "192.168.1.3:26379";
+        let master = state.get_master("mymaster").unwrap();
+        assert!(!master.sentinels.contains_key(&old_key));
+        assert_eq!(
+            master
+                .sentinels
+                .get(new_key)
+                .and_then(|sentinel| sentinel.runid.as_deref()),
+            Some("same-runid")
+        );
+
+        let other_master = state.get_master("othermaster").unwrap();
+        assert!(!other_master.sentinels.contains_key(&old_key));
+        let updated = other_master.sentinels.get(new_key).unwrap();
+        assert_eq!(updated.addr.hostname, "192.168.1.3");
+        assert_eq!(updated.runid.as_deref(), Some("same-runid"));
+        assert_eq!(updated.leader.as_deref(), Some("othermaster-leader"));
     }
 
     #[test]
