@@ -167,7 +167,9 @@ pub fn parse_info_response(info: &str) -> ParsedInfo {
                     result.slave_priority = value.parse().ok();
                 }
                 "run_id" => {
-                    result.run_id = Some(value.to_string());
+                    if let Some(run_id) = parse_redis_run_id(value) {
+                        result.run_id = Some(run_id);
+                    }
                 }
                 "connected_slaves" => {
                     result.connected_slaves = value.parse().ok();
@@ -178,6 +180,14 @@ pub fn parse_info_response(info: &str) -> ParsedInfo {
     }
 
     result
+}
+
+fn parse_redis_run_id(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 40 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes[..40]).into_owned())
 }
 
 pub fn apply_info_to_instance(instance: &mut SentinelRedisInstance, info: &ParsedInfo, now: u64) {
@@ -337,14 +347,31 @@ mod tests {
 # Replication
 role:master
 connected_slaves:2
-run_id:abc123def456
+run_id:0123456789abcdef0123456789abcdef01234567
 master_repl_offset:12345
 "#;
         let parsed = parse_info_response(info);
         assert_eq!(parsed.role, Some(Role::Master));
         assert_eq!(parsed.connected_slaves, Some(2));
-        assert_eq!(parsed.run_id, Some("abc123def456".to_string()));
+        assert_eq!(
+            parsed.run_id,
+            Some("0123456789abcdef0123456789abcdef01234567".to_string())
+        );
         assert_eq!(parsed.slave_repl_offset, Some(12345));
+    }
+
+    #[test]
+    fn parse_info_run_id_matches_redis_fixed_width() {
+        let short = parse_info_response("role:master\nrun_id:abc123\n");
+        assert_eq!(short.run_id, None);
+
+        let long = parse_info_response(
+            "role:master\nrun_id:0123456789abcdef0123456789abcdef0123456789extra\n",
+        );
+        assert_eq!(
+            long.run_id,
+            Some("0123456789abcdef0123456789abcdef01234567".to_string())
+        );
     }
 
     #[test]
@@ -444,13 +471,17 @@ slave_priority:100
     #[test]
     fn record_info_response_preserves_raw_cache_payload() {
         let mut instance = make_instance();
-        let raw = "role:master\nrun_id:cached123\nmaster_repl_offset:42\n";
+        let raw =
+            "role:master\nrun_id:abcdef0123456789abcdef0123456789abcdef01\nmaster_repl_offset:42\n";
 
         record_info_response(&mut instance, raw, 7000);
 
         assert_eq!(instance.info_refresh, 7000);
         assert_eq!(instance.info.as_deref(), Some(raw));
-        assert_eq!(instance.runid.as_deref(), Some("cached123"));
+        assert_eq!(
+            instance.runid.as_deref(),
+            Some("abcdef0123456789abcdef0123456789abcdef01")
+        );
         assert_eq!(instance.slave_repl_offset, 42);
     }
 
