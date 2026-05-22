@@ -295,4 +295,3 @@ fn aof_empty_save_and_load() {
 
     std::fs::remove_file(&path).ok();
 }
-

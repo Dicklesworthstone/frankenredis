@@ -72,9 +72,9 @@ fn canonicalize_to_resp2_shape(frame: &RespFrame) -> RespFrame {
             }
             RespFrame::Array(Some(flat))
         }
-        RespFrame::Array(Some(items)) => {
-            RespFrame::Array(Some(items.iter().map(canonicalize_to_resp2_shape).collect()))
-        }
+        RespFrame::Array(Some(items)) => RespFrame::Array(Some(
+            items.iter().map(canonicalize_to_resp2_shape).collect(),
+        )),
         other => other.clone(),
     }
 }
@@ -290,7 +290,8 @@ fn mr_zrange_withscores_resp3_pairs_match_resp2_flat_alternating() {
             };
             assert_eq!(pair_items.len(), 2);
             assert_eq!(
-                pair_items[0], flat[i * 2],
+                pair_items[0],
+                flat[i * 2],
                 "{argv:?}: pair {i} member byte drift"
             );
             assert_eq!(

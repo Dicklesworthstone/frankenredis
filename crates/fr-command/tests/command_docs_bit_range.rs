@@ -12,7 +12,11 @@ use fr_store::Store;
 fn run(name: &str) -> RespFrame {
     let mut store = Store::new();
     dispatch_argv(
-        &[b"COMMAND".to_vec(), b"DOCS".to_vec(), name.as_bytes().to_vec()],
+        &[
+            b"COMMAND".to_vec(),
+            b"DOCS".to_vec(),
+            name.as_bytes().to_vec(),
+        ],
         &mut store,
         0,
     )
@@ -60,7 +64,10 @@ fn bulk_eq(frame: &RespFrame, expected: &str) -> bool {
 }
 
 fn assert_bulk(frame: &RespFrame, expected: &str) {
-    assert!(bulk_eq(frame, expected), "expected {expected}, got {frame:?}");
+    assert!(
+        bulk_eq(frame, expected),
+        "expected {expected}, got {frame:?}"
+    );
 }
 
 fn assert_unit_oneof(unit: &RespFrame) {
@@ -112,9 +119,7 @@ fn command_docs_bitpos_matches_upstream_layout() {
     assert_bulk(arg_field(&range_sub[1], "name").unwrap(), "end-unit-block");
     assert_bulk(arg_field(&range_sub[1], "type").unwrap(), "block");
 
-    let RespFrame::Array(Some(end_block)) =
-        arg_field(&range_sub[1], "arguments").unwrap()
-    else {
+    let RespFrame::Array(Some(end_block)) = arg_field(&range_sub[1], "arguments").unwrap() else {
         panic!("end-unit-block arguments must be array");
     };
     assert_eq!(end_block.len(), 2);

@@ -108,7 +108,7 @@ fn mr_xlen_after_xdel_decreases_by_count_of_present_ids() {
     assert_eq!(store.xlen(b"s", NOW).unwrap(), 10);
 
     let to_delete = vec![(2, 0), (5, 0), (99, 99), (5, 0)]; // 99-99 missing,
-                                                             // 5-0 listed twice
+    // 5-0 listed twice
     let removed = store.xdel(b"s", &to_delete, NOW).expect("xdel");
     // Upstream XDEL counts each ACTUALLY removed entry exactly once
     // even if the same ID is listed twice; missing IDs don't count.
@@ -139,7 +139,9 @@ fn mr_xdel_repeated_call_is_no_op_for_already_deleted_ids() {
 
     // After all entries deleted, the stream object remains; subsequent
     // XADD with a fresh higher ID succeeds and the stream rebuilds.
-    store.xadd(b"s", (100, 0), &f, NOW).expect("post-clear xadd");
+    store
+        .xadd(b"s", (100, 0), &f, NOW)
+        .expect("post-clear xadd");
     assert_eq!(store.xlen(b"s", NOW).unwrap(), 1);
 }
 

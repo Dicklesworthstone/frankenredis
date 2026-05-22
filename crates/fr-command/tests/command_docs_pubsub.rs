@@ -15,7 +15,11 @@ use fr_store::Store;
 fn run(name: &str) -> RespFrame {
     let mut store = Store::new();
     dispatch_argv(
-        &[b"COMMAND".to_vec(), b"DOCS".to_vec(), name.as_bytes().to_vec()],
+        &[
+            b"COMMAND".to_vec(),
+            b"DOCS".to_vec(),
+            name.as_bytes().to_vec(),
+        ],
         &mut store,
         0,
     )
@@ -63,7 +67,10 @@ fn bulk_eq(frame: &RespFrame, expected: &str) -> bool {
 }
 
 fn assert_bulk(frame: &RespFrame, expected: &str) {
-    assert!(bulk_eq(frame, expected), "expected {expected}, got {frame:?}");
+    assert!(
+        bulk_eq(frame, expected),
+        "expected {expected}, got {frame:?}"
+    );
 }
 
 fn assert_flags(arg: &RespFrame, expected: &[&str]) {
@@ -99,7 +106,12 @@ fn command_docs_ssubscribe_matches_upstream_layout() {
 
 #[test]
 fn command_docs_unsubscribe_matches_upstream_layout() {
-    assert_single("UNSUBSCRIBE", "channel", "string", &["optional", "multiple"]);
+    assert_single(
+        "UNSUBSCRIBE",
+        "channel",
+        "string",
+        &["optional", "multiple"],
+    );
 }
 
 #[test]
@@ -119,7 +131,12 @@ fn command_docs_psubscribe_matches_upstream_layout() {
 
 #[test]
 fn command_docs_punsubscribe_matches_upstream_layout() {
-    assert_single("PUNSUBSCRIBE", "pattern", "pattern", &["optional", "multiple"]);
+    assert_single(
+        "PUNSUBSCRIBE",
+        "pattern",
+        "pattern",
+        &["optional", "multiple"],
+    );
 }
 
 #[test]

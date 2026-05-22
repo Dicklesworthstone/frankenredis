@@ -230,7 +230,15 @@ mod tests {
 
         // Whitespace after closing quote → ok.
         let args = split_inline_args(b"SET key \"hello\" extra").unwrap();
-        assert_eq!(args, vec![b"SET".to_vec(), b"key".to_vec(), b"hello".to_vec(), b"extra".to_vec()]);
+        assert_eq!(
+            args,
+            vec![
+                b"SET".to_vec(),
+                b"key".to_vec(),
+                b"hello".to_vec(),
+                b"extra".to_vec()
+            ]
+        );
 
         // Tab after closing quote → ok.
         let args = split_inline_args(b"SET key \"hello\"\textra").unwrap();
@@ -251,6 +259,14 @@ mod tests {
 
         // Whitespace trailer → ok.
         let args = split_inline_args(b"SET key 'hello' world").unwrap();
-        assert_eq!(args, vec![b"SET".to_vec(), b"key".to_vec(), b"hello".to_vec(), b"world".to_vec()]);
+        assert_eq!(
+            args,
+            vec![
+                b"SET".to_vec(),
+                b"key".to_vec(),
+                b"hello".to_vec(),
+                b"world".to_vec()
+            ]
+        );
     }
 }

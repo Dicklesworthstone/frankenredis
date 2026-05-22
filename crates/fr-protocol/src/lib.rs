@@ -262,8 +262,7 @@ fn parse_frame_internal(
             // numeric payloads are malformed — reject same way
             // ny5fu rejects '_payload\r\n'. (frankenredis-u1xg5)
             let (line, consumed) = read_line(input, next)?;
-            let s = std::str::from_utf8(line)
-                .map_err(|_| RespParseError::InvalidUtf8)?;
+            let s = std::str::from_utf8(line).map_err(|_| RespParseError::InvalidUtf8)?;
             if s.is_empty() || s.parse::<f64>().is_err() {
                 return Err(RespParseError::InvalidInteger);
             }
@@ -283,9 +282,7 @@ fn parse_frame_internal(
                 _ => 0,
             };
             if digits_start == line.len()
-                || line[digits_start..]
-                    .iter()
-                    .any(|b| !b.is_ascii_digit())
+                || line[digits_start..].iter().any(|b| !b.is_ascii_digit())
             {
                 return Err(RespParseError::InvalidInteger);
             }

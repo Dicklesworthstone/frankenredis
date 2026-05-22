@@ -10,7 +10,11 @@ use fr_store::Store;
 fn group_of(cmd: &str) -> String {
     let mut store = Store::new();
     let out = dispatch_argv(
-        &[b"COMMAND".to_vec(), b"DOCS".to_vec(), cmd.as_bytes().to_vec()],
+        &[
+            b"COMMAND".to_vec(),
+            b"DOCS".to_vec(),
+            cmd.as_bytes().to_vec(),
+        ],
         &mut store,
         0,
     )

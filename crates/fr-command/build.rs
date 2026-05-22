@@ -87,10 +87,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Tuple is (doc_flags lowercase, deprecated_since, replaced_by);
     // an entry only lands here when at least one of those fields is
     // present, so the consumer can binary_search and skip on miss.
-    let mut docs_deprecation = BTreeMap::<
-        String,
-        (Vec<String>, Option<String>, Option<String>),
-    >::new();
+    let mut docs_deprecation =
+        BTreeMap::<String, (Vec<String>, Option<String>, Option<String>)>::new();
     // (frankenredis-f7670) Set of command names whose upstream JSON
     // declares an `arguments` field. Container commands (CLUSTER,
     // CONFIG, CLIENT, DEBUG, MEMORY, OBJECT, SCRIPT, FUNCTION, ACL,
@@ -233,12 +231,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .get("replaced_by")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            if !doc_flags.is_empty()
-                || deprecated_since.is_some()
-                || replaced_by.is_some()
-            {
-                docs_deprecation
-                    .insert(command_name.clone(), (doc_flags, deprecated_since, replaced_by));
+            if !doc_flags.is_empty() || deprecated_since.is_some() || replaced_by.is_some() {
+                docs_deprecation.insert(
+                    command_name.clone(),
+                    (doc_flags, deprecated_since, replaced_by),
+                );
             }
 
             // (frankenredis-f7670) Mark commands with declared args so
@@ -340,9 +337,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     out.push_str("];\n");
 
-    out.push_str(
-        "const UPSTREAM_COMMAND_DOCS_DEPRECATION: &[(&str, &[&str], &str, &str)] = &[\n",
-    );
+    out.push_str("const UPSTREAM_COMMAND_DOCS_DEPRECATION: &[(&str, &[&str], &str, &str)] = &[\n");
     for (command, (doc_flags, deprecated_since, replaced_by)) in &docs_deprecation {
         out.push_str("    (\"");
         out.push_str(&escape_rust_string(command));

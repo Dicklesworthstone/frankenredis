@@ -21,7 +21,11 @@ use fr_store::Store;
 fn run(name: &str) -> RespFrame {
     let mut store = Store::new();
     dispatch_argv(
-        &[b"COMMAND".to_vec(), b"DOCS".to_vec(), name.as_bytes().to_vec()],
+        &[
+            b"COMMAND".to_vec(),
+            b"DOCS".to_vec(),
+            name.as_bytes().to_vec(),
+        ],
         &mut store,
         0,
     )
@@ -218,8 +222,14 @@ fn command_docs_cluster_addslots_has_real_arg_tree() {
     let RespFrame::Array(Some(arg0)) = &args[0] else {
         panic!("arg must be array");
     };
-    assert_eq!(field(arg0, "name").unwrap(), &RespFrame::BulkString(Some(b"slot".to_vec())));
-    assert_eq!(field(arg0, "type").unwrap(), &RespFrame::BulkString(Some(b"integer".to_vec())));
+    assert_eq!(
+        field(arg0, "name").unwrap(),
+        &RespFrame::BulkString(Some(b"slot".to_vec()))
+    );
+    assert_eq!(
+        field(arg0, "type").unwrap(),
+        &RespFrame::BulkString(Some(b"integer".to_vec()))
+    );
     let RespFrame::Array(Some(flags)) = field(arg0, "flags").unwrap() else {
         panic!("flags must be array");
     };

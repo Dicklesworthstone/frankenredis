@@ -23,7 +23,12 @@ type StreamIds = (Vec<u8>, Vec<StreamId>);
 
 fn seed_db0(store: &mut Store) {
     // String
-    store.set(b"db0:str".to_vec(), b"value-string".to_vec(), Some(60_000), NOW);
+    store.set(
+        b"db0:str".to_vec(),
+        b"value-string".to_vec(),
+        Some(60_000),
+        NOW,
+    );
 
     // Hash with per-field TTL (the sdmwz target)
     store
@@ -38,7 +43,11 @@ fn seed_db0(store: &mut Store) {
 
     // Sorted set
     store
-        .zadd(b"db0:zset", &[(1.0, b"a".to_vec()), (2.5, b"b".to_vec())], NOW)
+        .zadd(
+            b"db0:zset",
+            &[(1.0, b"a".to_vec()), (2.5, b"b".to_vec())],
+            NOW,
+        )
         .expect("zadd");
 
     // Stream with two entries
@@ -126,8 +135,14 @@ fn mr_swapdb_twice_is_identity_across_string_hash_zset_stream() {
     );
 
     // Sanity: things actually moved.
-    assert!(store.exists(b"db1:str", NOW), "db1:str must exist after first swap");
-    assert!(!store.exists(b"db0:str", NOW), "db0:str must be empty after first swap");
+    assert!(
+        store.exists(b"db1:str", NOW),
+        "db1:str must exist after first swap"
+    );
+    assert!(
+        !store.exists(b"db0:str", NOW),
+        "db0:str must be empty after first swap"
+    );
 
     // Second swap restores the original namespace.
     let _ = store.swap_prefixes(b"db0:", b"db1:");

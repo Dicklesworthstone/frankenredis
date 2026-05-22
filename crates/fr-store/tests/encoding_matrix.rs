@@ -200,8 +200,7 @@ fn list_encoding_quicklist_one_past_threshold_bytes() {
     // list stays as a single listpack — only overflowing the byte budget
     // forces a quicklist.
     let mut store = Store::new();
-    let small_values: Vec<Vec<u8>> =
-        (0..129_u32).map(|i| format!("v{i}").into_bytes()).collect();
+    let small_values: Vec<Vec<u8>> = (0..129_u32).map(|i| format!("v{i}").into_bytes()).collect();
     store.rpush(b"l", &small_values, NOW).expect("rpush small");
     assert_eq!(store.object_encoding(b"l", NOW), Some("listpack"));
 
@@ -356,9 +355,7 @@ fn mr_enc_no_downgrade_on_set_srem_after_listpack_promotion() {
     assert_eq!(store.object_encoding(b"s", NOW), Some("listpack"));
 
     let alpha = b"alpha".as_slice();
-    store
-        .srem(b"s", &[alpha], NOW)
-        .expect("srem non-int");
+    store.srem(b"s", &[alpha], NOW).expect("srem non-int");
     // Now the set is purely integers again, BUT the encoding stays at
     // listpack — this is the metamorphic non-reversal property.
     assert_eq!(store.object_encoding(b"s", NOW), Some("listpack"));

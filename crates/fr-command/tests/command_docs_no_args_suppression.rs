@@ -13,7 +13,11 @@ use fr_store::Store;
 fn run(name: &str) -> RespFrame {
     let mut store = Store::new();
     dispatch_argv(
-        &[b"COMMAND".to_vec(), b"DOCS".to_vec(), name.as_bytes().to_vec()],
+        &[
+            b"COMMAND".to_vec(),
+            b"DOCS".to_vec(),
+            name.as_bytes().to_vec(),
+        ],
         &mut store,
         0,
     )
@@ -51,21 +55,8 @@ fn command_docs_containers_omit_arguments_field() {
     // because subcommand handlers route the args themselves) and so
     // emit no `arguments` field at all.
     for cmd in [
-        "DEBUG",
-        "CLUSTER",
-        "CONFIG",
-        "CLIENT",
-        "FUNCTION",
-        "LATENCY",
-        "MEMORY",
-        "MODULE",
-        "OBJECT",
-        "PUBSUB",
-        "SCRIPT",
-        "SLOWLOG",
-        "ACL",
-        "XGROUP",
-        "XINFO",
+        "DEBUG", "CLUSTER", "CONFIG", "CLIENT", "FUNCTION", "LATENCY", "MEMORY", "MODULE",
+        "OBJECT", "PUBSUB", "SCRIPT", "SLOWLOG", "ACL", "XGROUP", "XINFO",
     ] {
         let out = run(cmd);
         let kv = kv(&out);

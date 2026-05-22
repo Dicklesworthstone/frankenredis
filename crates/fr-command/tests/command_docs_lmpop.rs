@@ -89,7 +89,10 @@ fn command_docs_lmpop_matches_upstream_layout() {
         panic!("flags must be array, got {flags:?}");
     };
     assert_eq!(flag_items.len(), 1);
-    assert_eq!(flag_items[0], RespFrame::SimpleString("multiple".to_string()));
+    assert_eq!(
+        flag_items[0],
+        RespFrame::SimpleString("multiple".to_string())
+    );
 
     // where: oneof with two pure-token subargs (LEFT, RIGHT)
     assert_bulk_eq(arg_field(&args[2], "name").unwrap(), "where");
@@ -113,5 +116,8 @@ fn command_docs_lmpop_matches_upstream_layout() {
         panic!("flags must be array");
     };
     assert_eq!(flag_items.len(), 1);
-    assert_eq!(flag_items[0], RespFrame::SimpleString("optional".to_string()));
+    assert_eq!(
+        flag_items[0],
+        RespFrame::SimpleString("optional".to_string())
+    );
 }

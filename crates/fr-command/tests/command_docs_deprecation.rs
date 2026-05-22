@@ -11,7 +11,11 @@ use fr_store::Store;
 fn run(name: &str) -> RespFrame {
     let mut store = Store::new();
     dispatch_argv(
-        &[b"COMMAND".to_vec(), b"DOCS".to_vec(), name.as_bytes().to_vec()],
+        &[
+            b"COMMAND".to_vec(),
+            b"DOCS".to_vec(),
+            name.as_bytes().to_vec(),
+        ],
         &mut store,
         0,
     )

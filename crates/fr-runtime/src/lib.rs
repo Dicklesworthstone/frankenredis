@@ -100,7 +100,8 @@ fn normalize_acl_hash(hash: &str) -> Option<Vec<u8>> {
 /// FF, CR) or a NUL byte. Used to reject malformed `ACL SETUSER` names
 /// that would otherwise break ACL-file serialization. (frankenredis-mdg4o)
 fn acl_username_has_invalid_byte(name: &[u8]) -> bool {
-    name.iter().any(|&b| matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r' | 0x00))
+    name.iter()
+        .any(|&b| matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r' | 0x00))
 }
 
 fn acl_setuser_missing_password_error(rule_str: &str) -> String {
@@ -306,8 +307,8 @@ fn canonical_command_fullname(argv: &[Vec<u8>]) -> String {
     let command = String::from_utf8_lossy(argv.first().map_or(b"", Vec::as_slice));
     let lower = command.to_ascii_lowercase();
     const CONTAINERS: &[&str] = &[
-        "acl", "client", "cluster", "command", "config", "debug", "function", "latency",
-        "memory", "module", "object", "pubsub", "script", "slowlog", "xgroup", "xinfo",
+        "acl", "client", "cluster", "command", "config", "debug", "function", "latency", "memory",
+        "module", "object", "pubsub", "script", "slowlog", "xgroup", "xinfo",
     ];
     if CONTAINERS.iter().any(|c| *c == lower)
         && let Some(subcommand) = argv.get(1)
@@ -2361,9 +2362,7 @@ impl Default for ServerState {
             // at startup. The master_replid lives independently of
             // server_run_id so it can rotate via DEBUG CHANGE-REPL-ID
             // / failover without disturbing the run identity.
-            replication_runtime_state: ReplicationRuntimeState::new(
-                fr_store::generate_run_id_hex(),
-            ),
+            replication_runtime_state: ReplicationRuntimeState::new(fr_store::generate_run_id_hex()),
             store,
             aof_records: Vec::new(),
             aof_base_offset: 0,
@@ -2790,9 +2789,7 @@ impl ServerState {
             self.replication_runtime_state.role,
             ReplicationRoleState::Master
         );
-        let any_replica_ever = self
-            .replication_runtime_state
-            .any_replica_ever_connected;
+        let any_replica_ever = self.replication_runtime_state.any_replica_ever_connected;
         let aof_active = self.aof_path.is_some() && self.store.aof_enabled;
         let should_propagate = !is_master || any_replica_ever || aof_active;
         if !should_propagate {
@@ -3274,16 +3271,18 @@ impl Runtime {
             }
         };
         let mut store = Store::new();
-        let counts =
-            match apply_rdb_entries_to_store(&mut store, &decoded_entries, now_ms.saturating_add(1))
-            {
-                Ok(counts) => counts,
-                Err(_) => {
-                    return RespFrame::Error(
-                        "ERR failed to reload dataset from in-memory RDB round-trip".to_string(),
-                    );
-                }
-            };
+        let counts = match apply_rdb_entries_to_store(
+            &mut store,
+            &decoded_entries,
+            now_ms.saturating_add(1),
+        ) {
+            Ok(counts) => counts,
+            Err(_) => {
+                return RespFrame::Error(
+                    "ERR failed to reload dataset from in-memory RDB round-trip".to_string(),
+                );
+            }
+        };
         store.stat_rdb_last_load_keys_expired = u64::try_from(counts.expired).unwrap_or(u64::MAX);
         store.stat_rdb_last_load_keys_loaded = u64::try_from(counts.loaded).unwrap_or(u64::MAX);
         self.server.store = store;
@@ -5054,7 +5053,8 @@ impl Runtime {
                 let elapsed_us = start.elapsed().as_micros() as u64;
                 self.record_slowlog(&argv, elapsed_us, now_ms);
                 self.server.record_latency_sample(&argv, elapsed_us, now_ms);
-                self.server.record_command_histogram(&argv, elapsed_us, &reply);
+                self.server
+                    .record_command_histogram(&argv, elapsed_us, &reply);
                 return reply;
             }
             Some(RuntimeSpecialCommand::Hello) => {
@@ -5067,7 +5067,8 @@ impl Runtime {
                 let elapsed_us = start.elapsed().as_micros() as u64;
                 self.record_slowlog(&argv, elapsed_us, now_ms);
                 self.server.record_latency_sample(&argv, elapsed_us, now_ms);
-                self.server.record_command_histogram(&argv, elapsed_us, &reply);
+                self.server
+                    .record_command_histogram(&argv, elapsed_us, &reply);
                 return reply;
             }
             _ => {}
@@ -5415,7 +5416,8 @@ impl Runtime {
                 let elapsed_us = special_start.elapsed().as_micros() as u64;
                 self.record_slowlog(&argv, elapsed_us, now_ms);
                 self.server.record_latency_sample(&argv, elapsed_us, now_ms);
-                self.server.record_command_histogram(&argv, elapsed_us, &reply);
+                self.server
+                    .record_command_histogram(&argv, elapsed_us, &reply);
                 return reply;
             }
         }
@@ -6888,9 +6890,7 @@ impl Runtime {
                         // `ACL DRYRUN default unknownCmd` returned
                         // 'UNKNOWNCMD' instead of 'unknownCmd'.
                         // (frankenredis-aclcase)
-                        return RespFrame::Error(format!(
-                            "ERR Command '{cmd_name}' not found"
-                        ));
+                        return RespFrame::Error(format!("ERR Command '{cmd_name}' not found"));
                     }
                     if fr_command::check_command_arity(&dryrun_argv[0], dryrun_argv.len()).is_err()
                     {
@@ -7559,8 +7559,7 @@ impl Runtime {
             // RESP3 session silently truncated the config file to a
             // single blank line because the if-let didn't match.
             let mut record = |k: &RespFrame, v: &RespFrame| {
-                if let (RespFrame::BulkString(Some(key)), RespFrame::BulkString(Some(val))) =
-                    (k, v)
+                if let (RespFrame::BulkString(Some(key)), RespFrame::BulkString(Some(val))) = (k, v)
                 {
                     let key = String::from_utf8_lossy(key);
                     let val = String::from_utf8_lossy(val);
@@ -9183,9 +9182,7 @@ impl Runtime {
                 let is_percent = trimmed.ends_with('%');
                 let canonical = if is_percent {
                     let body = &trimmed[..trimmed.len() - 1];
-                    if body.is_empty()
-                        || body.parse::<i64>().map(|v| v < 0).unwrap_or(true)
-                    {
+                    if body.is_empty() || body.parse::<i64>().map(|v| v < 0).unwrap_or(true) {
                         return config_set_failed(
                             "maxmemory-clients",
                             "argument must be a memory or percent value",
@@ -10008,9 +10005,8 @@ impl Runtime {
                         let valid = !parts.is_empty()
                             && parts.len().is_multiple_of(2)
                             && parts.iter().enumerate().all(|(idx, p)| {
-                                p.parse::<i64>().is_ok_and(|v| {
-                                    if idx % 2 == 0 { v >= 1 } else { v >= 0 }
-                                })
+                                p.parse::<i64>()
+                                    .is_ok_and(|v| if idx % 2 == 0 { v >= 1 } else { v >= 0 })
                             });
                         if !valid {
                             return config_set_failed("save", "Invalid save parameters");
@@ -10301,9 +10297,7 @@ impl Runtime {
                     };
                     sessions
                         .values()
-                        .filter(|session| {
-                            self.client_type_for_session(session) == canonical
-                        })
+                        .filter(|session| self.client_type_for_session(session) == canonical)
                         .map(|session| self.client_info_line_for_session(session, now_ms))
                         .collect::<String>()
                         .into_bytes()
@@ -12935,10 +12929,7 @@ replica_announced:1\r\n",
         // needs to drain the replication backlog and transition role
         // through the replica→master state machine) and is tracked as
         // a follow-up. (frankenredis-ql4cc)
-        if !is_sync
-            && argv.len() > 3
-            && argv[3].eq_ignore_ascii_case(b"FAILOVER")
-        {
+        if !is_sync && argv.len() > 3 && argv[3].eq_ignore_ascii_case(b"FAILOVER") {
             match &self.server.replication_runtime_state.role {
                 ReplicationRoleState::Master => {
                     return RespFrame::Error(
@@ -12946,16 +12937,19 @@ replica_announced:1\r\n",
                     );
                 }
                 ReplicationRoleState::Replica { .. } => {
-                    let our_replid =
-                        self.server.replication_runtime_state.backlog.replid.as_str();
+                    let our_replid = self
+                        .server
+                        .replication_runtime_state
+                        .backlog
+                        .replid
+                        .as_str();
                     let requested_replid = match std::str::from_utf8(&argv[1]) {
                         Ok(s) => s,
                         Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
                     };
                     if !requested_replid.eq_ignore_ascii_case(our_replid) {
                         return RespFrame::Error(
-                            "ERR PSYNC FAILOVER replid must match my replid."
-                                .to_string(),
+                            "ERR PSYNC FAILOVER replid must match my replid.".to_string(),
                         );
                     }
                     // Matching-replid promotion is intentionally not
@@ -13804,7 +13798,10 @@ fn apply_rdb_entries_to_store(
 ) -> Result<RdbLoadCounts, PersistError> {
     let mut counts = RdbLoadCounts::default();
     for entry in entries {
-        if entry.expire_ms.is_some_and(|expires_at| expires_at <= now_ms) {
+        if entry
+            .expire_ms
+            .is_some_and(|expires_at| expires_at <= now_ms)
+        {
             counts.expired = counts.expired.saturating_add(1);
             continue;
         }
@@ -14643,18 +14640,12 @@ mod tests {
         for line in body.lines() {
             if let Some(rest) = line.strip_prefix("cmdstat_get:") {
                 assert!(rest.starts_with("calls=3,usec="), "{line}");
-                assert!(
-                    rest.ends_with(",rejected_calls=0,failed_calls=0"),
-                    "{line}"
-                );
+                assert!(rest.ends_with(",rejected_calls=0,failed_calls=0"), "{line}");
                 assert!(rest.contains(",usec_per_call="), "{line}");
             }
             if let Some(rest) = line.strip_prefix("cmdstat_set:") {
                 assert!(rest.starts_with("calls=1,usec="), "{line}");
-                assert!(
-                    rest.ends_with(",rejected_calls=0,failed_calls=0"),
-                    "{line}"
-                );
+                assert!(rest.ends_with(",rejected_calls=0,failed_calls=0"), "{line}");
                 assert!(rest.contains(",usec_per_call="), "{line}");
             }
         }
@@ -14702,10 +14693,7 @@ mod tests {
         rt.execute_frame(command(&[b"SLOWLOG", b"RESET"]), 1);
 
         // Dispatch a genuinely unknown command.
-        let reply = rt.execute_frame(
-            command(&[b"DEFINITELY_NOT_A_COMMAND", b"arg1", b"arg2"]),
-            2,
-        );
+        let reply = rt.execute_frame(command(&[b"DEFINITELY_NOT_A_COMMAND", b"arg1", b"arg2"]), 2);
         assert!(
             matches!(reply, RespFrame::Error(ref s) if s.starts_with("ERR unknown command")),
             "expected unknown-command error, got {reply:?}",
@@ -14730,11 +14718,17 @@ mod tests {
             panic!("expected slowlog array");
         };
         for row in &rows {
-            let RespFrame::Array(Some(fields)) = row else { continue };
+            let RespFrame::Array(Some(fields)) = row else {
+                continue;
+            };
             let argv_slot = &fields[3];
-            let RespFrame::Array(Some(argv_fields)) = argv_slot else { continue };
+            let RespFrame::Array(Some(argv_fields)) = argv_slot else {
+                continue;
+            };
             for arg in argv_fields {
-                let RespFrame::BulkString(Some(bytes)) = arg else { continue };
+                let RespFrame::BulkString(Some(bytes)) = arg else {
+                    continue;
+                };
                 let s = String::from_utf8_lossy(bytes);
                 assert!(
                     !s.eq_ignore_ascii_case("definitely_not_a_command"),
@@ -14941,10 +14935,7 @@ mod tests {
         // trailing pair so the wire shape matches vendored.
         let mut rt = Runtime::default_strict();
         for section in [b"server".as_slice(), b"clients", b"cpu", b"errorstats"] {
-            let reply = rt.execute_frame(
-                command(&[b"INFO".as_slice(), section]),
-                0,
-            );
+            let reply = rt.execute_frame(command(&[b"INFO".as_slice(), section]), 0);
             let RespFrame::BulkString(Some(bytes)) = reply else {
                 panic!("expected bulk INFO {section:?} reply");
             };
@@ -15016,7 +15007,9 @@ mod tests {
         // Codes emitted in lex-sorted order — ERR < NOAUTH < WRONGTYPE.
         let err_pos = body.find("errorstat_ERR:").expect("ERR present");
         let noauth_pos = body.find("errorstat_NOAUTH:").expect("NOAUTH present");
-        let wrongtype_pos = body.find("errorstat_WRONGTYPE:").expect("WRONGTYPE present");
+        let wrongtype_pos = body
+            .find("errorstat_WRONGTYPE:")
+            .expect("WRONGTYPE present");
         assert!(err_pos < noauth_pos && noauth_pos < wrongtype_pos, "{body}");
 
         // CONFIG RESETSTAT should clear the counters along with the rest.
@@ -15227,7 +15220,10 @@ mod tests {
         // password-protected user globally triggered auth_required.
         let mut rt = Runtime::default_strict();
         rt.add_user(b"alice".to_vec(), b"secret2".to_vec());
-        assert!(rt.is_authenticated(), "default-nopass auto-auth survives non-default user adds");
+        assert!(
+            rt.is_authenticated(),
+            "default-nopass auto-auth survives non-default user adds"
+        );
 
         let out = rt.execute_frame(command(&[b"AUTH", b"alice", b"secret2"]), 0);
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
@@ -15572,10 +15568,7 @@ mod tests {
             "Lib-Name".as_bytes(),
             "LIB-NAME".as_bytes(),
         ] {
-            let reply = rt.execute_frame(
-                command(&[b"CLIENT", b"SETINFO", input, b"a b"]),
-                0,
-            );
+            let reply = rt.execute_frame(command(&[b"CLIENT", b"SETINFO", input, b"a b"]), 0);
             let expected = String::from_utf8(input.to_vec()).unwrap();
             assert_eq!(
                 reply,
@@ -15591,10 +15584,7 @@ mod tests {
             "Lib-Ver".as_bytes(),
             "LIB-VER".as_bytes(),
         ] {
-            let reply = rt.execute_frame(
-                command(&[b"CLIENT", b"SETINFO", input, b"1 2"]),
-                1,
-            );
+            let reply = rt.execute_frame(command(&[b"CLIENT", b"SETINFO", input, b"1 2"]), 1);
             let expected = String::from_utf8(input.to_vec()).unwrap();
             assert_eq!(
                 reply,
@@ -16697,7 +16687,10 @@ mod tests {
             fr_store::HashFieldTtlUnit::Milliseconds,
             true,
         );
-        assert_eq!(alive_abs, fr_store::HashFieldTtl::Remaining(1_700_000_500_500));
+        assert_eq!(
+            alive_abs,
+            fr_store::HashFieldTtl::Remaining(1_700_000_500_500)
+        );
         let doomed_abs = rt2.server.store.hash_field_ttl(
             b"h",
             b"doomed",
@@ -16705,7 +16698,10 @@ mod tests {
             fr_store::HashFieldTtlUnit::Milliseconds,
             true,
         );
-        assert_eq!(doomed_abs, fr_store::HashFieldTtl::Remaining(1_800_000_000_000));
+        assert_eq!(
+            doomed_abs,
+            fr_store::HashFieldTtl::Remaining(1_800_000_000_000)
+        );
         let keep_ttl = rt2.server.store.hash_field_ttl(
             b"h",
             b"keep",
@@ -16778,7 +16774,10 @@ mod tests {
         let mut rt = Runtime::default_strict();
 
         // Fresh runtime: default is nopass, fresh sessions auto-auth.
-        assert!(rt.is_authenticated(), "fresh default-nopass session should be authenticated");
+        assert!(
+            rt.is_authenticated(),
+            "fresh default-nopass session should be authenticated"
+        );
         let ping = rt.execute_frame(command(&[b"PING"]), 0);
         assert_eq!(ping, RespFrame::SimpleString("PONG".to_string()));
 
@@ -17177,10 +17176,7 @@ mod tests {
     fn fr_p2c_005_u003_runtime_replay_aof_stream_applies_records() {
         let mut source = Runtime::default_strict();
         // (frankenredis-rl0qz) Latch propagation so source captures aof records.
-        source
-            .server
-            .replication_runtime_state
-            .ensure_replica(42);
+        source.server.replication_runtime_state.ensure_replica(42);
         let _ = source.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
         let _ = source.execute_frame(command(&[b"INCR", b"counter"]), 1);
         let encoded = source.encoded_aof_stream();
@@ -17190,10 +17186,7 @@ mod tests {
         // (frankenredis-rl0qz) Latch target too — replay_aof_stream
         // goes through execute_frame → capture_aof_record which is now
         // gated on master+no-replicas+no-aof.
-        target
-            .server
-            .replication_runtime_state
-            .ensure_replica(43);
+        target.server.replication_runtime_state.ensure_replica(43);
         let replies = target
             .replay_aof_stream(&encoded, 10)
             .expect("replay aof stream");
@@ -17216,10 +17209,7 @@ mod tests {
     fn fr_p2c_005_u003_runtime_aof_stream_preserves_select_boundaries() {
         let mut source = Runtime::default_strict();
         // (frankenredis-rl0qz) Latch propagation.
-        source
-            .server
-            .replication_runtime_state
-            .ensure_replica(42);
+        source.server.replication_runtime_state.ensure_replica(42);
         assert_eq!(
             source.execute_frame(command(&[b"SET", b"db0:key", b"zero"]), 0),
             RespFrame::SimpleString("OK".to_string())
@@ -18094,18 +18084,10 @@ mod tests {
         // OFF REDIRECT <bogus> → reject (target doesn't exist).
         assert_eq!(
             rt.execute_frame(
-                command(&[
-                    b"CLIENT",
-                    b"TRACKING",
-                    b"OFF",
-                    b"REDIRECT",
-                    b"99999",
-                ]),
+                command(&[b"CLIENT", b"TRACKING", b"OFF", b"REDIRECT", b"99999",]),
                 1,
             ),
-            RespFrame::Error(
-                "ERR The client ID you want redirect to does not exist".to_string()
-            )
+            RespFrame::Error("ERR The client ID you want redirect to does not exist".to_string())
         );
 
         // OFF REDIRECT 0 → reject (parse-time positivity check).
@@ -18114,9 +18096,7 @@ mod tests {
                 command(&[b"CLIENT", b"TRACKING", b"OFF", b"REDIRECT", b"0"]),
                 2,
             ),
-            RespFrame::Error(
-                "ERR The client ID you want redirect to does not exist".to_string()
-            )
+            RespFrame::Error("ERR The client ID you want redirect to does not exist".to_string())
         );
 
         // OFF REDIRECT abc → reject (int parse error).
@@ -18340,22 +18320,13 @@ mod tests {
         assert_eq!(negative, RespFrame::BulkString(Some(b"".to_vec())));
 
         let bogus = rt.execute_frame(command(&[b"CLIENT", b"LIST", b"ID", b"abc"]), 2);
-        assert_eq!(
-            bogus,
-            RespFrame::Error("ERR Invalid client ID".to_string())
-        );
+        assert_eq!(bogus, RespFrame::Error("ERR Invalid client ID".to_string()));
 
         // Mixed numeric + non-numeric: short-circuits on the bogus
         // token (matches upstream's getLongLongFromObjectOrReply
         // failure). Order in argv determines which token errors.
-        let mixed = rt.execute_frame(
-            command(&[b"CLIENT", b"LIST", b"ID", b"0", b"abc"]),
-            3,
-        );
-        assert_eq!(
-            mixed,
-            RespFrame::Error("ERR Invalid client ID".to_string())
-        );
+        let mixed = rt.execute_frame(command(&[b"CLIENT", b"LIST", b"ID", b"0", b"abc"]), 3);
+        assert_eq!(mixed, RespFrame::Error("ERR Invalid client ID".to_string()));
     }
 
     #[test]
@@ -18533,7 +18504,12 @@ mod tests {
         // Vendored 7.2.4 emits 54 lines: header + per-subcommand
         // title and description rows + sub-bullet rows for KILL,
         // LIST, and SETINFO option lists.
-        assert_eq!(items.len(), 54, "wire-shape mismatch (got {} items)", items.len());
+        assert_eq!(
+            items.len(),
+            54,
+            "wire-shape mismatch (got {} items)",
+            items.len()
+        );
         for (idx, frame) in items.iter().enumerate() {
             assert!(
                 matches!(frame, RespFrame::SimpleString(_)),
@@ -19151,8 +19127,7 @@ mod tests {
         );
 
         // TO host port (non-int) -> integer parse error.
-        let to_bad_port =
-            rt.execute_frame(command(&[b"FAILOVER", b"TO", b"host", b"badport"]), 4);
+        let to_bad_port = rt.execute_frame(command(&[b"FAILOVER", b"TO", b"host", b"badport"]), 4);
         assert_eq!(
             to_bad_port,
             RespFrame::Error("ERR value is not an integer or out of range".to_string())
@@ -19776,19 +19751,13 @@ mod tests {
         // Cluster mode rejection.
         let mut rt = Runtime::default_strict();
         rt.server.store.cluster_enabled = true;
-        let cluster_reject = rt.execute_frame(
-            command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]),
-            0,
-        );
+        let cluster_reject = rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0);
         assert_eq!(
             cluster_reject,
             RespFrame::Error("ERR REPLICAOF not allowed in cluster mode.".to_string())
         );
         // Same rejection for SLAVEOF alias and NO ONE.
-        let cluster_reject_slave = rt.execute_frame(
-            command(&[b"SLAVEOF", b"NO", b"ONE"]),
-            1,
-        );
+        let cluster_reject_slave = rt.execute_frame(command(&[b"SLAVEOF", b"NO", b"ONE"]), 1);
         assert_eq!(
             cluster_reject_slave,
             RespFrame::Error("ERR REPLICAOF not allowed in cluster mode.".to_string())
@@ -19801,27 +19770,17 @@ mod tests {
             .replication_runtime_state
             .ensure_replica(rt.session.client_id);
         assert!(rt.is_replica(rt.session.client_id));
-        let replica_reject = rt.execute_frame(
-            command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]),
-            0,
-        );
+        let replica_reject = rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0);
         assert_eq!(
             replica_reject,
-            RespFrame::Error(
-                "ERR Command is not valid when client is a replica.".to_string()
-            )
+            RespFrame::Error("ERR Command is not valid when client is a replica.".to_string())
         );
         // Same error path covers REPLICAOF NO ONE since the gate fires
         // before the NO-ONE special case.
-        let replica_reject_no_one = rt.execute_frame(
-            command(&[b"REPLICAOF", b"NO", b"ONE"]),
-            1,
-        );
+        let replica_reject_no_one = rt.execute_frame(command(&[b"REPLICAOF", b"NO", b"ONE"]), 1);
         assert_eq!(
             replica_reject_no_one,
-            RespFrame::Error(
-                "ERR Command is not valid when client is a replica.".to_string()
-            )
+            RespFrame::Error("ERR Command is not valid when client is a replica.".to_string())
         );
     }
 
@@ -19918,13 +19877,10 @@ mod tests {
         );
 
         // Mismatched replid → dedicated error.
-        let mismatch =
-            rt.execute_frame(command(&[b"PSYNC", b"deadbeef", b"-1", b"FAILOVER"]), 1);
+        let mismatch = rt.execute_frame(command(&[b"PSYNC", b"deadbeef", b"-1", b"FAILOVER"]), 1);
         assert_eq!(
             mismatch,
-            RespFrame::Error(
-                "ERR PSYNC FAILOVER replid must match my replid.".to_string()
-            )
+            RespFrame::Error("ERR PSYNC FAILOVER replid must match my replid.".to_string())
         );
     }
 
@@ -20413,9 +20369,7 @@ mod tests {
         let unknown = rt.execute_frame(command(&[b"CLUSTER", b"NOPE"]), 0);
         assert_eq!(
             unknown,
-            RespFrame::Error(
-                "ERR unknown subcommand 'NOPE'. Try CLUSTER HELP.".to_string()
-            )
+            RespFrame::Error("ERR unknown subcommand 'NOPE'. Try CLUSTER HELP.".to_string())
         );
 
         let keyslot_wrong_arity = rt.execute_frame(command(&[b"CLUSTER", b"KEYSLOT"]), 0);
@@ -21517,10 +21471,7 @@ mod tests {
     fn config_get_port_returns_live_runtime_listening_port() {
         let mut rt = Runtime::default_strict();
         rt.set_server_port(16480);
-        let get = rt.execute_frame(
-            command(&[b"CONFIG", b"GET", b"port"]),
-            0,
-        );
+        let get = rt.execute_frame(command(&[b"CONFIG", b"GET", b"port"]), 0);
         assert_eq!(
             get,
             RespFrame::Array(Some(vec![
@@ -21532,10 +21483,7 @@ mod tests {
 
         // Default-port runtime should report 6379.
         let mut rt_default = Runtime::default_strict();
-        let get_default = rt_default.execute_frame(
-            command(&[b"CONFIG", b"GET", b"port"]),
-            0,
-        );
+        let get_default = rt_default.execute_frame(command(&[b"CONFIG", b"GET", b"port"]), 0);
         assert_eq!(
             get_default,
             RespFrame::Array(Some(vec![
@@ -21644,7 +21592,10 @@ mod tests {
         };
         assert_eq!(entries.len(), 4);
         let RespFrame::BulkString(Some(dir_bytes)) = &entries[1] else {
-            panic!("expected dir value to be a BulkString, got {:?}", entries[1]);
+            panic!(
+                "expected dir value to be a BulkString, got {:?}",
+                entries[1]
+            );
         };
         let dir = std::str::from_utf8(dir_bytes).expect("dir is utf8");
         let dir_path = std::path::Path::new(dir);
@@ -21656,8 +21607,14 @@ mod tests {
             dir_path.exists(),
             "CONFIG GET dir must point at an existing directory, got {dir}"
         );
-        assert_eq!(entries[2], RespFrame::BulkString(Some(b"dbfilename".to_vec())));
-        assert_eq!(entries[3], RespFrame::BulkString(Some(b"custom.rdb".to_vec())));
+        assert_eq!(
+            entries[2],
+            RespFrame::BulkString(Some(b"dbfilename".to_vec()))
+        );
+        assert_eq!(
+            entries[3],
+            RespFrame::BulkString(Some(b"custom.rdb".to_vec()))
+        );
     }
 
     #[test]
@@ -22162,8 +22119,14 @@ mod tests {
             panic!("dir must be BulkString");
         };
         assert!(std::path::Path::new(std::str::from_utf8(dir_bytes).unwrap()).is_absolute());
-        assert_eq!(entries[2], RespFrame::BulkString(Some(b"dbfilename".to_vec())));
-        assert_eq!(entries[3], RespFrame::BulkString(Some(b"original.rdb".to_vec())));
+        assert_eq!(
+            entries[2],
+            RespFrame::BulkString(Some(b"dbfilename".to_vec()))
+        );
+        assert_eq!(
+            entries[3],
+            RespFrame::BulkString(Some(b"original.rdb".to_vec()))
+        );
     }
 
     #[test]
@@ -22196,8 +22159,14 @@ mod tests {
             panic!("dir must be BulkString");
         };
         assert!(std::path::Path::new(std::str::from_utf8(dir_bytes).unwrap()).is_absolute());
-        assert_eq!(entries2[2], RespFrame::BulkString(Some(b"dbfilename".to_vec())));
-        assert_eq!(entries2[3], RespFrame::BulkString(Some(b"dump.rdb".to_vec())));
+        assert_eq!(
+            entries2[2],
+            RespFrame::BulkString(Some(b"dbfilename".to_vec()))
+        );
+        assert_eq!(
+            entries2[3],
+            RespFrame::BulkString(Some(b"dump.rdb".to_vec()))
+        );
     }
 
     #[test]
@@ -22215,8 +22184,7 @@ mod tests {
     #[test]
     fn config_help_frames_are_simple_strings_matching_upstream_wording() {
         let mut rt = Runtime::default_strict();
-        let RespFrame::Array(Some(lines)) =
-            rt.execute_frame(command(&[b"CONFIG", b"HELP"]), 0)
+        let RespFrame::Array(Some(lines)) = rt.execute_frame(command(&[b"CONFIG", b"HELP"]), 0)
         else {
             panic!("expected Array reply for CONFIG HELP");
         };
@@ -22233,7 +22201,11 @@ mod tests {
             "HELP",
             "    Print this help.",
         ];
-        assert_eq!(lines.len(), expected.len(), "line count must match upstream");
+        assert_eq!(
+            lines.len(),
+            expected.len(),
+            "line count must match upstream"
+        );
         for (i, (got, want)) in lines.iter().zip(expected.iter()).enumerate() {
             match got {
                 RespFrame::SimpleString(s) => assert_eq!(s, want, "line {i}"),
@@ -22460,10 +22432,7 @@ mod tests {
                 String::from_utf8_lossy(good),
             );
             assert_eq!(
-                rt.execute_frame(
-                    command(&[b"CONFIG", b"GET", b"active-expire-effort"]),
-                    0,
-                ),
+                rt.execute_frame(command(&[b"CONFIG", b"GET", b"active-expire-effort"]), 0,),
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"active-expire-effort".to_vec())),
                     RespFrame::BulkString(Some(good.to_vec())),
@@ -22521,7 +22490,12 @@ mod tests {
         let endpoint_msg = "ERR CONFIG SET failed (possibly related to argument 'cluster-preferred-endpoint-type') - argument(s) must be one of the following: ip, hostname, unknown-endpoint";
         assert_eq!(
             rt.execute_frame(
-                command(&[b"CONFIG", b"SET", b"cluster-preferred-endpoint-type", b"bogus"]),
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"cluster-preferred-endpoint-type",
+                    b"bogus"
+                ]),
                 0,
             ),
             RespFrame::Error(endpoint_msg.to_string()),
@@ -22552,7 +22526,9 @@ mod tests {
             panic!("expected Array");
         };
         assert_eq!(items.len(), 2);
-        assert!(matches!(&items[0], RespFrame::BulkString(Some(b)) if b == b"cluster-preferred-endpoint-type"));
+        assert!(
+            matches!(&items[0], RespFrame::BulkString(Some(b)) if b == b"cluster-preferred-endpoint-type")
+        );
         // Last accepted value was 'HostName' → lowercased to 'hostname'.
         assert!(matches!(&items[1], RespFrame::BulkString(Some(b)) if b == b"hostname"));
     }
@@ -22601,36 +22577,24 @@ mod tests {
         ] {
             // Negative — bound message with the alias the user supplied.
             assert_eq!(
-                rt.execute_frame(
-                    command(&[b"CONFIG", b"SET", name.as_bytes(), b"-1"]),
-                    0,
-                ),
+                rt.execute_frame(command(&[b"CONFIG", b"SET", name.as_bytes(), b"-1"]), 0,),
                 RespFrame::Error(bound_msg(name)),
                 "{name} -1 should be bound-rejected"
             );
             // Unparseable — parse message.
             assert_eq!(
-                rt.execute_frame(
-                    command(&[b"CONFIG", b"SET", name.as_bytes(), b"abc"]),
-                    0,
-                ),
+                rt.execute_frame(command(&[b"CONFIG", b"SET", name.as_bytes(), b"abc"]), 0,),
                 RespFrame::Error(parse_msg(name)),
                 "{name} 'abc' should be parse-rejected"
             );
             // Valid (0 and a small positive both accepted).
             assert_eq!(
-                rt.execute_frame(
-                    command(&[b"CONFIG", b"SET", name.as_bytes(), b"0"]),
-                    0,
-                ),
+                rt.execute_frame(command(&[b"CONFIG", b"SET", name.as_bytes(), b"0"]), 0,),
                 RespFrame::SimpleString("OK".to_string()),
                 "{name} 0 should be accepted"
             );
             assert_eq!(
-                rt.execute_frame(
-                    command(&[b"CONFIG", b"SET", name.as_bytes(), b"42"]),
-                    0,
-                ),
+                rt.execute_frame(command(&[b"CONFIG", b"SET", name.as_bytes(), b"42"]), 0,),
                 RespFrame::SimpleString("OK".to_string()),
                 "{name} 42 should be accepted"
             );
@@ -22698,8 +22662,14 @@ mod tests {
                     RespFrame::BulkString(Some(b"a".to_vec())),
                 ])),
             ),
-            (&[b"HGET", b"h", b"f1"], RespFrame::BulkString(Some(b"v1".to_vec()))),
-            (&[b"ZSCORE", b"z", b"a"], RespFrame::BulkString(Some(b"1".to_vec()))),
+            (
+                &[b"HGET", b"h", b"f1"],
+                RespFrame::BulkString(Some(b"v1".to_vec())),
+            ),
+            (
+                &[b"ZSCORE", b"z", b"a"],
+                RespFrame::BulkString(Some(b"1".to_vec())),
+            ),
         ] {
             let argv: Vec<Vec<u8>> = cmd.iter().map(|b| b.to_vec()).collect();
             let frame = RespFrame::Array(Some(
@@ -22740,28 +22710,19 @@ mod tests {
 
         for bad in [b"-1".as_slice(), b"2147483648", b"99999999999"] {
             assert_eq!(
-                rt.execute_frame(
-                    command(&[b"CONFIG", b"SET", b"lfu-decay-time", bad]),
-                    0,
-                ),
+                rt.execute_frame(command(&[b"CONFIG", b"SET", b"lfu-decay-time", bad]), 0,),
                 RespFrame::Error(bound.to_string()),
                 "{:?} should hit i32::MAX bound",
                 String::from_utf8_lossy(bad),
             );
         }
         assert_eq!(
-            rt.execute_frame(
-                command(&[b"CONFIG", b"SET", b"lfu-decay-time", b"abc"]),
-                0,
-            ),
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"lfu-decay-time", b"abc"]), 0,),
             RespFrame::Error(parse_msg.to_string()),
         );
         for good in [b"0".as_slice(), b"1", b"2147483647"] {
             assert_eq!(
-                rt.execute_frame(
-                    command(&[b"CONFIG", b"SET", b"lfu-decay-time", good]),
-                    0,
-                ),
+                rt.execute_frame(command(&[b"CONFIG", b"SET", b"lfu-decay-time", good]), 0,),
                 RespFrame::SimpleString("OK".to_string()),
                 "{:?} should be accepted",
                 String::from_utf8_lossy(good),
@@ -22808,10 +22769,7 @@ mod tests {
                 String::from_utf8_lossy(good),
             );
             assert_eq!(
-                rt.execute_frame(
-                    command(&[b"CONFIG", b"GET", b"stream-node-max-entries"]),
-                    0,
-                ),
+                rt.execute_frame(command(&[b"CONFIG", b"GET", b"stream-node-max-entries"]), 0,),
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"stream-node-max-entries".to_vec())),
                     RespFrame::BulkString(Some(good.to_vec())),
@@ -22852,10 +22810,7 @@ mod tests {
                 b"nosave force save",
             ] {
                 assert_eq!(
-                    rt.execute_frame(
-                        command(&[b"CONFIG", b"SET", name.as_bytes(), combo]),
-                        0,
-                    ),
+                    rt.execute_frame(command(&[b"CONFIG", b"SET", name.as_bytes(), combo]), 0,),
                     RespFrame::Error(conflict(name)),
                     "{name} {:?} should error",
                     String::from_utf8_lossy(combo),
@@ -22872,10 +22827,7 @@ mod tests {
                 b"now force",
             ] {
                 assert_eq!(
-                    rt.execute_frame(
-                        command(&[b"CONFIG", b"SET", name.as_bytes(), ok]),
-                        0,
-                    ),
+                    rt.execute_frame(command(&[b"CONFIG", b"SET", name.as_bytes(), ok]), 0,),
                     RespFrame::SimpleString("OK".to_string()),
                     "{name} {:?} should succeed",
                     String::from_utf8_lossy(ok),
@@ -22904,28 +22856,19 @@ mod tests {
             );
             for bad in [b"-1".as_slice(), b"-100", b"2147483648"] {
                 assert_eq!(
-                    rt.execute_frame(
-                        command(&[b"CONFIG", b"SET", name.as_bytes(), bad]),
-                        0,
-                    ),
+                    rt.execute_frame(command(&[b"CONFIG", b"SET", name.as_bytes(), bad]), 0,),
                     RespFrame::Error(bound.clone()),
                     "{name} {:?} should be bound-rejected",
                     String::from_utf8_lossy(bad),
                 );
             }
             assert_eq!(
-                rt.execute_frame(
-                    command(&[b"CONFIG", b"SET", name.as_bytes(), b"abc"]),
-                    0,
-                ),
+                rt.execute_frame(command(&[b"CONFIG", b"SET", name.as_bytes(), b"abc"]), 0,),
                 RespFrame::Error(parse.clone()),
             );
             for good in [b"0".as_slice(), b"100", b"2147483647"] {
                 assert_eq!(
-                    rt.execute_frame(
-                        command(&[b"CONFIG", b"SET", name.as_bytes(), good]),
-                        0,
-                    ),
+                    rt.execute_frame(command(&[b"CONFIG", b"SET", name.as_bytes(), good]), 0,),
                     RespFrame::SimpleString("OK".to_string()),
                     "{name} {:?} should succeed",
                     String::from_utf8_lossy(good),
@@ -22974,10 +22917,7 @@ mod tests {
         let msg = "ERR CONFIG SET failed (possibly related to argument 'maxmemory-clients') - argument must be a memory or percent value";
         for bad in [b"-1".as_slice(), b"bogus", b"%", b"-50%", b"50pct"] {
             assert_eq!(
-                rt.execute_frame(
-                    command(&[b"CONFIG", b"SET", b"maxmemory-clients", bad]),
-                    0,
-                ),
+                rt.execute_frame(command(&[b"CONFIG", b"SET", b"maxmemory-clients", bad]), 0,),
                 RespFrame::Error(msg.to_string()),
                 "{:?} should be rejected",
                 String::from_utf8_lossy(bad),
@@ -22985,10 +22925,7 @@ mod tests {
         }
         for good in [b"0".as_slice(), b"100mb", b"1g", b"50%", b"100%"] {
             assert_eq!(
-                rt.execute_frame(
-                    command(&[b"CONFIG", b"SET", b"maxmemory-clients", good]),
-                    0,
-                ),
+                rt.execute_frame(command(&[b"CONFIG", b"SET", b"maxmemory-clients", good]), 0,),
                 RespFrame::SimpleString("OK".to_string()),
                 "{:?} should succeed",
                 String::from_utf8_lossy(good),
@@ -23062,10 +22999,7 @@ mod tests {
         ];
         for (param, bad, expected) in cases {
             assert_eq!(
-                rt.execute_frame(
-                    command(&[b"CONFIG", b"SET", param, bad]),
-                    0,
-                ),
+                rt.execute_frame(command(&[b"CONFIG", b"SET", param, bad]), 0,),
                 RespFrame::Error(expected.to_string()),
                 "param={:?} bad={:?}",
                 String::from_utf8_lossy(param),
@@ -23076,7 +23010,13 @@ mod tests {
         // Over-validation regression: list-max-listpack-size must accept
         // values down to INT_MIN (upstream allows full i32 range to encode
         // size-class indices and entry-count bounds).
-        for good in [b"-100".as_slice(), b"-2147483648", b"2147483647", b"0", b"-2"] {
+        for good in [
+            b"-100".as_slice(),
+            b"-2147483648",
+            b"2147483647",
+            b"0",
+            b"-2",
+        ] {
             assert_eq!(
                 rt.execute_frame(
                     command(&[b"CONFIG", b"SET", b"list-max-listpack-size", good]),
@@ -23137,7 +23077,14 @@ mod tests {
             &[b"HEXPIRE", b"h", b"60", b"FIELDS", b"1", b"f1"],
             &[b"HPEXPIRE", b"h", b"60000", b"FIELDS", b"1", b"f1"],
             &[b"HEXPIREAT", b"h", b"9999999999", b"FIELDS", b"1", b"f1"],
-            &[b"HPEXPIREAT", b"h", b"9999999999000", b"FIELDS", b"1", b"f1"],
+            &[
+                b"HPEXPIREAT",
+                b"h",
+                b"9999999999000",
+                b"FIELDS",
+                b"1",
+                b"f1",
+            ],
             &[b"HEXPIRETIME", b"h", b"FIELDS", b"1", b"f1"],
             &[b"HPEXPIRETIME", b"h", b"FIELDS", b"1", b"f1"],
             &[b"HTTL", b"h", b"FIELDS", b"1", b"f1"],
@@ -23203,10 +23150,9 @@ mod tests {
     fn config_get_dedupes_entries_when_patterns_overlap() {
         let mut rt = Runtime::default_strict();
         // Repeated literal pattern → one (key,value) pair only.
-        let RespFrame::Array(Some(items)) = rt.execute_frame(
-            command(&[b"CONFIG", b"GET", b"maxmemory", b"maxmemory"]),
-            0,
-        ) else {
+        let RespFrame::Array(Some(items)) =
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"maxmemory", b"maxmemory"]), 0)
+        else {
             panic!("expected array reply from CONFIG GET");
         };
         assert_eq!(
@@ -23273,18 +23219,16 @@ mod tests {
             );
         }
         // *priority* pattern must yield both priority aliases.
-        let priority_names = collect_names(
-            rt.execute_frame(command(&[b"CONFIG", b"GET", b"*priority*"]), 0),
-        );
+        let priority_names =
+            collect_names(rt.execute_frame(command(&[b"CONFIG", b"GET", b"*priority*"]), 0));
         assert!(
             priority_names.iter().any(|n| n == "slave-priority")
                 && priority_names.iter().any(|n| n == "replica-priority"),
             "*priority* must yield both aliases, got {priority_names:?}"
         );
         // *serve-stale* pattern must yield both serve-stale aliases.
-        let stale_names = collect_names(
-            rt.execute_frame(command(&[b"CONFIG", b"GET", b"*serve-stale*"]), 0),
-        );
+        let stale_names =
+            collect_names(rt.execute_frame(command(&[b"CONFIG", b"GET", b"*serve-stale*"]), 0));
         assert!(
             stale_names.iter().any(|n| n == "slave-serve-stale-data")
                 && stale_names.iter().any(|n| n == "replica-serve-stale-data"),
@@ -23408,8 +23352,7 @@ mod tests {
         }
 
         // Wildcard sweep MUST NOT include any of the hidden names.
-        let RespFrame::Array(Some(all)) =
-            rt.execute_frame(command(&[b"CONFIG", b"GET", b"*"]), 0)
+        let RespFrame::Array(Some(all)) = rt.execute_frame(command(&[b"CONFIG", b"GET", b"*"]), 0)
         else {
             panic!("expected array reply from CONFIG GET *");
         };
@@ -23442,8 +23385,7 @@ mod tests {
     #[test]
     fn config_omits_redis_7_4_only_keys_61w0b() {
         let mut rt = Runtime::default_strict();
-        let RespFrame::Array(Some(all)) =
-            rt.execute_frame(command(&[b"CONFIG", b"GET", b"*"]), 0)
+        let RespFrame::Array(Some(all)) = rt.execute_frame(command(&[b"CONFIG", b"GET", b"*"]), 0)
         else {
             panic!("expected array reply from CONFIG GET *");
         };
@@ -23456,9 +23398,7 @@ mod tests {
             .collect();
         let redis_7_4_only = "hide-user-data-from-log";
         assert!(
-            !names
-                .iter()
-                .any(|n| n.eq_ignore_ascii_case(redis_7_4_only)),
+            !names.iter().any(|n| n.eq_ignore_ascii_case(redis_7_4_only)),
             "Redis 7.4-only config {redis_7_4_only} must NOT appear (vendored 7.2.4 doesn't have it)",
         );
         // (frankenredis-z6zp2) Three more keys that were leaking through
@@ -23492,10 +23432,9 @@ mod tests {
             );
         }
         // Exact-name CONFIG GET should also return empty for the 7.4 key.
-        let RespFrame::Array(Some(items)) = rt.execute_frame(
-            command(&[b"CONFIG", b"GET", b"hide-user-data-from-log"]),
-            0,
-        ) else {
+        let RespFrame::Array(Some(items)) =
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"hide-user-data-from-log"]), 0)
+        else {
             panic!("expected array reply");
         };
         assert!(
@@ -23521,10 +23460,7 @@ mod tests {
         // Rejected per upstream: even-indexed (seconds) must be >= 1.
         for bad in ["0 0", "0 100", "-1 100", "3600 -1"] {
             assert_eq!(
-                rt.execute_frame(
-                    command(&[b"CONFIG", b"SET", b"save", bad.as_bytes()]),
-                    0,
-                ),
+                rt.execute_frame(command(&[b"CONFIG", b"SET", b"save", bad.as_bytes()]), 0,),
                 err_reply,
                 "save '{bad}' must be rejected as 'Invalid save parameters'",
             );
@@ -23533,10 +23469,7 @@ mod tests {
         // Accepted per upstream.
         for ok in ["", "3600 1", "3600 1 300 100 60 10000", "3600 0"] {
             assert_eq!(
-                rt.execute_frame(
-                    command(&[b"CONFIG", b"SET", b"save", ok.as_bytes()]),
-                    0,
-                ),
+                rt.execute_frame(command(&[b"CONFIG", b"SET", b"save", ok.as_bytes()]), 0,),
                 ok_reply,
                 "save '{ok}' must be accepted",
             );
@@ -23871,12 +23804,7 @@ mod tests {
         // u64::MAX.wrapping_mul(1024^3) == 18446744072635809792.
         assert_eq!(
             rt.execute_frame(
-                command(&[
-                    b"CONFIG",
-                    b"SET",
-                    b"maxmemory",
-                    b"9999999999999999999999gb",
-                ]),
+                command(&[b"CONFIG", b"SET", b"maxmemory", b"9999999999999999999999gb",]),
                 0,
             ),
             RespFrame::SimpleString("OK".to_string())
@@ -23893,12 +23821,7 @@ mod tests {
         // leaves the value at u64::MAX = 18446744073709551615.
         assert_eq!(
             rt.execute_frame(
-                command(&[
-                    b"CONFIG",
-                    b"SET",
-                    b"maxmemory",
-                    b"99999999999999999999",
-                ]),
+                command(&[b"CONFIG", b"SET", b"maxmemory", b"99999999999999999999",]),
                 0,
             ),
             RespFrame::SimpleString("OK".to_string())
@@ -25369,10 +25292,7 @@ mod tests {
         // user-typed casing.
         let mut rt = Runtime::default_strict();
 
-        let log_extra = rt.execute_frame(
-            command(&[b"ACL", b"LOG", b"0", b"RESET"]),
-            0,
-        );
+        let log_extra = rt.execute_frame(command(&[b"ACL", b"LOG", b"0", b"RESET"]), 0);
         assert_eq!(
             log_extra,
             RespFrame::Error(
@@ -25381,10 +25301,7 @@ mod tests {
             )
         );
 
-        let cat_extra = rt.execute_frame(
-            command(&[b"ACL", b"CAT", b"read", b"extra"]),
-            1,
-        );
+        let cat_extra = rt.execute_frame(command(&[b"ACL", b"CAT", b"read", b"extra"]), 1);
         assert_eq!(
             cat_extra,
             RespFrame::Error(
@@ -25394,10 +25311,7 @@ mod tests {
         );
 
         // Casing preserves user-typed token.
-        let log_extra_lower = rt.execute_frame(
-            command(&[b"ACL", b"log", b"0", b"RESET"]),
-            2,
-        );
+        let log_extra_lower = rt.execute_frame(command(&[b"ACL", b"log", b"0", b"RESET"]), 2);
         assert_eq!(
             log_extra_lower,
             RespFrame::Error(
@@ -25420,9 +25334,7 @@ mod tests {
         let too_few = rt.execute_frame(command(&[b"CONFIG", b"SET", b"maxmemory"]), 0);
         assert_eq!(
             too_few,
-            RespFrame::Error(
-                "ERR wrong number of arguments for 'config|set' command".to_string()
-            )
+            RespFrame::Error("ERR wrong number of arguments for 'config|set' command".to_string())
         );
 
         // Odd tail: CONFIG SET maxmemory 100mb extra (argc=5).
@@ -25433,10 +25345,7 @@ mod tests {
         assert_eq!(odd_tail, RespFrame::Error("ERR syntax error".to_string()));
 
         // Sanity: even-paired tail still parses successfully.
-        let ok = rt.execute_frame(
-            command(&[b"CONFIG", b"SET", b"maxmemory", b"100mb"]),
-            2,
-        );
+        let ok = rt.execute_frame(command(&[b"CONFIG", b"SET", b"maxmemory", b"100mb"]), 2);
         assert_eq!(ok, RespFrame::SimpleString("OK".to_string()));
     }
 
@@ -25453,9 +25362,7 @@ mod tests {
         let arity = rt.execute_frame(command(&[b"DEBUG"]), 0);
         assert_eq!(
             arity,
-            RespFrame::Error(
-                "ERR wrong number of arguments for 'debug' command".to_string()
-            )
+            RespFrame::Error("ERR wrong number of arguments for 'debug' command".to_string())
         );
 
         // Sanity: argc>=2 with disabled gate still surfaces the
@@ -25464,10 +25371,7 @@ mod tests {
         let RespFrame::Error(msg) = gated else {
             panic!("expected error, got {gated:?}");
         };
-        assert!(
-            msg.starts_with("ERR DEBUG command not allowed."),
-            "{msg}"
-        );
+        assert!(msg.starts_with("ERR DEBUG command not allowed."), "{msg}");
     }
 
     #[test]
@@ -25490,10 +25394,7 @@ mod tests {
 
         // Unknown command surfaces "Command 'BADCMD' not found", not
         // the user's permission denial.
-        let unknown = rt.execute_frame(
-            command(&[b"ACL", b"DRYRUN", b"alice", b"BADCMD", b"k"]),
-            1,
-        );
+        let unknown = rt.execute_frame(command(&[b"ACL", b"DRYRUN", b"alice", b"BADCMD", b"k"]), 1);
         assert_eq!(
             unknown,
             RespFrame::Error("ERR Command 'BADCMD' not found".to_string())
@@ -25501,15 +25402,10 @@ mod tests {
 
         // Wrong arity (GET with no key) surfaces table-level wrong-
         // arity error, not OK and not the permission denial.
-        let bad_arity = rt.execute_frame(
-            command(&[b"ACL", b"DRYRUN", b"alice", b"GET"]),
-            2,
-        );
+        let bad_arity = rt.execute_frame(command(&[b"ACL", b"DRYRUN", b"alice", b"GET"]), 2);
         assert_eq!(
             bad_arity,
-            RespFrame::Error(
-                "ERR wrong number of arguments for 'get' command".to_string()
-            )
+            RespFrame::Error("ERR wrong number of arguments for 'get' command".to_string())
         );
 
         // CLEARSELECTORS accepted as no-op.
@@ -25544,10 +25440,7 @@ mod tests {
             "BoGuS".as_bytes(),
             "abcDEF".as_bytes(),
         ] {
-            let reply = rt.execute_frame(
-                command(&[b"ACL", b"DRYRUN", b"alice", input, b"k"]),
-                1,
-            );
+            let reply = rt.execute_frame(command(&[b"ACL", b"DRYRUN", b"alice", input, b"k"]), 1);
             let expected = String::from_utf8(input.to_vec()).unwrap();
             assert_eq!(
                 reply,
@@ -25733,10 +25626,7 @@ mod tests {
             b"nul\x00name",
         ];
         for bad in bad_names {
-            let reply = rt.execute_frame(
-                command(&[b"ACL", b"SETUSER", bad, b"on", b">pw"]),
-                0,
-            );
+            let reply = rt.execute_frame(command(&[b"ACL", b"SETUSER", bad, b"on", b">pw"]), 0);
             assert_eq!(
                 reply,
                 RespFrame::Error(
@@ -25763,10 +25653,7 @@ mod tests {
             b"",
         ];
         for ok in ok_names {
-            let reply = rt.execute_frame(
-                command(&[b"ACL", b"SETUSER", ok, b"on", b">pw"]),
-                1,
-            );
+            let reply = rt.execute_frame(command(&[b"ACL", b"SETUSER", ok, b"on", b">pw"]), 1);
             assert_eq!(
                 reply,
                 RespFrame::SimpleString("OK".to_string()),
@@ -25799,10 +25686,7 @@ mod tests {
 
         for (rules, expected) in cases {
             let user = format!("u_{}", expected.replace(['+', '@', '-', ' '], "_"));
-            rt.execute_frame(
-                command(&[b"ACL", b"DELUSER", user.as_bytes()]),
-                0,
-            );
+            rt.execute_frame(command(&[b"ACL", b"DELUSER", user.as_bytes()]), 0);
             let mut argv: Vec<Vec<u8>> = vec![
                 b"ACL".to_vec(),
                 b"SETUSER".to_vec(),
@@ -26244,7 +26128,10 @@ mod tests {
         assert_eq!(items[0], RespFrame::BulkString(Some(b"flags".to_vec())));
         assert_eq!(items[2], RespFrame::BulkString(Some(b"passwords".to_vec())));
         assert_eq!(items[4], RespFrame::BulkString(Some(b"commands".to_vec())));
-        assert_eq!(items[10], RespFrame::BulkString(Some(b"selectors".to_vec())));
+        assert_eq!(
+            items[10],
+            RespFrame::BulkString(Some(b"selectors".to_vec()))
+        );
     }
 
     #[test]
@@ -26536,7 +26423,10 @@ mod tests {
         // Spot-check the canonical key order against upstream.
         assert_eq!(pairs[0].0, RespFrame::BulkString(Some(b"count".to_vec())));
         assert_eq!(pairs[1].0, RespFrame::BulkString(Some(b"reason".to_vec())));
-        assert_eq!(pairs[4].0, RespFrame::BulkString(Some(b"username".to_vec())));
+        assert_eq!(
+            pairs[4].0,
+            RespFrame::BulkString(Some(b"username".to_vec()))
+        );
         assert_eq!(
             pairs[9].0,
             RespFrame::BulkString(Some(b"timestamp-last-updated".to_vec()))
@@ -26563,8 +26453,14 @@ mod tests {
         assert_eq!(items.len(), 20, "flat shape: 10 keys + 10 values");
         assert_eq!(items[0], RespFrame::BulkString(Some(b"count".to_vec())));
         assert_eq!(items[2], RespFrame::BulkString(Some(b"reason".to_vec())));
-        assert_eq!(items[16], RespFrame::BulkString(Some(b"timestamp-created".to_vec())));
-        assert_eq!(items[18], RespFrame::BulkString(Some(b"timestamp-last-updated".to_vec())));
+        assert_eq!(
+            items[16],
+            RespFrame::BulkString(Some(b"timestamp-created".to_vec()))
+        );
+        assert_eq!(
+            items[18],
+            RespFrame::BulkString(Some(b"timestamp-last-updated".to_vec()))
+        );
     }
 
     #[test]
@@ -27507,10 +27403,7 @@ mod tests {
 
         // DRYRUN: reader may GET an r* key but not SET it (write needs %W).
         assert_eq!(
-            rt.execute_frame(
-                command(&[b"ACL", b"DRYRUN", b"reader", b"GET", b"r1"]),
-                2,
-            ),
+            rt.execute_frame(command(&[b"ACL", b"DRYRUN", b"reader", b"GET", b"r1"]), 2,),
             RespFrame::SimpleString("OK".to_string())
         );
         assert_eq!(
@@ -27531,10 +27424,7 @@ mod tests {
             RespFrame::SimpleString("OK".to_string())
         );
         assert_eq!(
-            rt.execute_frame(
-                command(&[b"ACL", b"DRYRUN", b"writer", b"GET", b"w1"]),
-                5,
-            ),
+            rt.execute_frame(command(&[b"ACL", b"DRYRUN", b"writer", b"GET", b"w1"]), 5,),
             RespFrame::BulkString(Some(
                 b"User writer has no permissions to access the 'w1' key".to_vec(),
             ))
@@ -27582,14 +27472,7 @@ mod tests {
         assert_eq!(
             rt.execute_frame(
                 command(&[
-                    b"ACL",
-                    b"SETUSER",
-                    b"combo",
-                    b"on",
-                    b"nopass",
-                    b"-@all",
-                    b"+set",
-                    b"%R~foo*",
+                    b"ACL", b"SETUSER", b"combo", b"on", b"nopass", b"-@all", b"+set", b"%R~foo*",
                     b"%W~foo*",
                 ]),
                 0,
@@ -28137,8 +28020,7 @@ mod tests {
             RespFrame::Error("NOPERM No permissions to access a channel".to_string())
         );
 
-        let RespFrame::BulkString(Some(bytes)) =
-            rt.execute_frame(command(&[b"INFO", b"stats"]), 6)
+        let RespFrame::BulkString(Some(bytes)) = rt.execute_frame(command(&[b"INFO", b"stats"]), 6)
         else {
             panic!("expected INFO stats bulk string");
         };
@@ -28146,10 +28028,7 @@ mod tests {
         assert!(info.contains("acl_access_denied_auth:1\r\n"), "{info}");
         assert!(info.contains("acl_access_denied_cmd:1\r\n"), "{info}");
         assert!(info.contains("acl_access_denied_key:1\r\n"), "{info}");
-        assert!(
-            info.contains("acl_access_denied_channel:1\r\n"),
-            "{info}"
-        );
+        assert!(info.contains("acl_access_denied_channel:1\r\n"), "{info}");
     }
 
     #[test]
@@ -28411,9 +28290,12 @@ mod tests {
         assert!(items.contains(&RespFrame::SimpleString(
             "    Returns whether the user can execute the given command without executing the command.".to_string()
         )));
-        assert!(items.contains(&RespFrame::SimpleString(
-            "    Generate a secure 256-bit user password. The optional `bits` argument can".to_string()
-        )));
+        assert!(
+            items.contains(&RespFrame::SimpleString(
+                "    Generate a secure 256-bit user password. The optional `bits` argument can"
+                    .to_string()
+            ))
+        );
         assert!(items.contains(&RespFrame::SimpleString(
             "    be used to specify a different size.".to_string()
         )));
@@ -28452,9 +28334,7 @@ mod tests {
 
         // Trailing HELP block.
         assert!(items.contains(&RespFrame::SimpleString("HELP".to_string())));
-        assert!(items.contains(&RespFrame::SimpleString(
-            "    Print this help.".to_string()
-        )));
+        assert!(items.contains(&RespFrame::SimpleString("    Print this help.".to_string())));
     }
 
     #[test]
@@ -28533,7 +28413,10 @@ mod tests {
                 _ => None,
             })
             .expect("expected alice in ACL LIST after ACL LOAD");
-        assert_eq!(alice, "user alice on #<hidden> sanitize-payload ~* &* -@all +get");
+        assert_eq!(
+            alice,
+            "user alice on #<hidden> sanitize-payload ~* &* -@all +get"
+        );
 
         let _ = std::fs::remove_file(&acl_path);
     }

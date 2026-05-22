@@ -8,8 +8,8 @@
 //! (frankenredis-k7zm8)
 
 use fr_store::{
-    HashFieldPersistResult, HashFieldTtl, HashFieldTtlCondition, HashFieldTtlSet,
-    HashFieldTtlUnit, Store,
+    HashFieldPersistResult, HashFieldTtl, HashFieldTtlCondition, HashFieldTtlSet, HashFieldTtlUnit,
+    Store,
 };
 
 const NOW: u64 = 1_000_000;
@@ -28,13 +28,8 @@ fn mr_hexpire_httl_identity_on_fresh_field() {
     // HTTL must report ≈ N/1000 (rounded up).
     let mut store = fresh_with_field();
     let target = NOW + 60_000; // +60s from NOW
-    let outcome = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        target,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    let outcome =
+        store.hash_field_set_abs_expiry(b"h", b"f", target, HashFieldTtlCondition::None, NOW);
     assert!(matches!(outcome, HashFieldTtlSet::Applied));
 
     let ttl = store.hash_field_ttl(b"h", b"f", NOW, HashFieldTtlUnit::Seconds, false);
@@ -49,13 +44,8 @@ fn mr_hpersist_returns_field_to_no_ttl() {
     // After HPERSIST, the field's TTL must read as NoTtl (-1 in the
     // command surface) — never as Remaining or Expired.
     let mut store = fresh_with_field();
-    let _ = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    let _ =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 60_000, HashFieldTtlCondition::None, NOW);
 
     let persisted = store.hash_field_persist(b"h", b"f");
     assert!(matches!(persisted, HashFieldPersistResult::Persisted));
@@ -75,22 +65,12 @@ fn mr_hexpire_nx_idempotent_after_initial_apply() {
     // HEXPIRE NX on a field that already has a TTL is a no-op —
     // ConditionNotMet — and the prior TTL stands.
     let mut store = fresh_with_field();
-    let first = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 10_000,
-        HashFieldTtlCondition::Nx,
-        NOW,
-    );
+    let first =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 10_000, HashFieldTtlCondition::Nx, NOW);
     assert!(matches!(first, HashFieldTtlSet::Applied));
 
-    let again = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 999_999,
-        HashFieldTtlCondition::Nx,
-        NOW,
-    );
+    let again =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 999_999, HashFieldTtlCondition::Nx, NOW);
     assert!(matches!(again, HashFieldTtlSet::ConditionNotMet));
 
     // Original TTL stands.
@@ -104,13 +84,8 @@ fn mr_hexpire_xx_no_op_on_field_without_ttl() {
     // The field stays at NoTtl regardless of how aggressive the
     // proposed deadline is.
     let mut store = fresh_with_field();
-    let outcome = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::Xx,
-        NOW,
-    );
+    let outcome =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 60_000, HashFieldTtlCondition::Xx, NOW);
     assert!(matches!(outcome, HashFieldTtlSet::ConditionNotMet));
 
     let ttl = store.hash_field_ttl(b"h", b"f", NOW, HashFieldTtlUnit::Seconds, false);
@@ -153,13 +128,8 @@ fn mr_hexpire_lt_walks_down_to_minimum_proposed_deadline() {
 
     // A *higher* proposed deadline must NOT apply (LT only allows
     // strictly-lower).
-    let no_op = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 5_000,
-        HashFieldTtlCondition::Lt,
-        NOW,
-    );
+    let no_op =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 5_000, HashFieldTtlCondition::Lt, NOW);
     assert!(matches!(no_op, HashFieldTtlSet::ConditionNotMet));
 
     let ttl_after = store.hash_field_ttl(b"h", b"f", NOW, HashFieldTtlUnit::Milliseconds, false);
@@ -172,13 +142,8 @@ fn mr_hexpire_gt_walks_up_to_maximum_proposed_deadline() {
     // deadlines must each apply, ending at the maximum.
     let mut store = fresh_with_field();
     // Seed at a "low" deadline.
-    let _ = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 1_000,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    let _ =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 1_000, HashFieldTtlCondition::None, NOW);
 
     let mut last_seen = 0_u64;
     for proposed_offset in [5_000_u64, 50_000, 500_000, 999_999] {
@@ -202,13 +167,8 @@ fn mr_hexpire_gt_walks_up_to_maximum_proposed_deadline() {
 
     // A *lower* proposed deadline must NOT apply (GT only allows
     // strictly-higher).
-    let no_op = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 100,
-        HashFieldTtlCondition::Gt,
-        NOW,
-    );
+    let no_op =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 100, HashFieldTtlCondition::Gt, NOW);
     assert!(matches!(no_op, HashFieldTtlSet::ConditionNotMet));
 }
 
@@ -218,13 +178,8 @@ fn mr_hdel_clears_per_field_ttl_row() {
     // hash_field_expires so subsequent HSET of the same field starts
     // fresh.
     let mut store = fresh_with_field();
-    let _ = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    let _ =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 60_000, HashFieldTtlCondition::None, NOW);
     assert!(
         store
             .hash_field_expires
