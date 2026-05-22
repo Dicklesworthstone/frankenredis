@@ -229,8 +229,16 @@ fn cmd_monitor(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
         return RespFrame::Error("ERR Invalid IP address or hostname specified".into());
     }
 
+    let default_down_after = state.debug_config.default_down_after;
+    let default_failover_timeout = state.debug_config.default_failover_timeout;
     match state.monitor(name.as_ref(), ip.as_ref(), port, quorum) {
-        Ok(()) => RespFrame::SimpleString("OK".into()),
+        Ok(()) => {
+            if let Some(master) = state.get_master_mut(&name) {
+                master.down_after_period = default_down_after;
+                master.failover_timeout = default_failover_timeout;
+            }
+            RespFrame::SimpleString("OK".into())
+        }
         Err(e) => RespFrame::Error(e.into()),
     }
 }
@@ -3640,6 +3648,39 @@ mod tests {
         assert!(state.tilt);
         state.check_tilt(1136);
         assert!(!state.tilt);
+    }
+
+    #[test]
+    fn sentinel_monitor_uses_debug_default_timing_values_like_upstream() {
+        let mut state = SentinelState::new();
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"DEBUG",
+                b"default-down-after",
+                b"7000",
+                b"default-failover-timeout",
+                b"90000",
+            ],
+        );
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+
+        let result = dispatch_sentinel_command(&mut state, &[b"MASTER", b"mymaster"]);
+        assert_eq!(
+            info_field(&result, b"down-after-milliseconds").as_deref(),
+            Some("7000")
+        );
+        assert_eq!(
+            info_field(&result, b"failover-timeout").as_deref(),
+            Some("90000")
+        );
     }
 
     #[test]
