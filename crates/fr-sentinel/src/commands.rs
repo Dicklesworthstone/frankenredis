@@ -129,9 +129,9 @@ fn cmd_is_master_down_by_addr(state: &mut SentinelState, args: &[&[u8]]) -> Resp
     }
 
     let ip = String::from_utf8_lossy(args[0]);
-    let port = match String::from_utf8_lossy(args[1]).parse::<u16>() {
+    let port = match String::from_utf8_lossy(args[1]).parse::<i64>() {
         Ok(port) => port,
-        Err(_) => return RespFrame::Error("ERR Invalid port number".into()),
+        Err(_) => return RespFrame::Error("ERR value is not an integer or out of range".into()),
     };
     let requested_epoch = match String::from_utf8_lossy(args[2]).parse::<u64>() {
         Ok(epoch) => epoch,
@@ -162,11 +162,13 @@ fn cmd_is_master_down_by_addr(state: &mut SentinelState, args: &[&[u8]]) -> Resp
     ]))
 }
 
-fn find_master_name_by_addr(state: &SentinelState, ip: &str, port: u16) -> Option<String> {
+fn find_master_name_by_addr(state: &SentinelState, ip: &str, port: i64) -> Option<String> {
     state
         .masters
         .values()
-        .find(|master| master.addr.port == port && master.addr.hostname.eq_ignore_ascii_case(ip))
+        .find(|master| {
+            i64::from(master.addr.port) == port && master.addr.hostname.eq_ignore_ascii_case(ip)
+        })
         .map(|master| master.name.clone())
 }
 
@@ -1554,6 +1556,24 @@ mod tests {
                 .and_then(|master| master.leader.clone()),
             None
         );
+    }
+
+    #[test]
+    fn sentinel_is_master_down_by_addr_out_of_range_ports_are_no_match() {
+        let mut state = SentinelState::new();
+        assert!(state.monitor("mymaster", "127.0.0.1", 6379, 1).is_ok());
+        assert!(state.get_master("mymaster").is_some());
+        if let Some(master) = state.get_master_mut("mymaster") {
+            master.flags.insert(InstanceFlags::S_DOWN);
+        }
+
+        for port in [b"-1".as_slice(), b"70000".as_slice()] {
+            let result = dispatch_sentinel_command(
+                &mut state,
+                &[b"IS-MASTER-DOWN-BY-ADDR", b"127.0.0.1", port, b"7", b"*"],
+            );
+            assert_eq!(result, is_master_down_reply(0, "*", 0));
+        }
     }
 
     #[test]
