@@ -5065,11 +5065,19 @@ impl Store {
         now_ms: u64,
     ) -> Result<i64, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
+        let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
         self.internal_entry(key.to_vec(), Value::Hash(BTreeMap::new()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self
             .with_mutated_entry(key, |entry| {
+                if should_bump_lfu {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
                 let Value::Hash(m) = &mut entry.value else {
                     return (Err(StoreError::WrongType), false);
                 };
@@ -19012,6 +19020,37 @@ mod tests {
         let mut store = Store::new();
         assert_eq!(store.hincrby(b"h", b"n", 5, 0).unwrap(), 5);
         assert_eq!(store.hincrby(b"h", b"n", -3, 0).unwrap(), 2);
+    }
+
+    #[test]
+    fn hincrby_existing_hash_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        match store
+            .hincrby(b"h", b"n", 5, 0)
+            .map_err(|err| format!("hincrby seed failed: {err:?}"))?
+        {
+            5 => {}
+            other => return Err(format!("HINCRBY seed value mismatch: {other}")),
+        }
+
+        match store.object_freq(b"h", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new hash LFU frequency mismatch: {other:?}")),
+        }
+        match store
+            .hincrby(b"h", b"n", -3, 1)
+            .map_err(|err| format!("hincrby update failed: {err:?}"))?
+        {
+            2 => {}
+            other => return Err(format!("HINCRBY update value mismatch: {other}")),
+        }
+        match store.object_freq(b"h", 1) {
+            Some(6) => {}
+            other => return Err(format!("HINCRBY should bump LFU frequency, got {other:?}")),
+        }
+        Ok(())
     }
 
     #[test]
