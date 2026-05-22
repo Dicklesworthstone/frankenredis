@@ -12451,16 +12451,16 @@ impl Store {
             .collect();
         keys.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
 
-        let mut current_db = 0usize;
+        let mut current_db = None;
 
         for (db, logical_key, physical_key) in keys {
             let Some(entry) = self.entries.get(&physical_key) else {
                 continue;
             };
 
-            if db != current_db {
+            if current_db != Some(db) {
                 commands.push(vec![b"SELECT".to_vec(), db.to_string().into_bytes()]);
-                current_db = db;
+                current_db = Some(db);
             }
 
             match &entry.value {
@@ -22563,10 +22563,11 @@ mod tests {
         let mut store = Store::new();
         store.set(b"hello".to_vec(), b"world".to_vec(), None, 100);
         let cmds = store.to_aof_commands(100);
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0][0], b"SET");
-        assert_eq!(cmds[0][1], b"hello");
-        assert_eq!(cmds[0][2], b"world");
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0], vec![b"SELECT".to_vec(), b"0".to_vec()]);
+        assert_eq!(cmds[1][0], b"SET");
+        assert_eq!(cmds[1][1], b"hello");
+        assert_eq!(cmds[1][2], b"world");
     }
 
     #[test]
@@ -22575,11 +22576,12 @@ mod tests {
         // set with px_ttl_ms=5000 at now_ms=100 → expires_at_ms=5100
         store.set(b"k".to_vec(), b"v".to_vec(), Some(5000), 100);
         let cmds = store.to_aof_commands(100);
-        assert_eq!(cmds.len(), 2);
-        assert_eq!(cmds[0][0], b"SET");
-        assert_eq!(cmds[1][0], b"PEXPIREAT");
-        assert_eq!(cmds[1][1], b"k");
-        assert_eq!(cmds[1][2], b"5100");
+        assert_eq!(cmds.len(), 3);
+        assert_eq!(cmds[0], vec![b"SELECT".to_vec(), b"0".to_vec()]);
+        assert_eq!(cmds[1][0], b"SET");
+        assert_eq!(cmds[2][0], b"PEXPIREAT");
+        assert_eq!(cmds[2][1], b"k");
+        assert_eq!(cmds[2][2], b"5100");
     }
 
     #[test]
@@ -22602,11 +22604,12 @@ mod tests {
             .hset(b"myhash", b"field2".to_vec(), b"val2".to_vec(), 100)
             .unwrap();
         let cmds = store.to_aof_commands(100);
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0][0], b"HMSET");
-        assert_eq!(cmds[0][1], b"myhash");
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0], vec![b"SELECT".to_vec(), b"0".to_vec()]);
+        assert_eq!(cmds[1][0], b"HMSET");
+        assert_eq!(cmds[1][1], b"myhash");
         // Fields are sorted deterministically
-        assert_eq!(cmds[0].len(), 6); // HMSET key f1 v1 f2 v2
+        assert_eq!(cmds[1].len(), 6); // HMSET key f1 v1 f2 v2
     }
 
     #[test]
@@ -22618,12 +22621,13 @@ mod tests {
             100,
         );
         let cmds = store.to_aof_commands(100);
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0][0], b"RPUSH");
-        assert_eq!(cmds[0][1], b"mylist");
-        assert_eq!(cmds[0][2], b"a");
-        assert_eq!(cmds[0][3], b"b");
-        assert_eq!(cmds[0][4], b"c");
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0], vec![b"SELECT".to_vec(), b"0".to_vec()]);
+        assert_eq!(cmds[1][0], b"RPUSH");
+        assert_eq!(cmds[1][1], b"mylist");
+        assert_eq!(cmds[1][2], b"a");
+        assert_eq!(cmds[1][3], b"b");
+        assert_eq!(cmds[1][4], b"c");
     }
 
     #[test]
@@ -22631,11 +22635,12 @@ mod tests {
         let mut store = Store::new();
         let _ = store.sadd(b"myset", &[b"x".to_vec(), b"y".to_vec()], 100);
         let cmds = store.to_aof_commands(100);
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0][0], b"SADD");
-        assert_eq!(cmds[0][1], b"myset");
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0], vec![b"SELECT".to_vec(), b"0".to_vec()]);
+        assert_eq!(cmds[1][0], b"SADD");
+        assert_eq!(cmds[1][1], b"myset");
         // Members are sorted deterministically
-        assert_eq!(cmds[0].len(), 4); // SADD key x y
+        assert_eq!(cmds[1].len(), 4); // SADD key x y
     }
 
     #[test]
@@ -22649,11 +22654,12 @@ mod tests {
             )
             .unwrap();
         let cmds = store.to_aof_commands(100);
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0][0], b"ZADD");
-        assert_eq!(cmds[0][1], b"myzset");
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0], vec![b"SELECT".to_vec(), b"0".to_vec()]);
+        assert_eq!(cmds[1][0], b"ZADD");
+        assert_eq!(cmds[1][1], b"myzset");
         // Score-member pairs sorted by score then member
-        assert_eq!(cmds[0].len(), 6); // ZADD key score1 member1 score2 member2
+        assert_eq!(cmds[1].len(), 6); // ZADD key score1 member1 score2 member2
     }
 
     fn expect_aof_command_shapes(
@@ -22692,7 +22698,11 @@ mod tests {
         let cmds = store.to_aof_commands(100);
         expect_aof_command_shapes(
             &cmds,
-            &[(b"RPUSH".as_slice(), 66), (b"RPUSH".as_slice(), 3)],
+            &[
+                (b"SELECT".as_slice(), 2),
+                (b"RPUSH".as_slice(), 66),
+                (b"RPUSH".as_slice(), 3),
+            ],
         )?;
 
         let mut store = Store::new();
@@ -22707,7 +22717,11 @@ mod tests {
         let cmds = store.to_aof_commands(100);
         expect_aof_command_shapes(
             &cmds,
-            &[(b"HMSET".as_slice(), 130), (b"HMSET".as_slice(), 4)],
+            &[
+                (b"SELECT".as_slice(), 2),
+                (b"HMSET".as_slice(), 130),
+                (b"HMSET".as_slice(), 4),
+            ],
         )?;
 
         let mut store = Store::new();
@@ -22716,7 +22730,14 @@ mod tests {
             return Err("sadd failed".into());
         }
         let cmds = store.to_aof_commands(100);
-        expect_aof_command_shapes(&cmds, &[(b"SADD".as_slice(), 66), (b"SADD".as_slice(), 3)])?;
+        expect_aof_command_shapes(
+            &cmds,
+            &[
+                (b"SELECT".as_slice(), 2),
+                (b"SADD".as_slice(), 66),
+                (b"SADD".as_slice(), 3),
+            ],
+        )?;
 
         let mut store = Store::new();
         let zset_items: Vec<(f64, Vec<u8>)> = (0u8..65)
@@ -22726,7 +22747,14 @@ mod tests {
             return Err("zadd failed".into());
         }
         let cmds = store.to_aof_commands(100);
-        expect_aof_command_shapes(&cmds, &[(b"ZADD".as_slice(), 130), (b"ZADD".as_slice(), 4)])?;
+        expect_aof_command_shapes(
+            &cmds,
+            &[
+                (b"SELECT".as_slice(), 2),
+                (b"ZADD".as_slice(), 130),
+                (b"ZADD".as_slice(), 4),
+            ],
+        )?;
         Ok(())
     }
 
@@ -22743,6 +22771,9 @@ mod tests {
             .map_err(|err| format!("xadd failed: {err:?}"))?;
         let cmds = store.to_aof_commands(100);
         let mut commands = cmds.iter();
+        let Some(select) = commands.next() else {
+            return Err("missing SELECT".into());
+        };
         let Some(xadd) = commands.next() else {
             return Err("missing XADD".into());
         };
@@ -22751,6 +22782,9 @@ mod tests {
         };
         if commands.next().is_some() {
             return Err("unexpected extra stream AOF command".into());
+        }
+        if select != &vec![b"SELECT".to_vec(), b"0".to_vec()] {
+            return Err("stream AOF must select DB 0 before XADD".into());
         }
         match xadd.len().cmp(&5) {
             std::cmp::Ordering::Equal => {}
@@ -22779,6 +22813,13 @@ mod tests {
 
         let cmds = store.to_aof_commands(100);
         let expected = [
+            (
+                "SELECT",
+                vec![
+                    (b"SELECT".as_slice(), "command"),
+                    (b"0".as_slice(), "db index"),
+                ],
+            ),
             (
                 "placeholder XADD",
                 vec![
@@ -22860,13 +22901,14 @@ mod tests {
         store.xsetid(b"s", (999, 0), 100).unwrap();
         let cmds = store.to_aof_commands(100);
         // XADD + XSETID
-        assert_eq!(cmds.len(), 2);
-        assert_eq!(cmds[0][0], b"XADD");
-        assert_eq!(cmds[1][0], b"XSETID");
-        assert_eq!(cmds[1][1], b"s");
-        assert_eq!(cmds[1][2], b"999-0");
-        assert_eq!(cmds[1][3], b"ENTRIESADDED");
-        assert_eq!(cmds[1][4], b"1");
+        assert_eq!(cmds.len(), 3);
+        assert_eq!(cmds[0], vec![b"SELECT".to_vec(), b"0".to_vec()]);
+        assert_eq!(cmds[1][0], b"XADD");
+        assert_eq!(cmds[2][0], b"XSETID");
+        assert_eq!(cmds[2][1], b"s");
+        assert_eq!(cmds[2][2], b"999-0");
+        assert_eq!(cmds[2][3], b"ENTRIESADDED");
+        assert_eq!(cmds[2][4], b"1");
     }
 
     #[test]
@@ -22880,12 +22922,13 @@ mod tests {
             .unwrap();
 
         let cmds = store.to_aof_commands(100);
-        assert_eq!(cmds.len(), 2);
-        assert_eq!(cmds[1][0], b"XSETID");
-        assert_eq!(cmds[1][1], b"s");
-        assert_eq!(cmds[1][2], b"1-0");
-        assert_eq!(cmds[1][3], b"ENTRIESADDED");
-        assert_eq!(cmds[1][4], b"10");
+        assert_eq!(cmds.len(), 3);
+        assert_eq!(cmds[0], vec![b"SELECT".to_vec(), b"0".to_vec()]);
+        assert_eq!(cmds[2][0], b"XSETID");
+        assert_eq!(cmds[2][1], b"s");
+        assert_eq!(cmds[2][2], b"1-0");
+        assert_eq!(cmds[2][3], b"ENTRIESADDED");
+        assert_eq!(cmds[2][4], b"10");
     }
 
     #[test]
@@ -22902,18 +22945,19 @@ mod tests {
             .unwrap();
         let cmds = store.to_aof_commands(100);
         // XADD + XSETID + 2x XGROUP CREATE, matching Redis AOF rewrite.
-        assert_eq!(cmds.len(), 4);
-        assert_eq!(cmds[0][0], b"XADD");
+        assert_eq!(cmds.len(), 5);
+        assert_eq!(cmds[0], vec![b"SELECT".to_vec(), b"0".to_vec()]);
+        assert_eq!(cmds[1][0], b"XADD");
         // Groups sorted by name
-        assert_eq!(cmds[2][0], b"XGROUP");
-        assert_eq!(cmds[2][1], b"CREATE");
-        assert_eq!(cmds[2][2], b"s");
-        assert_eq!(cmds[2][3], b"grp1");
-        assert_eq!(cmds[2][4], b"0-0");
-        assert_eq!(cmds[2][5], b"ENTRIESREAD");
-        assert_eq!(cmds[2][6], b"0");
+        assert_eq!(cmds[3][0], b"XGROUP");
+        assert_eq!(cmds[3][1], b"CREATE");
+        assert_eq!(cmds[3][2], b"s");
+        assert_eq!(cmds[3][3], b"grp1");
+        assert_eq!(cmds[3][4], b"0-0");
+        assert_eq!(cmds[3][5], b"ENTRIESREAD");
+        assert_eq!(cmds[3][6], b"0");
         assert_eq!(
-            cmds[3],
+            cmds[4],
             vec![
                 b"XGROUP".to_vec(),
                 b"CREATE".to_vec(),
@@ -22969,12 +23013,13 @@ mod tests {
             .expect("xclaim must succeed");
 
         let cmds = store.to_aof_commands(100);
-        assert_eq!(cmds.len(), 6);
-        assert_eq!(cmds[0][0], b"XADD");
+        assert_eq!(cmds.len(), 7);
+        assert_eq!(cmds[0], vec![b"SELECT".to_vec(), b"0".to_vec()]);
+        assert_eq!(cmds[1][0], b"XADD");
         // XGROUP CREATE replay carries the ENTRIESREAD trailer so the
         // restored group preserves its read counter. (frankenredis-ic8v)
         assert_eq!(
-            cmds[2],
+            cmds[3],
             vec![
                 b"XGROUP".to_vec(),
                 b"CREATE".to_vec(),
@@ -22986,7 +23031,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            cmds[3],
+            cmds[4],
             vec![
                 b"XGROUP".to_vec(),
                 b"CREATECONSUMER".to_vec(),
@@ -22996,7 +23041,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            cmds[4],
+            cmds[5],
             vec![
                 b"XCLAIM".to_vec(),
                 b"s".to_vec(),
@@ -23013,7 +23058,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            cmds[5],
+            cmds[6],
             vec![
                 b"XGROUP".to_vec(),
                 b"CREATECONSUMER".to_vec(),
@@ -23031,11 +23076,12 @@ mod tests {
         store.set(b"a_key".to_vec(), b"2".to_vec(), None, 100);
         store.set(b"m_key".to_vec(), b"3".to_vec(), None, 100);
         let cmds = store.to_aof_commands(100);
-        assert_eq!(cmds.len(), 3);
+        assert_eq!(cmds.len(), 4);
+        assert_eq!(cmds[0], vec![b"SELECT".to_vec(), b"0".to_vec()]);
         // Keys should be sorted alphabetically
-        assert_eq!(cmds[0][1], b"a_key");
-        assert_eq!(cmds[1][1], b"m_key");
-        assert_eq!(cmds[2][1], b"z_key");
+        assert_eq!(cmds[1][1], b"a_key");
+        assert_eq!(cmds[2][1], b"m_key");
+        assert_eq!(cmds[3][1], b"z_key");
     }
 
     #[test]
@@ -23048,7 +23094,7 @@ mod tests {
         let _ = store.rpush(b"list", &[b"item".to_vec()], 100);
         let _ = store.sadd(b"set", &[b"member".to_vec()], 100);
         let cmds = store.to_aof_commands(100);
-        assert_eq!(cmds.len(), 4);
+        assert_eq!(cmds.len(), 5);
         let commands: Vec<&[u8]> = cmds.iter().map(|c| c[0].as_slice()).collect();
         // All data types represented
         assert!(commands.contains(&b"SET".as_slice()));
@@ -23071,16 +23117,17 @@ mod tests {
         store.set(b"key".to_vec(), b"value".to_vec(), None, 100);
 
         let cmds = store.to_aof_commands(100);
-        assert_eq!(cmds.len(), 3);
+        assert_eq!(cmds.len(), 4);
         assert_eq!(cmds[0][0], b"FUNCTION");
         assert_eq!(cmds[0][1], b"LOAD");
         assert_eq!(cmds[0][2], alpha);
         assert_eq!(cmds[1][0], b"FUNCTION");
         assert_eq!(cmds[1][1], b"LOAD");
         assert_eq!(cmds[1][2], beta);
-        assert_eq!(cmds[2][0], b"SET");
-        assert_eq!(cmds[2][1], b"key");
-        assert_eq!(cmds[2][2], b"value");
+        assert_eq!(cmds[2], vec![b"SELECT".to_vec(), b"0".to_vec()]);
+        assert_eq!(cmds[3][0], b"SET");
+        assert_eq!(cmds[3][1], b"key");
+        assert_eq!(cmds[3][2], b"value");
     }
 
     #[test]
@@ -23103,16 +23150,11 @@ mod tests {
             vec![
                 vec![b"FUNCTION".to_vec(), b"LOAD".to_vec(), alpha],
                 vec![b"FUNCTION".to_vec(), b"LOAD".to_vec(), beta],
+                vec![b"SELECT".to_vec(), b"0".to_vec()],
                 vec![b"SET".to_vec(), b"db0".to_vec(), b"v0".to_vec()],
                 vec![b"SELECT".to_vec(), b"1".to_vec()],
                 vec![b"SET".to_vec(), b"db1".to_vec(), b"v1".to_vec()],
             ]
-        );
-        assert!(
-            !cmds
-                .iter()
-                .any(|argv| argv.len() == 2 && argv[0] == b"SELECT" && argv[1] == b"0"),
-            "DB 0 must remain implicit even when function libraries precede multi-DB keys"
         );
     }
 
@@ -23136,18 +23178,13 @@ mod tests {
             vec![
                 vec![b"FUNCTION".to_vec(), b"LOAD".to_vec(), alpha],
                 vec![b"FUNCTION".to_vec(), b"LOAD".to_vec(), beta],
+                vec![b"SELECT".to_vec(), b"0".to_vec()],
                 vec![b"SET".to_vec(), b"a0".to_vec(), b"va0".to_vec()],
                 vec![b"PEXPIREAT".to_vec(), b"a0".to_vec(), b"7100".to_vec()],
                 vec![b"SELECT".to_vec(), b"1".to_vec()],
                 vec![b"SET".to_vec(), b"b1".to_vec(), b"vb1".to_vec()],
                 vec![b"PEXPIREAT".to_vec(), b"b1".to_vec(), b"6100".to_vec()],
             ]
-        );
-        assert!(
-            !cmds
-                .iter()
-                .any(|argv| argv.len() == 2 && argv[0] == b"SELECT" && argv[1] == b"0"),
-            "DB 0 must remain implicit when function libraries precede multi-DB expiries"
         );
     }
 
@@ -23164,6 +23201,7 @@ mod tests {
         assert_eq!(
             cmds,
             vec![
+                vec![b"SELECT".to_vec(), b"0".to_vec()],
                 vec![b"SET".to_vec(), b"a0".to_vec(), b"va0".to_vec()],
                 vec![b"PEXPIREAT".to_vec(), b"a0".to_vec(), b"7100".to_vec()],
                 vec![b"SET".to_vec(), b"z0".to_vec(), b"vz0".to_vec()],
@@ -23174,12 +23212,6 @@ mod tests {
                 vec![b"SELECT".to_vec(), b"2".to_vec()],
                 vec![b"SET".to_vec(), b"a2".to_vec(), b"va2".to_vec()],
             ]
-        );
-        assert!(
-            !cmds
-                .iter()
-                .any(|argv| argv.len() == 2 && argv[0] == b"SELECT" && argv[1] == b"0"),
-            "DB 0 must stay implicit in rewritten AOF output"
         );
     }
 
@@ -26077,6 +26109,7 @@ mod tests {
                 vec![
                     vec![b"FUNCTION".to_vec(), b"LOAD".to_vec(), alpha],
                     vec![b"FUNCTION".to_vec(), b"LOAD".to_vec(), beta],
+                    vec![b"SELECT".to_vec(), b"0".to_vec()],
                     vec![b"SET".to_vec(), b"a0".to_vec(), b"va0".to_vec()],
                     vec![b"PEXPIREAT".to_vec(), b"a0".to_vec(), b"8000".to_vec()],
                     vec![b"SELECT".to_vec(), b"2".to_vec()],
@@ -26084,12 +26117,6 @@ mod tests {
                     vec![b"PEXPIREAT".to_vec(), b"b2".to_vec(), b"7500".to_vec()],
                     vec![b"SET".to_vec(), b"c2".to_vec(), b"vc2".to_vec()],
                 ]
-            );
-            assert!(
-                !commands
-                    .iter()
-                    .any(|argv| argv.len() == 2 && argv[0] == b"SELECT" && argv[1] == b"0"),
-                "DB 0 must remain implicit across noncontiguous DB replay output"
             );
             assert!(
                 !commands

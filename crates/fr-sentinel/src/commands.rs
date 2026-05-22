@@ -489,11 +489,13 @@ fn path_has_execute_permission(path: &str) -> bool {
 }
 
 fn parse_positive_u64(value: &str, option: &str) -> Result<u64, RespFrame> {
-    value
-        .parse::<u64>()
-        .ok()
-        .filter(|parsed| *parsed > 0)
-        .ok_or_else(|| invalid_sentinel_set_argument(value, option))
+    let parsed = value
+        .parse::<i64>()
+        .map_err(|_| invalid_sentinel_set_argument(value, option))?;
+    if parsed <= 0 {
+        return Err(invalid_sentinel_set_argument(value, option));
+    }
+    u64::try_from(parsed).map_err(|_| invalid_sentinel_set_argument(value, option))
 }
 
 fn parse_positive_u32(value: &str, option: &str) -> Result<u32, RespFrame> {
@@ -505,9 +507,13 @@ fn parse_positive_u32(value: &str, option: &str) -> Result<u32, RespFrame> {
 }
 
 fn parse_non_negative_u64(value: &str, option: &str) -> Result<u64, RespFrame> {
-    value
-        .parse::<u64>()
-        .map_err(|_| invalid_sentinel_set_argument(value, option))
+    let parsed = value
+        .parse::<i64>()
+        .map_err(|_| invalid_sentinel_set_argument(value, option))?;
+    if parsed < 0 {
+        return Err(invalid_sentinel_set_argument(value, option));
+    }
+    u64::try_from(parsed).map_err(|_| invalid_sentinel_set_argument(value, option))
 }
 
 fn invalid_sentinel_set_argument(value: &str, option: &str) -> RespFrame {
@@ -1114,15 +1120,21 @@ fn canonical_sentinel_debug_key(option: &str) -> Option<&'static str> {
 }
 
 fn parse_positive_debug_u64(value: &str, option: &str) -> Result<u64, RespFrame> {
-    value
-        .parse::<u64>()
-        .ok()
-        .filter(|parsed| *parsed > 0)
-        .ok_or_else(|| {
-            RespFrame::Error(format!(
-                "ERR Invalid argument '{value}' for SENTINEL DEBUG '{option}'"
-            ))
-        })
+    let parsed = value.parse::<i64>().map_err(|_| {
+        RespFrame::Error(format!(
+            "ERR Invalid argument '{value}' for SENTINEL DEBUG '{option}'"
+        ))
+    })?;
+    if parsed <= 0 {
+        return Err(RespFrame::Error(format!(
+            "ERR Invalid argument '{value}' for SENTINEL DEBUG '{option}'"
+        )));
+    }
+    u64::try_from(parsed).map_err(|_| {
+        RespFrame::Error(format!(
+            "ERR Invalid argument '{value}' for SENTINEL DEBUG '{option}'"
+        ))
+    })
 }
 
 fn apply_sentinel_debug_update(config: &mut crate::SentinelDebugConfig, option: &str, value: u64) {
