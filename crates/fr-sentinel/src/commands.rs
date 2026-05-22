@@ -978,30 +978,59 @@ fn integer_u64(value: u64) -> RespFrame {
 
 fn cmd_help() -> RespFrame {
     let help = vec![
-        "SENTINEL MYID",
-        "SENTINEL MASTERS",
-        "SENTINEL MASTER <name>",
-        "SENTINEL REPLICAS <name>",
-        "SENTINEL SENTINELS <name>",
-        "SENTINEL MONITOR <name> <ip> <port> <quorum>",
-        "SENTINEL REMOVE <name>",
-        "SENTINEL SET <name> <option> <value> ...",
-        "SENTINEL SIMULATE-FAILURE [CRASH-AFTER-ELECTION] [CRASH-AFTER-PROMOTION] [HELP]",
-        "SENTINEL IS-MASTER-DOWN-BY-ADDR <ip> <port> <current-epoch> <runid>",
-        "SENTINEL RESET <pattern>",
-        "SENTINEL GET-MASTER-ADDR-BY-NAME <name>",
-        "SENTINEL CKQUORUM <name>",
-        "SENTINEL CONFIG SET <param> <value> [<param> <value> ...]",
-        "SENTINEL CONFIG GET <param> [<param> ...]",
-        "SENTINEL FLUSHCONFIG",
-        "SENTINEL FAILOVER <name>",
-        "SENTINEL PENDING-SCRIPTS",
-        "SENTINEL INFO-CACHE <name>",
-        "SENTINEL DEBUG [<param> <value> ...]",
+        "SENTINEL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "CKQUORUM <master-name>",
+        "    Check if the current Sentinel configuration is able to reach the quorum",
+        "    needed to failover a master and the majority needed to authorize the",
+        "    failover.",
+        "CONFIG SET param value [param value ...]",
+        "    Set a global Sentinel configuration parameter.",
+        "CONFIG GET <param> [param param param ...]",
+        "    Get global Sentinel configuration parameter.",
+        "DEBUG [<param> <value> ...]",
+        "    Show a list of configurable time parameters and their values (milliseconds).",
+        "    Or update current configurable parameters values (one or more).",
+        "GET-MASTER-ADDR-BY-NAME <master-name>",
+        "    Return the ip and port number of the master with that name.",
+        "FAILOVER <master-name>",
+        "    Manually failover a master node without asking for agreement from other",
+        "    Sentinels",
+        "FLUSHCONFIG",
+        "    Force Sentinel to rewrite its configuration on disk, including the current",
+        "    Sentinel state.",
+        "INFO-CACHE <master-name>",
+        "    Return last cached INFO output from masters and all its replicas.",
+        "IS-MASTER-DOWN-BY-ADDR <ip> <port> <current-epoch> <runid>",
+        "    Check if the master specified by ip:port is down from current Sentinel's",
+        "    point of view.",
+        "MASTER <master-name>",
+        "    Show the state and info of the specified master.",
+        "MASTERS",
+        "    Show a list of monitored masters and their state.",
+        "MONITOR <name> <ip> <port> <quorum>",
+        "    Start monitoring a new master with the specified name, ip, port and quorum.",
+        "MYID",
+        "    Return the ID of the Sentinel instance.",
+        "PENDING-SCRIPTS",
+        "    Get pending scripts information.",
+        "REMOVE <master-name>",
+        "    Remove master from Sentinel's monitor list.",
+        "REPLICAS <master-name>",
+        "    Show a list of replicas for this master and their state.",
+        "RESET <pattern>",
+        "    Reset masters for specific master name matching this pattern.",
+        "SENTINELS <master-name>",
+        "    Show a list of Sentinel instances for this master and their state.",
+        "SET <master-name> <option> <value> [<option> <value> ...]",
+        "    Set configuration parameters for certain masters.",
+        "SIMULATE-FAILURE [CRASH-AFTER-ELECTION] [CRASH-AFTER-PROMOTION] [HELP]",
+        "    Simulate a Sentinel crash.",
+        "HELP",
+        "    Print this help.",
     ];
     RespFrame::Array(Some(
         help.into_iter()
-            .map(|s| RespFrame::BulkString(Some(s.as_bytes().to_vec())))
+            .map(|s| RespFrame::SimpleString(s.to_string()))
             .collect(),
     ))
 }
@@ -2389,7 +2418,41 @@ mod tests {
     fn test_help() {
         let mut state = SentinelState::new();
         let result = dispatch_sentinel_command(&mut state, &[b"HELP"]);
-        assert!(array_len(&result).is_some_and(|len| len > 0));
+        assert!(matches!(result, RespFrame::Array(Some(_))));
+        let lines = if let RespFrame::Array(Some(lines)) = result {
+            lines
+        } else {
+            Vec::new()
+        };
+
+        assert_eq!(
+            lines.first(),
+            Some(&RespFrame::SimpleString(
+                "SENTINEL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:".into()
+            ))
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| matches!(line, RespFrame::SimpleString(_)))
+                .count(),
+            lines.len()
+        );
+        assert!(lines.contains(&RespFrame::SimpleString("CKQUORUM <master-name>".into())));
+        assert!(lines.contains(&RespFrame::SimpleString(
+            "    Check if the current Sentinel configuration is able to reach the quorum".into()
+        )));
+        assert!(lines.contains(&RespFrame::SimpleString(
+            "SIMULATE-FAILURE [CRASH-AFTER-ELECTION] [CRASH-AFTER-PROMOTION] [HELP]".into()
+        )));
+        assert_eq!(
+            lines[lines.len() - 2],
+            RespFrame::SimpleString("HELP".into())
+        );
+        assert_eq!(
+            lines.last(),
+            Some(&RespFrame::SimpleString("    Print this help.".into()))
+        );
     }
 
     #[test]
