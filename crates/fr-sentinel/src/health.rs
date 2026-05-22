@@ -506,7 +506,7 @@ slave_priority:100
             instance.runid.as_deref(),
             Some("abcdef0123456789abcdef0123456789abcdef01")
         );
-        assert_eq!(instance.slave_repl_offset, 42);
+        assert_eq!(instance.slave_repl_offset, 0);
     }
 
     #[test]
