@@ -692,9 +692,7 @@ fn cmd_config_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
 }
 
 fn canonical_sentinel_config_key(option: &str) -> Option<&'static str> {
-    SENTINEL_CONFIG_KEYS
-        .into_iter()
-        .find(|key| key.eq_ignore_ascii_case(option))
+    SENTINEL_CONFIG_KEYS.into_iter().find(|key| *key == option)
 }
 
 fn sentinel_config_value_is_valid(option: &str, value: &str) -> bool {
@@ -2705,6 +2703,38 @@ mod tests {
         );
         assert!(!state.resolve_hostnames);
         assert_eq!(state.announce_port, None);
+    }
+
+    #[test]
+    fn sentinel_config_set_rejects_mixed_case_option_names() {
+        let mut state = SentinelState::new();
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"CONFIG",
+                b"SET",
+                b"Resolve-Hostnames",
+                b"yes",
+                b"announce-port",
+                b"1234",
+            ],
+        );
+        assert!(
+            matches!(result, RespFrame::Error(ref message) if message.contains("Invalid argument 'Resolve-Hostnames' to SENTINEL CONFIG SET"))
+        );
+        assert!(!state.resolve_hostnames);
+        assert_eq!(state.announce_port, None);
+
+        let result =
+            dispatch_sentinel_command(&mut state, &[b"CONFIG", b"GET", b"RESOLVE-HOSTNAMES"]);
+        assert_eq!(
+            result,
+            RespFrame::Map(Some(vec![(
+                RespFrame::BulkString(Some(b"resolve-hostnames".to_vec())),
+                RespFrame::BulkString(Some(b"no".to_vec())),
+            )]))
+        );
     }
 
     #[test]
