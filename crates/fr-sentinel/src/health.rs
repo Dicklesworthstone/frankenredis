@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use crate::{InstanceLink, PING_PERIOD_MS, Role, SentinelRedisInstance};
+use crate::{INFO_PERIOD_MS, InstanceLink, PING_PERIOD_MS, Role, SentinelRedisInstance};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HealthCheckResult {
@@ -42,6 +42,20 @@ pub fn evaluate_instance_health(instance: &SentinelRedisInstance, now: u64) -> H
             }
             return result;
         }
+    }
+
+    if instance.is_master()
+        && instance.role_reported == Role::Slave
+        && now.saturating_sub(instance.role_reported_time)
+            > instance
+                .down_after_period
+                .saturating_add(INFO_PERIOD_MS.saturating_mul(2))
+    {
+        if !instance.is_s_down() {
+            result.should_mark_s_down = true;
+            result.reason = Some("master reports role=slave past grace period");
+        }
+        return result;
     }
 
     if elapsed_since_pong > instance.down_after_period {
@@ -283,6 +297,27 @@ mod tests {
         let result = evaluate_instance_health(&instance, 35_000);
 
         assert!(!result.should_mark_s_down);
+    }
+
+    #[test]
+    fn health_check_master_role_mismatch_marks_s_down_after_grace() {
+        let mut instance = make_instance();
+        let grace = instance
+            .down_after_period
+            .saturating_add(INFO_PERIOD_MS.saturating_mul(2));
+        instance.role_reported = Role::Slave;
+        instance.role_reported_time = 1_000;
+        instance.link.last_pong_time = 1_000 + grace + 1;
+
+        let at_boundary = evaluate_instance_health(&instance, 1_000 + grace);
+        assert!(!at_boundary.should_mark_s_down);
+
+        let after_boundary = evaluate_instance_health(&instance, 1_000 + grace + 1);
+        assert!(after_boundary.should_mark_s_down);
+        assert_eq!(
+            after_boundary.reason,
+            Some("master reports role=slave past grace period")
+        );
     }
 
     #[test]
