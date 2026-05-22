@@ -713,6 +713,12 @@ impl Entry {
         self.bump_mod_count();
     }
 
+    fn refresh_db_add_metadata(&mut self, now_ms: u64) {
+        self.last_access_ms = now_ms;
+        self.lfu_freq = LFU_INIT_VAL;
+        self.lfu_last_touch_min = now_ms / 60_000;
+    }
+
     fn duplicate_for_copy(&self, now_ms: u64) -> Self {
         let mut entry = Self::new(self.value.clone(), self.expires_at_ms, now_ms);
         entry.force_raw_encoding = self.force_raw_encoding;
@@ -3796,9 +3802,10 @@ impl Store {
         }
         let moved_entries_added = self.stream_entries_added.remove(key);
         let moved_max_deleted_id = self.stream_max_deleted_ids.remove(key);
-        let Some(entry) = self.internal_entries_remove(key) else {
+        let Some(mut entry) = self.internal_entries_remove(key) else {
             return Err(StoreError::KeyNotFound);
         };
+        entry.refresh_db_add_metadata(now_ms);
         let moved_groups = self.stream_groups.remove(key);
         let moved_last_id = self.stream_last_ids.remove(key);
         self.internal_entries_remove(newkey);
@@ -3836,9 +3843,10 @@ impl Store {
         }
         let moved_entries_added = self.stream_entries_added.remove(key);
         let moved_max_deleted_id = self.stream_max_deleted_ids.remove(key);
-        let Some(entry) = self.internal_entries_remove(key) else {
+        let Some(mut entry) = self.internal_entries_remove(key) else {
             return Err(StoreError::KeyNotFound);
         };
+        entry.refresh_db_add_metadata(now_ms);
         let moved_groups = self.stream_groups.remove(key);
         let moved_last_id = self.stream_last_ids.remove(key);
         self.internal_entries_insert(newkey.to_vec(), entry);
@@ -17643,6 +17651,34 @@ mod tests {
     }
 
     #[test]
+    fn rename_refreshes_destination_idle_metadata() -> Result<(), String> {
+        let mut store = Store::new();
+        store.set(b"old".to_vec(), b"v".to_vec(), None, 0);
+        match store.object_idletime(b"old", 90_000) {
+            Some(90) => {}
+            other => {
+                return Err(format!(
+                    "source idle time should start at 90 seconds, got {other:?}"
+                ));
+            }
+        }
+
+        store
+            .rename(b"old", b"new", 120_000)
+            .map_err(|err| format!("rename failed: {err:?}"))?;
+
+        match store.object_idletime(b"new", 180_000) {
+            Some(60) => {}
+            other => {
+                return Err(format!(
+                    "RENAMED destination should have refreshed LRU metadata, got {other:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn rename_missing_key_errors() {
         let mut store = Store::new();
         let err = store
@@ -17681,6 +17717,55 @@ mod tests {
         assert!(store.renamenx(b"a", b"c", 0).expect("renamenx"));
         assert_eq!(store.get(b"a", 0).unwrap(), None);
         assert_eq!(store.get(b"c", 0).unwrap(), Some(b"1".to_vec()));
+    }
+
+    #[test]
+    fn renamenx_resets_destination_lfu_metadata() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store.set(b"old".to_vec(), b"v".to_vec(), None, 0);
+        let Some(source) = store.entries.get_mut(b"old".as_slice()) else {
+            return Err("source entry missing".into());
+        };
+        source.lfu_freq = 200;
+        source.lfu_last_touch_min = 0;
+
+        if !store
+            .renamenx(b"old", b"new", 60_000)
+            .map_err(|err| format!("renamenx failed: {err:?}"))?
+        {
+            return Err("renamenx should move to an empty destination".into());
+        }
+
+        let Some(moved) = store.entries.get(b"new".as_slice()) else {
+            return Err("moved entry missing".into());
+        };
+        match moved.lfu_freq {
+            LFU_INIT_VAL => {}
+            other => {
+                return Err(format!(
+                    "RENAMENX destination should start at LFU_INIT_VAL, got {other}"
+                ));
+            }
+        }
+        match moved.lfu_last_touch_min {
+            1 => {}
+            other => {
+                return Err(format!(
+                    "RENAMENX destination should start with current LFU minute, got {other}"
+                ));
+            }
+        }
+        match store.object_freq(b"new", 60_000) {
+            Some(LFU_INIT_VAL) => {}
+            other => {
+                return Err(format!(
+                    "OBJECT FREQ should report fresh RENAMENX destination LFU, got {other:?}"
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[test]

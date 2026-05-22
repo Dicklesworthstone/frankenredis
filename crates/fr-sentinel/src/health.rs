@@ -125,6 +125,7 @@ pub struct ParsedInfo {
 
 pub fn parse_info_response(info: &str) -> ParsedInfo {
     let mut result = ParsedInfo::default();
+    let mut current_role = None;
 
     for line in info.lines() {
         let line = line.trim();
@@ -140,16 +141,17 @@ pub fn parse_info_response(info: &str) -> ParsedInfo {
                         "slave" => Some(Role::Slave),
                         _ => None,
                     } {
+                        current_role = Some(role);
                         result.role = Some(role);
                     }
                 }
-                "master_host" => {
+                "master_host" if current_role == Some(Role::Slave) => {
                     result.master_host = Some(value.to_string());
                 }
-                "master_port" => {
+                "master_port" if current_role == Some(Role::Slave) => {
                     result.master_port = value.parse().ok();
                 }
-                "master_link_status" => {
+                "master_link_status" if current_role == Some(Role::Slave) => {
                     result.master_link_status = Some(value.eq_ignore_ascii_case("up"));
                 }
                 "master_link_down_since_seconds" => {
@@ -158,12 +160,12 @@ pub fn parse_info_response(info: &str) -> ParsedInfo {
                         .ok()
                         .map(|seconds| seconds.saturating_mul(1000));
                 }
-                "slave_repl_offset" | "master_repl_offset"
-                    if result.slave_repl_offset.is_none() =>
+                "slave_repl_offset"
+                    if current_role == Some(Role::Slave) && result.slave_repl_offset.is_none() =>
                 {
                     result.slave_repl_offset = value.parse().ok();
                 }
-                "slave_priority" | "replica_priority" => {
+                "slave_priority" | "replica_priority" if current_role == Some(Role::Slave) => {
                     result.slave_priority = value.parse().ok();
                 }
                 "run_id" => {
@@ -359,7 +361,7 @@ master_repl_offset:12345
             parsed.run_id,
             Some("0123456789abcdef0123456789abcdef01234567".to_string())
         );
-        assert_eq!(parsed.slave_repl_offset, Some(12345));
+        assert_eq!(parsed.slave_repl_offset, None);
     }
 
     #[test]
@@ -374,6 +376,26 @@ master_repl_offset:12345
             long.run_id,
             Some("0123456789abcdef0123456789abcdef01234567".to_string())
         );
+    }
+
+    #[test]
+    fn parse_info_gates_slave_fields_on_observed_slave_role() {
+        let master = parse_info_response(
+            "role:master\nmaster_host:192.0.2.10\nmaster_port:6380\nmaster_link_status:up\nslave_repl_offset:7\nslave_priority:50\n",
+        );
+        assert_eq!(master.role, Some(Role::Master));
+        assert_eq!(master.master_host, None);
+        assert_eq!(master.master_port, None);
+        assert_eq!(master.master_link_status, None);
+        assert_eq!(master.slave_repl_offset, None);
+        assert_eq!(master.slave_priority, None);
+
+        let out_of_order = parse_info_response(
+            "master_host:192.0.2.11\nslave_repl_offset:5\nrole:slave\nslave_repl_offset:9\n",
+        );
+        assert_eq!(out_of_order.role, Some(Role::Slave));
+        assert_eq!(out_of_order.master_host, None);
+        assert_eq!(out_of_order.slave_repl_offset, Some(9));
     }
 
     #[test]
