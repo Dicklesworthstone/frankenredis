@@ -13659,10 +13659,10 @@ fn decode_intset_members(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
             }
             _ => unreachable!("width checked above"),
         };
-        if let Some(previous_value) = previous {
-            if value <= previous_value {
-                return Err(StoreError::InvalidDumpPayload);
-            }
+        if let Some(previous_value) = previous
+            && value <= previous_value
+        {
+            return Err(StoreError::InvalidDumpPayload);
         }
         previous = Some(value);
         members.push(value.to_string().into_bytes());

@@ -2696,6 +2696,7 @@ mod tests {
     #[test]
     fn sentinel_set_script_paths_accept_executable_and_empty_clears() {
         let mut state = SentinelState::new();
+        state.deny_scripts_reconfig = false;
         let _ = dispatch_sentinel_command(
             &mut state,
             &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
@@ -2756,9 +2757,9 @@ mod tests {
     }
 
     #[test]
-    fn sentinel_set_script_paths_respect_deny_scripts_reconfig() {
+    fn sentinel_set_script_paths_are_denied_by_default_like_upstream() {
         let mut state = SentinelState::new();
-        state.deny_scripts_reconfig = true;
+        assert!(state.deny_scripts_reconfig);
         let _ = dispatch_sentinel_command(
             &mut state,
             &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
@@ -2788,6 +2789,7 @@ mod tests {
     #[test]
     fn sentinel_master_replies_include_configured_script_paths() {
         let mut state = SentinelState::new();
+        state.deny_scripts_reconfig = false;
         let _ = dispatch_sentinel_command(
             &mut state,
             &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],

@@ -411,7 +411,7 @@ impl SentinelState {
             sentinel_auth_user: None,
             resolve_hostnames: false,
             announce_hostnames: false,
-            deny_scripts_reconfig: false,
+            deny_scripts_reconfig: true,
             simfailure_flags: SimFailureFlags::empty(),
             loglevel: "notice".to_string(),
             debug_config: SentinelDebugConfig::default(),
