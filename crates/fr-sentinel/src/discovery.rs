@@ -70,7 +70,7 @@ pub fn create_hello_message(state: &SentinelState, master: &SentinelRedisInstanc
 }
 
 pub fn should_publish_hello(master: &SentinelRedisInstance, now: u64) -> bool {
-    now.saturating_sub(master.last_pub_time) >= PUBLISH_PERIOD_MS
+    now.saturating_sub(master.last_pub_time) > PUBLISH_PERIOD_MS
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -695,6 +695,7 @@ slave0:10.0.0.10,6379,online
         master.last_pub_time = 1000;
 
         assert!(!should_publish_hello(&master, 1500));
-        assert!(should_publish_hello(&master, 4000));
+        assert!(!should_publish_hello(&master, 3000));
+        assert!(should_publish_hello(&master, 3001));
     }
 }
