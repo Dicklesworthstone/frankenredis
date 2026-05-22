@@ -529,6 +529,37 @@ mod tests {
     }
 
     #[test]
+    fn failover_selection_skips_s_down_reconfiguration_targets_like_upstream() {
+        let addr = SentinelAddr::new("10.0.0.1", 6379);
+        let mut master = SentinelRedisInstance::new_master("mymaster", addr, 2);
+        let promoted =
+            SentinelRedisInstance::new_master("promoted", SentinelAddr::new("10.0.0.2", 6380), 0);
+        let healthy =
+            SentinelRedisInstance::new_master("healthy", SentinelAddr::new("10.0.0.3", 6381), 0);
+        let mut s_down =
+            SentinelRedisInstance::new_master("s-down", SentinelAddr::new("10.0.0.4", 6382), 0);
+        s_down.flags.insert(InstanceFlags::S_DOWN);
+        master.slaves.insert("promoted".to_string(), promoted);
+        master.slaves.insert("healthy".to_string(), healthy);
+        master.slaves.insert("s-down".to_string(), s_down);
+        master.failover_state = FailoverState::SelectSlave;
+        let mut ctx = FailoverContext::new();
+
+        let state = advance_failover_state(
+            &mut master,
+            FailoverEvent::SlaveSelected("promoted".to_string()),
+            &mut ctx,
+            2500,
+        );
+
+        assert_eq!(state, FailoverState::SendSlaveofNoone);
+        assert_eq!(ctx.slaves_to_reconfig, vec!["healthy".to_string()]);
+        assert!(!is_reconfiguration_complete(&ctx));
+        track_slave_reconfiguration(&mut ctx, "healthy", ReconfigStatus::Done);
+        assert!(is_reconfiguration_complete(&ctx));
+    }
+
+    #[test]
     fn failover_timeout_detection() {
         let addr = SentinelAddr::new("10.0.0.1", 6379);
         let mut master = SentinelRedisInstance::new_master("mymaster", addr, 2);
