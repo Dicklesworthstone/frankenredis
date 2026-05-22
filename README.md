@@ -1562,13 +1562,11 @@ Honest list of what FrankenRedis does *not* do today. The roadmap below tracks c
 - **No multi-node cluster sharding.** The `CLUSTER` command surface is implemented for single-node mode (slot map, NODES, INFO, KEYSLOT, etc.), but FrankenRedis does not yet do CRC16 slot rebalancing or live shard migration across multiple FrankenRedis processes.
 - **Pipelined throughput trails Redis at high pipeline depth.** Single-command throughput is in the 71–83% range of Redis; `pipeline=16` is at ~33–47%. The `writev` scatter-gather work that closes the gap is on the roadmap.
 - **Wire-level TLS not yet terminated.** TLS configuration, accept-rate-limit, and policy are wired through `fr-config` / `fr-runtime`, but the listener does not yet terminate `rustls` connections. Clients connect in plaintext for now.
-- **Hash field TTL: storage layer only.** The in-memory representation (`hash_field_expires: BTreeMap<(key, field), expires_at_ms>` on `Store`) plus the `RDB_TYPE_HASH_WITH_TTLS` (tag 100) round-trip both exist, but the full Redis 7.4 wire-level command family — `HEXPIRE`, `HPEXPIRE`, `HEXPIREAT`, `HPEXPIREAT`, `HEXPIRETIME`, `HPEXPIRETIME`, `HPERSIST`, `HTTL`, `HPTTL` — is not yet dispatched, and the lazy-expiry enforcement at every hash read path is still to come.
+- **Hash field TTL commands are intentionally not exposed.** The `HEXPIRE`/`HTTL`/`HPERSIST` family is a Redis 7.4 feature; FrankenRedis targets 7.2.4 parity. The storage-layer representation exists (`hash_field_expires` on `Store`, `RDB_TYPE_HASH_WITH_TTLS` round-trip) for forward compatibility.
 - **HyperLogLog representation is always dense.** Upstream uses a sparse representation for low cardinalities; FrankenRedis uses the 16,389-byte dense form unconditionally. Tracked as `frankenredis-j2tuo`.
 - **`DUMP` for large quicklist entries uses the PACKED container.** Upstream Redis emits a PLAIN container compressed with LZF for big-item quicklist nodes; FrankenRedis currently emits PACKED. The on-wire payload remains a valid `DUMP`/`RESTORE` round-trip in both directions, but is not byte-identical to vendored. Tracked as `frankenredis-371l9`.
 - **Maxmemory eviction is exact-scan, not sample-based.** `select_eviction_candidate` walks every `Entry` to find the best LRU/TTL candidate (`O(N)` per eviction). Upstream samples `maxmemory-samples` random keys and merges into an `EVPOOL_SIZE = 16` pool. `CONFIG SET maxmemory-samples` is accepted for compatibility but doesn't yet influence selection.
 - **LFU eviction selection currently falls back to LRU.** The 8-bit LFU counter is tracked per-Entry and exposed correctly via `OBJECT FREQ` (with upstream-shape logarithmic increment + minute-decay), but `select_eviction_candidate` for `allkeys-lfu` / `volatile-lfu` picks by `last_access_ms` rather than by `lfu_freq` today.
-- **`ACL` does not yet implement `%R`/`%W`/`%RW` key selectors.** The Redis 7.0 fine-grained key-selector syntax is on the roadmap. Tracked as `frankenredis-y40p3`.
-- **Lua: small stdlib gaps.** `cmsgpack`, `struct`, `setfenv`/`getfenv`, and `newproxy` are not exposed to scripts. `cjson.decode` is permissive about trailing commas / non-string keys where upstream rejects them. Each is tracked as a P4 parity bead.
 - **RaptorQ-everywhere durability sidecar is not started.** The doctrine is named in `AGENTS.md`; no crate dependency or implementation exists yet.
 - **No tagged releases.** Workspace version is `0.1.0` everywhere; the project is pre-1.0 and `main` is the only branch with guarantees.
 
@@ -1579,11 +1577,9 @@ Honest list of what FrankenRedis does *not* do today. The roadmap below tracks c
 1. **Multi-node cluster sharding**: CRC16 slot allocation, slot migration, MOVED/ASK redirects, gossip.
 2. **`writev` scatter-gather** for the write path, to close the `pipeline=16` gap to Redis.
 3. **Wire-level `rustls` termination** in `fr-server`, to fully realize the TLS configuration framework that already exists in `fr-config`/`fr-runtime`.
-4. **Hash field TTL lazy-read enforcement** across every read path.
-5. **HyperLogLog sparse representation** for low cardinalities.
-6. **ACL `%R`/`%W`/`%RW` key selectors** (Redis 7.0 fine-grained selectors).
-7. **RaptorQ-everywhere sidecar** for self-healing durability of long-lived state snapshots, fixture bundles, and reproducibility ledgers.
-8. **Asupersync-backed runtime adapter** and **FrankenTUI operator dashboard adapter** for the deployment story.
+4. **HyperLogLog sparse representation** for low cardinalities.
+5. **RaptorQ-everywhere sidecar** for self-healing durability of long-lived state snapshots, fixture bundles, and reproducibility ledgers.
+6. **Asupersync-backed runtime adapter** and **FrankenTUI operator dashboard adapter** for the deployment story.
 
 ---
 
