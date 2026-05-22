@@ -467,6 +467,7 @@ fn cmd_reset(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
         return wrong_arity("sentinel reset");
     }
     let pattern = String::from_utf8_lossy(args[0]);
+    let now_ms = state.previous_time;
     let mut count = 0i64;
 
     let names_to_reset: Vec<String> = state
@@ -478,12 +479,30 @@ fn cmd_reset(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
 
     for name in names_to_reset {
         if let Some(master) = state.masters.get_mut(&name) {
-            master.sentinels.clear();
-            master.slaves.clear();
+            reset_master(master, now_ms);
             count += 1;
         }
     }
     RespFrame::Integer(count)
+}
+
+fn reset_master(master: &mut SentinelRedisInstance, now_ms: u64) {
+    master.sentinels.clear();
+    master.slaves.clear();
+    master.flags = crate::InstanceFlags::MASTER;
+    master.leader = None;
+    master.failover_state = crate::FailoverState::None;
+    master.failover_state_change_time = 0;
+    master.failover_start_time = 0;
+    master.promoted_slave = None;
+    master.runid = None;
+    master.slave_master_host = None;
+    master.link.act_ping_time = now_ms;
+    master.link.last_ping_time = 0;
+    master.link.last_avail_time = now_ms;
+    master.link.last_pong_time = now_ms;
+    master.role_reported_time = now_ms;
+    master.role_reported = crate::Role::Master;
 }
 
 fn cmd_get_master_addr(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
@@ -1550,6 +1569,82 @@ mod tests {
             )),
             ["sentinel-a", "sentinel-b", "sentinel-c"]
         );
+    }
+
+    #[test]
+    fn sentinel_reset_clears_failover_state_like_upstream() {
+        let mut state = SentinelState::new();
+        state.previous_time = 12_345;
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+
+        {
+            let master_exists = state.masters.contains_key("mymaster");
+            let Some(master) = state.get_master_mut("mymaster") else {
+                assert!(master_exists, "mymaster exists");
+                return;
+            };
+            master.slaves.insert(
+                "replica".to_string(),
+                sentinel_instance("replica", "127.0.0.2", 6380, InstanceFlags::SLAVE),
+            );
+            master.sentinels.insert(
+                "sentinel".to_string(),
+                sentinel_instance("sentinel", "127.0.0.3", 26379, InstanceFlags::SENTINEL),
+            );
+            master.flags.insert(InstanceFlags::S_DOWN);
+            master.flags.insert(InstanceFlags::O_DOWN);
+            master.flags.insert(InstanceFlags::MASTER_DOWN);
+            master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
+            master.flags.insert(InstanceFlags::PROMOTED);
+            master.flags.insert(InstanceFlags::FORCE_FAILOVER);
+            master.flags.insert(InstanceFlags::MASTER_REBOOT);
+            master.leader = Some("leader-runid".to_string());
+            master.failover_state = crate::FailoverState::ReconfSlaves;
+            master.failover_state_change_time = 111;
+            master.failover_start_time = 222;
+            master.promoted_slave = Some(Box::new(sentinel_instance(
+                "promoted",
+                "127.0.0.4",
+                6381,
+                InstanceFlags::SLAVE,
+            )));
+            master.runid = Some("master-runid".to_string());
+            master.slave_master_host = Some("old-master".to_string());
+            master.link.act_ping_time = 333;
+            master.link.last_ping_time = 444;
+            master.link.last_avail_time = 555;
+            master.link.last_pong_time = 666;
+            master.role_reported = crate::Role::Slave;
+            master.role_reported_time = 777;
+        }
+
+        let result = dispatch_sentinel_command(&mut state, &[b"RESET", b"mymaster"]);
+        assert_eq!(result, RespFrame::Integer(1));
+
+        let master_exists = state.masters.contains_key("mymaster");
+        let Some(master) = state.get_master("mymaster") else {
+            assert!(master_exists, "mymaster exists after reset");
+            return;
+        };
+        assert!(master.slaves.is_empty());
+        assert!(master.sentinels.is_empty());
+        assert_eq!(master.flags, InstanceFlags::MASTER);
+        assert_eq!(master.leader, None);
+        assert_eq!(master.failover_state, crate::FailoverState::None);
+        assert_eq!(master.failover_state_change_time, 0);
+        assert_eq!(master.failover_start_time, 0);
+        assert!(master.promoted_slave.is_none());
+        assert_eq!(master.runid, None);
+        assert_eq!(master.slave_master_host, None);
+        assert_eq!(master.link.act_ping_time, 12_345);
+        assert_eq!(master.link.last_ping_time, 0);
+        assert_eq!(master.link.last_avail_time, 12_345);
+        assert_eq!(master.link.last_pong_time, 12_345);
+        assert_eq!(master.role_reported, crate::Role::Master);
+        assert_eq!(master.role_reported_time, 12_345);
     }
 
     #[test]
@@ -2761,8 +2856,11 @@ mod tests {
             let master = state.masters.get_mut("mymaster").unwrap();
             master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
             master.failover_state = FailoverState::ReconfSlaves;
-            let mut promoted =
-                SentinelRedisInstance::new_master("promoted", SentinelAddr::new("10.0.0.5", 6380), 1);
+            let mut promoted = SentinelRedisInstance::new_master(
+                "promoted",
+                SentinelAddr::new("10.0.0.5", 6380),
+                1,
+            );
             promoted.flags = InstanceFlags::SLAVE;
             master.promoted_slave = Some(Box::new(promoted));
         }
@@ -2777,5 +2875,77 @@ mod tests {
                 RespFrame::BulkString(Some(b"6380".to_vec())),
             ]))
         );
+    }
+
+    #[test]
+    fn sentinel_reset_clears_failover_down_and_promoted_state() {
+        use crate::{FailoverState, InstanceFlags, Role, SentinelAddr};
+
+        let mut state = SentinelState::new();
+        state.previous_time = 1000;
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+
+        // Add a replica and sentinel
+        {
+            let master = state.masters.get_mut("mymaster").unwrap();
+            let replica =
+                SentinelRedisInstance::new_master("replica1", SentinelAddr::new("127.0.0.2", 6380), 1);
+            master.slaves.insert("replica1".to_string(), replica);
+            let sentinel =
+                SentinelRedisInstance::new_master("sentinel1", SentinelAddr::new("127.0.0.3", 26379), 1);
+            master.sentinels.insert("sentinel1".to_string(), sentinel);
+        }
+
+        // Simulate failover and down state
+        {
+            let master = state.masters.get_mut("mymaster").unwrap();
+            master.flags.insert(InstanceFlags::S_DOWN);
+            master.flags.insert(InstanceFlags::O_DOWN);
+            master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
+            master.failover_state = FailoverState::ReconfSlaves;
+            master.failover_state_change_time = 500;
+            master.failover_start_time = 400;
+            master.leader = Some("leader-sentinel".to_string());
+            master.runid = Some("old-runid".to_string());
+            master.role_reported = Role::Slave;
+            let promoted =
+                SentinelRedisInstance::new_master("promoted", SentinelAddr::new("127.0.0.2", 6380), 1);
+            master.promoted_slave = Some(Box::new(promoted));
+
+            // Verify dirty state is set
+            assert!(master.flags.contains(InstanceFlags::S_DOWN));
+            assert!(master.flags.contains(InstanceFlags::O_DOWN));
+            assert!(master.flags.contains(InstanceFlags::FAILOVER_IN_PROGRESS));
+            assert_eq!(master.slaves.len(), 1);
+            assert_eq!(master.sentinels.len(), 1);
+            assert!(master.promoted_slave.is_some());
+        }
+
+        // Reset the master
+        state.previous_time = 2000;
+        let result = dispatch_sentinel_command(&mut state, &[b"RESET", b"mymaster"]);
+        assert_eq!(result, RespFrame::Integer(1));
+
+        // Verify all state is cleared
+        let master = state.get_master("mymaster").unwrap();
+        assert!(!master.flags.contains(InstanceFlags::S_DOWN));
+        assert!(!master.flags.contains(InstanceFlags::O_DOWN));
+        assert!(!master.flags.contains(InstanceFlags::FAILOVER_IN_PROGRESS));
+        assert!(master.flags.contains(InstanceFlags::MASTER));
+        assert_eq!(master.failover_state, FailoverState::None);
+        assert_eq!(master.failover_state_change_time, 0);
+        assert_eq!(master.failover_start_time, 0);
+        assert!(master.leader.is_none());
+        assert!(master.runid.is_none());
+        assert!(master.promoted_slave.is_none());
+        assert_eq!(master.role_reported, Role::Master);
+        assert_eq!(master.role_reported_time, 2000);
+        assert_eq!(master.slaves.len(), 0);
+        assert_eq!(master.sentinels.len(), 0);
+        assert_eq!(master.link.last_avail_time, 2000);
+        assert_eq!(master.link.last_pong_time, 2000);
     }
 }
