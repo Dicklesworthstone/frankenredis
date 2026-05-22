@@ -23,7 +23,7 @@ pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> R
     match subcommand.as_str() {
         "MYID" => {
             if args.len() != 1 {
-                return subcommand_syntax_error(&subcommand_raw);
+                return wrong_arity("sentinel|myid");
             }
             cmd_myid(state)
         }
@@ -2460,15 +2460,12 @@ mod tests {
     }
 
     #[test]
-    fn sentinel_myid_extra_args_returns_subcommand_syntax_error() {
+    fn sentinel_myid_extra_args_returns_pipe_qualified_arity_error() {
         let mut state = SentinelState::new();
         let result = dispatch_sentinel_command(&mut state, &[b"MYID", b"extra"]);
         assert_eq!(
             result,
-            RespFrame::Error(
-                "ERR unknown subcommand or wrong number of arguments for 'MYID'. Try SENTINEL HELP."
-                    .into()
-            )
+            RespFrame::Error("ERR wrong number of arguments for 'sentinel|myid' command".into())
         );
     }
 
