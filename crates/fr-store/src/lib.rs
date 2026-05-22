@@ -12242,7 +12242,9 @@ impl Store {
                 }
                 let mut hash = BTreeMap::new();
                 for pair in &mut chunks {
-                    hash.insert(pair[0].clone(), pair[1].clone());
+                    if hash.insert(pair[0].clone(), pair[1].clone()).is_some() {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
                 }
                 Value::Hash(hash)
             }
@@ -12261,7 +12263,9 @@ impl Store {
                 let members = decode_listpack_strings(&listpack)?;
                 let mut set = BTreeSet::new();
                 for member in members {
-                    set.insert(member);
+                    if !set.insert(member) {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
                 }
                 force_set_listpack_encoding = true;
                 Value::Set(set)
@@ -12283,7 +12287,9 @@ impl Store {
                     if score.is_nan() {
                         return Err(StoreError::InvalidDumpPayload);
                     }
-                    zs.insert(pair[0].clone(), score);
+                    if !zs.insert(pair[0].clone(), score) {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
                 }
                 Value::SortedSet(zs)
             }
@@ -20895,6 +20901,55 @@ mod tests {
             Err(StoreError::InvalidDumpPayload) => Ok(()),
             other => Err(format!(
                 "duplicate raw hash fields should reject the dump, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn restore_rejects_duplicate_hash_listpack_fields() -> Result<(), String> {
+        let listpack =
+            encode_listpack_strings(&[b"field".as_slice(), b"one", b"field", b"two"]).unwrap();
+        let mut body = vec![RDB_TYPE_HASH_LISTPACK];
+        append_raw_dump_bulk(&mut body, &listpack);
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        match store.restore_key(b"h", 0, &payload, false, 100) {
+            Err(StoreError::InvalidDumpPayload) => Ok(()),
+            other => Err(format!(
+                "duplicate hash listpack fields should reject the dump, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn restore_rejects_duplicate_set_listpack_members() -> Result<(), String> {
+        let listpack = encode_listpack_strings(&[b"dup".as_slice(), b"dup"]).unwrap();
+        let mut body = vec![RDB_TYPE_SET_LISTPACK];
+        append_raw_dump_bulk(&mut body, &listpack);
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        match store.restore_key(b"s", 0, &payload, false, 100) {
+            Err(StoreError::InvalidDumpPayload) => Ok(()),
+            other => Err(format!(
+                "duplicate set listpack members should reject the dump, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn restore_rejects_duplicate_zset_listpack_members() -> Result<(), String> {
+        let listpack = encode_listpack_strings(&[b"dup".as_slice(), b"1", b"dup", b"2"]).unwrap();
+        let mut body = vec![RDB_TYPE_ZSET_LISTPACK];
+        append_raw_dump_bulk(&mut body, &listpack);
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        match store.restore_key(b"z", 0, &payload, false, 100) {
+            Err(StoreError::InvalidDumpPayload) => Ok(()),
+            other => Err(format!(
+                "duplicate zset listpack members should reject the dump, got {other:?}"
             )),
         }
     }
