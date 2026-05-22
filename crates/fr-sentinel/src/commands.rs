@@ -289,10 +289,12 @@ fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
                     Ok(value) => value,
                     Err(error) => return error,
                 };
-                master.down_after_period = match parse_positive_u64(&value, &option_raw) {
+                let down_after_period = match parse_positive_u64(&value, &option_raw) {
                     Ok(parsed) => parsed,
                     Err(error) => return error,
                 };
+                master.down_after_period = down_after_period;
+                propagate_down_after_period(master, down_after_period);
                 i += 2;
             }
             "failover-timeout" => {
@@ -450,6 +452,15 @@ fn set_renamed_command(master: &mut crate::SentinelRedisInstance, oldname: &str,
     master.renamed_commands.remove(&old_key);
     if !oldname.eq_ignore_ascii_case(newname) {
         master.renamed_commands.insert(old_key, newname.to_string());
+    }
+}
+
+fn propagate_down_after_period(master: &mut crate::SentinelRedisInstance, period_ms: u64) {
+    for replica in master.slaves.values_mut() {
+        replica.down_after_period = period_ms;
+    }
+    for sentinel in master.sentinels.values_mut() {
+        sentinel.down_after_period = period_ms;
     }
 }
 
@@ -2569,6 +2580,80 @@ mod tests {
         };
         assert_eq!(master.auth_user, None);
         assert_eq!(master.auth_pass, None);
+    }
+
+    #[test]
+    fn sentinel_set_down_after_propagates_to_children_like_upstream() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+        add_replica(&mut state, "mymaster", "replica-a", |replica| {
+            replica.down_after_period = 1_000;
+        });
+        {
+            let Some(master) = state.get_master_mut("mymaster") else {
+                assert!(
+                    state.masters.contains_key("mymaster"),
+                    "monitor should create master"
+                );
+                return;
+            };
+            let mut sentinel =
+                sentinel_instance("sentinel-a", "127.0.0.2", 26379, InstanceFlags::SENTINEL);
+            sentinel.down_after_period = 1_000;
+            master.sentinels.insert("sentinel-a".to_string(), sentinel);
+        }
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"SET", b"mymaster", b"down-after-milliseconds", b"7000"],
+        );
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+
+        let master = dispatch_sentinel_command(&mut state, &[b"MASTER", b"mymaster"]);
+        assert_eq!(
+            info_field(&master, b"down-after-milliseconds").as_deref(),
+            Some("7000")
+        );
+
+        let replicas = dispatch_sentinel_command(&mut state, &[b"REPLICAS", b"mymaster"]);
+        assert!(
+            matches!(&replicas, RespFrame::Array(Some(_))),
+            "replicas response should be an array: {replicas:?}"
+        );
+        let RespFrame::Array(Some(replicas)) = &replicas else {
+            return;
+        };
+        assert!(!replicas.is_empty(), "configured replica should be listed");
+        let Some(replica) = replicas.first() else {
+            return;
+        };
+        assert_eq!(
+            info_field(replica, b"down-after-milliseconds").as_deref(),
+            Some("7000")
+        );
+
+        let sentinels = dispatch_sentinel_command(&mut state, &[b"SENTINELS", b"mymaster"]);
+        assert!(
+            matches!(&sentinels, RespFrame::Array(Some(_))),
+            "sentinels response should be an array: {sentinels:?}"
+        );
+        let RespFrame::Array(Some(sentinels)) = &sentinels else {
+            return;
+        };
+        assert!(
+            !sentinels.is_empty(),
+            "configured sentinel should be listed"
+        );
+        let Some(sentinel) = sentinels.first() else {
+            return;
+        };
+        assert_eq!(
+            info_field(sentinel, b"down-after-milliseconds").as_deref(),
+            Some("7000")
+        );
     }
 
     #[test]
