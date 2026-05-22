@@ -158,7 +158,8 @@ fn cmd_is_master_down_by_addr(state: &mut SentinelState, args: &[&[u8]]) -> Resp
         (None, 0)
     } else if let Some(master_name) = master_name {
         let epoch_u64 = signed_epoch_to_unsigned(requested_epoch);
-        sentinel_vote_leader(state, &master_name, epoch_u64, &requested_runid)
+        let now = state.previous_time;
+        sentinel_vote_leader(state, &master_name, epoch_u64, &requested_runid, now)
     } else {
         (None, 0)
     };
@@ -193,11 +194,13 @@ fn sentinel_vote_leader(
     master_name: &str,
     requested_epoch: u64,
     requested_runid: &str,
+    now: u64,
 ) -> (Option<String>, u64) {
     if requested_epoch > state.current_epoch {
         state.current_epoch = requested_epoch;
     }
     let current_epoch = state.current_epoch;
+    let myid = state.myid_hex();
     let Some(master) = state.get_master_mut(master_name) else {
         return (None, 0);
     };
@@ -205,6 +208,9 @@ fn sentinel_vote_leader(
     if master.leader_epoch < requested_epoch && current_epoch <= requested_epoch {
         master.leader = Some(requested_runid.to_string());
         master.leader_epoch = current_epoch;
+        if !requested_runid.eq_ignore_ascii_case(&myid) {
+            master.failover_start_time = now;
+        }
     }
 
     (master.leader.clone(), master.leader_epoch)
@@ -1834,6 +1840,63 @@ mod tests {
         );
         assert_eq!(next_epoch, is_master_down_reply(1, "candidate-b", 8));
         assert_eq!(state.current_epoch, 8);
+    }
+
+    #[test]
+    fn sentinel_is_master_down_by_addr_non_self_vote_delays_local_failover() {
+        let mut state = SentinelState::new();
+        assert!(state.monitor("mymaster", "127.0.0.1", 6379, 1).is_ok());
+        state.previous_time = 12_345;
+        if let Some(master) = state.get_master_mut("mymaster") {
+            master.flags.insert(InstanceFlags::S_DOWN);
+        }
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"IS-MASTER-DOWN-BY-ADDR",
+                b"127.0.0.1",
+                b"6379",
+                b"11",
+                b"candidate",
+            ],
+        );
+        assert_eq!(result, is_master_down_reply(1, "candidate", 11));
+
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        assert_eq!(master.failover_start_time, 12_345);
+    }
+
+    #[test]
+    fn sentinel_is_master_down_by_addr_self_vote_does_not_delay_local_failover() {
+        let mut state = SentinelState::new();
+        assert!(state.monitor("mymaster", "127.0.0.1", 6379, 1).is_ok());
+        state.previous_time = 54_321;
+        if let Some(master) = state.get_master_mut("mymaster") {
+            master.flags.insert(InstanceFlags::S_DOWN);
+        }
+        let myid = state.myid_hex();
+        let args: [&[u8]; 5] = [
+            b"IS-MASTER-DOWN-BY-ADDR",
+            b"127.0.0.1",
+            b"6379",
+            b"12",
+            myid.as_bytes(),
+        ];
+
+        let result = dispatch_sentinel_command(&mut state, &args);
+        assert_eq!(result, is_master_down_reply(1, &myid, 12));
+
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        assert_eq!(master.failover_start_time, 0);
     }
 
     #[test]
