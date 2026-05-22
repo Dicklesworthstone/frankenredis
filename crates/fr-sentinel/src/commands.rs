@@ -299,7 +299,7 @@ fn cmd_monitor(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
 
     let default_down_after = state.debug_config.default_down_after;
     let default_failover_timeout = state.debug_config.default_failover_timeout;
-    match state.monitor_addr(name.as_ref(), addr, quorum) {
+    match state.monitor_addr_after_quorum_validation(name.as_ref(), addr, quorum) {
         Ok(()) => {
             if let Some(master) = state.get_master_mut(&name) {
                 master.down_after_period = default_down_after;
@@ -354,11 +354,11 @@ fn parse_monitor_port(value: &str) -> Result<u16, RespFrame> {
 fn parse_monitor_quorum(value: &str) -> Result<u32, RespFrame> {
     let parsed = value
         .parse::<i64>()
-        .map_err(|_| RespFrame::Error("ERR Invalid quorum number".into()))?;
+        .map_err(|_| RespFrame::Error("ERR Invalid quorum".into()))?;
     if parsed <= 0 {
         return Err(RespFrame::Error("ERR Quorum must be 1 or greater.".into()));
     }
-    u32::try_from(parsed).map_err(|_| RespFrame::Error("ERR Invalid quorum number".into()))
+    Ok(parsed as u32)
 }
 
 fn cmd_remove(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
@@ -430,7 +430,7 @@ fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
                     Ok(value) => value,
                     Err(error) => return error,
                 };
-                master.quorum = match parse_positive_u32(&value, &option_raw) {
+                master.quorum = match parse_wrapping_u32_from_positive_i64(&value, &option_raw) {
                     Ok(parsed) => parsed,
                     Err(error) => return error,
                 };
@@ -590,12 +590,14 @@ fn parse_positive_u64(value: &str, option: &str) -> Result<u64, RespFrame> {
     u64::try_from(parsed).map_err(|_| invalid_sentinel_set_argument(value, option))
 }
 
-fn parse_positive_u32(value: &str, option: &str) -> Result<u32, RespFrame> {
-    value
-        .parse::<u32>()
-        .ok()
-        .filter(|parsed| *parsed > 0)
-        .ok_or_else(|| invalid_sentinel_set_argument(value, option))
+fn parse_wrapping_u32_from_positive_i64(value: &str, option: &str) -> Result<u32, RespFrame> {
+    let parsed = value
+        .parse::<i64>()
+        .map_err(|_| invalid_sentinel_set_argument(value, option))?;
+    if parsed <= 0 {
+        return Err(invalid_sentinel_set_argument(value, option));
+    }
+    Ok(parsed as u32)
 }
 
 fn parse_wrapping_i32_from_positive_i64(value: &str, option: &str) -> Result<i32, RespFrame> {
@@ -2209,10 +2211,7 @@ mod tests {
             &mut state,
             &[b"MONITOR", b"malformed", b"127.0.0.1", b"6379", b"NaN"],
         );
-        assert_eq!(
-            malformed,
-            RespFrame::Error("ERR Invalid quorum number".into())
-        );
+        assert_eq!(malformed, RespFrame::Error("ERR Invalid quorum".into()));
         assert!(state.get_master("malformed").is_none());
     }
 
@@ -2226,7 +2225,7 @@ mod tests {
         );
         assert_eq!(
             malformed_quorum,
-            RespFrame::Error("ERR Invalid quorum number".into())
+            RespFrame::Error("ERR Invalid quorum".into())
         );
         assert!(state.get_master("malformed").is_none());
 
@@ -2239,6 +2238,52 @@ mod tests {
             RespFrame::Error("ERR Quorum must be 1 or greater.".into())
         );
         assert!(state.get_master("zero").is_none());
+    }
+
+    #[test]
+    fn sentinel_monitor_quorum_wraps_oversized_i64_like_upstream() {
+        let mut state = SentinelState::new();
+
+        for (name, value, wrapped) in [
+            ("q2147483648", b"2147483648".as_slice(), 2_147_483_648),
+            ("q4294967295", b"4294967295".as_slice(), u32::MAX),
+            ("q4294967296", b"4294967296".as_slice(), 0),
+            (
+                "q9223372036854775807",
+                b"9223372036854775807".as_slice(),
+                u32::MAX,
+            ),
+        ] {
+            let result = dispatch_sentinel_command(
+                &mut state,
+                &[b"MONITOR", name.as_bytes(), b"127.0.0.1", b"6379", value],
+            );
+            assert_eq!(result, RespFrame::SimpleString("OK".into()));
+            assert_eq!(
+                state.get_master(name).map(|master| master.quorum),
+                Some(wrapped)
+            );
+
+            let master = dispatch_sentinel_command(&mut state, &[b"MASTER", name.as_bytes()]);
+            let expected = wrapped.to_string();
+            assert_eq!(
+                info_field(&master, b"quorum").as_deref(),
+                Some(expected.as_str())
+            );
+        }
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"MONITOR",
+                b"q-overflow",
+                b"127.0.0.1",
+                b"6379",
+                b"9223372036854775808",
+            ],
+        );
+        assert_eq!(result, RespFrame::Error("ERR Invalid quorum".into()));
+        assert!(state.get_master("q-overflow").is_none());
     }
 
     #[test]
@@ -3567,6 +3612,49 @@ mod tests {
                 .get_master("mymaster")
                 .map(|master| master.parallel_syncs),
             Some(-1)
+        );
+    }
+
+    #[test]
+    fn sentinel_set_quorum_wraps_oversized_i64_like_upstream() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+
+        for (value, wrapped) in [
+            (b"2147483648".as_slice(), 2_147_483_648),
+            (b"4294967295".as_slice(), u32::MAX),
+            (b"4294967296".as_slice(), 0),
+            (b"9223372036854775807".as_slice(), u32::MAX),
+        ] {
+            let result =
+                dispatch_sentinel_command(&mut state, &[b"SET", b"mymaster", b"quorum", value]);
+            assert_eq!(result, RespFrame::SimpleString("OK".into()));
+            assert_eq!(
+                state.get_master("mymaster").map(|master| master.quorum),
+                Some(wrapped)
+            );
+
+            let master = dispatch_sentinel_command(&mut state, &[b"MASTER", b"mymaster"]);
+            let expected = wrapped.to_string();
+            assert_eq!(
+                info_field(&master, b"quorum").as_deref(),
+                Some(expected.as_str())
+            );
+        }
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"SET", b"mymaster", b"quorum", b"9223372036854775808"],
+        );
+        assert!(
+            matches!(result, RespFrame::Error(ref message) if message.contains("Invalid argument"))
+        );
+        assert_eq!(
+            state.get_master("mymaster").map(|master| master.quorum),
+            Some(u32::MAX)
         );
     }
 

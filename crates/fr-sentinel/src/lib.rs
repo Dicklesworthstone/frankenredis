@@ -446,12 +446,21 @@ impl SentinelState {
         addr: SentinelAddr,
         quorum: u32,
     ) -> Result<(), &'static str> {
+        if quorum == 0 {
+            return Err("ERR Quorum must be 1 or greater.");
+        }
+        self.monitor_addr_after_quorum_validation(name, addr, quorum)
+    }
+
+    pub(crate) fn monitor_addr_after_quorum_validation(
+        &mut self,
+        name: impl Into<String>,
+        addr: SentinelAddr,
+        quorum: u32,
+    ) -> Result<(), &'static str> {
         let name = name.into();
         if self.masters.contains_key(&name) {
             return Err("ERR Duplicate master name.");
-        }
-        if quorum == 0 {
-            return Err("ERR Quorum must be 1 or greater.");
         }
         let mut instance = SentinelRedisInstance::new_master(&name, addr, quorum);
         instance.initialize_created_link_state(self.previous_time);
