@@ -187,7 +187,9 @@ fn parse_redis_run_id(value: &str) -> Option<String> {
     if bytes.len() < 40 {
         return None;
     }
-    Some(String::from_utf8_lossy(&bytes[..40]).into_owned())
+    bytes
+        .get(..40)
+        .map(|run_id| String::from_utf8_lossy(run_id).into_owned())
 }
 
 pub fn apply_info_to_instance(instance: &mut SentinelRedisInstance, info: &ParsedInfo, now: u64) {
