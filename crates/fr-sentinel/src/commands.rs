@@ -2,7 +2,7 @@
 
 use std::{fs, os::unix::fs::PermissionsExt};
 
-use crate::{SentinelRedisInstance, SentinelState};
+use crate::{FailoverState, InstanceFlags, SentinelRedisInstance, SentinelState};
 use fr_protocol::RespFrame;
 
 pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
@@ -76,7 +76,8 @@ fn cmd_myid(state: &SentinelState) -> RespFrame {
 }
 
 fn cmd_masters(state: &SentinelState) -> RespFrame {
-    let masters = sorted_instance_info_arrays(state.masters.values());
+    let now_ms = state.previous_time;
+    let masters = sorted_instance_info_arrays(state.masters.values(), now_ms);
     RespFrame::Array(Some(masters))
 }
 
@@ -85,8 +86,9 @@ fn cmd_master(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
         return wrong_arity("sentinel master");
     }
     let name = String::from_utf8_lossy(args[0]);
+    let now_ms = state.previous_time;
     match state.get_master(&name) {
-        Some(master) => instance_to_info_array(master),
+        Some(master) => instance_to_info_array(master, now_ms),
         None => missing_master_error(),
     }
 }
@@ -96,9 +98,10 @@ fn cmd_replicas(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
         return wrong_arity("sentinel replicas");
     }
     let name = String::from_utf8_lossy(args[0]);
+    let now_ms = state.previous_time;
     match state.get_master(&name) {
         Some(master) => {
-            let replicas = sorted_instance_info_arrays(master.slaves.values());
+            let replicas = sorted_instance_info_arrays(master.slaves.values(), now_ms);
             RespFrame::Array(Some(replicas))
         }
         None => missing_master_error(),
@@ -110,9 +113,10 @@ fn cmd_sentinels(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
         return wrong_arity("sentinel sentinels");
     }
     let name = String::from_utf8_lossy(args[0]);
+    let now_ms = state.previous_time;
     match state.get_master(&name) {
         Some(master) => {
-            let sentinels = sorted_instance_info_arrays(master.sentinels.values());
+            let sentinels = sorted_instance_info_arrays(master.sentinels.values(), now_ms);
             RespFrame::Array(Some(sentinels))
         }
         None => missing_master_error(),
@@ -1104,13 +1108,17 @@ fn cmd_help() -> RespFrame {
 
 fn sorted_instance_info_arrays<'a>(
     instances: impl Iterator<Item = &'a crate::SentinelRedisInstance>,
+    now_ms: u64,
 ) -> Vec<RespFrame> {
     let mut instances: Vec<_> = instances.collect();
     instances.sort_by(|left, right| left.name.cmp(&right.name));
-    instances.into_iter().map(instance_to_info_array).collect()
+    instances
+        .into_iter()
+        .map(|inst| instance_to_info_array(inst, now_ms))
+        .collect()
 }
 
-fn instance_to_info_array(instance: &crate::SentinelRedisInstance) -> RespFrame {
+fn instance_to_info_array(instance: &crate::SentinelRedisInstance, now_ms: u64) -> RespFrame {
     let mut pairs = vec![
         RespFrame::BulkString(Some(b"name".to_vec())),
         RespFrame::BulkString(Some(instance.name.clone().into_bytes())),
@@ -1124,17 +1132,119 @@ fn instance_to_info_array(instance: &crate::SentinelRedisInstance) -> RespFrame 
         )),
         RespFrame::BulkString(Some(b"flags".to_vec())),
         RespFrame::BulkString(Some(flags_to_string(&instance.flags).into_bytes())),
-        RespFrame::BulkString(Some(b"quorum".to_vec())),
-        RespFrame::BulkString(Some(instance.quorum.to_string().into_bytes())),
-        RespFrame::BulkString(Some(b"down-after-milliseconds".to_vec())),
-        RespFrame::BulkString(Some(instance.down_after_period.to_string().into_bytes())),
-        RespFrame::BulkString(Some(b"failover-timeout".to_vec())),
-        RespFrame::BulkString(Some(instance.failover_timeout.to_string().into_bytes())),
-        RespFrame::BulkString(Some(b"parallel-syncs".to_vec())),
-        RespFrame::BulkString(Some(instance.parallel_syncs.to_string().into_bytes())),
+        RespFrame::BulkString(Some(b"link-pending-commands".to_vec())),
+        RespFrame::BulkString(Some(b"0".to_vec())), // fr-sentinel doesn't track pending commands
+        RespFrame::BulkString(Some(b"link-refcount".to_vec())),
+        RespFrame::BulkString(Some(b"1".to_vec())), // fr-sentinel uses single refcount
+        RespFrame::BulkString(Some(b"last-ping-sent".to_vec())),
+        RespFrame::BulkString(Some(
+            if instance.link.act_ping_time > 0 {
+                now_ms.saturating_sub(instance.link.act_ping_time)
+            } else {
+                0
+            }
+            .to_string()
+            .into_bytes(),
+        )),
+        RespFrame::BulkString(Some(b"last-ok-ping-reply".to_vec())),
+        RespFrame::BulkString(Some(
+            now_ms
+                .saturating_sub(instance.link.last_avail_time)
+                .to_string()
+                .into_bytes(),
+        )),
+        RespFrame::BulkString(Some(b"last-ping-reply".to_vec())),
+        RespFrame::BulkString(Some(
+            now_ms
+                .saturating_sub(instance.link.last_pong_time)
+                .to_string()
+                .into_bytes(),
+        )),
     ];
 
+    // Conditional: failover-state when FAILOVER_IN_PROGRESS
+    if instance.flags.contains(InstanceFlags::FAILOVER_IN_PROGRESS) {
+        pairs.push(RespFrame::BulkString(Some(b"failover-state".to_vec())));
+        pairs.push(RespFrame::BulkString(Some(
+            failover_state_str(&instance.failover_state).as_bytes().to_vec(),
+        )));
+    }
+
+    // Conditional: s-down-time when S_DOWN
+    if instance.flags.contains(InstanceFlags::S_DOWN) {
+        pairs.push(RespFrame::BulkString(Some(b"s-down-time".to_vec())));
+        pairs.push(RespFrame::BulkString(Some(
+            now_ms
+                .saturating_sub(instance.s_down_since_time)
+                .to_string()
+                .into_bytes(),
+        )));
+    }
+
+    // Conditional: o-down-time when O_DOWN
+    if instance.flags.contains(InstanceFlags::O_DOWN) {
+        pairs.push(RespFrame::BulkString(Some(b"o-down-time".to_vec())));
+        pairs.push(RespFrame::BulkString(Some(
+            now_ms
+                .saturating_sub(instance.o_down_since_time)
+                .to_string()
+                .into_bytes(),
+        )));
+    }
+
+    pairs.extend([
+        RespFrame::BulkString(Some(b"down-after-milliseconds".to_vec())),
+        RespFrame::BulkString(Some(instance.down_after_period.to_string().into_bytes())),
+    ]);
+
+    // Masters and Slaves: info-refresh, role-reported, role-reported-time
+    if instance.is_master() || instance.is_slave() {
+        pairs.extend([
+            RespFrame::BulkString(Some(b"info-refresh".to_vec())),
+            RespFrame::BulkString(Some(
+                if instance.info_refresh > 0 {
+                    now_ms.saturating_sub(instance.info_refresh)
+                } else {
+                    0
+                }
+                .to_string()
+                .into_bytes(),
+            )),
+            RespFrame::BulkString(Some(b"role-reported".to_vec())),
+            RespFrame::BulkString(Some(
+                match instance.role_reported {
+                    crate::Role::Master => "master",
+                    _ => "slave",
+                }
+                .as_bytes()
+                .to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"role-reported-time".to_vec())),
+            RespFrame::BulkString(Some(
+                now_ms
+                    .saturating_sub(instance.role_reported_time)
+                    .to_string()
+                    .into_bytes(),
+            )),
+        ]);
+    }
+
+    // Masters only
     if instance.is_master() {
+        pairs.extend([
+            RespFrame::BulkString(Some(b"config-epoch".to_vec())),
+            RespFrame::BulkString(Some(instance.config_epoch.to_string().into_bytes())),
+            RespFrame::BulkString(Some(b"num-slaves".to_vec())),
+            RespFrame::BulkString(Some(instance.slaves.len().to_string().into_bytes())),
+            RespFrame::BulkString(Some(b"num-other-sentinels".to_vec())),
+            RespFrame::BulkString(Some(instance.sentinels.len().to_string().into_bytes())),
+            RespFrame::BulkString(Some(b"quorum".to_vec())),
+            RespFrame::BulkString(Some(instance.quorum.to_string().into_bytes())),
+            RespFrame::BulkString(Some(b"failover-timeout".to_vec())),
+            RespFrame::BulkString(Some(instance.failover_timeout.to_string().into_bytes())),
+            RespFrame::BulkString(Some(b"parallel-syncs".to_vec())),
+            RespFrame::BulkString(Some(instance.parallel_syncs.to_string().into_bytes())),
+        ]);
         if let Some(ref script) = instance.notification_script {
             pairs.push(RespFrame::BulkString(Some(b"notification-script".to_vec())));
             pairs.push(RespFrame::BulkString(Some(script.clone().into_bytes())));
@@ -1147,14 +1257,58 @@ fn instance_to_info_array(instance: &crate::SentinelRedisInstance) -> RespFrame 
         }
     }
 
-    pairs.extend([
-        RespFrame::BulkString(Some(b"num-slaves".to_vec())),
-        RespFrame::BulkString(Some(instance.slaves.len().to_string().into_bytes())),
-        RespFrame::BulkString(Some(b"num-other-sentinels".to_vec())),
-        RespFrame::BulkString(Some(instance.sentinels.len().to_string().into_bytes())),
-    ]);
+    // Slaves only
+    if instance.is_slave() {
+        pairs.extend([
+            RespFrame::BulkString(Some(b"master-link-down-time".to_vec())),
+            RespFrame::BulkString(Some(instance.master_link_down_time.to_string().into_bytes())),
+            RespFrame::BulkString(Some(b"master-link-status".to_vec())),
+            RespFrame::BulkString(Some(
+                match instance.slave_master_link_status {
+                    crate::LinkStatus::Up => "ok",
+                    _ => "err",
+                }
+                .as_bytes()
+                .to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"master-host".to_vec())),
+            RespFrame::BulkString(Some(
+                instance
+                    .slave_master_host
+                    .clone()
+                    .unwrap_or_else(|| "?".to_string())
+                    .into_bytes(),
+            )),
+            RespFrame::BulkString(Some(b"master-port".to_vec())),
+            RespFrame::BulkString(Some(
+                instance.slave_master_port.unwrap_or(0).to_string().into_bytes(),
+            )),
+            RespFrame::BulkString(Some(b"slave-priority".to_vec())),
+            RespFrame::BulkString(Some(instance.slave_priority.to_string().into_bytes())),
+            RespFrame::BulkString(Some(b"slave-repl-offset".to_vec())),
+            RespFrame::BulkString(Some(instance.slave_repl_offset.to_string().into_bytes())),
+            RespFrame::BulkString(Some(b"replica-announced".to_vec())),
+            RespFrame::BulkString(Some(
+                if instance.replica_announced { "1" } else { "0" }
+                    .as_bytes()
+                    .to_vec(),
+            )),
+        ]);
+    }
 
     RespFrame::Array(Some(pairs))
+}
+
+fn failover_state_str(state: &FailoverState) -> &'static str {
+    match state {
+        FailoverState::None => "none",
+        FailoverState::WaitStart => "wait-start",
+        FailoverState::SelectSlave => "select-slave",
+        FailoverState::SendSlaveofNoone => "send-slaveof-noone",
+        FailoverState::WaitPromotion => "wait-promotion",
+        FailoverState::ReconfSlaves => "reconf-slaves",
+        FailoverState::UpdateConfig => "update-config",
+    }
 }
 
 fn flags_to_string(flags: &crate::InstanceFlags) -> String {
