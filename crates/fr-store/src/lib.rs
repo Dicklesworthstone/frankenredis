@@ -6168,10 +6168,21 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(Vec::new());
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
                     let members: Vec<Vec<u8>> = s.iter().cloned().collect();
+                    if lfu_tracking_enabled {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    }
                     entry.touch(now_ms);
                     Ok(members)
                 }
@@ -17420,6 +17431,37 @@ mod tests {
                     "SISMEMBER should bump LFU frequency, got {other:?}"
                 ));
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn smembers_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .sadd(b"s", &[b"a".to_vec()], 0)
+            .map_err(|err| format!("seed set failed: {err:?}"))?;
+
+        match store.object_freq(b"s", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new set LFU frequency mismatch: {other:?}")),
+        }
+        match store
+            .smembers(b"s", 1)
+            .map_err(|err| format!("smembers failed: {err:?}"))?
+            .as_slice()
+        {
+            [member] => match member.as_slice() {
+                b"a" => {}
+                other => return Err(format!("SMEMBERS member mismatch: {other:?}")),
+            },
+            other => return Err(format!("SMEMBERS result mismatch: {other:?}")),
+        }
+        match store.object_freq(b"s", 1) {
+            Some(6) => {}
+            other => return Err(format!("SMEMBERS should bump LFU frequency, got {other:?}")),
         }
         Ok(())
     }

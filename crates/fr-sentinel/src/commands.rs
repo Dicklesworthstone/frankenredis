@@ -5,6 +5,10 @@ use std::{fs, os::unix::fs::PermissionsExt};
 use crate::{FailoverState, InstanceFlags, SentinelRedisInstance, SentinelState};
 use fr_protocol::RespFrame;
 
+const SENTINEL_MAX_DESYNC_MS: u64 = 1_000;
+const SENTINEL_DESYNC_HASH_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const SENTINEL_DESYNC_HASH_PRIME: u64 = 0x0000_0100_0000_01b3;
+
 pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     if args.is_empty() {
         return RespFrame::Error("ERR wrong number of arguments for 'sentinel' command".into());
@@ -209,11 +213,48 @@ fn sentinel_vote_leader(
         master.leader = Some(requested_runid.to_string());
         master.leader_epoch = current_epoch;
         if !requested_runid.eq_ignore_ascii_case(&myid) {
-            master.failover_start_time = now;
+            master.failover_start_time =
+                sentinel_failover_start_time(now, current_epoch, master_name, requested_runid);
         }
     }
 
     (master.leader.clone(), master.leader_epoch)
+}
+
+fn sentinel_failover_start_time(
+    now: u64,
+    epoch: u64,
+    master_name: &str,
+    sentinel_runid: &str,
+) -> u64 {
+    now.saturating_add(sentinel_failover_desync_delay_ms(
+        now,
+        epoch,
+        master_name,
+        sentinel_runid,
+    ))
+}
+
+fn sentinel_failover_desync_delay_ms(
+    now: u64,
+    epoch: u64,
+    master_name: &str,
+    sentinel_runid: &str,
+) -> u64 {
+    let mut hash = SENTINEL_DESYNC_HASH_OFFSET;
+    hash = sentinel_desync_mix_bytes(hash, &now.to_le_bytes());
+    hash = sentinel_desync_mix_bytes(hash, &epoch.to_le_bytes());
+    hash = sentinel_desync_mix_bytes(hash, master_name.as_bytes());
+    hash = sentinel_desync_mix_bytes(hash, sentinel_runid.as_bytes());
+    hash % SENTINEL_MAX_DESYNC_MS
+}
+
+fn sentinel_desync_mix_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(SENTINEL_DESYNC_HASH_PRIME);
+    }
+    hash
 }
 
 fn cmd_monitor(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
@@ -821,6 +862,7 @@ fn cmd_failover(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     let now = state.previous_time;
     let debug_config = state.debug_config.clone();
     let new_epoch = state.current_epoch.saturating_add(1);
+    let myid = state.myid_hex();
     let mut started = false;
     let reply = match state.get_master_mut(&name) {
         Some(master) => {
@@ -834,7 +876,7 @@ fn cmd_failover(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
             master.flags.insert(InstanceFlags::FORCE_FAILOVER);
             master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
             master.failover_epoch = new_epoch;
-            master.failover_start_time = now;
+            master.failover_start_time = sentinel_failover_start_time(now, new_epoch, &name, &myid);
             master.failover_state_change_time = now;
             master.failover_state = FailoverState::WaitStart;
             started = true;
@@ -1996,7 +2038,10 @@ mod tests {
         let Some(master) = master else {
             return;
         };
-        assert_eq!(master.failover_start_time, 12_345);
+        let expected_start_time = sentinel_failover_start_time(12_345, 11, "mymaster", "candidate");
+        assert_eq!(master.failover_start_time, expected_start_time);
+        assert!(master.failover_start_time >= 12_345);
+        assert!(master.failover_start_time < 12_345 + SENTINEL_MAX_DESYNC_MS);
     }
 
     #[test]
@@ -3320,6 +3365,8 @@ mod tests {
         let result = dispatch_sentinel_command(&mut state, &[b"FAILOVER", b"mymaster"]);
         assert!(matches!(result, RespFrame::SimpleString(_)));
         assert_eq!(state.current_epoch, 1);
+        let expected_start_time =
+            sentinel_failover_start_time(1234, 1, "mymaster", &state.myid_hex());
 
         let master = state.get_master("mymaster");
         assert!(master.is_some(), "mymaster exists");
@@ -3333,7 +3380,9 @@ mod tests {
                 .contains(crate::InstanceFlags::FAILOVER_IN_PROGRESS)
         );
         assert_eq!(master.failover_epoch, 1);
-        assert_eq!(master.failover_start_time, 1234);
+        assert_eq!(master.failover_start_time, expected_start_time);
+        assert!(master.failover_start_time >= 1234);
+        assert!(master.failover_start_time < 1234 + SENTINEL_MAX_DESYNC_MS);
         assert_eq!(master.failover_state_change_time, 1234);
         assert_eq!(master.failover_state, crate::FailoverState::WaitStart);
     }
