@@ -496,7 +496,7 @@ fn cmd_get_master_addr(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
             RespFrame::BulkString(Some(master.addr.hostname.clone().into_bytes())),
             RespFrame::BulkString(Some(master.addr.port.to_string().into_bytes())),
         ])),
-        None => RespFrame::BulkString(None),
+        None => RespFrame::Array(None),
     }
 }
 
@@ -1519,6 +1519,16 @@ mod tests {
         let result =
             dispatch_sentinel_command(&mut state, &[b"GET-MASTER-ADDR-BY-NAME", b"mymaster"]);
         assert_eq!(array_len(&result), Some(2));
+    }
+
+    #[test]
+    fn sentinel_get_master_addr_unknown_master_returns_null_array() {
+        let mut state = SentinelState::new();
+
+        let result =
+            dispatch_sentinel_command(&mut state, &[b"GET-MASTER-ADDR-BY-NAME", b"missing"]);
+
+        assert_eq!(result, RespFrame::Array(None));
     }
 
     #[test]
