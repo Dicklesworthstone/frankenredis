@@ -21452,14 +21452,11 @@ mod tests {
     }
 
     #[test]
-    fn restore_rejects_empty_aggregate_payloads() -> Result<(), String> {
-        let empty_listpack =
-            encode_listpack_strings(&[]).ok_or_else(|| "encode empty listpack".to_string())?;
-        let empty_ziplist =
-            encode_test_ziplist_strings(&[]).ok_or_else(|| "encode empty ziplist".to_string())?;
-        let empty_zipmap =
-            encode_test_zipmap(&[]).ok_or_else(|| "encode empty zipmap".to_string())?;
-        let empty_intset = encode_intset(&[]).ok_or_else(|| "encode empty intset".to_string())?;
+    fn restore_rejects_empty_aggregate_payloads() -> Result<(), &'static str> {
+        let empty_listpack = encode_listpack_strings(&[]).ok_or("encode empty listpack")?;
+        let empty_ziplist = encode_test_ziplist_strings(&[]).ok_or("encode empty ziplist")?;
+        let empty_zipmap = encode_test_zipmap(&[]).ok_or("encode empty zipmap")?;
+        let empty_intset = encode_intset(&[]).ok_or("encode empty intset")?;
 
         let mut cases = Vec::new();
 
@@ -21524,10 +21521,10 @@ mod tests {
             let mut store = Store::new();
             match store.restore_key(key, 0, &payload, false, 100) {
                 Err(StoreError::InvalidDumpPayload) => {}
-                _ => return Err("empty aggregate payload restored successfully".to_string()),
+                _ => return Err("empty aggregate payload restored successfully"),
             }
             if store.exists(key, 100) {
-                return Err("empty aggregate payload created a key".to_string());
+                return Err("empty aggregate payload created a key");
             }
         }
 
@@ -21535,7 +21532,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_accepts_empty_string_payload() -> Result<(), String> {
+    fn restore_accepts_empty_string_payload() -> Result<(), &'static str> {
         let mut body = vec![RDB_TYPE_STRING];
         append_raw_dump_bulk(&mut body, b"");
         let payload = append_dump_footer(body);
@@ -21543,10 +21540,10 @@ mod tests {
         let mut store = Store::new();
         store
             .restore_key(b"empty-string", 0, &payload, false, 100)
-            .map_err(|err| format!("empty string restore failed: {err:?}"))?;
+            .map_err(|_| "empty string restore failed")?;
         match store.get(b"empty-string", 100) {
             Ok(Some(value)) if value.is_empty() => Ok(()),
-            other => Err(format!("empty string restore produced {other:?}")),
+            _ => Err("empty string restore produced the wrong value"),
         }
     }
 
@@ -21719,51 +21716,51 @@ mod tests {
     }
 
     #[test]
-    fn restore_rejects_empty_list() {
+    fn restore_rejects_empty_list() -> Result<(), &'static str> {
         let mut body = vec![RDB_TYPE_LIST];
         encode_length(&mut body, 0);
         let payload = append_dump_footer(body);
         let mut store = Store::new();
-        assert!(matches!(
-            store.restore_key(b"l", 0, &payload, false, 100),
-            Err(StoreError::InvalidDumpPayload)
-        ));
+        match store.restore_key(b"l", 0, &payload, false, 100) {
+            Err(StoreError::InvalidDumpPayload) => Ok(()),
+            _ => Err("empty list payload restored successfully"),
+        }
     }
 
     #[test]
-    fn restore_rejects_empty_set() {
+    fn restore_rejects_empty_set() -> Result<(), &'static str> {
         let mut body = vec![RDB_TYPE_SET];
         encode_length(&mut body, 0);
         let payload = append_dump_footer(body);
         let mut store = Store::new();
-        assert!(matches!(
-            store.restore_key(b"s", 0, &payload, false, 100),
-            Err(StoreError::InvalidDumpPayload)
-        ));
+        match store.restore_key(b"s", 0, &payload, false, 100) {
+            Err(StoreError::InvalidDumpPayload) => Ok(()),
+            _ => Err("empty set payload restored successfully"),
+        }
     }
 
     #[test]
-    fn restore_rejects_empty_hash() {
+    fn restore_rejects_empty_hash() -> Result<(), &'static str> {
         let mut body = vec![RDB_TYPE_HASH];
         encode_length(&mut body, 0);
         let payload = append_dump_footer(body);
         let mut store = Store::new();
-        assert!(matches!(
-            store.restore_key(b"h", 0, &payload, false, 100),
-            Err(StoreError::InvalidDumpPayload)
-        ));
+        match store.restore_key(b"h", 0, &payload, false, 100) {
+            Err(StoreError::InvalidDumpPayload) => Ok(()),
+            _ => Err("empty hash payload restored successfully"),
+        }
     }
 
     #[test]
-    fn restore_rejects_empty_zset() {
+    fn restore_rejects_empty_zset() -> Result<(), &'static str> {
         let mut body = vec![RDB_TYPE_ZSET_2];
         encode_length(&mut body, 0);
         let payload = append_dump_footer(body);
         let mut store = Store::new();
-        assert!(matches!(
-            store.restore_key(b"z", 0, &payload, false, 100),
-            Err(StoreError::InvalidDumpPayload)
-        ));
+        match store.restore_key(b"z", 0, &payload, false, 100) {
+            Err(StoreError::InvalidDumpPayload) => Ok(()),
+            _ => Err("empty zset payload restored successfully"),
+        }
     }
 
     #[test]
