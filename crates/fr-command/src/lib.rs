@@ -19974,28 +19974,23 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
                 subcommand: "HELP".to_string(),
             });
         }
+        // Mirror upstream object.c::memoryCommand HELP verbatim. Frames are
+        // SimpleString (addReplyHelp emits status replies). (frankenredis-33cf7)
         Ok(RespFrame::Array(Some(vec![
-            RespFrame::BulkString(Some(b"DOCTOR".to_vec())),
-            RespFrame::BulkString(Some(b"    Return memory problems reports.".to_vec())),
-            RespFrame::BulkString(Some(b"MALLOC-STATS".to_vec())),
-            RespFrame::BulkString(Some(
-                b"    Return internal statistics report from the memory allocator.".to_vec(),
-            )),
-            RespFrame::BulkString(Some(b"PURGE".to_vec())),
-            RespFrame::BulkString(Some(
-                b"    Attempt to purge dirty pages for reclamation by the allocator.".to_vec(),
-            )),
-            RespFrame::BulkString(Some(b"STATS".to_vec())),
-            RespFrame::BulkString(Some(
-                b"    Return information about the memory usage of the server.".to_vec(),
-            )),
-            RespFrame::BulkString(Some(b"USAGE <key> [SAMPLES <count>]".to_vec())),
-            RespFrame::BulkString(Some(
-                b"    Return memory in bytes used by <key> and its value. Nested values are".to_vec(),
-            )),
-            RespFrame::BulkString(Some(
-                b"    sampled up to <count> times (default: 5, 0 means sample all).".to_vec(),
-            )),
+            hello_simple("MEMORY <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
+            hello_simple("DOCTOR"),
+            hello_simple("    Return memory problems reports."),
+            hello_simple("MALLOC-STATS"),
+            hello_simple("    Return internal statistics report from the memory allocator."),
+            hello_simple("PURGE"),
+            hello_simple("    Attempt to purge dirty pages for reclamation by the allocator."),
+            hello_simple("STATS"),
+            hello_simple("    Return information about the memory usage of the server."),
+            hello_simple("USAGE <key> [SAMPLES <count>]"),
+            hello_simple("    Return memory in bytes used by <key> and its value. Nested values are"),
+            hello_simple("    sampled up to <count> times (default: 5, 0 means sample all)."),
+            hello_simple("HELP"),
+            hello_simple("    Print this help."),
         ])))
     } else if sub.eq_ignore_ascii_case("STATS") {
         if argv.len() != 2 {
@@ -41041,14 +41036,16 @@ mod tests {
         let RespFrame::Array(Some(items)) = out else {
             panic!("expected array");
         };
-        assert_eq!(items.len(), 11);
+        assert_eq!(items.len(), 14);
         assert_eq!(
             items[0],
-            RespFrame::BulkString(Some(b"DOCTOR".to_vec()))
+            RespFrame::SimpleString(
+                "MEMORY <subcommand> [<arg> [value] [opt] ...]. Subcommands are:".to_string()
+            )
         );
         assert_eq!(
-            items[8],
-            RespFrame::BulkString(Some(b"USAGE <key> [SAMPLES <count>]".to_vec()))
+            items[12],
+            RespFrame::SimpleString("HELP".to_string())
         );
     }
 
