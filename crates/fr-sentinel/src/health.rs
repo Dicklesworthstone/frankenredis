@@ -21,7 +21,12 @@ pub fn evaluate_instance_health(instance: &SentinelRedisInstance, now: u64) -> H
     }
 
     if instance.link.disconnected {
-        if !instance.is_s_down() && elapsed_since_pong > instance.down_after_period {
+        let disconnected_elapsed = if instance.link.act_ping_time > 0 {
+            now.saturating_sub(instance.link.act_ping_time)
+        } else {
+            now.saturating_sub(instance.link.last_avail_time)
+        };
+        if !instance.is_s_down() && disconnected_elapsed > instance.down_after_period {
             result.should_mark_s_down = true;
             result.reason = Some("disconnected longer than down-after-period");
         }
@@ -266,6 +271,18 @@ mod tests {
             result.reason,
             Some("disconnected longer than down-after-period")
         );
+    }
+
+    #[test]
+    fn health_check_disconnected_uses_last_available_reply() {
+        let mut instance = make_instance();
+        instance.link.disconnected = true;
+        instance.link.last_pong_time = 0;
+        instance.link.last_avail_time = 34_500;
+
+        let result = evaluate_instance_health(&instance, 35_000);
+
+        assert!(!result.should_mark_s_down);
     }
 
     #[test]
