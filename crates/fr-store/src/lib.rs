@@ -4292,7 +4292,7 @@ impl Store {
             cursor = cycle.next_cursor;
 
             if cycle.evicted_keys == 0 {
-                let Some(candidate) = self.select_eviction_candidate(now_ms) else {
+                let Some(candidate) = self.select_eviction_candidate(now_ms, sample_limit) else {
                     break;
                 };
                 if self.internal_entries_remove(candidate.as_slice()).is_some() {
@@ -10904,16 +10904,78 @@ impl Store {
         usage
     }
 
-    fn select_lfu_eviction_candidate(&self, now_ms: u64, volatile_only: bool) -> Option<Vec<u8>> {
+    fn sampled_eviction_candidate_keys(
+        &mut self,
+        volatile_only: bool,
+        sample_limit: usize,
+    ) -> Vec<Vec<u8>> {
+        let candidates: Vec<Vec<u8>> = self
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| {
+                if !volatile_only || entry.expires_at_ms.is_some() {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let sample_limit = sample_limit.max(1);
+        if candidates.len() <= sample_limit {
+            return candidates;
+        }
+
+        let mut sampled = Vec::with_capacity(sample_limit);
+        let mut selected_indices = HashSet::with_capacity(sample_limit);
+        while sampled.len() < sample_limit {
+            let idx = self.next_rand() as usize % candidates.len();
+            if selected_indices.insert(idx)
+                && let Some(candidate) = candidates.get(idx)
+            {
+                sampled.push(candidate.clone());
+            }
+        }
+        sampled
+    }
+
+    fn select_lru_eviction_candidate_from_keys(&self, keys: &[Vec<u8>]) -> Option<Vec<u8>> {
+        let mut best_key: Option<Vec<u8>> = None;
+        let mut best_access = u64::MAX;
+        for key in keys {
+            let Some(entry) = self.entries.get(key) else {
+                continue;
+            };
+            if entry.last_access_ms < best_access
+                || (entry.last_access_ms == best_access
+                    && best_key.as_ref().is_none_or(|best| key < best))
+            {
+                best_access = entry.last_access_ms;
+                best_key = Some(key.clone());
+            }
+        }
+        best_key
+    }
+
+    fn select_lfu_eviction_candidate_from_keys(
+        &self,
+        keys: &[Vec<u8>],
+        now_ms: u64,
+    ) -> Option<Vec<u8>> {
         let mut best_key: Option<Vec<u8>> = None;
         let mut best_freq = u8::MAX;
         let mut best_access = u64::MAX;
-        for (key, entry) in &self.entries {
-            if volatile_only && entry.expires_at_ms.is_none() {
+        for key in keys {
+            let Some(entry) = self.entries.get(key) else {
                 continue;
-            }
+            };
             let freq = entry.current_lfu_freq(now_ms, self.lfu_decay_time);
-            if freq < best_freq || (freq == best_freq && entry.last_access_ms < best_access) {
+            if freq < best_freq
+                || (freq == best_freq && entry.last_access_ms < best_access)
+                || (freq == best_freq
+                    && entry.last_access_ms == best_access
+                    && best_key.as_ref().is_none_or(|best| key < best))
+            {
                 best_freq = freq;
                 best_access = entry.last_access_ms;
                 best_key = Some(key.clone());
@@ -10922,53 +10984,52 @@ impl Store {
         best_key
     }
 
-    fn select_eviction_candidate(&mut self, now_ms: u64) -> Option<Vec<u8>> {
+    fn select_ttl_eviction_candidate_from_keys(&self, keys: &[Vec<u8>]) -> Option<Vec<u8>> {
+        let mut best_key: Option<Vec<u8>> = None;
+        let mut best_ttl = u64::MAX;
+        for key in keys {
+            let Some(entry) = self.entries.get(key) else {
+                continue;
+            };
+            if let Some(expires_at_ms) = entry.expires_at_ms
+                && (expires_at_ms < best_ttl
+                    || (expires_at_ms == best_ttl
+                        && best_key.as_ref().is_none_or(|best| key < best)))
+            {
+                best_ttl = expires_at_ms;
+                best_key = Some(key.clone());
+            }
+        }
+        best_key
+    }
+
+    fn select_eviction_candidate(&mut self, now_ms: u64, sample_limit: usize) -> Option<Vec<u8>> {
         match self.maxmemory_policy {
             MaxmemoryPolicy::Noeviction => None,
 
             MaxmemoryPolicy::AllkeysLru => {
-                // Pick the key with the smallest last_access_ms (least recently used).
-                let mut best_key: Option<Vec<u8>> = None;
-                let mut best_access: u64 = u64::MAX;
-                for (key, entry) in &self.entries {
-                    if entry.last_access_ms < best_access {
-                        best_access = entry.last_access_ms;
-                        best_key = Some(key.clone());
-                    }
-                }
-                best_key
+                let keys = self.sampled_eviction_candidate_keys(false, sample_limit);
+                self.select_lru_eviction_candidate_from_keys(&keys)
             }
 
-            MaxmemoryPolicy::AllkeysLfu => self.select_lfu_eviction_candidate(now_ms, false),
+            MaxmemoryPolicy::AllkeysLfu => {
+                let keys = self.sampled_eviction_candidate_keys(false, sample_limit);
+                self.select_lfu_eviction_candidate_from_keys(&keys, now_ms)
+            }
 
             MaxmemoryPolicy::VolatileLru => {
-                // Pick the volatile key (has expiry) with the smallest last_access_ms.
-                let mut best_key: Option<Vec<u8>> = None;
-                let mut best_access: u64 = u64::MAX;
-                for (key, entry) in &self.entries {
-                    if entry.expires_at_ms.is_some() && entry.last_access_ms < best_access {
-                        best_access = entry.last_access_ms;
-                        best_key = Some(key.clone());
-                    }
-                }
-                best_key
+                let keys = self.sampled_eviction_candidate_keys(true, sample_limit);
+                self.select_lru_eviction_candidate_from_keys(&keys)
             }
 
-            MaxmemoryPolicy::VolatileLfu => self.select_lfu_eviction_candidate(now_ms, true),
+            MaxmemoryPolicy::VolatileLfu => {
+                let keys = self.sampled_eviction_candidate_keys(true, sample_limit);
+                self.select_lfu_eviction_candidate_from_keys(&keys, now_ms)
+            }
 
             MaxmemoryPolicy::VolatileTtl => {
-                // Pick the volatile key with the smallest expires_at_ms (soonest to expire).
-                let mut best_key: Option<Vec<u8>> = None;
-                let mut best_ttl: u64 = u64::MAX;
-                for (key, entry) in &self.entries {
-                    if let Some(exp) = entry.expires_at_ms
-                        && exp < best_ttl
-                    {
-                        best_ttl = exp;
-                        best_key = Some(key.clone());
-                    }
-                }
-                best_key
+                let keys = self.sampled_eviction_candidate_keys(true, sample_limit);
+                self.select_ttl_eviction_candidate_from_keys(&keys)
             }
 
             MaxmemoryPolicy::AllkeysRandom => {
@@ -16527,6 +16588,39 @@ mod tests {
     }
 
     #[test]
+    fn maxmemory_samples_limits_lru_candidate_pool() {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLru;
+        for idx in 0..8 {
+            let key = format!("sample:{idx}");
+            store.set(key.into_bytes(), b"v".to_vec(), None, idx);
+        }
+
+        let oldest = b"sample:0".to_vec();
+        let mut probe_seed = 1;
+        let (chosen_seed, sampled_key) = loop {
+            assert!(
+                probe_seed < 4096,
+                "expected to find an LCG seed that samples a non-oldest key"
+            );
+            store.rng_seed = probe_seed;
+            let sampled = store.sampled_eviction_candidate_keys(false, 1);
+            let sampled_key = sampled.first().expect("non-empty sample").clone();
+            if sampled_key != oldest {
+                break (probe_seed, sampled_key);
+            }
+            probe_seed += 1;
+        };
+
+        store.rng_seed = chosen_seed;
+        assert_eq!(
+            store.select_eviction_candidate(10_000, 1),
+            Some(sampled_key)
+        );
+        assert_eq!(store.select_eviction_candidate(10_000, 32), Some(oldest));
+    }
+
+    #[test]
     fn state_digest_changes_on_mutation() {
         let mut store = Store::new();
         let digest_a = store.state_digest();
@@ -16929,7 +17023,7 @@ mod tests {
         cold.last_access_ms = 10_000;
 
         assert_eq!(
-            store.select_eviction_candidate(10_000),
+            store.select_eviction_candidate(10_000, 16),
             Some(b"new-cold".to_vec())
         );
     }
@@ -16970,7 +17064,7 @@ mod tests {
         cold.last_access_ms = 10_000;
 
         assert_eq!(
-            store.select_eviction_candidate(10_000),
+            store.select_eviction_candidate(10_000, 16),
             Some(b"volatile-cold".to_vec())
         );
     }
