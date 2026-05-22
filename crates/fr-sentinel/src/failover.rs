@@ -224,11 +224,20 @@ pub fn check_failover_timeout(master: &SentinelRedisInstance, now: u64) -> bool 
     now.saturating_sub(master.failover_start_time) > master.failover_timeout
 }
 
-pub fn should_start_failover(master: &SentinelRedisInstance, is_leader: bool) -> bool {
+pub fn should_start_failover(master: &SentinelRedisInstance, is_leader: bool, now: u64) -> bool {
     if !master.is_o_down() {
         return false;
     }
+    if master.flags.contains(InstanceFlags::FAILOVER_IN_PROGRESS) {
+        return false;
+    }
     if master.failover_state != FailoverState::None {
+        return false;
+    }
+    if master.failover_start_time != 0
+        && now.saturating_sub(master.failover_start_time)
+            < master.failover_timeout.saturating_mul(2)
+    {
         return false;
     }
     if !is_leader && !master.flags.contains(InstanceFlags::FORCE_FAILOVER) {
@@ -506,16 +515,39 @@ mod tests {
     fn should_start_failover_checks() {
         let addr = SentinelAddr::new("10.0.0.1", 6379);
         let master = SentinelRedisInstance::new_master("mymaster", addr, 2);
+        let now = 500_000;
 
-        assert!(!should_start_failover(&master, true));
+        assert!(!should_start_failover(&master, true, now));
 
         let mut o_down_master =
             SentinelRedisInstance::new_master("mymaster", SentinelAddr::new("10.0.0.1", 6379), 2);
         o_down_master.flags.insert(InstanceFlags::O_DOWN);
-        assert!(should_start_failover(&o_down_master, true));
-        assert!(!should_start_failover(&o_down_master, false));
+        assert!(should_start_failover(&o_down_master, true, now));
+        assert!(!should_start_failover(&o_down_master, false, now));
 
         o_down_master.flags.insert(InstanceFlags::FORCE_FAILOVER);
-        assert!(should_start_failover(&o_down_master, false));
+        assert!(should_start_failover(&o_down_master, false, now));
+    }
+
+    #[test]
+    fn should_start_failover_honors_recent_attempt_cooldown() {
+        let mut master =
+            SentinelRedisInstance::new_master("mymaster", SentinelAddr::new("10.0.0.1", 6379), 2);
+        master.flags.insert(InstanceFlags::O_DOWN);
+        master.failover_start_time = 1_000;
+        master.failover_timeout = 10_000;
+
+        assert!(!should_start_failover(&master, true, 20_999));
+        assert!(should_start_failover(&master, true, 21_000));
+    }
+
+    #[test]
+    fn should_start_failover_rejects_active_failover_flag() {
+        let mut master =
+            SentinelRedisInstance::new_master("mymaster", SentinelAddr::new("10.0.0.1", 6379), 2);
+        master.flags.insert(InstanceFlags::O_DOWN);
+        master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
+
+        assert!(!should_start_failover(&master, true, 500_000));
     }
 }
