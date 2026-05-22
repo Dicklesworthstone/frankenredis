@@ -737,14 +737,45 @@ fn cmd_pending_scripts(state: &SentinelState) -> RespFrame {
     let scripts: Vec<RespFrame> = state
         .scripts_queue
         .iter()
-        .map(|script| {
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"path".to_vec())),
-                RespFrame::BulkString(Some(script.path.clone().into_bytes())),
-            ]))
-        })
+        .map(pending_script_job_reply)
         .collect();
     RespFrame::Array(Some(scripts))
+}
+
+fn pending_script_job_reply(script: &crate::ScriptJob) -> RespFrame {
+    let mut argv = Vec::with_capacity(script.args.len() + 1);
+    argv.push(RespFrame::BulkString(Some(
+        script.path.clone().into_bytes(),
+    )));
+    argv.extend(
+        script
+            .args
+            .iter()
+            .map(|arg| RespFrame::BulkString(Some(arg.clone().into_bytes()))),
+    );
+
+    RespFrame::Map(Some(vec![
+        (
+            RespFrame::BulkString(Some(b"argv".to_vec())),
+            RespFrame::Array(Some(argv)),
+        ),
+        (
+            RespFrame::BulkString(Some(b"flags".to_vec())),
+            RespFrame::BulkString(Some(b"scheduled".to_vec())),
+        ),
+        (
+            RespFrame::BulkString(Some(b"pid".to_vec())),
+            RespFrame::BulkString(Some(b"0".to_vec())),
+        ),
+        (
+            RespFrame::BulkString(Some(b"run-delay".to_vec())),
+            RespFrame::BulkString(Some(b"0".to_vec())),
+        ),
+        (
+            RespFrame::BulkString(Some(b"retry-num".to_vec())),
+            RespFrame::BulkString(Some(script.retry_count.to_string().into_bytes())),
+        ),
+    ]))
 }
 
 fn cmd_info_cache(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
@@ -1085,7 +1116,11 @@ fn glob_match_ignore_ascii_case(pattern: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InstanceFlags, SentinelAddr, SentinelRedisInstance};
+    use crate::{InstanceFlags, ScriptJob, SentinelAddr, SentinelRedisInstance};
+
+    fn bulk_str(value: &str) -> RespFrame {
+        RespFrame::BulkString(Some(value.as_bytes().to_vec()))
+    }
 
     fn sentinel_instance(
         name: &str,
@@ -1885,6 +1920,36 @@ mod tests {
         assert_eq!(master.failover_start_time, 1234);
         assert_eq!(master.failover_state_change_time, 1234);
         assert_eq!(master.failover_state, crate::FailoverState::WaitStart);
+    }
+
+    #[test]
+    fn sentinel_pending_scripts_reports_upstream_job_fields() {
+        let mut state = SentinelState::new();
+        state.scripts_queue.push(ScriptJob {
+            path: "/tmp/notify.sh".into(),
+            args: vec!["event".into(), "mymaster".into()],
+            retry_count: 2,
+        });
+
+        let result = dispatch_sentinel_command(&mut state, &[b"PENDING-SCRIPTS"]);
+
+        assert_eq!(
+            result,
+            RespFrame::Array(Some(vec![RespFrame::Map(Some(vec![
+                (
+                    bulk_str("argv"),
+                    RespFrame::Array(Some(vec![
+                        bulk_str("/tmp/notify.sh"),
+                        bulk_str("event"),
+                        bulk_str("mymaster"),
+                    ])),
+                ),
+                (bulk_str("flags"), bulk_str("scheduled")),
+                (bulk_str("pid"), bulk_str("0")),
+                (bulk_str("run-delay"), bulk_str("0")),
+                (bulk_str("retry-num"), bulk_str("2")),
+            ]))]))
+        );
     }
 
     #[test]
