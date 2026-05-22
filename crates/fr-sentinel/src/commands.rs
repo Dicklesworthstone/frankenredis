@@ -1544,8 +1544,7 @@ fn glob_match_bytes(pattern: &[u8], text: &[u8], nocase: bool) -> bool {
         }
         b'?' => glob_match_bytes(&pattern[1..], &text[1..], nocase),
         b'[' => {
-            if let Some((matched, consumed)) =
-                glob_match_char_class(&pattern[1..], text[0], nocase)
+            if let Some((matched, consumed)) = glob_match_char_class(&pattern[1..], text[0], nocase)
             {
                 matched && glob_match_bytes(&pattern[1 + consumed..], &text[1..], nocase)
             } else {
