@@ -13627,6 +13627,7 @@ fn decode_intset_members(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
 
     let mut members = Vec::with_capacity(len);
     let mut cursor = 8;
+    let mut previous = None;
     for _ in 0..len {
         let value = match width {
             2 => {
@@ -13658,6 +13659,12 @@ fn decode_intset_members(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
             }
             _ => unreachable!("width checked above"),
         };
+        if let Some(previous_value) = previous {
+            if value <= previous_value {
+                return Err(StoreError::InvalidDumpPayload);
+            }
+        }
+        previous = Some(value);
         members.push(value.to_string().into_bytes());
     }
     Ok(members)
@@ -21587,6 +21594,62 @@ mod tests {
             Ok(Some(value)) if value.is_empty() => Ok(()),
             _ => Err("empty string restore produced the wrong value"),
         }
+    }
+
+    #[test]
+    fn restore_rejects_duplicate_and_unsorted_intset_payloads() -> Result<(), &'static str> {
+        fn intset_dump(entries: &[i16]) -> Vec<u8> {
+            let count = match u32::try_from(entries.len()) {
+                Ok(count) => count,
+                Err(_) => return Vec::new(),
+            };
+            let mut intset = Vec::new();
+            intset.extend_from_slice(&2u32.to_le_bytes());
+            intset.extend_from_slice(&count.to_le_bytes());
+            for entry in entries {
+                intset.extend_from_slice(&entry.to_le_bytes());
+            }
+            let mut body = vec![RDB_TYPE_SET_INTSET];
+            append_raw_dump_bulk(&mut body, &intset);
+            append_dump_footer(body)
+        }
+
+        for (key, payload) in [
+            (b"duplicate".as_slice(), intset_dump(&[1, 1])),
+            (b"unsorted".as_slice(), intset_dump(&[2, 1])),
+        ] {
+            let mut store = Store::new();
+            match store.restore_key(key, 0, &payload, false, 100) {
+                Err(StoreError::InvalidDumpPayload) => {}
+                _ => return Err("malformed intset payload restored successfully"),
+            }
+            if store.exists(key, 100) {
+                return Err("malformed intset payload created a key");
+            }
+        }
+
+        let valid_payload = intset_dump(&[1, 2]);
+        let mut store = Store::new();
+        if store
+            .restore_key(b"valid", 0, &valid_payload, false, 100)
+            .is_err()
+        {
+            return Err("valid ascending intset was rejected");
+        }
+        if !store
+            .sismember(b"valid", b"1", 100)
+            .map_err(|_| "sismember 1 failed")?
+        {
+            return Err("valid intset missing first member");
+        }
+        if !store
+            .sismember(b"valid", b"2", 100)
+            .map_err(|_| "sismember 2 failed")?
+        {
+            return Err("valid intset missing second member");
+        }
+
+        Ok(())
     }
 
     #[test]
