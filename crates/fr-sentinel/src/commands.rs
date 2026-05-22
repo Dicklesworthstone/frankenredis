@@ -492,12 +492,30 @@ fn cmd_get_master_addr(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     }
     let name = String::from_utf8_lossy(args[0]);
     match state.get_master(&name) {
-        Some(master) => RespFrame::Array(Some(vec![
-            RespFrame::BulkString(Some(master.addr.hostname.clone().into_bytes())),
-            RespFrame::BulkString(Some(master.addr.port.to_string().into_bytes())),
-        ])),
+        Some(master) => {
+            let addr = current_master_addr(master);
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(addr.hostname.clone().into_bytes())),
+                RespFrame::BulkString(Some(addr.port.to_string().into_bytes())),
+            ]))
+        }
         None => RespFrame::Array(None),
     }
+}
+
+fn current_master_addr(master: &SentinelRedisInstance) -> &crate::SentinelAddr {
+    if master
+        .flags
+        .contains(crate::InstanceFlags::FAILOVER_IN_PROGRESS)
+        && matches!(
+            master.failover_state,
+            crate::FailoverState::ReconfSlaves | crate::FailoverState::UpdateConfig
+        )
+        && let Some(promoted) = master.promoted_slave.as_deref()
+    {
+        return &promoted.addr;
+    }
+    &master.addr
 }
 
 fn cmd_ckquorum(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
@@ -1555,6 +1573,53 @@ mod tests {
             dispatch_sentinel_command(&mut state, &[b"GET-MASTER-ADDR-BY-NAME", b"missing"]);
 
         assert_eq!(result, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn sentinel_get_master_addr_reports_promoted_slave_after_reconf_slaves() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"10.0.0.1", b"6379", b"1"],
+        );
+        {
+            let master = state.get_master_mut("mymaster");
+            assert!(master.is_some(), "mymaster exists");
+            let Some(master) = master else {
+                return;
+            };
+            master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
+            master.failover_state = crate::FailoverState::WaitPromotion;
+            master.promoted_slave = Some(Box::new(sentinel_instance(
+                "10.0.0.2:6380",
+                "10.0.0.2",
+                6380,
+                InstanceFlags::SLAVE,
+            )));
+        }
+
+        let old_addr =
+            dispatch_sentinel_command(&mut state, &[b"GET-MASTER-ADDR-BY-NAME", b"mymaster"]);
+        assert_eq!(
+            old_addr,
+            RespFrame::Array(Some(vec![bulk_str("10.0.0.1"), bulk_str("6379")]))
+        );
+
+        {
+            let master = state.get_master_mut("mymaster");
+            assert!(master.is_some(), "mymaster exists");
+            let Some(master) = master else {
+                return;
+            };
+            master.failover_state = crate::FailoverState::ReconfSlaves;
+        }
+
+        let promoted_addr =
+            dispatch_sentinel_command(&mut state, &[b"GET-MASTER-ADDR-BY-NAME", b"mymaster"]);
+        assert_eq!(
+            promoted_addr,
+            RespFrame::Array(Some(vec![bulk_str("10.0.0.2"), bulk_str("6380")]))
+        );
     }
 
     #[test]
@@ -2666,6 +2731,50 @@ mod tests {
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"beta".to_vec())),
                 RespFrame::Array(Some(vec![expected_info_cache_row(0, None)])),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sentinel_get_master_addr_returns_promoted_slave_during_failover() {
+        use crate::{FailoverState, InstanceFlags, SentinelAddr};
+
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"1"],
+        );
+
+        // Before failover: returns master address
+        let result =
+            dispatch_sentinel_command(&mut state, &[b"GET-MASTER-ADDR-BY-NAME", b"mymaster"]);
+        assert_eq!(
+            result,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
+                RespFrame::BulkString(Some(b"6379".to_vec())),
+            ]))
+        );
+
+        // Simulate failover in progress with promoted slave
+        {
+            let master = state.masters.get_mut("mymaster").unwrap();
+            master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
+            master.failover_state = FailoverState::ReconfSlaves;
+            let mut promoted =
+                SentinelRedisInstance::new_master("promoted", SentinelAddr::new("10.0.0.5", 6380), 1);
+            promoted.flags = InstanceFlags::SLAVE;
+            master.promoted_slave = Some(Box::new(promoted));
+        }
+
+        // During failover: returns promoted slave address
+        let result =
+            dispatch_sentinel_command(&mut state, &[b"GET-MASTER-ADDR-BY-NAME", b"mymaster"]);
+        assert_eq!(
+            result,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"10.0.0.5".to_vec())),
+                RespFrame::BulkString(Some(b"6380".to_vec())),
             ]))
         );
     }
