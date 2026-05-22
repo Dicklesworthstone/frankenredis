@@ -6508,21 +6508,34 @@ impl Store {
         for key in keys {
             self.drop_if_expired(key, now_ms);
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
 
         let mut max_card = 0;
         let mut base_idx = None;
         for (i, key) in keys.iter().enumerate() {
-            if let Some(entry) = self.entries.get_mut(*key) {
-                match &entry.value {
-                    Value::Set(s) => {
-                        let len = s.len();
-                        if len > max_card {
-                            max_card = len;
-                            base_idx = Some(i);
+            if self.entries.contains_key(*key) {
+                let rand_sample = if lfu_tracking_enabled {
+                    self.next_rand()
+                } else {
+                    0
+                };
+                if let Some(entry) = self.entries.get_mut(*key) {
+                    match &entry.value {
+                        Value::Set(s) => {
+                            let len = s.len();
+                            if len > max_card {
+                                max_card = len;
+                                base_idx = Some(i);
+                            }
+                            if lfu_tracking_enabled {
+                                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                            }
+                            entry.touch(now_ms);
                         }
-                        entry.touch(now_ms);
+                        _ => return Err(StoreError::WrongType),
                     }
-                    _ => return Err(StoreError::WrongType),
                 }
             }
         }
@@ -6556,16 +6569,27 @@ impl Store {
     }
 
     pub fn sdiff(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
-        if keys.is_empty() {
+        let Some(first_key) = keys.first().copied() else {
             return Ok(Vec::new());
-        }
+        };
         for key in keys {
             self.drop_if_expired(key, now_ms);
         }
-        let mut result = match self.entries.get_mut(keys[0]) {
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(first_key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        let mut result = match self.entries.get_mut(first_key) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
                     let res = s.clone();
+                    if lfu_tracking_enabled {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    }
                     entry.touch(now_ms);
                     res
                 }
@@ -6573,24 +6597,44 @@ impl Store {
             },
             None => return Ok(Vec::new()),
         };
-        for key in &keys[1..] {
+        for key in keys.iter().skip(1) {
             if result.is_empty() {
-                if let Some(entry) = self.entries.get_mut(*key) {
-                    if let Value::Set(_) = &entry.value {
-                        entry.touch(now_ms);
+                if self.entries.contains_key(*key) {
+                    let rand_sample = if lfu_tracking_enabled {
+                        self.next_rand()
                     } else {
-                        return Err(StoreError::WrongType);
+                        0
+                    };
+                    if let Some(entry) = self.entries.get_mut(*key) {
+                        if let Value::Set(_) = &entry.value {
+                            if lfu_tracking_enabled {
+                                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                            }
+                            entry.touch(now_ms);
+                        } else {
+                            return Err(StoreError::WrongType);
+                        }
                     }
                 }
                 continue;
             }
-            if let Some(entry) = self.entries.get_mut(*key) {
-                match &entry.value {
-                    Value::Set(s) => {
-                        result.retain(|m| !s.contains(m));
-                        entry.touch(now_ms);
+            if self.entries.contains_key(*key) {
+                let rand_sample = if lfu_tracking_enabled {
+                    self.next_rand()
+                } else {
+                    0
+                };
+                if let Some(entry) = self.entries.get_mut(*key) {
+                    match &entry.value {
+                        Value::Set(s) => {
+                            result.retain(|m| !s.contains(m));
+                            if lfu_tracking_enabled {
+                                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                            }
+                            entry.touch(now_ms);
+                        }
+                        _ => return Err(StoreError::WrongType),
                     }
-                    _ => return Err(StoreError::WrongType),
                 }
             }
         }
@@ -20965,6 +21009,48 @@ mod tests {
     }
 
     #[test]
+    fn sunion_bumps_lfu_frequency_for_existing_sets() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .sadd(b"s1", &[b"a".to_vec(), b"b".to_vec()], 0)
+            .map_err(|err| format!("seed s1 failed: {err:?}"))?;
+        store
+            .sadd(b"s2", &[b"b".to_vec(), b"c".to_vec()], 0)
+            .map_err(|err| format!("seed s2 failed: {err:?}"))?;
+
+        let result = store
+            .sunion(&[b"s1", b"s2"], 1)
+            .map_err(|err| format!("sunion failed: {err:?}"))?;
+        let mut members = result.iter();
+        match members.next().map(Vec::as_slice) {
+            Some(b"a") => {}
+            other => return Err(format!("SUNION first member mismatch: {other:?}")),
+        }
+        match members.next().map(Vec::as_slice) {
+            Some(b"b") => {}
+            other => return Err(format!("SUNION second member mismatch: {other:?}")),
+        }
+        match members.next().map(Vec::as_slice) {
+            Some(b"c") => {}
+            other => return Err(format!("SUNION third member mismatch: {other:?}")),
+        }
+        if let Some(extra) = members.next() {
+            return Err(format!("SUNION extra member: {extra:?}"));
+        }
+        match store.object_freq(b"s1", 1) {
+            Some(6) => {}
+            other => return Err(format!("SUNION should bump LFU for s1, got {other:?}")),
+        }
+        match store.object_freq(b"s2", 1) {
+            Some(6) => {}
+            other => return Err(format!("SUNION should bump LFU for s2, got {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
     fn sdiff_basic() {
         let mut store = Store::new();
         store
@@ -20973,6 +21059,40 @@ mod tests {
         store.sadd(b"s2", &[b"b".to_vec()], 0).unwrap();
         let result = store.sdiff(&[b"s1", b"s2"], 0).unwrap();
         assert_eq!(result, vec![b"a".to_vec(), b"c".to_vec()]);
+    }
+
+    #[test]
+    fn sdiff_bumps_lfu_frequency_for_existing_sets() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .sadd(b"s1", &[b"a".to_vec(), b"b".to_vec()], 0)
+            .map_err(|err| format!("seed s1 failed: {err:?}"))?;
+        store
+            .sadd(b"s2", &[b"b".to_vec()], 0)
+            .map_err(|err| format!("seed s2 failed: {err:?}"))?;
+
+        match store
+            .sdiff(&[b"s1", b"s2"], 1)
+            .map_err(|err| format!("sdiff failed: {err:?}"))?
+            .as_slice()
+        {
+            [member] => match member.as_slice() {
+                b"a" => {}
+                other => return Err(format!("SDIFF member mismatch: {other:?}")),
+            },
+            other => return Err(format!("SDIFF result mismatch: {other:?}")),
+        }
+        match store.object_freq(b"s1", 1) {
+            Some(6) => {}
+            other => return Err(format!("SDIFF should bump LFU for s1, got {other:?}")),
+        }
+        match store.object_freq(b"s2", 1) {
+            Some(6) => {}
+            other => return Err(format!("SDIFF should bump LFU for s2, got {other:?}")),
+        }
+        Ok(())
     }
 
     #[test]
