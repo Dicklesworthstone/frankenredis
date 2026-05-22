@@ -12248,6 +12248,19 @@ impl Store {
                 }
                 Value::List(list)
             }
+            RDB_TYPE_LIST_QUICKLIST => {
+                let (node_count, consumed) = decode_length(payload, cursor)?;
+                cursor += consumed;
+                let mut list = VecDeque::new();
+                for _ in 0..node_count {
+                    let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                    cursor += consumed;
+                    for item in decode_ziplist_strings(&ziplist)? {
+                        list.push_back(item);
+                    }
+                }
+                Value::List(list)
+            }
             RDB_TYPE_HASH_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
@@ -15930,14 +15943,14 @@ mod tests {
         HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, LatencySample, MaxmemoryPolicy,
         MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT,
         PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK,
-        RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET,
-        RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING,
-        RDB_TYPE_ZSET, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, ScoreBound,
-        ScoreMember, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
-        StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
-        StreamPendingEntry, Value, ValueType, decode_length, decode_listpack_strings,
-        decode_rdb_string, encode_db_key, encode_length, encode_listpack_strings,
-        hll_sparse_decode,
+        RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2,
+        RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
+        RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2,
+        RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, ScoreBound, ScoreMember, Store, StoreError,
+        StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
+        StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value, ValueType,
+        decode_length, decode_listpack_strings, decode_rdb_string, encode_db_key, encode_length,
+        encode_listpack_strings, hll_sparse_decode,
     };
 
     fn group_read_options(
@@ -21275,6 +21288,32 @@ mod tests {
             }
             other => Err(format!(
                 "legacy list ziplist restored wrong values: {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn restore_accepts_legacy_list_quicklist() -> Result<(), String> {
+        let zl1 = encode_test_ziplist_strings(&[b"alpha".as_slice(), b"42"])
+            .ok_or_else(|| "encode quicklist node 1".to_string())?;
+        let zl2 = encode_test_ziplist_strings(&[b"omega".as_slice()])
+            .ok_or_else(|| "encode quicklist node 2".to_string())?;
+        let mut body = vec![RDB_TYPE_LIST_QUICKLIST];
+        encode_length(&mut body, 2);
+        append_raw_dump_bulk(&mut body, &zl1);
+        append_raw_dump_bulk(&mut body, &zl2);
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        store
+            .restore_key(b"l", 0, &payload, false, 100)
+            .map_err(|err| format!("restore legacy list quicklist: {err:?}"))?;
+        match store.lrange(b"l", 0, -1, 100) {
+            Ok(values) if byte_vecs_match(&values, &[b"alpha".as_slice(), b"42", b"omega"]) => {
+                Ok(())
+            }
+            other => Err(format!(
+                "legacy list quicklist restored wrong values: {other:?}"
             )),
         }
     }
