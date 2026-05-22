@@ -6260,6 +6260,9 @@ impl Store {
         for key in keys {
             self.drop_if_expired(key, now_ms);
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
 
         let mut min_card = usize::MAX;
         let mut min_idx = 0;
@@ -6286,19 +6289,37 @@ impl Store {
         if has_empty {
             // Touch existing sets to emulate Redis behavior
             for key in keys {
-                if let Some(entry) = self.entries.get_mut(*key)
-                    && let Value::Set(_) = &entry.value
-                {
-                    entry.touch(now_ms);
+                if self.entries.contains_key(*key) {
+                    let rand_sample = if lfu_tracking_enabled {
+                        self.next_rand()
+                    } else {
+                        0
+                    };
+                    if let Some(entry) = self.entries.get_mut(*key)
+                        && let Value::Set(_) = &entry.value
+                    {
+                        if lfu_tracking_enabled {
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        }
+                        entry.touch(now_ms);
+                    }
                 }
             }
             return Ok(Vec::new());
         }
 
+        let rand_sample = if lfu_tracking_enabled {
+            self.next_rand()
+        } else {
+            0
+        };
         let mut result = match self.entries.get_mut(keys[min_idx]) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
                     let res = s.clone();
+                    if lfu_tracking_enabled {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    }
                     entry.touch(now_ms);
                     res
                 }
@@ -6312,17 +6333,35 @@ impl Store {
                 continue;
             }
             if result.is_empty() {
-                if let Some(entry) = self.entries.get_mut(*key)
-                    && let Value::Set(_) = &entry.value
-                {
-                    entry.touch(now_ms);
+                if self.entries.contains_key(*key) {
+                    let rand_sample = if lfu_tracking_enabled {
+                        self.next_rand()
+                    } else {
+                        0
+                    };
+                    if let Some(entry) = self.entries.get_mut(*key)
+                        && let Value::Set(_) = &entry.value
+                    {
+                        if lfu_tracking_enabled {
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        }
+                        entry.touch(now_ms);
+                    }
                 }
                 continue;
             }
+            let rand_sample = if lfu_tracking_enabled {
+                self.next_rand()
+            } else {
+                0
+            };
             match self.entries.get_mut(*key) {
                 Some(entry) => {
                     if let Value::Set(s) = &entry.value {
                         result.retain(|m| s.contains(m));
+                        if lfu_tracking_enabled {
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        }
                         entry.touch(now_ms);
                     }
                 }
@@ -6348,6 +6387,9 @@ impl Store {
         for key in keys {
             self.drop_if_expired(key, now_ms);
         }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
 
         let mut min_card = usize::MAX;
         let mut min_idx = 0;
@@ -6372,19 +6414,37 @@ impl Store {
 
         if has_empty {
             for key in keys {
-                if let Some(entry) = self.entries.get_mut(*key)
-                    && let Value::Set(_) = &entry.value
-                {
-                    entry.touch(now_ms);
+                if self.entries.contains_key(*key) {
+                    let rand_sample = if lfu_tracking_enabled {
+                        self.next_rand()
+                    } else {
+                        0
+                    };
+                    if let Some(entry) = self.entries.get_mut(*key)
+                        && let Value::Set(_) = &entry.value
+                    {
+                        if lfu_tracking_enabled {
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        }
+                        entry.touch(now_ms);
+                    }
                 }
             }
             return Ok(0);
         }
 
+        let rand_sample = if lfu_tracking_enabled {
+            self.next_rand()
+        } else {
+            0
+        };
         let mut result = match self.entries.get_mut(keys[min_idx]) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
                     let res = s.clone();
+                    if lfu_tracking_enabled {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    }
                     entry.touch(now_ms);
                     res
                 }
@@ -6398,17 +6458,35 @@ impl Store {
                 continue;
             }
             if result.is_empty() {
-                if let Some(entry) = self.entries.get_mut(*key)
-                    && let Value::Set(_) = &entry.value
-                {
-                    entry.touch(now_ms);
+                if self.entries.contains_key(*key) {
+                    let rand_sample = if lfu_tracking_enabled {
+                        self.next_rand()
+                    } else {
+                        0
+                    };
+                    if let Some(entry) = self.entries.get_mut(*key)
+                        && let Value::Set(_) = &entry.value
+                    {
+                        if lfu_tracking_enabled {
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        }
+                        entry.touch(now_ms);
+                    }
                 }
                 continue;
             }
+            let rand_sample = if lfu_tracking_enabled {
+                self.next_rand()
+            } else {
+                0
+            };
             match self.entries.get_mut(*key) {
                 Some(entry) => match &entry.value {
                     Value::Set(s) => {
                         result.retain(|m| s.contains(m));
+                        if lfu_tracking_enabled {
+                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                        }
                         entry.touch(now_ms);
                     }
                     _ => return Err(StoreError::WrongType),
@@ -20799,6 +20877,78 @@ mod tests {
             .unwrap();
         let result = store.sinter(&[b"s1", b"s2"], 0).unwrap();
         assert_eq!(result, vec![b"b".to_vec(), b"c".to_vec()]);
+    }
+
+    #[test]
+    fn sinter_bumps_lfu_frequency_for_existing_sets() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .sadd(b"s1", &[b"a".to_vec(), b"b".to_vec()], 0)
+            .map_err(|err| format!("seed s1 failed: {err:?}"))?;
+        store
+            .sadd(b"s2", &[b"b".to_vec()], 0)
+            .map_err(|err| format!("seed s2 failed: {err:?}"))?;
+
+        match store.object_freq(b"s1", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new s1 LFU frequency mismatch: {other:?}")),
+        }
+        match store.object_freq(b"s2", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new s2 LFU frequency mismatch: {other:?}")),
+        }
+        match store
+            .sinter(&[b"s1", b"s2"], 1)
+            .map_err(|err| format!("sinter failed: {err:?}"))?
+            .as_slice()
+        {
+            [member] => match member.as_slice() {
+                b"b" => {}
+                other => return Err(format!("SINTER member mismatch: {other:?}")),
+            },
+            other => return Err(format!("SINTER result mismatch: {other:?}")),
+        }
+        match store.object_freq(b"s1", 1) {
+            Some(6) => {}
+            other => return Err(format!("SINTER should bump LFU for s1, got {other:?}")),
+        }
+        match store.object_freq(b"s2", 1) {
+            Some(6) => {}
+            other => return Err(format!("SINTER should bump LFU for s2, got {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sintercard_bumps_lfu_frequency_for_existing_sets() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .sadd(b"s1", &[b"a".to_vec(), b"b".to_vec()], 0)
+            .map_err(|err| format!("seed s1 failed: {err:?}"))?;
+        store
+            .sadd(b"s2", &[b"b".to_vec()], 0)
+            .map_err(|err| format!("seed s2 failed: {err:?}"))?;
+
+        match store
+            .sintercard(&[b"s1", b"s2"], 0, 1)
+            .map_err(|err| format!("sintercard failed: {err:?}"))?
+        {
+            1 => {}
+            other => return Err(format!("SINTERCARD count mismatch: {other}")),
+        }
+        match store.object_freq(b"s1", 1) {
+            Some(6) => {}
+            other => return Err(format!("SINTERCARD should bump LFU for s1, got {other:?}")),
+        }
+        match store.object_freq(b"s2", 1) {
+            Some(6) => {}
+            other => return Err(format!("SINTERCARD should bump LFU for s2, got {other:?}")),
+        }
+        Ok(())
     }
 
     #[test]
