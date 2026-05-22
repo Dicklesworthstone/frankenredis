@@ -1174,7 +1174,7 @@ fn instance_to_info_array(instance: &crate::SentinelRedisInstance, now_ms: u64) 
             instance.runid.clone().unwrap_or_default().into_bytes(),
         )),
         RespFrame::BulkString(Some(b"flags".to_vec())),
-        RespFrame::BulkString(Some(flags_to_string(&instance.flags).into_bytes())),
+        RespFrame::BulkString(Some(instance_flags_to_string(instance).into_bytes())),
         RespFrame::BulkString(Some(b"link-pending-commands".to_vec())),
         RespFrame::BulkString(Some(b"0".to_vec())), // fr-sentinel doesn't track pending commands
         RespFrame::BulkString(Some(b"link-refcount".to_vec())),
@@ -1388,8 +1388,15 @@ fn failover_state_str(state: &FailoverState) -> &'static str {
     }
 }
 
-fn flags_to_string(flags: &crate::InstanceFlags) -> String {
+fn instance_flags_to_string(instance: &crate::SentinelRedisInstance) -> String {
+    let flags = instance.flags;
     let mut parts = Vec::new();
+    if flags.contains(crate::InstanceFlags::S_DOWN) {
+        parts.push("s_down");
+    }
+    if flags.contains(crate::InstanceFlags::O_DOWN) {
+        parts.push("o_down");
+    }
     if flags.contains(crate::InstanceFlags::MASTER) {
         parts.push("master");
     }
@@ -1399,11 +1406,8 @@ fn flags_to_string(flags: &crate::InstanceFlags) -> String {
     if flags.contains(crate::InstanceFlags::SENTINEL) {
         parts.push("sentinel");
     }
-    if flags.contains(crate::InstanceFlags::S_DOWN) {
-        parts.push("s_down");
-    }
-    if flags.contains(crate::InstanceFlags::O_DOWN) {
-        parts.push("o_down");
+    if instance.link.disconnected {
+        parts.push("disconnected");
     }
     if flags.contains(crate::InstanceFlags::MASTER_DOWN) {
         parts.push("master_down");
@@ -1411,11 +1415,28 @@ fn flags_to_string(flags: &crate::InstanceFlags) -> String {
     if flags.contains(crate::InstanceFlags::FAILOVER_IN_PROGRESS) {
         parts.push("failover_in_progress");
     }
-    if parts.is_empty() {
-        "none".to_string()
-    } else {
-        parts.join(",")
+    if flags.contains(crate::InstanceFlags::PROMOTED) {
+        parts.push("promoted");
     }
+    if flags.contains(crate::InstanceFlags::RECONF_SENT) {
+        parts.push("reconf_sent");
+    }
+    if flags.contains(crate::InstanceFlags::RECONF_INPROG) {
+        parts.push("reconf_inprog");
+    }
+    if flags.contains(crate::InstanceFlags::RECONF_DONE) {
+        parts.push("reconf_done");
+    }
+    if flags.contains(crate::InstanceFlags::FORCE_FAILOVER) {
+        parts.push("force_failover");
+    }
+    if flags.contains(crate::InstanceFlags::SCRIPT_KILL_SENT) {
+        parts.push("script_kill_sent");
+    }
+    if flags.contains(crate::InstanceFlags::MASTER_REBOOT) {
+        parts.push("master_reboot");
+    }
+    parts.join(",")
 }
 
 fn glob_match(pattern: &str, text: &str) -> bool {
@@ -2104,11 +2125,16 @@ mod tests {
         }
 
         let result = dispatch_sentinel_command(&mut state, &[b"SENTINELS", b"mymaster"]);
-        let RespFrame::Array(Some(sentinels)) = result else {
-            panic!("expected array");
+        let RespFrame::Array(Some(sentinels)) = &result else {
+            assert!(
+                matches!(&result, RespFrame::Array(Some(_))),
+                "expected array"
+            );
+            return;
         };
         let Some(first) = sentinels.first() else {
-            panic!("expected at least one sentinel");
+            assert!(!sentinels.is_empty(), "expected at least one sentinel");
+            return;
         };
         assert_eq!(
             info_field(first, b"last-hello-message").as_deref(),
@@ -2144,6 +2170,46 @@ mod tests {
         assert_eq!(
             info_field(&result, b"failover-state").as_deref(),
             Some("reconf_slaves")
+        );
+    }
+
+    #[test]
+    fn sentinel_instance_flags_match_upstream_order_and_full_set() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+
+        let master_exists = state.masters.contains_key("mymaster");
+        let Some(master) = state.get_master_mut("mymaster") else {
+            assert!(master_exists, "mymaster exists");
+            return;
+        };
+        for flag in [
+            InstanceFlags::S_DOWN,
+            InstanceFlags::O_DOWN,
+            InstanceFlags::MASTER_DOWN,
+            InstanceFlags::FAILOVER_IN_PROGRESS,
+            InstanceFlags::PROMOTED,
+            InstanceFlags::RECONF_SENT,
+            InstanceFlags::RECONF_INPROG,
+            InstanceFlags::RECONF_DONE,
+            InstanceFlags::FORCE_FAILOVER,
+            InstanceFlags::SCRIPT_KILL_SENT,
+            InstanceFlags::MASTER_REBOOT,
+        ] {
+            master.flags.insert(flag);
+        }
+        master.link.disconnected = true;
+
+        let result = dispatch_sentinel_command(&mut state, &[b"MASTER", b"mymaster"]);
+
+        assert_eq!(
+            info_field(&result, b"flags").as_deref(),
+            Some(
+                "s_down,o_down,master,disconnected,master_down,failover_in_progress,promoted,reconf_sent,reconf_inprog,reconf_done,force_failover,script_kill_sent,master_reboot"
+            )
         );
     }
 
