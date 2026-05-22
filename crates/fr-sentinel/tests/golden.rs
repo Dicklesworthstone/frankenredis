@@ -47,10 +47,10 @@ fn assert_golden(test_name: &str, actual: &str) {
     }
 }
 
-fn bulk_field<'a>(fields: &'a [RespFrame], key: &[u8]) -> Option<&'a [u8]> {
+fn bulk_field<'a>(fields: &'a [(RespFrame, RespFrame)], key: &[u8]) -> Option<&'a [u8]> {
     fields
-        .chunks_exact(2)
-        .find_map(|pair| match (&pair[0], &pair[1]) {
+        .iter()
+        .find_map(|(field, value)| match (field, value) {
             (RespFrame::BulkString(Some(field)), RespFrame::BulkString(Some(value)))
                 if field == key =>
             {
@@ -66,7 +66,7 @@ fn render_sentinel_list(reply: RespFrame) -> String {
     };
     let mut rendered = String::new();
     for instance in instances {
-        let RespFrame::Array(Some(fields)) = instance else {
+        let RespFrame::Map(Some(fields)) = instance else {
             continue;
         };
         let name = String::from_utf8_lossy(bulk_field(&fields, b"name").unwrap_or_default());
