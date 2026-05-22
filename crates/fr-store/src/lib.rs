@@ -8692,20 +8692,33 @@ impl Store {
 
     pub fn zrandmember(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let lfu_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         let rand_val = self.next_rand();
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    if zs.is_empty() {
-                        return Ok(None);
-                    }
-                    let idx = (rand_val as usize) % zs.len();
-                    let member = zs.iter_asc().nth(idx).map(|(m, _)| m.clone());
-                    entry.touch(now_ms);
-                    Ok(member)
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        if zs.is_empty() {
+                            return Ok(None);
+                        }
+                        let idx = (rand_val as usize) % zs.len();
+                        let member = zs.iter_asc().nth(idx).map(|(m, _)| m.clone());
+                        entry.touch(now_ms);
+                        Ok(member)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(None),
         }
     }
@@ -8720,8 +8733,19 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let lfu_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         let mut result_data = None;
         if let Some(entry) = self.entries.get_mut(key) {
+            if lfu_tracking_enabled {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
+            }
             match &entry.value {
                 Value::SortedSet(zs) => {
                     if !zs.is_empty() {
@@ -20467,6 +20491,25 @@ mod tests {
         match store.object_freq(b"z", 1) {
             Some(6) => {}
             other => return Err(format!("ZSCAN LFU mismatch: {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn zrandmember_existing_zset_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store.zincrby(b"z", b"m".to_vec(), 1.0, 0).unwrap();
+
+        match store.object_freq(b"z", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new zset LFU frequency mismatch: {other:?}")),
+        }
+        let _member = store.zrandmember(b"z", 1).unwrap();
+        match store.object_freq(b"z", 1) {
+            Some(6) => {}
+            other => return Err(format!("ZRANDMEMBER LFU mismatch: {other:?}")),
         }
         Ok(())
     }
