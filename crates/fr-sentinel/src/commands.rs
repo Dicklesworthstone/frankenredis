@@ -94,7 +94,7 @@ fn cmd_myid(state: &SentinelState) -> RespFrame {
 fn cmd_masters(state: &SentinelState) -> RespFrame {
     let now_ms = state.previous_time;
     let masters =
-        sorted_instance_info_arrays(state.masters.values(), now_ms, state.announce_hostnames);
+        sorted_instance_info_maps(state.masters.values(), now_ms, state.announce_hostnames);
     RespFrame::Array(Some(masters))
 }
 
@@ -105,7 +105,7 @@ fn cmd_master(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     let name = String::from_utf8_lossy(args[0]);
     let now_ms = state.previous_time;
     match state.get_master(&name) {
-        Some(master) => instance_to_info_array(master, now_ms, state.announce_hostnames),
+        Some(master) => instance_to_info_map(master, now_ms, state.announce_hostnames),
         None => missing_master_error(),
     }
 }
@@ -122,11 +122,8 @@ fn cmd_replicas(
     let now_ms = state.previous_time;
     match state.get_master(&name) {
         Some(master) => {
-            let replicas = sorted_instance_info_arrays(
-                master.slaves.values(),
-                now_ms,
-                state.announce_hostnames,
-            );
+            let replicas =
+                sorted_instance_info_maps(master.slaves.values(), now_ms, state.announce_hostnames);
             RespFrame::Array(Some(replicas))
         }
         None => missing_master_error(),
@@ -141,7 +138,7 @@ fn cmd_sentinels(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     let now_ms = state.previous_time;
     match state.get_master(&name) {
         Some(master) => {
-            let sentinels = sorted_instance_info_arrays(
+            let sentinels = sorted_instance_info_maps(
                 master.sentinels.values(),
                 now_ms,
                 state.announce_hostnames,
@@ -1344,7 +1341,7 @@ fn cmd_help() -> RespFrame {
     ))
 }
 
-fn sorted_instance_info_arrays<'a>(
+fn sorted_instance_info_maps<'a>(
     instances: impl Iterator<Item = &'a crate::SentinelRedisInstance>,
     now_ms: u64,
     announce_hostnames: bool,
@@ -1355,11 +1352,11 @@ fn sorted_instance_info_arrays<'a>(
     instances.sort_by(|left, right| left.name.cmp(&right.name));
     instances
         .into_iter()
-        .map(|inst| instance_to_info_array(inst, now_ms, announce_hostnames))
+        .map(|inst| instance_to_info_map(inst, now_ms, announce_hostnames))
         .collect()
 }
 
-fn instance_to_info_array(
+fn instance_to_info_map(
     instance: &crate::SentinelRedisInstance,
     now_ms: u64,
     announce_hostnames: bool,
@@ -1580,7 +1577,22 @@ fn instance_to_info_array(
         ]);
     }
 
-    RespFrame::Array(Some(pairs))
+    RespFrame::Map(Some(alternating_fields_to_map_entries(pairs)))
+}
+
+fn alternating_fields_to_map_entries(fields: Vec<RespFrame>) -> Vec<(RespFrame, RespFrame)> {
+    debug_assert_eq!(fields.len() % 2, 0);
+
+    let mut entries = Vec::with_capacity(fields.len() / 2);
+    let mut fields = fields.into_iter();
+    while let Some(name) = fields.next() {
+        let Some(value) = fields.next() else {
+            debug_assert!(false, "instance info fields must be key/value pairs");
+            break;
+        };
+        entries.push((name, value));
+    }
+    entries
 }
 
 fn failover_state_str(state: &FailoverState) -> &'static str {
@@ -1806,16 +1818,16 @@ mod tests {
         instances
             .into_iter()
             .filter_map(|instance| {
-                let RespFrame::Array(Some(fields)) = instance else {
+                let RespFrame::Map(Some(fields)) = instance else {
                     return None;
                 };
                 fields
-                    .chunks_exact(2)
-                    .find_map(|pair| match (&pair[0], &pair[1]) {
+                    .into_iter()
+                    .find_map(|(name, value)| match (name, value) {
                         (RespFrame::BulkString(Some(key)), RespFrame::BulkString(Some(value)))
                             if key == b"name" =>
                         {
-                            String::from_utf8(value.clone()).ok()
+                            String::from_utf8(value).ok()
                         }
                         _ => None,
                     })
@@ -1831,28 +1843,26 @@ mod tests {
     }
 
     fn info_field(frame: &RespFrame, key: &[u8]) -> Option<String> {
-        let RespFrame::Array(Some(fields)) = frame else {
+        let RespFrame::Map(Some(fields)) = frame else {
             return None;
         };
-        fields
-            .chunks_exact(2)
-            .find_map(|pair| match (&pair[0], &pair[1]) {
-                (RespFrame::BulkString(Some(name)), RespFrame::BulkString(Some(value)))
-                    if name == key =>
-                {
-                    String::from_utf8(value.clone()).ok()
-                }
-                _ => None,
-            })
+        fields.iter().find_map(|(name, value)| match (name, value) {
+            (RespFrame::BulkString(Some(name)), RespFrame::BulkString(Some(value)))
+                if name == key =>
+            {
+                String::from_utf8(value.clone()).ok()
+            }
+            _ => None,
+        })
     }
 
     fn info_field_names(frame: &RespFrame) -> Vec<String> {
-        let RespFrame::Array(Some(fields)) = frame else {
+        let RespFrame::Map(Some(fields)) = frame else {
             return Vec::new();
         };
         fields
-            .chunks_exact(2)
-            .filter_map(|pair| match &pair[0] {
+            .iter()
+            .filter_map(|(name, _)| match name {
                 RespFrame::BulkString(Some(name)) => String::from_utf8(name.clone()).ok(),
                 _ => None,
             })
@@ -1906,6 +1916,19 @@ mod tests {
 
         let result = dispatch_sentinel_command(&mut state, &[b"MASTERS"]);
         assert_eq!(array_len(&result), Some(1));
+        let RespFrame::Array(Some(masters)) = &result else {
+            return;
+        };
+        assert!(
+            matches!(masters.first(), Some(RespFrame::Map(Some(_)))),
+            "MASTERS should list per-instance maps: {masters:?}"
+        );
+
+        let result = dispatch_sentinel_command(&mut state, &[b"MASTER", b"mymaster"]);
+        assert!(
+            matches!(result, RespFrame::Map(Some(_))),
+            "MASTER should reply with an instance map: {result:?}"
+        );
     }
 
     #[test]
