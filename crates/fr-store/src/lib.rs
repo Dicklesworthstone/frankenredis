@@ -10548,10 +10548,21 @@ impl Store {
     /// PFCOUNT: return the approximate cardinality for one or more HLL keys.
     /// Multiple keys are merged into a temporary union before estimating.
     pub fn pfcount(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<u64, StoreError> {
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
         let mut merged = vec![0u8; HLL_REGISTERS];
         for &key in keys {
             self.drop_if_expired(key, now_ms);
+            let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+                self.next_rand()
+            } else {
+                0
+            };
             if let Some(entry) = self.entries.get_mut(key) {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
                 match &entry.value {
                     Value::String(data) => {
                         let registers = hll_parse_registers(data)?;
