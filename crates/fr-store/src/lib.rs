@@ -9311,11 +9311,12 @@ impl Store {
                             .insert(key.to_vec(), entries_added);
                     }
                     if let Some(max_deleted_id) = max_deleted_id {
-                        if max_deleted_id == (0, 0) {
-                            self.stream_max_deleted_ids.remove(key);
-                        } else {
-                            self.stream_max_deleted_ids
-                                .insert(key.to_vec(), max_deleted_id);
+                        match max_deleted_id {
+                            (0, 0) => {}
+                            _ => {
+                                self.stream_max_deleted_ids
+                                    .insert(key.to_vec(), max_deleted_id);
+                            }
                         }
                     }
                     entry.touch_write(now_ms);
@@ -19713,6 +19714,54 @@ mod tests {
         // vendored stays at (1000,1).
         assert_eq!(store.xtrim(b"s", 0, None, 0).unwrap(), 1);
         assert_eq!(store.stream_max_deleted_id(b"s"), Some((1000, 1)));
+    }
+
+    #[test]
+    fn xsetid_zero_maxdeletedid_preserves_existing_watermark() -> Result<(), String> {
+        // Redis 7.2.4 xsetidCommand ignores MAXDELETEDID 0-0:
+        // it only assigns s->max_deleted_entry_id for non-zero IDs.
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1, 0), &[(b"k".to_vec(), b"v".to_vec())], 0)
+            .map_err(|err| format!("xadd failed: {err:?}"))?;
+        let deleted = store
+            .xdel(b"s", &[(1, 0)], 0)
+            .map_err(|err| format!("xdel failed: {err:?}"))?;
+        match deleted {
+            1 => {}
+            other => return Err(format!("xdel removed {other} entries, expected 1")),
+        }
+        match store.stream_max_deleted_id(b"s") {
+            Some((1, 0)) => {}
+            other => {
+                return Err(format!(
+                    "xdel stored max-deleted-entry-id {other:?}, expected 1-0"
+                ));
+            }
+        }
+
+        store
+            .xsetid_with_metadata(b"s", (2, 0), None, Some((0, 0)), 0)
+            .map_err(|err| format!("xsetid failed: {err:?}"))?;
+
+        match store.stream_max_deleted_id(b"s") {
+            Some((1, 0)) => {}
+            other => {
+                return Err(format!(
+                    "MAXDELETEDID 0-0 stored max-deleted-entry-id {other:?}, expected 1-0"
+                ));
+            }
+        }
+        let last_id = store
+            .xlast_id(b"s", 0)
+            .map_err(|err| format!("xlast_id failed: {err:?}"))?;
+        match last_id {
+            Some((2, 0)) => {}
+            other => {
+                return Err(format!("xsetid stored last id {other:?}, expected 2-0"));
+            }
+        }
+        Ok(())
     }
 
     #[test]
