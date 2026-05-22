@@ -9004,18 +9004,17 @@ mod tests {
     /// through the self-spawning vendored redis-server oracle.
     /// (br-frankenredis-o4su)
     ///
-    /// Two classes of cases are excluded via `run_live_redis_diff_excluding`:
+    /// Absolute-time TTL observation cases are excluded via
+    /// `run_live_redis_diff_excluding`: `EXPIRETIME` / `PEXPIRETIME` /
+    /// `(P)TTL` / `GETEX EXAT` / `SET EXAT`. Our runtime obeys the
+    /// fixture-pinned `now_ms`, so `EXPIRETIME` on a key whose
+    /// deadline was set with a small fixture offset returns the
+    /// fixture-relative integer against the oracle's wall-clock
+    /// integer (or `-2` when past). (br-frankenredis-7rp6)
     ///
-    /// 1. Absolute-time TTL observation (`EXPIRETIME` / `PEXPIRETIME` /
-    ///    `(P)TTL` / `GETEX EXAT` / `SET EXAT`). Our runtime obeys the
-    ///    fixture-pinned `now_ms`, so `EXPIRETIME` on a key whose
-    ///    deadline was set with a small fixture offset returns the
-    ///    fixture-relative integer against the oracle's wall-clock
-    ///    integer (or `-2` when past). (br-frankenredis-7rp6)
-    /// 2. `INCRBYFLOAT` on non-terminating-decimal inputs. We use
-    ///    f64 Ryu shortest round-trip; upstream uses long-double
-    ///    `%.17Lf` + trim. Without an f128 / long-double shim the
-    ///    f64 rounding error leaks into the reply string. (7rp6)
+    /// `INCRBYFLOAT` decimal formatting now goes through the store's
+    /// decimal/long-double text path, so those cases stay in the live
+    /// matrix rather than being filtered.
     #[test]
     fn live_redis_core_strings_matches_runtime() {
         let cfg = HarnessConfig::default_paths();
@@ -9038,10 +9037,6 @@ mod tests {
             "getex_verify_ttl_after_persist",
             "set_exat_verify_ttl",
             "set_pxat_verify_pttl",
-            // f64 vs long-double precision divergence (br-frankenredis-7rp6).
-            "incrbyfloat_new_key",
-            "incrbyfloat_negative",
-            "incrbyfloat_format_pi",
         ];
         run_live_diff_tolerant("core_strings", || {
             run_live_redis_diff_excluding(&cfg, "core_strings.json", XFAIL, &oracle)
