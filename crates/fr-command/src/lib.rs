@@ -19967,6 +19967,36 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             });
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("HELP") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "MEMORY",
+                subcommand: "HELP".to_string(),
+            });
+        }
+        Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"DOCTOR".to_vec())),
+            RespFrame::BulkString(Some(b"    Return memory problems reports.".to_vec())),
+            RespFrame::BulkString(Some(b"MALLOC-STATS".to_vec())),
+            RespFrame::BulkString(Some(
+                b"    Return internal statistics report from the memory allocator.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"PURGE".to_vec())),
+            RespFrame::BulkString(Some(
+                b"    Attempt to purge dirty pages for reclamation by the allocator.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"STATS".to_vec())),
+            RespFrame::BulkString(Some(
+                b"    Return information about the memory usage of the server.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"USAGE <key> [SAMPLES <count>]".to_vec())),
+            RespFrame::BulkString(Some(
+                b"    Return memory in bytes used by <key> and its value. Nested values are".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"    sampled up to <count> times (default: 5, 0 means sample all).".to_vec(),
+            )),
+        ])))
     } else if sub.eq_ignore_ascii_case("STATS") {
         if argv.len() != 2 {
             // (br-frankenredis-marg)
@@ -41008,7 +41038,18 @@ mod tests {
         let mut store = Store::new();
         let out = dispatch_argv(&[b"MEMORY".to_vec(), b"HELP".to_vec()], &mut store, 0)
             .expect("memory help");
-        assert!(matches!(out, RespFrame::Array(Some(_))));
+        let RespFrame::Array(Some(items)) = out else {
+            panic!("expected array");
+        };
+        assert_eq!(items.len(), 11);
+        assert_eq!(
+            items[0],
+            RespFrame::BulkString(Some(b"DOCTOR".to_vec()))
+        );
+        assert_eq!(
+            items[8],
+            RespFrame::BulkString(Some(b"USAGE <key> [SAMPLES <count>]".to_vec()))
+        );
     }
 
     #[test]
