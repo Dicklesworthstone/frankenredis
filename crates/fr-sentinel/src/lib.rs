@@ -22,6 +22,43 @@ pub const SCRIPT_MAX_RUNTIME_MS: u64 = 60000;
 pub const SCRIPT_RETRY_DELAY_MS: u64 = 30000;
 pub const DEFAULT_FAILOVER_TIMEOUT_MS: u64 = 180000;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentinelDebugConfig {
+    pub info_period: u64,
+    pub ping_period: u64,
+    pub ask_period: u64,
+    pub publish_period: u64,
+    pub default_down_after: u64,
+    pub default_failover_timeout: u64,
+    pub tilt_trigger: u64,
+    pub tilt_period: u64,
+    pub slave_reconf_timeout: u64,
+    pub min_link_reconnect_period: u64,
+    pub election_timeout: u64,
+    pub script_max_runtime: u64,
+    pub script_retry_delay: u64,
+}
+
+impl Default for SentinelDebugConfig {
+    fn default() -> Self {
+        Self {
+            info_period: INFO_PERIOD_MS,
+            ping_period: PING_PERIOD_MS,
+            ask_period: ASK_PERIOD_MS,
+            publish_period: PUBLISH_PERIOD_MS,
+            default_down_after: DEFAULT_DOWN_AFTER_MS,
+            default_failover_timeout: DEFAULT_FAILOVER_TIMEOUT_MS,
+            tilt_trigger: TILT_TRIGGER_MS,
+            tilt_period: TILT_PERIOD_MS,
+            slave_reconf_timeout: SLAVE_RECONF_TIMEOUT_MS,
+            min_link_reconnect_period: MIN_LINK_RECONNECT_PERIOD_MS,
+            election_timeout: ELECTION_TIMEOUT_MS,
+            script_max_runtime: SCRIPT_MAX_RUNTIME_MS,
+            script_retry_delay: SCRIPT_RETRY_DELAY_MS,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SimFailureFlags(u8);
 
@@ -321,6 +358,7 @@ pub struct SentinelState {
     pub deny_scripts_reconfig: bool,
     pub simfailure_flags: SimFailureFlags,
     pub loglevel: String,
+    pub debug_config: SentinelDebugConfig,
 }
 
 impl Default for SentinelState {
@@ -354,6 +392,7 @@ impl SentinelState {
             deny_scripts_reconfig: false,
             simfailure_flags: SimFailureFlags::empty(),
             loglevel: "notice".to_string(),
+            debug_config: SentinelDebugConfig::default(),
         }
     }
 
@@ -401,11 +440,11 @@ impl SentinelState {
             return;
         }
         let delta = now.abs_diff(self.previous_time);
-        if delta > TILT_TRIGGER_MS && !self.tilt {
+        if delta > self.debug_config.tilt_trigger && !self.tilt {
             self.tilt = true;
             self.tilt_start_time = now;
         }
-        if self.tilt && now.saturating_sub(self.tilt_start_time) > TILT_PERIOD_MS {
+        if self.tilt && now.saturating_sub(self.tilt_start_time) > self.debug_config.tilt_period {
             self.tilt = false;
         }
         self.previous_time = now;

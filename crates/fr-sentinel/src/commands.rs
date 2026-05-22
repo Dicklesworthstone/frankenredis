@@ -794,17 +794,124 @@ fn info_cache_row(instance: &crate::SentinelRedisInstance, now_ms: u64) -> RespF
     ]))
 }
 
-fn cmd_debug(_state: &SentinelState, _args: &[&[u8]]) -> RespFrame {
-    RespFrame::Array(Some(vec![
-        RespFrame::BulkString(Some(b"ping-period".to_vec())),
-        RespFrame::Integer(crate::PING_PERIOD_MS as i64),
-        RespFrame::BulkString(Some(b"info-period".to_vec())),
-        RespFrame::Integer(crate::INFO_PERIOD_MS as i64),
-        RespFrame::BulkString(Some(b"tilt-trigger".to_vec())),
-        RespFrame::Integer(crate::TILT_TRIGGER_MS as i64),
-        RespFrame::BulkString(Some(b"tilt-period".to_vec())),
-        RespFrame::Integer(crate::TILT_PERIOD_MS as i64),
-    ]))
+fn cmd_debug(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
+    if args.is_empty() {
+        return sentinel_debug_info(&state.debug_config);
+    }
+
+    let mut cursor = 0usize;
+    while cursor < args.len() {
+        let option_raw = String::from_utf8_lossy(args[cursor]);
+        let Some(option) = canonical_sentinel_debug_key(&option_raw) else {
+            return unknown_sentinel_debug_option(&option_raw);
+        };
+        let Some(value) = args.get(cursor + 1) else {
+            return unknown_sentinel_debug_option(&option_raw);
+        };
+        let value = String::from_utf8_lossy(value);
+        let value = match parse_positive_debug_u64(&value, &option_raw) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        apply_sentinel_debug_update(&mut state.debug_config, option, value);
+        cursor += 2;
+    }
+
+    RespFrame::SimpleString("OK".into())
+}
+
+fn sentinel_debug_info(config: &crate::SentinelDebugConfig) -> RespFrame {
+    let entries = [
+        ("INFO-PERIOD", config.info_period),
+        ("PING-PERIOD", config.ping_period),
+        ("ASK-PERIOD", config.ask_period),
+        ("PUBLISH-PERIOD", config.publish_period),
+        ("DEFAULT-DOWN-AFTER", config.default_down_after),
+        ("DEFAULT-FAILOVER-TIMEOUT", config.default_failover_timeout),
+        ("TILT-TRIGGER", config.tilt_trigger),
+        ("TILT-PERIOD", config.tilt_period),
+        ("SLAVE-RECONF-TIMEOUT", config.slave_reconf_timeout),
+        (
+            "MIN-LINK-RECONNECT-PERIOD",
+            config.min_link_reconnect_period,
+        ),
+        ("ELECTION-TIMEOUT", config.election_timeout),
+        ("SCRIPT-MAX-RUNTIME", config.script_max_runtime),
+        ("SCRIPT-RETRY-DELAY", config.script_retry_delay),
+    ];
+
+    RespFrame::Map(Some(
+        entries
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    RespFrame::BulkString(Some(key.as_bytes().to_vec())),
+                    integer_u64(value),
+                )
+            })
+            .collect(),
+    ))
+}
+
+fn canonical_sentinel_debug_key(option: &str) -> Option<&'static str> {
+    [
+        "info-period",
+        "ping-period",
+        "ask-period",
+        "publish-period",
+        "default-down-after",
+        "default-failover-timeout",
+        "tilt-trigger",
+        "tilt-period",
+        "slave-reconf-timeout",
+        "min-link-reconnect-period",
+        "election-timeout",
+        "script-max-runtime",
+        "script-retry-delay",
+    ]
+    .into_iter()
+    .find(|key| key.eq_ignore_ascii_case(option))
+}
+
+fn parse_positive_debug_u64(value: &str, option: &str) -> Result<u64, RespFrame> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|parsed| *parsed > 0)
+        .ok_or_else(|| {
+            RespFrame::Error(format!(
+                "ERR Invalid argument '{value}' for SENTINEL DEBUG '{option}'"
+            ))
+        })
+}
+
+fn apply_sentinel_debug_update(config: &mut crate::SentinelDebugConfig, option: &str, value: u64) {
+    match option {
+        "info-period" => config.info_period = value,
+        "ping-period" => config.ping_period = value,
+        "ask-period" => config.ask_period = value,
+        "publish-period" => config.publish_period = value,
+        "default-down-after" => config.default_down_after = value,
+        "default-failover-timeout" => config.default_failover_timeout = value,
+        "tilt-trigger" => config.tilt_trigger = value,
+        "tilt-period" => config.tilt_period = value,
+        "slave-reconf-timeout" => config.slave_reconf_timeout = value,
+        "min-link-reconnect-period" => config.min_link_reconnect_period = value,
+        "election-timeout" => config.election_timeout = value,
+        "script-max-runtime" => config.script_max_runtime = value,
+        "script-retry-delay" => config.script_retry_delay = value,
+        _ => {}
+    }
+}
+
+fn unknown_sentinel_debug_option(option: &str) -> RespFrame {
+    RespFrame::Error(format!(
+        "ERR Unknown option or number of arguments for SENTINEL DEBUG '{option}'"
+    ))
+}
+
+fn integer_u64(value: u64) -> RespFrame {
+    RespFrame::Integer(i64::try_from(value).unwrap_or(i64::MAX))
 }
 
 fn cmd_help() -> RespFrame {
@@ -1006,6 +1113,20 @@ mod tests {
                 }
                 _ => None,
             })
+    }
+
+    fn debug_integer_field(frame: &RespFrame, key: &[u8]) -> Option<i64> {
+        let RespFrame::Map(Some(fields)) = frame else {
+            return None;
+        };
+        fields.iter().find_map(|(name, value)| match (name, value) {
+            (RespFrame::BulkString(Some(name)), RespFrame::Integer(value))
+                if name.as_slice().eq(key) =>
+            {
+                Some(*value)
+            }
+            _ => None,
+        })
     }
 
     fn expected_info_cache_row(age_ms: i64, info: Option<&str>) -> RespFrame {
@@ -1983,6 +2104,85 @@ mod tests {
             RespFrame::Error("ERR Unknown failure simulation specified".into())
         );
         assert_eq!(state.simfailure_flags, crate::SimFailureFlags::empty());
+    }
+
+    #[test]
+    fn sentinel_debug_returns_full_timing_map() {
+        let mut state = SentinelState::new();
+        let result = dispatch_sentinel_command(&mut state, &[b"DEBUG"]);
+
+        assert!(matches!(result, RespFrame::Map(Some(_))));
+        let RespFrame::Map(Some(entries)) = &result else {
+            return;
+        };
+        assert_eq!(entries.len(), 13);
+        assert_eq!(
+            debug_integer_field(&result, b"INFO-PERIOD"),
+            Some(crate::INFO_PERIOD_MS as i64)
+        );
+        assert_eq!(
+            debug_integer_field(&result, b"PING-PERIOD"),
+            Some(crate::PING_PERIOD_MS as i64)
+        );
+        assert_eq!(
+            debug_integer_field(&result, b"DEFAULT-DOWN-AFTER"),
+            Some(crate::DEFAULT_DOWN_AFTER_MS as i64)
+        );
+        assert_eq!(
+            debug_integer_field(&result, b"SCRIPT-RETRY-DELAY"),
+            Some(crate::SCRIPT_RETRY_DELAY_MS as i64)
+        );
+    }
+
+    #[test]
+    fn sentinel_debug_updates_positive_timing_values_and_tilt_uses_them() {
+        let mut state = SentinelState::new();
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"DEBUG",
+                b"ping-period",
+                b"250",
+                b"tilt-trigger",
+                b"50",
+                b"tilt-period",
+                b"75",
+            ],
+        );
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+
+        let result = dispatch_sentinel_command(&mut state, &[b"DEBUG"]);
+        assert_eq!(debug_integer_field(&result, b"PING-PERIOD"), Some(250));
+        assert_eq!(debug_integer_field(&result, b"TILT-TRIGGER"), Some(50));
+        assert_eq!(debug_integer_field(&result, b"TILT-PERIOD"), Some(75));
+
+        state.check_tilt(1000);
+        state.check_tilt(1060);
+        assert!(state.tilt);
+        state.check_tilt(1136);
+        assert!(!state.tilt);
+    }
+
+    #[test]
+    fn sentinel_debug_rejects_unknown_missing_and_non_positive_values() {
+        let mut state = SentinelState::new();
+
+        let result = dispatch_sentinel_command(&mut state, &[b"DEBUG", b"ping-period", b"0"]);
+        assert!(
+            matches!(result, RespFrame::Error(message) if message.contains("Invalid argument"))
+        );
+        assert_eq!(state.debug_config.ping_period, crate::PING_PERIOD_MS);
+
+        let result = dispatch_sentinel_command(&mut state, &[b"DEBUG", b"ping-period"]);
+        assert!(
+            matches!(result, RespFrame::Error(message) if message.contains("Unknown option or number of arguments"))
+        );
+
+        let result = dispatch_sentinel_command(&mut state, &[b"DEBUG", b"not-an-option", b"1"]);
+        assert!(
+            matches!(result, RespFrame::Error(message) if message.contains("Unknown option or number of arguments"))
+        );
     }
 
     #[test]
