@@ -3940,8 +3940,8 @@ mod tests {
         //   01 78 78 e0 11 00 01 78 78  (9 bytes)
         // i.e. [literal-2, 'x', 'x', long-match-26, literal-2, 'x', 'x'].
         let input: Vec<u8> = vec![b'x'; 30];
-        let out = lzf_compress(&input, input.len() - 4)
-            .expect("compression of 30 x's must succeed");
+        let out =
+            lzf_compress(&input, input.len() - 4).expect("compression of 30 x's must succeed");
         assert_eq!(
             out,
             vec![0x01, b'x', b'x', 0xe0, 0x11, 0x00, 0x01, b'x', b'x'],

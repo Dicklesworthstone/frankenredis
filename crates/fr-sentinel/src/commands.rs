@@ -133,7 +133,7 @@ fn cmd_is_master_down_by_addr(state: &mut SentinelState, args: &[&[u8]]) -> Resp
         Ok(port) => port,
         Err(_) => return RespFrame::Error("ERR value is not an integer or out of range".into()),
     };
-    let requested_epoch = match String::from_utf8_lossy(args[2]).parse::<u64>() {
+    let requested_epoch = match String::from_utf8_lossy(args[2]).parse::<i64>() {
         Ok(epoch) => epoch,
         Err(_) => return RespFrame::Error("ERR Invalid current epoch".into()),
     };
@@ -150,7 +150,9 @@ fn cmd_is_master_down_by_addr(state: &mut SentinelState, args: &[&[u8]]) -> Resp
     let (leader, leader_epoch) = if requested_runid == "*" {
         (None, 0)
     } else if let Some(master_name) = master_name {
-        sentinel_vote_leader(state, &master_name, requested_epoch, &requested_runid)
+        // Convert i64 epoch to u64 for vote comparison; negative epochs won't match
+        let epoch_u64 = u64::try_from(requested_epoch).unwrap_or(0);
+        sentinel_vote_leader(state, &master_name, epoch_u64, &requested_runid)
     } else {
         (None, 0)
     };
@@ -1574,6 +1576,32 @@ mod tests {
             );
             assert_eq!(result, is_master_down_reply(0, "*", 0));
         }
+    }
+
+    #[test]
+    fn sentinel_is_master_down_by_addr_negative_epoch_with_star_runid_succeeds() {
+        let mut state = SentinelState::new();
+        assert!(state.monitor("mymaster", "127.0.0.1", 6379, 1).is_ok());
+
+        // Negative epoch with '*' runid should return normal no-vote reply, not error
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"IS-MASTER-DOWN-BY-ADDR", b"127.0.0.1", b"6379", b"-1", b"*"],
+        );
+        assert_eq!(result, is_master_down_reply(0, "*", 0));
+
+        // Also test large negative epoch
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[
+                b"IS-MASTER-DOWN-BY-ADDR",
+                b"127.0.0.1",
+                b"6379",
+                b"-9223372036854775808",
+                b"*",
+            ],
+        );
+        assert_eq!(result, is_master_down_reply(0, "*", 0));
     }
 
     #[test]
