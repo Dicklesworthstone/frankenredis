@@ -12216,7 +12216,9 @@ impl Store {
                 };
                 let mut entries = BTreeMap::new();
                 for (ms, seq, fields) in stream_entries {
-                    entries.insert((ms, seq), fields);
+                    if entries.insert((ms, seq), fields).is_some() {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
                 }
                 restored_stream_last_id = watermark.or_else(|| entries.keys().next_back().copied());
                 restored_stream_entries_added = entries_added;
@@ -22248,6 +22250,51 @@ mod tests {
         store
             .restore_key(b"valid", 0, &valid_payload, false, 100)
             .map_err(|err| format!("valid stream groups must restore: {err:?}"))?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn restore_rejects_duplicate_stream_entry_ids() -> Result<(), String> {
+        fn stream_dump_with_entries(
+            entries: Vec<fr_persist::StreamEntry>,
+        ) -> Result<Vec<u8>, String> {
+            let entries_added = u64::try_from(entries.len())
+                .map_err(|_| "stream entry count exceeded u64".to_string())?;
+            let stream_payload = fr_persist::encode_upstream_stream_listpacks3_payload(
+                &entries,
+                entries.last().map(|entry| (entry.0, entry.1)),
+                &[],
+                Some(entries_added),
+            )
+            .ok_or_else(|| "stream payload encoding failed".to_string())?;
+            let mut body = vec![RDB_TYPE_STREAM_LISTPACKS_3];
+            body.extend_from_slice(&stream_payload);
+            Ok(append_dump_footer(body))
+        }
+
+        let duplicate_payload = stream_dump_with_entries(vec![
+            (1, 0, vec![(b"f".to_vec(), b"v1".to_vec())]),
+            (1, 0, vec![(b"f".to_vec(), b"v2".to_vec())]),
+        ])?;
+        let mut duplicate_store = Store::new();
+        match duplicate_store.restore_key(b"duplicate", 0, &duplicate_payload, false, 100) {
+            Err(StoreError::InvalidDumpPayload) => {}
+            other => {
+                return Err(format!(
+                    "duplicate stream entry IDs should fail restore, got {other:?}"
+                ));
+            }
+        }
+
+        let valid_payload = stream_dump_with_entries(vec![
+            (1, 0, vec![(b"f".to_vec(), b"v1".to_vec())]),
+            (2, 0, vec![(b"f".to_vec(), b"v2".to_vec())]),
+        ])?;
+        let mut valid_store = Store::new();
+        valid_store
+            .restore_key(b"valid", 0, &valid_payload, false, 100)
+            .map_err(|err| format!("valid stream entry IDs must restore: {err:?}"))?;
 
         Ok(())
     }
