@@ -1507,24 +1507,120 @@ fn instance_flags_to_string(instance: &crate::SentinelRedisInstance) -> String {
 }
 
 fn glob_match(pattern: &str, text: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-    if pattern.starts_with('*') && pattern.ends_with('*') {
-        let mid = &pattern[1..pattern.len() - 1];
-        return text.contains(mid);
-    }
-    if let Some(suffix) = pattern.strip_prefix('*') {
-        return text.ends_with(suffix);
-    }
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        return text.starts_with(prefix);
-    }
-    pattern == text
+    glob_match_bytes(pattern.as_bytes(), text.as_bytes(), false)
 }
 
 fn glob_match_ignore_ascii_case(pattern: &str, text: &str) -> bool {
-    glob_match(&pattern.to_ascii_lowercase(), &text.to_ascii_lowercase())
+    glob_match_bytes(pattern.as_bytes(), text.as_bytes(), true)
+}
+
+fn glob_match_bytes(pattern: &[u8], text: &[u8], nocase: bool) -> bool {
+    if pattern.is_empty() {
+        return text.is_empty();
+    }
+    if text.is_empty() {
+        return pattern.iter().all(|byte| *byte == b'*');
+    }
+
+    match pattern[0] {
+        b'*' => {
+            let mut rest = &pattern[1..];
+            while rest.first() == Some(&b'*') {
+                rest = &rest[1..];
+            }
+            if rest.is_empty() {
+                return true;
+            }
+            let mut candidate = text;
+            loop {
+                if glob_match_bytes(rest, candidate, nocase) {
+                    return true;
+                }
+                if candidate.is_empty() {
+                    return false;
+                }
+                candidate = &candidate[1..];
+            }
+        }
+        b'?' => glob_match_bytes(&pattern[1..], &text[1..], nocase),
+        b'[' => {
+            if let Some((matched, consumed)) =
+                glob_match_char_class(&pattern[1..], text[0], nocase)
+            {
+                matched && glob_match_bytes(&pattern[1 + consumed..], &text[1..], nocase)
+            } else {
+                byte_matches(b'[', text[0], nocase)
+                    && glob_match_bytes(&pattern[1..], &text[1..], nocase)
+            }
+        }
+        b'\\' if pattern.len() >= 2 => {
+            byte_matches(pattern[1], text[0], nocase)
+                && glob_match_bytes(&pattern[2..], &text[1..], nocase)
+        }
+        byte => {
+            byte_matches(byte, text[0], nocase)
+                && glob_match_bytes(&pattern[1..], &text[1..], nocase)
+        }
+    }
+}
+
+fn glob_match_char_class(class: &[u8], text: u8, nocase: bool) -> Option<(bool, usize)> {
+    let mut cursor = 0usize;
+    let negate = class.first() == Some(&b'^');
+    if negate {
+        cursor += 1;
+    }
+
+    let mut matched = false;
+    while cursor < class.len() {
+        if class[cursor] == b']' {
+            return Some((if negate { !matched } else { matched }, cursor + 1));
+        }
+
+        if class[cursor] == b'\\' && cursor + 1 < class.len() {
+            cursor += 1;
+            if byte_matches(class[cursor], text, nocase) {
+                matched = true;
+            }
+            cursor += 1;
+            continue;
+        }
+
+        if cursor + 2 < class.len() && class[cursor + 1] == b'-' {
+            let start = ascii_fold(class[cursor], nocase);
+            let end = ascii_fold(class[cursor + 2], nocase);
+            let target = ascii_fold(text, nocase);
+            let (lower, upper) = if start <= end {
+                (start, end)
+            } else {
+                (end, start)
+            };
+            if (lower..=upper).contains(&target) {
+                matched = true;
+            }
+            cursor += 3;
+            continue;
+        }
+
+        if byte_matches(class[cursor], text, nocase) {
+            matched = true;
+        }
+        cursor += 1;
+    }
+
+    None
+}
+
+fn byte_matches(left: u8, right: u8, nocase: bool) -> bool {
+    ascii_fold(left, nocase) == ascii_fold(right, nocase)
+}
+
+fn ascii_fold(byte: u8, nocase: bool) -> u8 {
+    if nocase {
+        byte.to_ascii_lowercase()
+    } else {
+        byte
+    }
 }
 
 #[cfg(test)]
@@ -2250,6 +2346,18 @@ mod tests {
         assert_eq!(master.link.last_pong_time, 12_345);
         assert_eq!(master.role_reported, crate::Role::Master);
         assert_eq!(master.role_reported_time, 12_345);
+    }
+
+    #[test]
+    fn sentinel_reset_uses_redis_glob_patterns() {
+        let mut state = SentinelState::new();
+        assert!(state.monitor("alpha-a", "127.0.0.1", 6379, 1).is_ok());
+        assert!(state.monitor("alpha-b", "127.0.0.1", 6380, 1).is_ok());
+        assert!(state.monitor("beta-a", "127.0.0.1", 6381, 1).is_ok());
+
+        let result = dispatch_sentinel_command(&mut state, &[b"RESET", b"alpha-[ab]"]);
+
+        assert_eq!(result, RespFrame::Integer(2));
     }
 
     #[test]
@@ -3345,6 +3453,21 @@ mod tests {
         assert!(!glob_match("my*", "yourmaster"));
         assert!(glob_match("*master", "mymaster"));
         assert!(glob_match("*mast*", "mymaster"));
+        assert!(glob_match("myma?ter", "mymaster"));
+        assert!(glob_match("myma[rs]ter", "mymaster"));
+        assert!(glob_match("myma[a-z]ter", "mymaster"));
+        assert!(glob_match("myma[^x]ter", "mymaster"));
+        assert!(!glob_match("myma[^s]ter", "mymaster"));
+        assert!(glob_match(r"my\*master", "my*master"));
+        assert!(!glob_match(r"my\*master", "myxxmaster"));
+        assert!(glob_match_ignore_ascii_case(
+            "ANNOUNCE-[G-I]OST*",
+            "announce-hostnames"
+        ));
+        assert!(!glob_match_ignore_ascii_case(
+            "ANNOUNCE-[^H]OST*",
+            "announce-hostnames"
+        ));
         assert!(glob_match("mymaster", "mymaster"));
         assert!(!glob_match("mymaster", "mymaster2"));
     }
@@ -3450,6 +3573,16 @@ mod tests {
                     RespFrame::BulkString(Some(b"1234".to_vec())),
                 ),
             ]))
+        );
+
+        let result =
+            dispatch_sentinel_command(&mut state, &[b"CONFIG", b"GET", b"ANNOUNCE-[G-I]OST*"]);
+        assert_eq!(
+            result,
+            RespFrame::Map(Some(vec![(
+                RespFrame::BulkString(Some(b"announce-hostnames".to_vec())),
+                RespFrame::BulkString(Some(b"yes".to_vec())),
+            )]))
         );
     }
 

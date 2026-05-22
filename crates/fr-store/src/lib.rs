@@ -12628,11 +12628,30 @@ impl Store {
                             commands.push(create);
 
                             for consumer in &group.consumers {
-                                let has_pending = group
-                                    .pending
-                                    .values()
-                                    .any(|pending| pending.consumer == *consumer);
-                                if !has_pending {
+                                let mut emitted_pending = false;
+                                for ((pending_ms, pending_seq), pending_entry) in
+                                    group.pending.iter().filter(|(_, pending)| {
+                                        pending.consumer.as_slice().cmp(consumer.as_slice()).is_eq()
+                                    })
+                                {
+                                    emitted_pending = true;
+                                    let pending_id = format!("{pending_ms}-{pending_seq}");
+                                    commands.push(vec![
+                                        b"XCLAIM".to_vec(),
+                                        logical_key.clone(),
+                                        group_name.clone(),
+                                        pending_entry.consumer.clone(),
+                                        b"0".to_vec(),
+                                        pending_id.into_bytes(),
+                                        b"TIME".to_vec(),
+                                        pending_entry.last_delivered_ms.to_string().into_bytes(),
+                                        b"RETRYCOUNT".to_vec(),
+                                        pending_entry.deliveries.to_string().into_bytes(),
+                                        b"JUSTID".to_vec(),
+                                        b"FORCE".to_vec(),
+                                    ]);
+                                }
+                                if !emitted_pending {
                                     commands.push(vec![
                                         b"XGROUP".to_vec(),
                                         b"CREATECONSUMER".to_vec(),
@@ -12641,24 +12660,6 @@ impl Store {
                                         consumer.clone(),
                                     ]);
                                 }
-                            }
-
-                            for ((pending_ms, pending_seq), pending_entry) in &group.pending {
-                                let pending_id = format!("{pending_ms}-{pending_seq}");
-                                commands.push(vec![
-                                    b"XCLAIM".to_vec(),
-                                    logical_key.clone(),
-                                    group_name.clone(),
-                                    pending_entry.consumer.clone(),
-                                    b"0".to_vec(),
-                                    pending_id.into_bytes(),
-                                    b"TIME".to_vec(),
-                                    pending_entry.last_delivered_ms.to_string().into_bytes(),
-                                    b"RETRYCOUNT".to_vec(),
-                                    pending_entry.deliveries.to_string().into_bytes(),
-                                    b"JUSTID".to_vec(),
-                                    b"FORCE".to_vec(),
-                                ]);
                             }
                         }
                     }
@@ -22988,16 +22989,6 @@ mod tests {
         assert_eq!(
             cmds[4],
             vec![
-                b"XGROUP".to_vec(),
-                b"CREATECONSUMER".to_vec(),
-                b"s".to_vec(),
-                b"g".to_vec(),
-                b"idle".to_vec(),
-            ]
-        );
-        assert_eq!(
-            cmds[5],
-            vec![
                 b"XCLAIM".to_vec(),
                 b"s".to_vec(),
                 b"g".to_vec(),
@@ -23010,6 +23001,16 @@ mod tests {
                 b"7".to_vec(),
                 b"JUSTID".to_vec(),
                 b"FORCE".to_vec(),
+            ]
+        );
+        assert_eq!(
+            cmds[5],
+            vec![
+                b"XGROUP".to_vec(),
+                b"CREATECONSUMER".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"idle".to_vec(),
             ]
         );
     }
