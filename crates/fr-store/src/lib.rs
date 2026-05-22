@@ -6239,22 +6239,35 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &mut entry.value {
-                Value::List(l) => {
-                    for v in values {
-                        l.push_front(v.clone());
-                    }
-                    if !values.is_empty() {
-                        Self::mark_digest_stale_fields(
-                            &mut self.digest_stale,
-                            &mut self.digest_mutations,
-                        );
-                    }
-                    Ok(l.len())
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &mut entry.value {
+                    Value::List(l) => {
+                        for v in values {
+                            l.push_front(v.clone());
+                        }
+                        if !values.is_empty() {
+                            Self::mark_digest_stale_fields(
+                                &mut self.digest_stale,
+                                &mut self.digest_mutations,
+                            );
+                        }
+                        Ok(l.len())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(0),
         }
     }
@@ -6266,22 +6279,35 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
-            Some(entry) => match &mut entry.value {
-                Value::List(l) => {
-                    for v in values {
-                        l.push_back(v.clone());
-                    }
-                    if !values.is_empty() {
-                        Self::mark_digest_stale_fields(
-                            &mut self.digest_stale,
-                            &mut self.digest_mutations,
-                        );
-                    }
-                    Ok(l.len())
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &mut entry.value {
+                    Value::List(l) => {
+                        for v in values {
+                            l.push_back(v.clone());
+                        }
+                        if !values.is_empty() {
+                            Self::mark_digest_stale_fields(
+                                &mut self.digest_stale,
+                                &mut self.digest_mutations,
+                            );
+                        }
+                        Ok(l.len())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(0),
         }
     }
@@ -19894,6 +19920,44 @@ mod tests {
         match store.object_freq(b"l", 1) {
             Some(6) => {}
             other => return Err(format!("RPUSH LFU mismatch: {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lpushx_existing_list_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store.lpush(b"l", &[b"v1".to_vec()], 0).unwrap();
+
+        match store.object_freq(b"l", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new list LFU frequency mismatch: {other:?}")),
+        }
+        store.lpushx(b"l", &[b"v2".to_vec()], 1).unwrap();
+        match store.object_freq(b"l", 1) {
+            Some(6) => {}
+            other => return Err(format!("LPUSHX LFU mismatch: {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rpushx_existing_list_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store.rpush(b"l", &[b"v1".to_vec()], 0).unwrap();
+
+        match store.object_freq(b"l", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new list LFU frequency mismatch: {other:?}")),
+        }
+        store.rpushx(b"l", &[b"v2".to_vec()], 1).unwrap();
+        match store.object_freq(b"l", 1) {
+            Some(6) => {}
+            other => return Err(format!("RPUSHX LFU mismatch: {other:?}")),
         }
         Ok(())
     }
