@@ -10,7 +10,8 @@ pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> R
         return RespFrame::Error("ERR wrong number of arguments for 'sentinel' command".into());
     }
 
-    let subcommand = String::from_utf8_lossy(args[0]).to_ascii_uppercase();
+    let subcommand_raw = String::from_utf8_lossy(args[0]);
+    let subcommand = subcommand_raw.to_ascii_uppercase();
     match subcommand.as_str() {
         "MYID" => {
             if args.len() != 1 {
@@ -57,7 +58,9 @@ pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> R
             }
             cmd_help()
         }
-        _ => RespFrame::Error(format!("ERR Unknown sentinel subcommand '{}'", subcommand)),
+        _ => RespFrame::Error(format!(
+            "ERR unknown subcommand or wrong number of arguments for '{subcommand_raw}'. Try SENTINEL HELP."
+        )),
     }
 }
 
@@ -3051,6 +3054,19 @@ mod tests {
         assert_eq!(
             lines.last(),
             Some(&RespFrame::SimpleString("    Print this help.".into()))
+        );
+    }
+
+    #[test]
+    fn sentinel_unknown_subcommand_uses_upstream_syntax_error() {
+        let mut state = SentinelState::new();
+        let result = dispatch_sentinel_command(&mut state, &[b"notACommand"]);
+
+        assert_eq!(
+            result,
+            RespFrame::Error(
+                "ERR unknown subcommand or wrong number of arguments for 'notACommand'. Try SENTINEL HELP.".into()
+            )
         );
     }
 

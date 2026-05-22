@@ -12,6 +12,7 @@ const RDB_DUMP_VERSION: u16 = 11;
 const RDB_TYPE_STRING: u8 = 0;
 const RDB_TYPE_LIST: u8 = 1;
 const RDB_TYPE_SET: u8 = 2;
+const RDB_TYPE_ZSET: u8 = 3;
 const RDB_TYPE_HASH: u8 = 4;
 const RDB_TYPE_ZSET_2: u8 = 5;
 const RDB_TYPE_SET_INTSET: u8 = 11;
@@ -12139,7 +12140,7 @@ impl Store {
                 }
                 Value::Hash(hash)
             }
-            RDB_TYPE_ZSET_2 => {
+            RDB_TYPE_ZSET | RDB_TYPE_ZSET_2 => {
                 // Sorted set
                 let (count, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
@@ -12147,19 +12148,29 @@ impl Store {
                 for _ in 0..count {
                     let (member, mc) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += mc;
-                    if cursor + 8 > data_end {
-                        return Err(StoreError::InvalidDumpPayload);
-                    }
-                    let score = f64::from_le_bytes(
-                        payload[cursor..cursor + 8]
-                            .try_into()
-                            .map_err(|_| StoreError::InvalidDumpPayload)?,
-                    );
-                    cursor += 8;
+                    let score = if type_byte == RDB_TYPE_ZSET_2 {
+                        if cursor + 8 > data_end {
+                            return Err(StoreError::InvalidDumpPayload);
+                        }
+                        let score = f64::from_le_bytes(
+                            payload[cursor..cursor + 8]
+                                .try_into()
+                                .map_err(|_| StoreError::InvalidDumpPayload)?,
+                        );
+                        cursor += 8;
+                        score
+                    } else {
+                        let (score, consumed) =
+                            decode_rdb_legacy_double(payload, cursor, data_end)?;
+                        cursor += consumed;
+                        score
+                    };
                     if score.is_nan() {
                         return Err(StoreError::InvalidDumpPayload);
                     }
-                    zs.insert(member, score);
+                    if !zs.insert(member, score) {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
                 }
                 Value::SortedSet(zs)
             }
@@ -12916,6 +12927,37 @@ fn decode_lzf_rdb_string(
     let decompressed = lzf_decompress_string(&data[payload_start..payload_end], uncompressed_len)
         .ok_or(StoreError::InvalidDumpPayload)?;
     Ok((decompressed, payload_end - offset))
+}
+
+fn decode_rdb_legacy_double(
+    data: &[u8],
+    offset: usize,
+    data_end: usize,
+) -> Result<(f64, usize), StoreError> {
+    let len = *data.get(offset).ok_or(StoreError::InvalidDumpPayload)?;
+    match len {
+        255 => Ok((f64::NEG_INFINITY, 1)),
+        254 => Ok((f64::INFINITY, 1)),
+        253 => Ok((f64::NAN, 1)),
+        len => {
+            let len = usize::from(len);
+            let start = offset
+                .checked_add(1)
+                .ok_or(StoreError::InvalidDumpPayload)?;
+            let end = start
+                .checked_add(len)
+                .ok_or(StoreError::InvalidDumpPayload)?;
+            if end > data_end {
+                return Err(StoreError::InvalidDumpPayload);
+            }
+            let raw = std::str::from_utf8(&data[start..end])
+                .map_err(|_| StoreError::InvalidDumpPayload)?;
+            let score = raw
+                .parse::<f64>()
+                .map_err(|_| StoreError::InvalidDumpPayload)?;
+            Ok((score, 1 + len))
+        }
+    }
 }
 
 fn lzf_decompress_string(input: &[u8], expected_len: usize) -> Option<Vec<u8>> {
@@ -15633,12 +15675,12 @@ mod tests {
         MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT,
         PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK,
         RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
-        RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK,
-        ScoreBound, ScoreMember, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
-        StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
-        StreamPendingEntry, Value, ValueType, decode_length, decode_listpack_strings,
-        decode_rdb_string, encode_db_key, encode_length, encode_listpack_strings,
-        hll_sparse_decode,
+        RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2,
+        RDB_TYPE_ZSET_LISTPACK, ScoreBound, ScoreMember, Store, StoreError, StreamAutoClaimOptions,
+        StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor,
+        StreamGroupReadOptions, StreamPendingEntry, Value, ValueType, decode_length,
+        decode_listpack_strings, decode_rdb_string, encode_db_key, encode_length,
+        encode_listpack_strings, hll_sparse_decode,
     };
 
     fn group_read_options(
@@ -20772,6 +20814,48 @@ mod tests {
                 (b"beta".to_vec(), 2.0),
                 (b"alpha".to_vec(), 2.0),
             ]
+        );
+    }
+
+    #[test]
+    fn restore_accepts_legacy_zset_with_textual_scores() {
+        let mut body = vec![RDB_TYPE_ZSET];
+        encode_length(&mut body, 2);
+        append_raw_dump_bulk(&mut body, b"one");
+        body.push(1);
+        body.extend_from_slice(b"1");
+        append_raw_dump_bulk(&mut body, b"half");
+        body.push(3);
+        body.extend_from_slice(b"0.5");
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        assert_eq!(store.restore_key(b"z", 0, &payload, false, 100), Ok(()));
+
+        assert_eq!(store.zscore(b"z", b"one", 100), Ok(Some(1.0)));
+        assert_eq!(store.zscore(b"z", b"half", 100), Ok(Some(0.5)));
+        assert_eq!(
+            store.zrange(b"z", 0, -1, 100),
+            Ok(vec![b"half".to_vec(), b"one".to_vec()])
+        );
+    }
+
+    #[test]
+    fn restore_rejects_duplicate_zset_members() {
+        let mut body = vec![RDB_TYPE_ZSET];
+        encode_length(&mut body, 2);
+        append_raw_dump_bulk(&mut body, b"dup");
+        body.push(1);
+        body.extend_from_slice(b"1");
+        append_raw_dump_bulk(&mut body, b"dup");
+        body.push(1);
+        body.extend_from_slice(b"2");
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        assert_eq!(
+            store.restore_key(b"z", 0, &payload, false, 100),
+            Err(StoreError::InvalidDumpPayload)
         );
     }
 
