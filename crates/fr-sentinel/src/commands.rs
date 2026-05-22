@@ -67,6 +67,10 @@ fn wrong_arity(command: &'static str) -> RespFrame {
     ))
 }
 
+fn missing_master_error() -> RespFrame {
+    RespFrame::Error("ERR No such master with that name".into())
+}
+
 fn cmd_myid(state: &SentinelState) -> RespFrame {
     RespFrame::BulkString(Some(state.myid_hex().into_bytes()))
 }
@@ -83,7 +87,7 @@ fn cmd_master(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     let name = String::from_utf8_lossy(args[0]);
     match state.get_master(&name) {
         Some(master) => instance_to_info_array(master),
-        None => RespFrame::Error(format!("ERR No such master with that name: {}", name)),
+        None => missing_master_error(),
     }
 }
 
@@ -97,7 +101,7 @@ fn cmd_replicas(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
             let replicas = sorted_instance_info_arrays(master.slaves.values());
             RespFrame::Array(Some(replicas))
         }
-        None => RespFrame::Error(format!("ERR No such master with that name: {}", name)),
+        None => missing_master_error(),
     }
 }
 
@@ -111,7 +115,7 @@ fn cmd_sentinels(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
             let sentinels = sorted_instance_info_arrays(master.sentinels.values());
             RespFrame::Array(Some(sentinels))
         }
-        None => RespFrame::Error(format!("ERR No such master with that name: {}", name)),
+        None => missing_master_error(),
     }
 }
 
@@ -242,7 +246,7 @@ fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     let deny_scripts_reconfig = state.deny_scripts_reconfig;
     let master = match state.get_master_mut(&name) {
         Some(m) => m,
-        None => return RespFrame::Error(format!("ERR No such master with that name: {}", name)),
+        None => return missing_master_error(),
     };
 
     let mut i = 1;
@@ -516,7 +520,7 @@ fn cmd_ckquorum(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
                 ))
             }
         }
-        None => RespFrame::Error(format!("ERR No such master with that name: {}", name)),
+        None => missing_master_error(),
     }
 }
 
@@ -712,7 +716,7 @@ fn cmd_failover(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
             started = true;
             RespFrame::SimpleString("OK".into())
         }
-        None => RespFrame::Error(format!("ERR No such master with that name: {}", name)),
+        None => missing_master_error(),
     };
     if started {
         state.current_epoch = new_epoch;
@@ -1273,6 +1277,28 @@ mod tests {
 
         let result = dispatch_sentinel_command(&mut state, &[b"MASTERS"]);
         assert_eq!(array_len(&result), Some(1));
+    }
+
+    #[test]
+    fn sentinel_missing_master_errors_match_upstream_wording() {
+        let mut state = SentinelState::new();
+        let commands: &[&[&[u8]]] = &[
+            &[b"MASTER", b"missing"],
+            &[b"REPLICAS", b"missing"],
+            &[b"SLAVES", b"missing"],
+            &[b"SENTINELS", b"missing"],
+            &[b"SET", b"missing", b"down-after-milliseconds", b"1"],
+            &[b"REMOVE", b"missing"],
+            &[b"CKQUORUM", b"missing"],
+            &[b"FAILOVER", b"missing"],
+        ];
+
+        for command in commands {
+            assert_eq!(
+                dispatch_sentinel_command(&mut state, command),
+                RespFrame::Error("ERR No such master with that name".into())
+            );
+        }
     }
 
     #[test]
