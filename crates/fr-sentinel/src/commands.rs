@@ -691,15 +691,46 @@ fn cmd_failover(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
         return wrong_arity("sentinel failover");
     }
     let name = String::from_utf8_lossy(args[0]);
-    match state.get_master_mut(&name) {
+    let now = state.previous_time;
+    let new_epoch = state.current_epoch.saturating_add(1);
+    let mut started = false;
+    let reply = match state.get_master_mut(&name) {
         Some(master) => {
             use crate::{FailoverState, InstanceFlags};
+            if master.flags.contains(InstanceFlags::FAILOVER_IN_PROGRESS) {
+                return RespFrame::Error("-INPROG Failover already in progress".into());
+            }
+            if !has_suitable_failover_replica(master) {
+                return RespFrame::Error("-NOGOODSLAVE No suitable replica to promote".into());
+            }
             master.flags.insert(InstanceFlags::FORCE_FAILOVER);
+            master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
+            master.failover_epoch = new_epoch;
+            master.failover_start_time = now;
+            master.failover_state_change_time = now;
             master.failover_state = FailoverState::WaitStart;
+            started = true;
             RespFrame::SimpleString("OK".into())
         }
         None => RespFrame::Error(format!("ERR No such master with that name: {}", name)),
+    };
+    if started {
+        state.current_epoch = new_epoch;
     }
+    reply
+}
+
+fn has_suitable_failover_replica(master: &crate::SentinelRedisInstance) -> bool {
+    master.slaves.values().any(is_suitable_failover_replica)
+}
+
+fn is_suitable_failover_replica(replica: &crate::SentinelRedisInstance) -> bool {
+    use crate::InstanceFlags;
+
+    !replica.flags.contains(InstanceFlags::S_DOWN)
+        && !replica.flags.contains(InstanceFlags::O_DOWN)
+        && !replica.link.disconnected
+        && replica.slave_priority > 0
 }
 
 fn cmd_pending_scripts(state: &SentinelState) -> RespFrame {
@@ -1066,6 +1097,22 @@ mod tests {
             SentinelRedisInstance::new_master(name, SentinelAddr::new(hostname, port), 0);
         instance.flags = flags;
         instance
+    }
+
+    fn add_replica(
+        state: &mut SentinelState,
+        master_name: &str,
+        replica_name: &str,
+        configure: impl FnOnce(&mut SentinelRedisInstance),
+    ) {
+        let master_exists = state.masters.contains_key(master_name);
+        let Some(master) = state.get_master_mut(master_name) else {
+            assert!(master_exists, "{master_name} master exists");
+            return;
+        };
+        let mut replica = sentinel_instance(replica_name, "127.0.0.1", 6380, InstanceFlags::SLAVE);
+        configure(&mut replica);
+        master.slaves.insert(replica_name.to_string(), replica);
     }
 
     fn list_reply_names(frame: RespFrame) -> Vec<String> {
@@ -1812,13 +1859,16 @@ mod tests {
     #[test]
     fn test_failover() {
         let mut state = SentinelState::new();
+        state.previous_time = 1234;
         let _ = dispatch_sentinel_command(
             &mut state,
             &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
         );
+        add_replica(&mut state, "mymaster", "replica-1", |_| {});
 
         let result = dispatch_sentinel_command(&mut state, &[b"FAILOVER", b"mymaster"]);
         assert!(matches!(result, RespFrame::SimpleString(_)));
+        assert_eq!(state.current_epoch, 1);
 
         let master = state.get_master("mymaster");
         assert!(master.is_some(), "mymaster exists");
@@ -1826,7 +1876,82 @@ mod tests {
             return;
         };
         assert!(master.flags.contains(crate::InstanceFlags::FORCE_FAILOVER));
+        assert!(
+            master
+                .flags
+                .contains(crate::InstanceFlags::FAILOVER_IN_PROGRESS)
+        );
+        assert_eq!(master.failover_epoch, 1);
+        assert_eq!(master.failover_start_time, 1234);
+        assert_eq!(master.failover_state_change_time, 1234);
         assert_eq!(master.failover_state, crate::FailoverState::WaitStart);
+    }
+
+    #[test]
+    fn sentinel_failover_rejects_no_good_replica() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+
+        let result = dispatch_sentinel_command(&mut state, &[b"FAILOVER", b"mymaster"]);
+
+        assert!(matches!(result, RespFrame::Error(message) if message.contains("NOGOODSLAVE")));
+        assert_eq!(state.current_epoch, 0);
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        assert!(!master.flags.contains(crate::InstanceFlags::FORCE_FAILOVER));
+        assert_eq!(master.failover_state, crate::FailoverState::None);
+    }
+
+    #[test]
+    fn sentinel_failover_rejects_existing_failover() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+        add_replica(&mut state, "mymaster", "replica-1", |_| {});
+        let master_exists = state.masters.contains_key("mymaster");
+        let Some(master) = state.get_master_mut("mymaster") else {
+            assert!(master_exists, "mymaster exists");
+            return;
+        };
+        master
+            .flags
+            .insert(crate::InstanceFlags::FAILOVER_IN_PROGRESS);
+
+        let result = dispatch_sentinel_command(&mut state, &[b"FAILOVER", b"mymaster"]);
+
+        assert!(matches!(result, RespFrame::Error(message) if message.contains("INPROG")));
+        assert_eq!(state.current_epoch, 0);
+    }
+
+    #[test]
+    fn sentinel_failover_rejects_unsuitable_replicas() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+        add_replica(&mut state, "mymaster", "priority-zero", |replica| {
+            replica.slave_priority = 0;
+        });
+        add_replica(&mut state, "mymaster", "sdown", |replica| {
+            replica.flags.insert(crate::InstanceFlags::S_DOWN);
+        });
+        add_replica(&mut state, "mymaster", "disconnected", |replica| {
+            replica.link.disconnected = true;
+        });
+
+        let result = dispatch_sentinel_command(&mut state, &[b"FAILOVER", b"mymaster"]);
+
+        assert!(matches!(result, RespFrame::Error(message) if message.contains("NOGOODSLAVE")));
+        assert_eq!(state.current_epoch, 0);
     }
 
     #[test]
