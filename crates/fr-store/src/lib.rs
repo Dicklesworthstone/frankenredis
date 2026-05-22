@@ -11343,11 +11343,23 @@ impl Store {
         now_ms: u64,
     ) -> Result<(u64, Vec<Vec<u8>>), StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
         let max_intset_entries = self.set_max_intset_entries;
         let max_listpack_entries = self.set_max_listpack_entries;
         let max_listpack_value = self.set_max_listpack_value;
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
                 Value::Set(s) => {
                     // (frankenredis-yvxq6) Upstream
                     // t_set.c::sscanCommand short-circuits on the
@@ -11398,10 +11410,11 @@ impl Store {
 
                     let next = if pos >= s.len() { 0 } else { pos as u64 };
                     // SCAN-family commands are read-only: do NOT touch LRU
-                    Ok((next, result))
+                        Ok((next, result))
+                    }
+                    _ => Err(StoreError::WrongType),
                 }
-                _ => Err(StoreError::WrongType),
-            },
+            }
             None => Ok((0, Vec::new())),
         }
     }
@@ -20403,6 +20416,25 @@ mod tests {
         match store.object_freq(b"h", 1) {
             Some(6) => {}
             other => return Err(format!("HSCAN LFU mismatch: {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sscan_existing_set_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store.sadd(b"s", &[b"m".to_vec()], 0).unwrap();
+
+        match store.object_freq(b"s", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new set LFU frequency mismatch: {other:?}")),
+        }
+        let _result = store.sscan(b"s", 0, None, 10, 1).unwrap();
+        match store.object_freq(b"s", 1) {
+            Some(6) => {}
+            other => return Err(format!("SSCAN LFU mismatch: {other:?}")),
         }
         Ok(())
     }
