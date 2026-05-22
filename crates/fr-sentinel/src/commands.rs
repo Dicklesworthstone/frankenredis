@@ -1257,6 +1257,8 @@ fn cmd_help() -> RespFrame {
         "    Set configuration parameters for certain masters.",
         "SIMULATE-FAILURE [CRASH-AFTER-ELECTION] [CRASH-AFTER-PROMOTION] [HELP]",
         "    Simulate a Sentinel crash.",
+        "HELP",
+        "    Print this help.",
     ];
     RespFrame::Array(Some(
         help.into_iter()
@@ -4073,13 +4075,13 @@ mod tests {
             "SIMULATE-FAILURE [CRASH-AFTER-ELECTION] [CRASH-AFTER-PROMOTION] [HELP]".into()
         )));
         assert_eq!(
-            lines.last(),
-            Some(&RespFrame::SimpleString(
-                "    Simulate a Sentinel crash.".into()
-            ))
+            lines[lines.len() - 2],
+            RespFrame::SimpleString("HELP".into())
         );
-        assert!(!lines.contains(&RespFrame::SimpleString("HELP".into())));
-        assert!(!lines.contains(&RespFrame::SimpleString("    Print this help.".into())));
+        assert_eq!(
+            lines.last(),
+            Some(&RespFrame::SimpleString("    Print this help.".into()))
+        );
     }
 
     #[test]
