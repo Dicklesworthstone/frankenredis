@@ -4774,11 +4774,19 @@ impl Store {
         now_ms: u64,
     ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
+        let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
         self.internal_entry(key.to_vec(), Value::Hash(BTreeMap::new()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let result = self
             .with_mutated_entry(key, |entry| {
+                if should_bump_lfu {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
                 let Value::Hash(m) = &mut entry.value else {
                     return Err(StoreError::WrongType);
                 };
@@ -18700,6 +18708,33 @@ mod tests {
         assert_eq!(store.hget(b"h", b"f1", 0).unwrap(), Some(b"v2".to_vec()));
         assert_eq!(store.hget(b"h", b"missing", 0).unwrap(), None);
         assert_eq!(store.hget(b"nokey", b"f1", 0).unwrap(), None);
+    }
+
+    #[test]
+    fn hset_existing_hash_bumps_lfu_frequency() -> Result<(), String> {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store
+            .hset(b"h", b"f".to_vec(), b"v1".to_vec(), 0)
+            .map_err(|err| format!("seed hash failed: {err:?}"))?;
+
+        match store.object_freq(b"h", 0) {
+            Some(LFU_INIT_VAL) => {}
+            other => return Err(format!("new hash LFU frequency mismatch: {other:?}")),
+        }
+        match store
+            .hset(b"h", b"f".to_vec(), b"v2".to_vec(), 1)
+            .map_err(|err| format!("hset update failed: {err:?}"))?
+        {
+            false => {}
+            true => return Err("HSET update incorrectly reported a new field".to_string()),
+        }
+        match store.object_freq(b"h", 1) {
+            Some(6) => {}
+            other => return Err(format!("HSET should bump LFU frequency, got {other:?}")),
+        }
+        Ok(())
     }
 
     #[test]
