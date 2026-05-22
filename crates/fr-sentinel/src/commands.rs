@@ -908,7 +908,7 @@ fn sentinel_debug_info(config: &crate::SentinelDebugConfig) -> RespFrame {
             .map(|(key, value)| {
                 (
                     RespFrame::BulkString(Some(key.as_bytes().to_vec())),
-                    integer_u64(value),
+                    bulk_u64(value),
                 )
             })
             .collect(),
@@ -972,8 +972,8 @@ fn unknown_sentinel_debug_option(option: &str) -> RespFrame {
     ))
 }
 
-fn integer_u64(value: u64) -> RespFrame {
-    RespFrame::Integer(i64::try_from(value).unwrap_or(i64::MAX))
+fn bulk_u64(value: u64) -> RespFrame {
+    RespFrame::BulkString(Some(value.to_string().into_bytes()))
 }
 
 fn cmd_help() -> RespFrame {
@@ -1226,15 +1226,15 @@ mod tests {
             })
     }
 
-    fn debug_integer_field(frame: &RespFrame, key: &[u8]) -> Option<i64> {
+    fn debug_bulk_integer_field(frame: &RespFrame, key: &[u8]) -> Option<i64> {
         let RespFrame::Map(Some(fields)) = frame else {
             return None;
         };
         fields.iter().find_map(|(name, value)| match (name, value) {
-            (RespFrame::BulkString(Some(name)), RespFrame::Integer(value))
+            (RespFrame::BulkString(Some(name)), RespFrame::BulkString(Some(value)))
                 if name.as_slice().eq(key) =>
             {
-                Some(*value)
+                std::str::from_utf8(value).ok()?.parse().ok()
             }
             _ => None,
         })
@@ -2346,19 +2346,19 @@ mod tests {
         };
         assert_eq!(entries.len(), 13);
         assert_eq!(
-            debug_integer_field(&result, b"INFO-PERIOD"),
+            debug_bulk_integer_field(&result, b"INFO-PERIOD"),
             Some(crate::INFO_PERIOD_MS as i64)
         );
         assert_eq!(
-            debug_integer_field(&result, b"PING-PERIOD"),
+            debug_bulk_integer_field(&result, b"PING-PERIOD"),
             Some(crate::PING_PERIOD_MS as i64)
         );
         assert_eq!(
-            debug_integer_field(&result, b"DEFAULT-DOWN-AFTER"),
+            debug_bulk_integer_field(&result, b"DEFAULT-DOWN-AFTER"),
             Some(crate::DEFAULT_DOWN_AFTER_MS as i64)
         );
         assert_eq!(
-            debug_integer_field(&result, b"SCRIPT-RETRY-DELAY"),
+            debug_bulk_integer_field(&result, b"SCRIPT-RETRY-DELAY"),
             Some(crate::SCRIPT_RETRY_DELAY_MS as i64)
         );
     }
@@ -2382,9 +2382,9 @@ mod tests {
         assert_eq!(result, RespFrame::SimpleString("OK".into()));
 
         let result = dispatch_sentinel_command(&mut state, &[b"DEBUG"]);
-        assert_eq!(debug_integer_field(&result, b"PING-PERIOD"), Some(250));
-        assert_eq!(debug_integer_field(&result, b"TILT-TRIGGER"), Some(50));
-        assert_eq!(debug_integer_field(&result, b"TILT-PERIOD"), Some(75));
+        assert_eq!(debug_bulk_integer_field(&result, b"PING-PERIOD"), Some(250));
+        assert_eq!(debug_bulk_integer_field(&result, b"TILT-TRIGGER"), Some(50));
+        assert_eq!(debug_bulk_integer_field(&result, b"TILT-PERIOD"), Some(75));
 
         state.check_tilt(1000);
         state.check_tilt(1060);
