@@ -12121,7 +12121,9 @@ impl Store {
                 for _ in 0..count {
                     let (member, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += consumed;
-                    set.insert(member);
+                    if !set.insert(member) {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
                 }
                 force_set_hashtable_encoding = true;
                 Value::Set(set)
@@ -20857,6 +20859,23 @@ mod tests {
             store.restore_key(b"z", 0, &payload, false, 100),
             Err(StoreError::InvalidDumpPayload)
         );
+    }
+
+    #[test]
+    fn restore_rejects_duplicate_raw_set_members() -> Result<(), String> {
+        let mut body = vec![RDB_TYPE_SET];
+        encode_length(&mut body, 2);
+        append_raw_dump_bulk(&mut body, b"dup");
+        append_raw_dump_bulk(&mut body, b"dup");
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        match store.restore_key(b"s", 0, &payload, false, 100) {
+            Err(StoreError::InvalidDumpPayload) => Ok(()),
+            other => Err(format!(
+                "duplicate raw set members should reject the dump, got {other:?}"
+            )),
+        }
     }
 
     #[test]
