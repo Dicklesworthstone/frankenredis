@@ -20,6 +20,7 @@ ParsedInfo {
     slave_priority: Some(
         0,
     ),
+    replica_announced: None,
     run_id: None,
     connected_slaves: None,
 }

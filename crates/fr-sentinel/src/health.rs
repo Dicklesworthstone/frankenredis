@@ -119,6 +119,7 @@ pub struct ParsedInfo {
     pub master_link_down_since: Option<u64>,
     pub slave_repl_offset: Option<u64>,
     pub slave_priority: Option<u32>,
+    pub replica_announced: Option<bool>,
     pub run_id: Option<String>,
     pub connected_slaves: Option<u32>,
 }
@@ -168,6 +169,9 @@ pub fn parse_info_response(info: &str) -> ParsedInfo {
                 "slave_priority" | "replica_priority" if current_role == Some(Role::Slave) => {
                     result.slave_priority = value.parse().ok();
                 }
+                "replica_announced" if current_role == Some(Role::Slave) => {
+                    result.replica_announced = Some(parse_redis_atoi_prefix(value) != 0);
+                }
                 "run_id" => {
                     if let Some(run_id) = parse_redis_run_id(value) {
                         result.run_id = Some(run_id);
@@ -192,6 +196,44 @@ fn parse_redis_run_id(value: &str) -> Option<String> {
     bytes
         .get(..40)
         .map(|run_id| String::from_utf8_lossy(run_id).into_owned())
+}
+
+fn parse_redis_atoi_prefix(value: &str) -> i64 {
+    let bytes = value.as_bytes();
+    let mut cursor = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let negative = match bytes.get(cursor) {
+        Some(b'-') => {
+            cursor += 1;
+            true
+        }
+        Some(b'+') => {
+            cursor += 1;
+            false
+        }
+        _ => false,
+    };
+
+    let mut parsed = 0i64;
+    let mut saw_digit = false;
+    while let Some(byte) = bytes.get(cursor).filter(|byte| byte.is_ascii_digit()) {
+        parsed = parsed
+            .saturating_mul(10)
+            .saturating_add(i64::from(*byte - b'0'));
+        saw_digit = true;
+        cursor += 1;
+    }
+
+    if !saw_digit {
+        return 0;
+    }
+    if negative {
+        parsed.saturating_neg()
+    } else {
+        parsed
+    }
 }
 
 pub fn apply_info_to_instance(instance: &mut SentinelRedisInstance, info: &ParsedInfo, now: u64) {
@@ -224,6 +266,9 @@ pub fn apply_info_to_instance(instance: &mut SentinelRedisInstance, info: &Parse
     }
     if let Some(priority) = info.slave_priority {
         instance.slave_priority = priority;
+    }
+    if let Some(replica_announced) = info.replica_announced {
+        instance.replica_announced = replica_announced;
     }
     if let Some(ref runid) = info.run_id {
         instance.runid = Some(runid.clone());
@@ -381,7 +426,7 @@ master_repl_offset:12345
     #[test]
     fn parse_info_gates_slave_fields_on_observed_slave_role() {
         let master = parse_info_response(
-            "role:master\nmaster_host:192.0.2.10\nmaster_port:6380\nmaster_link_status:up\nslave_repl_offset:7\nslave_priority:50\n",
+            "role:master\nmaster_host:192.0.2.10\nmaster_port:6380\nmaster_link_status:up\nslave_repl_offset:7\nslave_priority:50\nreplica_announced:0\n",
         );
         assert_eq!(master.role, Some(Role::Master));
         assert_eq!(master.master_host, None);
@@ -389,13 +434,15 @@ master_repl_offset:12345
         assert_eq!(master.master_link_status, None);
         assert_eq!(master.slave_repl_offset, None);
         assert_eq!(master.slave_priority, None);
+        assert_eq!(master.replica_announced, None);
 
         let out_of_order = parse_info_response(
-            "master_host:192.0.2.11\nslave_repl_offset:5\nrole:slave\nslave_repl_offset:9\n",
+            "master_host:192.0.2.11\nslave_repl_offset:5\nreplica_announced:0\nrole:slave\nslave_repl_offset:9\nreplica_announced:1disabled\n",
         );
         assert_eq!(out_of_order.role, Some(Role::Slave));
         assert_eq!(out_of_order.master_host, None);
         assert_eq!(out_of_order.slave_repl_offset, Some(9));
+        assert_eq!(out_of_order.replica_announced, Some(true));
     }
 
     #[test]
@@ -439,6 +486,7 @@ master_port:6379
 master_link_status:up
 slave_repl_offset:54321
 slave_priority:100
+replica_announced:0
 "#;
         let parsed = parse_info_response(info);
         assert_eq!(parsed.role, Some(Role::Slave));
@@ -447,6 +495,7 @@ slave_priority:100
         assert_eq!(parsed.master_link_status, Some(true));
         assert_eq!(parsed.slave_repl_offset, Some(54321));
         assert_eq!(parsed.slave_priority, Some(100));
+        assert_eq!(parsed.replica_announced, Some(false));
     }
 
     #[test]
@@ -459,6 +508,15 @@ slave_priority:100
     }
 
     #[test]
+    fn parse_info_replica_announced_uses_redis_atoi_prefix() {
+        let malformed = parse_info_response("role:slave\nreplica_announced:disabled\n");
+        assert_eq!(malformed.replica_announced, Some(false));
+
+        let signed = parse_info_response("role:slave\nreplica_announced:-1disabled\n");
+        assert_eq!(signed.replica_announced, Some(true));
+    }
+
+    #[test]
     fn apply_info_updates_instance() {
         let mut instance = make_instance();
         let info = ParsedInfo {
@@ -466,6 +524,7 @@ slave_priority:100
             run_id: Some("test123".to_string()),
             master_link_down_since: Some(12_000),
             slave_repl_offset: Some(99999),
+            replica_announced: Some(false),
             ..Default::default()
         };
 
@@ -474,6 +533,7 @@ slave_priority:100
         assert_eq!(instance.runid, Some("test123".to_string()));
         assert_eq!(instance.master_link_down_time, 12_000);
         assert_eq!(instance.slave_repl_offset, 99999);
+        assert!(!instance.replica_announced);
         assert_eq!(instance.info_refresh, 5000);
     }
 
@@ -507,6 +567,7 @@ slave_priority:100
             Some("abcdef0123456789abcdef0123456789abcdef01")
         );
         assert_eq!(instance.slave_repl_offset, 0);
+        assert!(instance.replica_announced);
     }
 
     #[test]

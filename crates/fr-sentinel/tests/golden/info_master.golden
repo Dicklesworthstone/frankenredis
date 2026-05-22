@@ -8,6 +8,7 @@ ParsedInfo {
     master_link_down_since: None,
     slave_repl_offset: None,
     slave_priority: None,
+    replica_announced: None,
     run_id: None,
     connected_slaves: Some(
         2,
