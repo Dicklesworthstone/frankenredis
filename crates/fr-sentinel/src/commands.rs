@@ -1356,13 +1356,10 @@ fn instance_to_info_array(instance: &crate::SentinelRedisInstance, now_ms: u64) 
         pairs.extend([
             RespFrame::BulkString(Some(b"last-hello-message".to_vec())),
             RespFrame::BulkString(Some(
-                if instance.last_hello_time > 0 {
-                    now_ms.saturating_sub(instance.last_hello_time)
-                } else {
-                    0
-                }
-                .to_string()
-                .into_bytes(),
+                now_ms
+                    .saturating_sub(instance.last_hello_time)
+                    .to_string()
+                    .into_bytes(),
             )),
             RespFrame::BulkString(Some(b"voted-leader".to_vec())),
             RespFrame::BulkString(Some(
@@ -2164,6 +2161,43 @@ mod tests {
         assert_eq!(
             info_field(first, b"voted-leader-epoch").as_deref(),
             Some("42")
+        );
+    }
+
+    #[test]
+    fn sentinel_sentinels_last_hello_zero_reports_elapsed_time_like_upstream() {
+        let mut state = SentinelState::new();
+        state.previous_time = 12_345;
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+
+        {
+            let Some(master) = state.get_master_mut("mymaster") else {
+                return;
+            };
+            let sentinel = sentinel_instance(
+                "other-sentinel",
+                "192.168.1.2",
+                26379,
+                InstanceFlags::SENTINEL,
+            );
+            master
+                .sentinels
+                .insert("other-sentinel".to_string(), sentinel);
+        }
+
+        let result = dispatch_sentinel_command(&mut state, &[b"SENTINELS", b"mymaster"]);
+        let RespFrame::Array(Some(sentinels)) = &result else {
+            return;
+        };
+        let Some(first) = sentinels.first() else {
+            return;
+        };
+        assert_eq!(
+            info_field(first, b"last-hello-message").as_deref(),
+            Some("12345")
         );
     }
 
