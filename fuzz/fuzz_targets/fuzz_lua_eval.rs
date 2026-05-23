@@ -237,7 +237,9 @@ fn render_case(case: &StructuredLuaCase) -> RenderedCase {
 }
 
 fn render_with_padding(script: String) -> RenderedCase {
-    let padded = format!("\n;;\n{script}\n;;\n");
+    // Only add leading whitespace/semicolons - trailing semicolons after
+    // `return` are invalid in Lua (return must be last statement in block).
+    let padded = format!("\n;;\n{script}\n");
     RenderedCase {
         base_script: script.into_bytes(),
         padded_script: padded.into_bytes(),
