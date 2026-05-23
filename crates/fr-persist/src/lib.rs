@@ -258,6 +258,12 @@ pub fn parse_aof_manifest(input: &str) -> Result<AofManifest, PersistError> {
         return Err(manifest_parse_error(0, "empty manifest"));
     }
 
+    // Reject manifests that contained only blank/comment lines and no actual entries.
+    // Such manifests format to empty strings which then fail to reparse.
+    if manifest.base.is_none() && manifest.history.is_empty() && manifest.incremental.is_empty() {
+        return Err(manifest_parse_error(0, "empty manifest"));
+    }
+
     Ok(manifest)
 }
 
