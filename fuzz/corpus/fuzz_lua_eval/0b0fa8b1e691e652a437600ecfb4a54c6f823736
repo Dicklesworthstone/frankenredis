@@ -1,0 +1,3 @@
+pairs(t) do sum = s
+return srer _, v in ipairs(t) do sum = sum + v end
+return sum

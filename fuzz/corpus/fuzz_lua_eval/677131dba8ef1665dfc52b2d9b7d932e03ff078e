@@ -1,0 +1,3 @@
+@local t = {a=1, n {b=2}
+local sum = 0
+for _, v in pairs(t_, v in pairs(t) dosum

@@ -1,0 +1,3 @@
+pairs(t) do sum = sum + v end
+r= sum + v end
+return sum
