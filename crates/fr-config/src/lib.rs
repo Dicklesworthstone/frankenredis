@@ -214,6 +214,10 @@ pub fn parse_redis_config_bytes(input: &[u8]) -> Result<ParsedConfigFile, Config
         }
 
         let mut name = tokens.remove(0);
+        // Empty quoted strings like "" produce empty tokens; skip them as directive names
+        if name.is_empty() {
+            continue;
+        }
         name.make_ascii_lowercase();
         directives.push(ParsedConfigDirective {
             line_number,
