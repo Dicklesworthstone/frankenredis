@@ -226,9 +226,10 @@ fn sanitize_bare_token(raw: Vec<u8>, fallback: &[u8]) -> Vec<u8> {
 }
 
 fn sanitize_single_quoted_token(raw: Vec<u8>) -> Vec<u8> {
+    // Filter out backslash to avoid escape sequence ambiguity with \'
     let mut out: Vec<u8> = raw
         .into_iter()
-        .filter(|byte| byte.is_ascii_graphic() || *byte == b' ')
+        .filter(|byte| (byte.is_ascii_graphic() || *byte == b' ') && *byte != b'\\')
         .take(MAX_TOKEN_LEN)
         .collect();
     if out.is_empty() {
