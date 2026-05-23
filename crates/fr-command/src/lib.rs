@@ -18811,10 +18811,21 @@ pub fn apply_client_reply_state(
     let prior_skip_next = state.skip_next;
     state.suppress_current_response = false;
 
-    let Some(action) = parse_client_reply_action(argv)? else {
-        state.suppress_current_response = prior_off || prior_skip_next;
-        state.skip_next = false;
-        return Ok(());
+    let action = match parse_client_reply_action(argv) {
+        Ok(Some(a)) => a,
+        Ok(None) => {
+            // Not a CLIENT REPLY command
+            state.suppress_current_response = prior_off || prior_skip_next;
+            state.skip_next = false;
+            return Ok(());
+        }
+        Err(e) => {
+            // CLIENT REPLY with wrong arity or invalid mode: still update
+            // suppression state before returning error (matches Redis behavior)
+            state.suppress_current_response = prior_off || prior_skip_next;
+            state.skip_next = false;
+            return Err(e);
+        }
     };
 
     match action {
@@ -53638,6 +53649,61 @@ mod tests {
                 .dispatch_client_ctx
                 .client_reply
                 .suppress_current_response
+        );
+    }
+
+    #[test]
+    fn client_reply_error_still_updates_suppression_state() {
+        // Regression test for fuzz_client_reply crash (fuzz artifact
+        // crash-e4c14920bd645b56349c2b4e4b9ebbb84ece0e88). When CLIENT
+        // REPLY fails validation (wrong arity or invalid mode), the
+        // suppress_current_response must still be set based on prior
+        // off/skip_next state, and skip_next must be cleared.
+        use crate::apply_client_reply_state;
+        use fr_store::ClientReplyState;
+
+        let mut state = ClientReplyState::default();
+
+        // Set skip_next=true
+        apply_client_reply_state(
+            &[b"CLIENT".to_vec(), b"REPLY".to_vec(), b"SKIP".to_vec()],
+            &mut state,
+        )
+        .unwrap();
+        assert!(state.skip_next);
+        assert!(state.suppress_current_response);
+
+        // Invalid mode should still consume skip_next and set suppress
+        let err = apply_client_reply_state(
+            &[b"CLIENT".to_vec(), b"REPLY".to_vec(), b"GARBAGE".to_vec()],
+            &mut state,
+        )
+        .unwrap_err();
+        assert_eq!(err, CommandError::SyntaxError);
+        assert!(!state.skip_next, "skip_next must be cleared on error");
+        assert!(
+            state.suppress_current_response,
+            "suppress must be set based on prior skip_next"
+        );
+
+        // Same for wrong arity while off=true
+        state = ClientReplyState::default();
+        state.off = true;
+
+        let err = apply_client_reply_state(
+            &[
+                b"CLIENT".to_vec(),
+                b"REPLY".to_vec(),
+                b"ON".to_vec(),
+                b"EXTRA".to_vec(),
+            ],
+            &mut state,
+        )
+        .unwrap_err();
+        assert_eq!(err, client_wrong_subcommand_arity("REPLY"));
+        assert!(
+            state.suppress_current_response,
+            "suppress must be set based on prior off state"
         );
     }
 
