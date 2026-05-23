@@ -1,0 +1,12 @@
+# Replication
+role:slave
+oaster_h2os0*0.0.1
+master_port:6379
+ma_repl_offset:9t:10*0
+master_port:6379
+ma1
+master_port:2758
+50
+.1
+master_port:6379
+masta_priority:50

@@ -1,0 +1,6 @@
+# Replication
+role:slave
+ma *099
+replica_priority:5licpmic%
+replica_priority:637
+replica_priority:ity

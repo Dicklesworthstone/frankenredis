@@ -1,0 +1,5 @@
+# eplication
+role:slave
+t:
+master_link_status:up:with-extra-colon
+master_link_down_since_seconds:4

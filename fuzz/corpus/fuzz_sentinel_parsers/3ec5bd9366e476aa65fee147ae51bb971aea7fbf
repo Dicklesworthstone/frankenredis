@@ -1,0 +1,4 @@
+
+role:slave
+rt:1
+slave_priority:100pliamnd

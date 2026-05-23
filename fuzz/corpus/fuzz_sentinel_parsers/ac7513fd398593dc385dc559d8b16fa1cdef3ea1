@@ -1,0 +1,7 @@
+# Repn
+role:slave
+)0.1
+master_port:6379
+m.0.0.1
+master_port:6379
+m

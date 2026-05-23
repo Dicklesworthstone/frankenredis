@@ -1,0 +1,7 @@
+
+role:slave
+;.
+master_port:633
+#clav:;1
+master_port:633
+# pUr

@@ -1,0 +1,13 @@
+on
+role:on
+role:slave
+m68
+slave_repl_offset:#
+slave0:st99
+:ate=i50
+p=,stete=slave
+m68
+slave_repl_offset:#
+slave0:st99
+:ate=i50
+p=,stete=av

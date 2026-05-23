@@ -1,0 +1,6 @@
+# Rep;lic
+slave0::iip=256r-runid-1
+5
+slave0:1
+5
+slave0:iip=256.ip=20

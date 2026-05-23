@@ -1,0 +1,5 @@
+
+role:slave
+oe
+mastt100.0.1
+master_port:fpor

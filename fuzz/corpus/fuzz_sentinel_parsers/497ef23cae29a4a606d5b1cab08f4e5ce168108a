@@ -1,0 +1,2 @@
+g=0
+slave=:ip=10.00.11,port=bad,st:ip=10.0.0.11,port=bad,state=online,offset=2,l,offse=3,lag=0

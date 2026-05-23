@@ -1,0 +1,7 @@
+p=0
+slave0:ip=10ne,offset=
+e,
+slave:ip=10.0ne,ofs0.0ne,offset=
+slave1:ip=ffs0.0ne,offset=
+slave1:ip=10.0n,offset=
+10

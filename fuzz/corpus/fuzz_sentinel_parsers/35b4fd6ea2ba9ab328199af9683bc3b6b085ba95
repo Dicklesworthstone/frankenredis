@@ -1,0 +1,7 @@
+es:3
+slave0:porffset=3,lagste2
+connects:3
+slave0:porffset=3,lagste2
+con
+connected_slaves:1=0
+1:ip=10.0=3,lag=0t

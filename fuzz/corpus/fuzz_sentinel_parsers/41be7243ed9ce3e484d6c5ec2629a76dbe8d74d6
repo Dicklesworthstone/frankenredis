@@ -1,0 +1,8 @@
+# Replication
+role:slave
+mastst:10.ds:0
+slave_repl_offset:1
+ss:0
+slave_repl_offset:54321543econds:0
+slave_repl_offset:ca-r21
+slave321

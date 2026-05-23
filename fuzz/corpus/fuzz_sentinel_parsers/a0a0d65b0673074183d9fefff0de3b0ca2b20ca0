@@ -1,0 +1,4 @@
+#!
+role:slave
+
+master_port:09

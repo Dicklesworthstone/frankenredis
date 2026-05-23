@@ -1,0 +1,5 @@
+#(R
+role:slave
+
+slave_priority:100p
+

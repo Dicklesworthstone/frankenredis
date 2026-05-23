@@ -1,0 +1,15 @@
+#11.t:n1t:05.t:nr
+slave_repl_offset:notanoffset
+s# R# Replica,state=online,ofseft=0,lag=0
+slave1:it=1laver_port:nr
+slave_repl_offset:t:nr
+slave_repl_offset:tet
+slave_ost:11.t:nr
+slave_repl_offset:notet
+slave_ost:11.t:nr
+slave_repl_offset:notano0.t:nr
+slave_repl_offset:notanoffsetsslaver_port:nr
+slave_repl_offset:tet
+slave_ost:0.0.011#.=t:nr
+slave_repl_offset:notanoffsetstp2
+laver_porrt:n

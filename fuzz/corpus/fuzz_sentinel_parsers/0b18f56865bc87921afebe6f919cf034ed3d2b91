@@ -1,0 +1,3 @@
+# R:3
+a:3
+slave01:ip=stqnline,offset=3,lline,offset=3,offset=3,=online,offset=3,lag=0

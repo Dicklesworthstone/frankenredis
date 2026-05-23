@@ -1,0 +1,9 @@
+# Resication
+role:slave
+mhost:04.t:nr
+slave_repl_offset:nfset
+slaverr
+slave_repl_offset:tet
+slave_t:11.t:nr
+slave_repl_offset:ngtanoffsnr
+slave_repl_offset:notanoffity

@@ -1,0 +1,5 @@
+#ati
+role:slave
+master_host
+slave_priority:notet
+slave_priority:nota1

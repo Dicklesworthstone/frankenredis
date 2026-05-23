@@ -1,0 +1,5 @@
+# Replication
+role:master
+con'ected_slaves:0
+master_rep5
+slave0:ip=2ffs255.255,port=state=onlije,offset=18446744073709551615,ll_offset:184,offset=18446744073709551615,ll_offset84467440737095255,p`ort=6,state=onlije,offset=18446744073709551615,lag=0

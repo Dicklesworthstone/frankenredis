@@ -1,0 +1,4 @@
+# Replicat&3
+slave0:port=6380,state=online,offset=1,lag=0
+slaveole1:=ad10.0.0.11,p,offset=2,lag=0
+slave2:it.0.0.=tp26382,state=online,offset=3,lag=0

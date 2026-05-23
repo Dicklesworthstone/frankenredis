@@ -1,0 +1,6 @@
+# R
+role:slave
+m
+master_port:551615
+=l_->0.0&1
+master_port:275807

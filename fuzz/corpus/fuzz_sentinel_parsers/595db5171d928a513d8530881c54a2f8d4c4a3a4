@@ -1,0 +1,6 @@
+# Reication
+role:slave
+m
+master_port:551615
+=l_offset:notanof->0.0&1
+master_port:551615

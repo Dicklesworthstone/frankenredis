@@ -1,0 +1,7 @@
+# Replication
+role:slave
+mar
+slave_repl_offset:notaoffset
+_po
+slave_repl_offset:notaver_port:nr
+slave_repl_offset:notaoffse

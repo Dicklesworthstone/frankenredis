@@ -1,0 +1,6 @@
+# Replication
+role:slave
+mast
+master_port:otaport
+master_link_status:up
+master_link_dority:notapriority

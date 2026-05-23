@@ -1,0 +1,7 @@
+# Replication
+role:slave
+_rgpl_offet
+slave_priority:nset
+slave_priority:noet
+slave_priority:notapret
+ty

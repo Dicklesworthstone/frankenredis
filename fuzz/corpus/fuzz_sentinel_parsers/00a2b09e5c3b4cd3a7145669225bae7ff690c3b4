@@ -1,0 +1,6 @@
+cat
+role:slave
+
+
+slave_repl_offset:
+y

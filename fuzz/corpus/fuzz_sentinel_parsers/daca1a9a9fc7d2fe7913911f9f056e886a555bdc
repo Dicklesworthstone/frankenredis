@@ -1,0 +1,11 @@
+# eplicat:master
+co0ave1:ipt=0,lag=1
+slave2:it=10.0.0.=tp2ro1,z,,,,,319e=onli=,l00
+slave2:it=10.0.0.=tp2ro1,6,,,,,319e=onag=,l15
+slave2:it=;.=tp2roi1,6,,,,,319e=.fseft=ag=.l00
+slave2:it=10.0.0.=tp2ro1,6,,,,,31t=0,lag=0
+slave2:it=10.0.0.=tp2ro1,z,,,,,319e=onli=,l00
+slave2:it=10.0.0.=tp2ro1,6,,,,,319e=onag=,l00
+slave2:it=;.=tp2roi1,6,,,,,319e=.fseft=ag=.l00
+slave2:it=10.0ro1,6,,ne,o=nl,o9e=on=online,o=onl,o_ffset=3,lag=0lag
+g=0

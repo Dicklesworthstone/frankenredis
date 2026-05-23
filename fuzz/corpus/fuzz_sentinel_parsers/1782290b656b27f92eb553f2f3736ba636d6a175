@@ -1,0 +1,4 @@
+# Replication
+role:slave
+notapormaset
+slave_priority:nparotiority

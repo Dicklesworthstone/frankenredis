@@ -1,0 +1,52 @@
+# ,lag:ip=,offset=1,lag=0
+2,lag:ip=,offset=1# :up
+master_link_down_since_seconds:+
+
+role:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role:s~
+mask_down_sioce_seconds:+
+
+rlink_le:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role:s~
+mask_down_since_seconds,lag# R=1,lag:ip=,offset=1,lag=0
+slave=:0.0.0:+
+
+role:s~
+mast# :up
+mr_linter_l#ole:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role30.0.01:s~
+master_linter_,i
+master_link_down_since_seconds:+
+
+role:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role:s~
+mask_down_sioce_seconds:+
+
+rlink_le:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role:s~
+mask_down_since_seconds,lag# R=1,lag:ip=,offset=1,lag=0
+slave=:0.0.0:+
+
+role:s~
+mast# :up
+mr_linter_l#ole:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role30.0.01:s~
+master_linter_,ip=10.0.0.11,R=1,l1,ip=10.1

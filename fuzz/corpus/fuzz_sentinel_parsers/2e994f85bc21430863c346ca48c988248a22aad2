@@ -1,0 +1,7 @@
+cat
+role:slave
+mr00.0.1
+master_port:636~
+masten:st:1
+master_port:637~
+catve.c:

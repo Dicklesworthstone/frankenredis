@@ -1,0 +1,5 @@
+# Replication
+role:slave
+m42
+slave_repl_offset:99
+replica_priority:50

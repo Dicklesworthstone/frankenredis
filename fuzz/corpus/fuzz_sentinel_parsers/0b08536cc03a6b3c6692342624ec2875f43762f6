@@ -1,0 +1,3 @@
+t.slave0
+role:slave
+master_port:-

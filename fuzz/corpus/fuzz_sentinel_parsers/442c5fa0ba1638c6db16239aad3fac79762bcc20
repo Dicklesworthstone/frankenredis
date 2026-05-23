@@ -1,0 +1,5 @@
+#ipeRa
+role:slave
+master_h:
+slave_repl_offset:5
+3unid-

@@ -1,0 +1,5 @@
+# Replication
+role:slave
+mast
+master_port:notapormaset
+slave_priority:nparotiority

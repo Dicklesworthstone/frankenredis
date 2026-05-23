@@ -1,0 +1,5 @@
+# 
+role:slave
+mster
+master_port:103230
+

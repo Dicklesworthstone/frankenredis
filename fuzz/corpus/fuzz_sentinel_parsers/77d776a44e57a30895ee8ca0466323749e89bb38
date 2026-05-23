@@ -1,0 +1,5 @@
+t=0,lag=0
+slave2:it=10.0.0.=tp2ro1,6,,,,,319e=onli
+sseft=ag=,l00
+slave2:it=;.=tp2roi1,6,,,,,319=.fseft=ag=,l00
+slave2:it=10.0.0.=tp2ro1,6,,,,,319e=online,offset=3,lagg=0

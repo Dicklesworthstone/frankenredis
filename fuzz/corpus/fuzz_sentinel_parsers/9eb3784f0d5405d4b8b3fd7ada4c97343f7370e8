@@ -1,0 +1,2 @@
+#licat:3
+slave0:=ip=onmin,o=onl,oasa_o_fsetf=3,lag=0

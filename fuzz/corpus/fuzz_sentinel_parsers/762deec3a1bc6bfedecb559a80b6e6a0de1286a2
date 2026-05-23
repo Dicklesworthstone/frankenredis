@@ -1,0 +1,8 @@
+# Ree:#iatjion
+role:slave
+;.0.1
+master_port:633
+;;;;.0.1
+master_port:631
+master_port:633
+# pr

@@ -1,0 +1,8 @@
+# Replication
+role:master
+connected_slaves:2
+master_repz_offset:12345er-runplicaRtion
+role:master
+connected_slaves:2
+master_repz_offset:12345er-runid-1
+slv# Replica7370552.255.0

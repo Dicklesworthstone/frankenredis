@@ -1,0 +1,12 @@
+# (^Ion
+role:slave
+master_2.1
+master_port:6379
+replica_announced:6379
+replica_ann.slave
+master_port:6379
+replica_announced:6379
+replic9
+replica_announced:6379
+replica_announced:uislaveort:
+6379

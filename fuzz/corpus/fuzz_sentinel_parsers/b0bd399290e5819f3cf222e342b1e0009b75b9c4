@@ -1,0 +1,3 @@
+# Repves:1
+mast=69535,state=o_709%51615
+slave0:ip=255.255.255.255,port=69535,state=online,offset=18446744073704551615,lag=0

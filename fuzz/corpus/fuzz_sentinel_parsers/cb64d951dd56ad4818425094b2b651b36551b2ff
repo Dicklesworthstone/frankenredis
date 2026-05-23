@@ -1,0 +1,6 @@
+# Rep
+role:slave
+)1.1
+master_port:6379
+master_port:2284
+m

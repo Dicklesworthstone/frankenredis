@@ -1,0 +1,14 @@
+
+sl0.ffset+
+#!R
+role:slave
+maste_host.1
+master_port:0y
+ss
+master_port:0y
+sl0.ffsets
+#!R
+role:slave
+maste_host.1
+master_port:0y
+slaver_porslaveslave_st5:i2=p>av

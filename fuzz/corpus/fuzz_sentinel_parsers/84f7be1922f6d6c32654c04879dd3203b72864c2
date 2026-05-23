@@ -1,0 +1,7 @@
+# R=1,lp=,ag=0
+slave=:a=0
+slave=:ip=30.0.01,ip=10.01,por,t=ip=30.0.01,ip=10.0.030.0.01,ip=10.0.0.11,por,t=ip==0
+slave=:a=0
+slave=:ip=30.0.01,ip=10.01,por,t=ip=30.0.01,ip=10.0/030.0.01,ip=10.0.0e11,t=ip=30.0.ag:ip=,offset=1,lag# R=1,lag:ip=,offset=1,lag=0
+slave=:a==30.0.01,ip=10.01,por,t=ip=30.001,ip=10.0.030.0.01,ip=10.0.0.11,por,t=ip==slave=:a=0
+slave=:ip=.0.0031,ip=10.,por,t=ip=30.0.01,ip=11.0.030.0.01,ip=10.0.0.11,por,t=ip=30.0.01,ip=10.0

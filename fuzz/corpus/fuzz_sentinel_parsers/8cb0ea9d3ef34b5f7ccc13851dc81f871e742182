@@ -1,0 +1,5 @@
+127.0.0.1rt:nr
+slave_repl_off`set:notanr_port:nr
+slave_repl_off`set:rsion0.0.1,26379,rrt:nr
+slave_repl_off`set:notanr_port:nr
+slave_repl_off`set:n9,2

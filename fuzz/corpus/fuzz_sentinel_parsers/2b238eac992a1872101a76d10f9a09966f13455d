@@ -1,0 +1,4 @@
+" s
+role:slave
+m_ds0
+slave_repl_offset:54321e

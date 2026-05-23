@@ -1,0 +1,5 @@
+# Replication
+ron
+role:slave
+master_host:09.0.0.
+master_port:6379d
