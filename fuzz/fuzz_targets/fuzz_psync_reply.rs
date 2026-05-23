@@ -196,11 +196,15 @@ fn render_invalid_fullresync(case: InvalidFullResyncCase) -> String {
         InvalidFullResyncCase::InvalidOffset {
             replid,
             offset_text,
-        } => format!(
-            "FULLRESYNC {} {}",
-            sanitize_replid_40(replid),
-            sanitize_token(offset_text, "offset")
-        ),
+        } => {
+            // Ensure offset is truly invalid by prefixing with 'X'
+            let invalid_offset = format!("X{}", sanitize_token(offset_text, "0"));
+            format!(
+                "FULLRESYNC {} {}",
+                sanitize_replid_40(replid),
+                invalid_offset
+            )
+        }
         InvalidFullResyncCase::ExtraToken {
             replid,
             offset,
