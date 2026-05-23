@@ -4610,7 +4610,7 @@ impl Runtime {
             && let ReplicationRoleState::Replica { state, .. } =
                 &mut self.server.replication_runtime_state.role
         {
-            *state = "connect";
+            *state = "connecting";
             self.server.replica_reconfigure_requested = true;
         }
     }
@@ -4622,7 +4622,7 @@ impl Runtime {
             && let ReplicationRoleState::Replica { state, .. } =
                 &mut self.server.replication_runtime_state.role
         {
-            *state = "connect";
+            *state = "connecting";
             self.server.replica_reconfigure_requested = true;
         }
     }
@@ -12771,7 +12771,7 @@ replica_announced:1\r\n",
         self.server.replication_runtime_state.role = ReplicationRoleState::Replica {
             host: host.to_string(),
             port,
-            state: "connect",
+            state: "connecting",
         };
         self.server.replica_reconfigure_requested = true;
         Ok(())
@@ -12866,7 +12866,7 @@ replica_announced:1\r\n",
         self.server.replication_runtime_state.role = ReplicationRoleState::Replica {
             host,
             port,
-            state: "connect",
+            state: "connecting",
         };
         self.server.replica_reconfigure_requested = true;
         RespFrame::SimpleString("OK".to_string())
@@ -19094,7 +19094,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"slave".to_vec())),
                 RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
                 RespFrame::Integer(6380),
-                RespFrame::BulkString(Some(b"connect".to_vec())),
+                RespFrame::BulkString(Some(b"connecting".to_vec())),
                 RespFrame::Integer(-1),
             ]))
         );
@@ -19131,7 +19131,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"slave".to_vec())),
                 RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
                 RespFrame::Integer(6380),
-                RespFrame::BulkString(Some(b"connect".to_vec())),
+                RespFrame::BulkString(Some(b"connecting".to_vec())),
                 RespFrame::Integer(-1),
             ]))
         );
@@ -19321,7 +19321,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"slave".to_vec())),
                 RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
                 RespFrame::Integer(i64::from(addr.port())),
-                RespFrame::BulkString(Some(b"connect".to_vec())),
+                RespFrame::BulkString(Some(b"connecting".to_vec())),
                 RespFrame::Integer(-1),
             ]))
         );
@@ -19881,7 +19881,7 @@ mod tests {
         // the consistency invariant for chain-replicas.
         // (frankenredis-tplbw)
         let mut rt = Runtime::default_strict();
-        // Enter Replica role via REPLICAOF — initial state is "connect"
+        // Enter Replica role via REPLICAOF — initial state is "connecting"
         // (not "connected"), so the master link is not yet established.
         assert_eq!(
             rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0),
@@ -19948,7 +19948,7 @@ mod tests {
     #[test]
     fn psync_failover_rejected_when_replica_replid_mismatches() {
         let mut rt = Runtime::default_strict();
-        // Enter Replica role. Initial state is "connect" so the
+        // Enter Replica role. Initial state is "connecting" so the
         // NOMASTERLINK guard would normally fire — but the FAILOVER
         // replid-match check runs first per upstream order.
         assert_eq!(
@@ -21375,7 +21375,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"slave".to_vec())),
                 RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
                 RespFrame::Integer(6380),
-                RespFrame::BulkString(Some(b"connect".to_vec())),
+                RespFrame::BulkString(Some(b"connecting".to_vec())),
                 RespFrame::Integer(-1),
             ]))
         );

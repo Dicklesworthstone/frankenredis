@@ -475,7 +475,7 @@
           },
           {
             "kind": "bulk",
-            "value": "connect"
+            "value": "connecting"
           },
           {
             "kind": "integer",
@@ -555,7 +555,7 @@
           },
           {
             "kind": "bulk",
-            "value": "connect"
+            "value": "connecting"
           },
           {
             "kind": "integer",
