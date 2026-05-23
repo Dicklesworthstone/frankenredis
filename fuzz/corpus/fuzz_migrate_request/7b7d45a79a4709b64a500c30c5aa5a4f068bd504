@@ -1,0 +1,7 @@
+lhost
+6379
+
+0
+5000
+KEYS
+only

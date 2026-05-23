@@ -1,0 +1,11 @@
+localho3t
+6379
+
+5
+5000
+AUTH
+et
+KEYS
+k1
+k2
+k3
