@@ -1555,6 +1555,17 @@ pub struct Store {
     /// (frankenredis-trackingtotal) Number of BCAST prefixes tracked across
     /// all clients with prefix-based tracking enabled.
     pub stat_tracking_total_prefixes: usize,
+    /// True when a BGSAVE child process is currently running. Used by INFO
+    /// persistence's `rdb_bgsave_in_progress` field. Populated by the
+    /// runtime from `server.rdb_bgsave_pid.is_some()`.
+    pub rdb_bgsave_in_progress: bool,
+    /// True when a BGREWRITEAOF child process is currently running. Used by
+    /// INFO persistence's `aof_rewrite_in_progress` field. Populated by the
+    /// runtime from `server.aof_rewrite_pid.is_some()`.
+    pub aof_rewrite_in_progress: bool,
+    /// True when AOF rewrite is scheduled. Used by INFO persistence's
+    /// `aof_rewrite_scheduled` field. Populated by the runtime.
+    pub aof_rewrite_scheduled: bool,
     /// (frankenredis-jrqgd) Max read-buffer length observed across any
     /// client since the last reset. Drives INFO clients'
     /// `client_recent_max_input_buffer:` field. Updated by the runtime
@@ -1866,6 +1877,9 @@ impl Default for Store {
             stat_tracking_total_keys: 0,
             stat_tracking_total_items: 0,
             stat_tracking_total_prefixes: 0,
+            rdb_bgsave_in_progress: false,
+            aof_rewrite_in_progress: false,
+            aof_rewrite_scheduled: false,
             stat_clients_recent_max_input_buffer: 0,
             stat_clients_recent_max_output_buffer: 0,
             stat_clients_normal_mem_bytes: 0,

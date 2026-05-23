@@ -13939,7 +13939,11 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("current_save_keys_processed:0\r\n");
         info.push_str("current_save_keys_total:0\r\n");
         let _ = write!(info, "rdb_changes_since_last_save:{}\r\n", store.dirty);
-        info.push_str("rdb_bgsave_in_progress:0\r\n");
+        let _ = write!(
+            info,
+            "rdb_bgsave_in_progress:{}\r\n",
+            u8::from(store.rdb_bgsave_in_progress)
+        );
         let _ = write!(info, "rdb_last_save_time:{}\r\n", store.last_save_time_sec);
         let _ = write!(
             info,
@@ -13971,8 +13975,16 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             store.stat_rdb_last_load_keys_loaded
         );
         let _ = write!(info, "aof_enabled:{}\r\n", usize::from(store.aof_enabled));
-        info.push_str("aof_rewrite_in_progress:0\r\n");
-        info.push_str("aof_rewrite_scheduled:0\r\n");
+        let _ = write!(
+            info,
+            "aof_rewrite_in_progress:{}\r\n",
+            u8::from(store.aof_rewrite_in_progress)
+        );
+        let _ = write!(
+            info,
+            "aof_rewrite_scheduled:{}\r\n",
+            u8::from(store.aof_rewrite_scheduled)
+        );
         let _ = write!(
             info,
             "aof_last_rewrite_time_sec:{}\r\n",

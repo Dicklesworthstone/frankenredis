@@ -4493,6 +4493,9 @@ impl Runtime {
             .sum();
         self.server.store.stat_tracking_total_prefixes = total_prefixes;
         self.server.store.maxmemory_bytes_live = self.server.maxmemory_bytes;
+        self.server.store.rdb_bgsave_in_progress = self.server.rdb_bgsave_pid.is_some();
+        self.server.store.aof_rewrite_in_progress = self.server.aof_rewrite_pid.is_some();
+        self.server.store.aof_rewrite_scheduled = self.server.aof_rewrite_scheduled;
     }
 
     pub fn add_user(&mut self, username: Vec<u8>, password: Vec<u8>) {
