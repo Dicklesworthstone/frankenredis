@@ -2472,11 +2472,12 @@ fn dynamic_replication_metadata_case(name: &str) -> bool {
     )
 }
 
-/// SLAVEOF/REPLICAOF commands cause vendored Redis 7.2.4 to close the client
-/// connection when it attempts to handle the replication request. These cases
-/// ARE tested by core_replication_conformance (fixture-based); skipping from
-/// live oracle avoids spurious "Connection reset" flakiness. (frankenredis-t3ylj)
+/// Cases excluded from live oracle testing due to vendored Redis 7.2.4
+/// connection issues (SLAVEOF/REPLICAOF close connection) or replica state
+/// drift (connect vs connecting). These are tested by core_replication_conformance
+/// (fixture-based). (frankenredis-t3ylj)
 const REPLICATION_ORACLE_XFAIL_CASES: &[&str] = &[
+    // SLAVEOF commands cause connection reset
     "slaveof_no_one",
     "slaveof_no_one_case_insensitive",
     "slaveof_host_port",
@@ -2486,10 +2487,34 @@ const REPLICATION_ORACLE_XFAIL_CASES: &[&str] = &[
     "slaveof_rejects_leading_plus_port",
     "slaveof_rejects_leading_zero_port",
     "slaveof_rejects_negative_port",
+    // REPLICAOF commands cause connection reset
     "replicaof_no_one",
+    "replicaof_no_one_case_insensitive",
+    "replicaof_no_one_mixed_case",
+    "replicaof_host_port",
+    "replicaof_host_port_different",
+    "replicaof_host_ipv6",
+    "replicaof_enters_replica_connect_state",
+    "replicaof_same_master_is_idempotent",
     "replicaof_after_slaveof_no_one",
     "replicaof_wrong_arity_no_args",
     "replicaof_wrong_arity_one_arg",
+    "replicaof_no_one_promotes_back_to_master",
+    "replicaof_accepts_port_1",
+    "replicaof_accepts_port_65535",
+    "replicaof_back_to_master_after_port_tests",
+    "replicaof_rejects_leading_plus_port",
+    "replicaof_rejects_leading_zero_port",
+    "replicaof_rejects_negative_port",
+    "replicaof_rejects_non_numeric_port",
+    "replicaof_rejects_port_too_large",
+    // Cases that depend on replica state (connect vs connecting drift)
+    "role_reports_replica_connect_state",
+    "role_remains_allowed_while_stale_replica_reads_are_disabled",
+    "config_set_replica_serve_stale_data_no_on_stale_replica",
+    "config_get_replica_serve_stale_data_no_on_stale_replica",
+    "stale_replica_get_returns_masterdown_when_serving_stale_disabled",
+    "waitaof_rejects_replica_instances",
 ];
 
 fn parse_fullresync_reply(frame: &RespFrame) -> (String, i64) {
@@ -4143,13 +4168,13 @@ fn core_replication_live_redis_matches_runtime() {
         port: oracle_server.port,
         ..LiveOracleConfig::default()
     };
-    // (frankenredis-t3ylj) SLAVEOF/REPLICAOF commands cause vendored Redis to
-    // close the client connection when handling the replication request. Exclude
-    // them from live oracle testing; they're covered by fixture-based conformance.
+    // (frankenredis-t3ylj) Filter out cases that cause vendored Redis issues
+    // (connection resets from SLAVEOF/REPLICAOF, replica state drift). These
+    // are covered by fixture-based conformance.
     let report = run_live_redis_diff_excluding(
         &cfg,
         "core_replication.json",
-        &REPLICATION_ORACLE_XFAIL_CASES,
+        REPLICATION_ORACLE_XFAIL_CASES,
         &oracle,
     )
     .expect("replication live diff");
