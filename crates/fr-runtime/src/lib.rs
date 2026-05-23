@@ -24733,9 +24733,8 @@ mod tests {
             RespFrame::SimpleString("Background saving started".to_string())
         );
 
-        // Wait for child to exit
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        rt.check_child_processes(2);
+        // Wait for child to exit (blocking wait instead of timed poll)
+        rt.wait_for_child_processes();
 
         let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 2);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
@@ -24776,8 +24775,8 @@ mod tests {
             rt.execute_frame(command(&[b"BGSAVE"]), 1),
             RespFrame::SimpleString("Background saving started".to_string())
         );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        rt.check_child_processes(1);
+        // Use blocking wait instead of timed poll to avoid race condition
+        rt.wait_for_child_processes();
 
         assert_eq!(
             rt.execute_frame(command(&[b"SET", b"blocked", b"write"]), 2),
