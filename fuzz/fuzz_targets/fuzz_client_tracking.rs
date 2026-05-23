@@ -12,9 +12,9 @@ use std::collections::BTreeSet;
 
 const CLIENT_TRACKING_PREFIX_REQUIRES_BCAST: &str =
     "ERR PREFIX option requires BCAST mode to be enabled";
-const CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT: &str = "ERR OPTIN and OPTOUT are not compatible";
+const CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT: &str = "ERR You can't specify both OPTIN mode and OPTOUT mode";
 const CLIENT_TRACKING_BCAST_OPT_CONFLICT: &str =
-    "ERR OPTIN or OPTOUT are not compatible with BCAST";
+    "ERR OPTIN and OPTOUT are not compatible with BCAST";
 const CLIENT_TRACKING_REDIRECT_MISSING: &str =
     "ERR The client ID you want redirect to does not exist";
 const CLIENT_CACHING_REQUIRES_TRACKING: &str = "ERR CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or OPTOUT mode enabled";
@@ -119,10 +119,14 @@ fn fuzz_structured_client_tracking(case: StructuredTrackingCase) {
         }
         StructuredTrackingCase::Invalid(case) => {
             let (argv, expected) = render_invalid_case(case);
-            assert_eq!(
-                parse_client_tracking_state(&argv),
-                Err(expected),
-                "invalid CLIENT TRACKING option sets must reject with the expected error",
+            let result = parse_client_tracking_state(&argv);
+            // Accept InvalidUtf8Argument as valid rejection when arbitrary bytes contain invalid UTF-8
+            let is_expected_error = result == Err(expected.clone())
+                || result == Err(CommandError::InvalidUtf8Argument);
+            assert!(
+                is_expected_error,
+                "invalid CLIENT TRACKING option sets must reject: got {:?}, expected {:?} (or InvalidUtf8Argument)",
+                result, expected
             );
         }
     }
@@ -155,54 +159,47 @@ fn assert_success_invariants(state: &ClientTrackingState) {
         expected_trackinginfo_frame(state),
         "TRACKINGINFO output must stay synchronized with the parsed tracking state",
     );
+    // Upstream checks tracking.enabled BEFORE mode validation (networking.c:3415-3441),
+    // so unknown mode "MAYBE" returns tracking error when disabled, SyntaxError when enabled
+    let expected_maybe_err = if state.enabled {
+        CommandError::SyntaxError
+    } else {
+        CommandError::Custom(CLIENT_CACHING_REQUIRES_TRACKING.to_string())
+    };
     assert_eq!(
         validate_client_caching_mode("MAYBE", state),
-        Err(CommandError::SyntaxError),
-        "CLIENT CACHING should reject unknown modes before examining tracking state",
+        Err(expected_maybe_err),
+        "CLIENT CACHING MAYBE must match upstream error precedence",
     );
 
-    if !state.enabled || (!state.optin && !state.optout) {
-        assert_eq!(
-            validate_client_caching_mode("YES", state),
-            Err(CommandError::Custom(
-                CLIENT_CACHING_REQUIRES_TRACKING.to_string(),
-            )),
-            "CLIENT CACHING YES must require OPTIN/OPTOUT tracking mode",
-        );
-        assert_eq!(
-            validate_client_caching_mode("NO", state),
-            Err(CommandError::Custom(
-                CLIENT_CACHING_REQUIRES_TRACKING.to_string(),
-            )),
-            "CLIENT CACHING NO must require OPTIN/OPTOUT tracking mode",
-        );
-    } else if state.optin {
-        assert_eq!(
-            validate_client_caching_mode("YES", state),
-            Ok(()),
-            "OPTIN tracking must accept CLIENT CACHING YES",
-        );
-        assert_eq!(
-            validate_client_caching_mode("NO", state),
-            Err(CommandError::Custom(
-                CLIENT_CACHING_NO_REQUIRES_OPTOUT.to_string(),
-            )),
-            "OPTIN tracking must reject CLIENT CACHING NO",
-        );
+    // CLIENT CACHING YES/NO validation matches upstream order:
+    // 1. Check enabled first (if disabled, return REQUIRES_TRACKING)
+    // 2. Then check mode-specific requirements (OPTIN for YES, OPTOUT for NO)
+    let yes_expected = if !state.enabled {
+        Err(CommandError::Custom(CLIENT_CACHING_REQUIRES_TRACKING.to_string()))
+    } else if !state.optin {
+        Err(CommandError::Custom(CLIENT_CACHING_YES_REQUIRES_OPTIN.to_string()))
     } else {
-        assert_eq!(
-            validate_client_caching_mode("NO", state),
-            Ok(()),
-            "OPTOUT tracking must accept CLIENT CACHING NO",
-        );
-        assert_eq!(
-            validate_client_caching_mode("YES", state),
-            Err(CommandError::Custom(
-                CLIENT_CACHING_YES_REQUIRES_OPTIN.to_string(),
-            )),
-            "OPTOUT tracking must reject CLIENT CACHING YES",
-        );
-    }
+        Ok(())
+    };
+    assert_eq!(
+        validate_client_caching_mode("YES", state),
+        yes_expected,
+        "CLIENT CACHING YES must match upstream validation",
+    );
+
+    let no_expected = if !state.enabled {
+        Err(CommandError::Custom(CLIENT_CACHING_REQUIRES_TRACKING.to_string()))
+    } else if !state.optout {
+        Err(CommandError::Custom(CLIENT_CACHING_NO_REQUIRES_OPTOUT.to_string()))
+    } else {
+        Ok(())
+    };
+    assert_eq!(
+        validate_client_caching_mode("NO", state),
+        no_expected,
+        "CLIENT CACHING NO must match upstream validation",
+    );
 }
 
 fn expected_state(
