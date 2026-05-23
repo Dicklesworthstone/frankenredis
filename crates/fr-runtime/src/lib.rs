@@ -1380,8 +1380,18 @@ impl AuthState {
                         "ERR Error in ACL SETUSER modifier '{rule_str}': Unknown command or category name in ACL"
                     ));
                 }
-                user.allowed_categories.insert(cat_lower.clone());
-                user.denied_categories.remove(&cat_lower);
+                // Category "all" is equivalent to allcommands for idempotency
+                // (frankenredis-mb2eb: +@alL must behave like +@all)
+                if cat_lower == "all" {
+                    user.all_commands = true;
+                    user.allowed_commands.clear();
+                    user.denied_commands.clear();
+                    user.allowed_categories.clear();
+                    user.denied_categories.clear();
+                } else {
+                    user.allowed_categories.insert(cat_lower.clone());
+                    user.denied_categories.remove(&cat_lower);
+                }
             } else if let Some(cat) = rule_str.strip_prefix("-@") {
                 // -@category — deny all commands in this category.
                 // (br-frankenredis-aclsetcat)
@@ -1391,8 +1401,18 @@ impl AuthState {
                         "ERR Error in ACL SETUSER modifier '{rule_str}': Unknown command or category name in ACL"
                     ));
                 }
-                user.denied_categories.insert(cat_lower.clone());
-                user.allowed_categories.remove(&cat_lower);
+                // Category "all" is equivalent to nocommands for idempotency
+                // (frankenredis-mb2eb: -@alL must behave like -@all)
+                if cat_lower == "all" {
+                    user.all_commands = false;
+                    user.allowed_commands.clear();
+                    user.denied_commands.clear();
+                    user.allowed_categories.clear();
+                    user.denied_categories.clear();
+                } else {
+                    user.denied_categories.insert(cat_lower.clone());
+                    user.allowed_categories.remove(&cat_lower);
+                }
             } else if let Some(cmd) = rule_str.strip_prefix('+') {
                 // +command — allow this specific command. Upstream
                 // acl.c::ACLSetUser rejects unknown command names
