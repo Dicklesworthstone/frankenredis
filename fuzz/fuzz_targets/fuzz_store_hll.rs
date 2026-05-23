@@ -209,15 +209,27 @@ fn apply_op(store: &mut Store, op: HllOp, now_ms: u64) {
             let dest = slot_key(slot_index(dest));
             let source_keys = build_source_keys(source_count, [first, second, third]);
             let unique_source_keys = dedupe_source_keys(&source_keys);
+
+            // PFMERGE includes dest's existing data in the union, so we must
+            // compute the expected union over dest + sources (deduplicated).
+            let mut all_keys_for_expected: Vec<&[u8]> = vec![dest];
+            all_keys_for_expected.extend(source_keys.iter().copied());
+            let all_keys_for_expected = dedupe_source_keys(&all_keys_for_expected);
+
             let expected_union = store
+                .pfcount(&all_keys_for_expected, now_ms)
+                .expect("counting dest + sources should work");
+
+            // Verify duplicate sources don't change the estimate
+            let expected_sources_only = store
                 .pfcount(&source_keys, now_ms)
-                .expect("counting merge sources should work");
-            let expected_unique_union = store
+                .expect("counting sources should work");
+            let expected_unique_sources = store
                 .pfcount(&unique_source_keys, now_ms)
-                .expect("counting unique merge sources should work");
+                .expect("counting unique sources should work");
             assert_eq!(
-                expected_union, expected_unique_union,
-                "duplicate PFMERGE sources should not change the union estimate"
+                expected_sources_only, expected_unique_sources,
+                "duplicate PFCOUNT sources should not change the estimate"
             );
 
             store
@@ -226,7 +238,7 @@ fn apply_op(store: &mut Store, op: HllOp, now_ms: u64) {
             let after_merge = store.pfcount(&[dest], now_ms).expect("dest count");
             assert_eq!(
                 after_merge, expected_union,
-                "PFMERGE destination should match PFCOUNT over the source union"
+                "PFMERGE destination should match PFCOUNT over dest + sources union"
             );
 
             let payload_after_first = dump_payload(store, dest, now_ms);
