@@ -114,8 +114,15 @@ proptest! {
         }
         rt.execute_frame(RespFrame::Array(Some(mset_args)), 0);
 
-        // Verify each key
-        for (key, expected_val) in &values {
+        // Deduplicate keys: MSET keeps the last value for duplicate keys.
+        // Build a map to get final expected values.
+        let mut expected_map: std::collections::HashMap<Vec<u8>, Vec<u8>> = std::collections::HashMap::new();
+        for (key, val) in &values {
+            expected_map.insert(key.clone(), val.clone());
+        }
+
+        // Verify each unique key
+        for (key, expected_val) in &expected_map {
             let get_args = vec![
                 RespFrame::BulkString(Some(b"GET".to_vec())),
                 RespFrame::BulkString(Some(key.clone())),
