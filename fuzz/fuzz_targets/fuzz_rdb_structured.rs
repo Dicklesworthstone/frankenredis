@@ -311,6 +311,7 @@ fn build_stream_groups(
         name: capped_non_empty(&group.name, b"group", 32),
         last_delivered_id_ms: pending_entry.0,
         last_delivered_id_seq: pending_entry.1,
+        entries_read: None,
         consumers: vec![consumer.clone()],
         pending: vec![RdbStreamPendingEntry {
             entry_id_ms: pending_entry.0,
