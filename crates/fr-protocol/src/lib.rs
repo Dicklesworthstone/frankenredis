@@ -23,6 +23,18 @@ pub enum RespFrame {
 /// is built from user-controlled input via `format!()`. Mirrors
 /// upstream Redis' `_addReplyErrorFormat` which does
 /// `sdsmapchars(s, "\r\n", "  ", 2)` for the same reason.
+///
+/// Used both for encoding (output) and parsing (input) to ensure
+/// roundtrip consistency: `parse(encode(frame)) == frame`.
+fn sanitize_inline_body(s: &str) -> String {
+    if !s.bytes().any(|b| b == b'\r' || b == b'\n') {
+        return s.to_owned();
+    }
+    s.chars()
+        .map(|c| if c == '\r' || c == '\n' { ' ' } else { c })
+        .collect()
+}
+
 fn push_inline_sanitized(out: &mut Vec<u8>, body: &[u8]) {
     let needs_sanitize = body.iter().any(|&b| b == b'\r' || b == b'\n');
     if !needs_sanitize {
@@ -223,16 +235,14 @@ fn parse_frame_internal(
     match prefix {
         b'+' => {
             let (line, consumed) = read_line(input, next)?;
-            let text = std::str::from_utf8(line)
-                .map(str::to_owned)
-                .map_err(|_| RespParseError::InvalidUtf8)?;
+            let raw = std::str::from_utf8(line).map_err(|_| RespParseError::InvalidUtf8)?;
+            let text = sanitize_inline_body(raw);
             Ok((RespFrame::SimpleString(text), consumed))
         }
         b'-' => {
             let (line, consumed) = read_line(input, next)?;
-            let text = std::str::from_utf8(line)
-                .map(str::to_owned)
-                .map_err(|_| RespParseError::InvalidUtf8)?;
+            let raw = std::str::from_utf8(line).map_err(|_| RespParseError::InvalidUtf8)?;
+            let text = sanitize_inline_body(raw);
             Ok((RespFrame::Error(text), consumed))
         }
         b':' => {
