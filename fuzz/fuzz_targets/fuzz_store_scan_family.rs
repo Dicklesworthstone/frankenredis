@@ -311,10 +311,19 @@ fn assert_hscan_query(
     pattern: Option<&[u8]>,
     now_ms: u64,
 ) {
+    // Upstream HSCAN short-circuits on small hashes (listpack-encoded):
+    // returns all entries with cursor=0, ignoring COUNT and input cursor.
+    // With MAX_HASH_FIELDS=8 and MAX_BLOB_LEN=24, all fuzz hashes fit in
+    // listpack (hash_max_listpack_entries=512, hash_max_listpack_value=64).
     match target {
         CollectionTarget::Real => {
             let ordered = store.hgetall(HASH_KEY, now_ms).expect("seeded hash");
-            let expected = expected_assoc_batch(&ordered, cursor as usize, count as usize, pattern);
+            // Short-circuit for listpack: return all matching entries with cursor=0
+            let expected: Vec<(Vec<u8>, Vec<u8>)> = ordered
+                .iter()
+                .filter(|(field, _)| pattern.is_none_or(|pat| glob_match(pat, field)))
+                .cloned()
+                .collect();
             let actual = store.hscan(
                 HASH_KEY,
                 u64::from(cursor),
@@ -322,8 +331,12 @@ fn assert_hscan_query(
                 usize::from(count),
                 now_ms,
             );
-            assert_eq!(actual, Ok(expected.clone()));
-            assert_hash_full_walk(store, count, pattern, now_ms, ordered);
+            assert_eq!(actual, Ok((0, expected.clone())));
+            // Full walk is also a single step for listpack
+            assert_eq!(
+                store.hscan(HASH_KEY, 0, pattern, usize::from(count), now_ms),
+                Ok((0, expected))
+            );
         }
         CollectionTarget::WrongType => {
             assert_eq!(
@@ -360,10 +373,19 @@ fn assert_sscan_query(
     pattern: Option<&[u8]>,
     now_ms: u64,
 ) {
+    // Upstream SSCAN short-circuits on small sets (listpack/intset-encoded):
+    // returns all entries with cursor=0, ignoring COUNT and input cursor.
+    // With MAX_SET_MEMBERS=8 and MAX_BLOB_LEN=24, all fuzz sets fit in
+    // listpack/intset (set_max_listpack_entries=128, set_max_listpack_value=64).
     match target {
         CollectionTarget::Real => {
             let ordered = store.smembers(SET_KEY, now_ms).expect("seeded set");
-            let expected = expected_scan_batch(&ordered, cursor as usize, count as usize, pattern);
+            // Short-circuit for listpack/intset: return all matching entries with cursor=0
+            let expected: Vec<Vec<u8>> = ordered
+                .iter()
+                .filter(|member| pattern.is_none_or(|pat| glob_match(pat, member)))
+                .cloned()
+                .collect();
             let actual = store.sscan(
                 SET_KEY,
                 u64::from(cursor),
@@ -371,8 +393,12 @@ fn assert_sscan_query(
                 usize::from(count),
                 now_ms,
             );
-            assert_eq!(actual, Ok(expected.clone()));
-            assert_member_full_walk(store, SET_KEY, count, pattern, now_ms, ordered);
+            assert_eq!(actual, Ok((0, expected.clone())));
+            // Full walk is also a single step for listpack/intset
+            assert_eq!(
+                store.sscan(SET_KEY, 0, pattern, usize::from(count), now_ms),
+                Ok((0, expected))
+            );
         }
         CollectionTarget::WrongType => {
             assert_eq!(
@@ -409,12 +435,21 @@ fn assert_zscan_query(
     pattern: Option<&[u8]>,
     now_ms: u64,
 ) {
+    // Upstream ZSCAN short-circuits on small zsets (listpack-encoded):
+    // returns all entries with cursor=0, ignoring COUNT and input cursor.
+    // With MAX_ZSET_MEMBERS=8 and MAX_BLOB_LEN=24, all fuzz zsets fit in
+    // listpack (zset_max_listpack_entries=128, zset_max_listpack_value=64).
     match target {
         CollectionTarget::Real => {
             let ordered = store
                 .zrange_withscores(ZSET_KEY, 0, -1, now_ms)
                 .expect("seeded zset");
-            let expected = expected_assoc_batch(&ordered, cursor as usize, count as usize, pattern);
+            // Short-circuit for listpack: return all matching entries with cursor=0
+            let expected: Vec<(Vec<u8>, f64)> = ordered
+                .iter()
+                .filter(|(member, _)| pattern.is_none_or(|pat| glob_match(pat, member)))
+                .cloned()
+                .collect();
             let actual = store.zscan(
                 ZSET_KEY,
                 u64::from(cursor),
@@ -422,8 +457,12 @@ fn assert_zscan_query(
                 usize::from(count),
                 now_ms,
             );
-            assert_eq!(actual, Ok(expected.clone()));
-            assert_zscan_full_walk(store, count, pattern, now_ms, ordered);
+            assert_eq!(actual, Ok((0, expected.clone())));
+            // Full walk is also a single step for listpack
+            assert_eq!(
+                store.zscan(ZSET_KEY, 0, pattern, usize::from(count), now_ms),
+                Ok((0, expected))
+            );
         }
         CollectionTarget::WrongType => {
             assert_eq!(
