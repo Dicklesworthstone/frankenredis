@@ -4465,7 +4465,33 @@ impl Runtime {
     }
 
     fn refresh_store_runtime_info_context(&mut self) {
-        self.server.store.stat_tracking_clients = 0;
+        // (frankenredis-trackingtotal) Compute client tracking stats for INFO stats section.
+        // stat_tracking_clients: count of clients with tracking enabled
+        // stat_tracking_total_keys: number of distinct keys being tracked
+        // stat_tracking_total_items: sum of all key-to-client subscriptions
+        // stat_tracking_total_prefixes: sum of all BCAST prefixes across clients
+        let mut tracking_clients: u64 = 0;
+        let mut total_prefixes: usize = 0;
+        for session in self.server.client_sessions.values() {
+            if session.client_tracking.enabled {
+                tracking_clients += 1;
+                total_prefixes += session.client_tracking.prefixes.len();
+            }
+        }
+        if self.session.client_tracking.enabled {
+            tracking_clients += 1;
+            total_prefixes += self.session.client_tracking.prefixes.len();
+        }
+        self.server.store.stat_tracking_clients = tracking_clients;
+        self.server.store.stat_tracking_total_keys =
+            self.server.client_tracking_observed_keys.len();
+        self.server.store.stat_tracking_total_items = self
+            .server
+            .client_tracking_observed_keys
+            .values()
+            .map(|observers| observers.len())
+            .sum();
+        self.server.store.stat_tracking_total_prefixes = total_prefixes;
         self.server.store.maxmemory_bytes_live = self.server.maxmemory_bytes;
     }
 

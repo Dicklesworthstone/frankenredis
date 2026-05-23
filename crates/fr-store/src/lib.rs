@@ -1546,6 +1546,15 @@ pub struct Store {
     pub stat_blocked_clients: u64,
     /// Number of clients with client-side caching tracking enabled.
     pub stat_tracking_clients: u64,
+    /// (frankenredis-trackingtotal) Number of distinct keys being tracked
+    /// for client-side caching invalidation notifications.
+    pub stat_tracking_total_keys: usize,
+    /// (frankenredis-trackingtotal) Total count of key-to-client tracking
+    /// subscriptions (sum of all client IDs observing each key).
+    pub stat_tracking_total_items: usize,
+    /// (frankenredis-trackingtotal) Number of BCAST prefixes tracked across
+    /// all clients with prefix-based tracking enabled.
+    pub stat_tracking_total_prefixes: usize,
     /// (frankenredis-jrqgd) Max read-buffer length observed across any
     /// client since the last reset. Drives INFO clients'
     /// `client_recent_max_input_buffer:` field. Updated by the runtime
@@ -1854,6 +1863,9 @@ impl Default for Store {
             stat_connected_clients: 0,
             stat_blocked_clients: 0,
             stat_tracking_clients: 0,
+            stat_tracking_total_keys: 0,
+            stat_tracking_total_items: 0,
+            stat_tracking_total_prefixes: 0,
             stat_clients_recent_max_input_buffer: 0,
             stat_clients_recent_max_output_buffer: 0,
             stat_clients_normal_mem_bytes: 0,

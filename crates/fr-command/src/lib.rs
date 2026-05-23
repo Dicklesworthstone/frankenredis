@@ -14117,9 +14117,21 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("active_defrag_key_misses:0\r\n");
         info.push_str("total_active_defrag_time:0\r\n");
         info.push_str("current_active_defrag_time:0\r\n");
-        info.push_str("tracking_total_keys:0\r\n");
-        info.push_str("tracking_total_items:0\r\n");
-        info.push_str("tracking_total_prefixes:0\r\n");
+        let _ = write!(
+            info,
+            "tracking_total_keys:{}\r\n",
+            store.stat_tracking_total_keys
+        );
+        let _ = write!(
+            info,
+            "tracking_total_items:{}\r\n",
+            store.stat_tracking_total_items
+        );
+        let _ = write!(
+            info,
+            "tracking_total_prefixes:{}\r\n",
+            store.stat_tracking_total_prefixes
+        );
         let _ = write!(
             info,
             "unexpected_error_replies:{}\r\n",
