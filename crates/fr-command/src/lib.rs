@@ -44148,6 +44148,11 @@ mod tests {
             let name = entry.file_name().into_string().map_err(|name| {
                 format!("fuzz_migrate_request seed filename is not UTF-8: {name:?}")
             })?;
+            // Skip fuzz-generated hash-named seeds (40 hex chars = SHA-1).
+            // Only manually named seeds are checked against the contract.
+            if name.len() == 40 && name.chars().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
             assert!(
                 listed_seeds.contains(name.as_str()),
                 "fuzz_migrate_request seed {name} must be listed as accept or reject"
