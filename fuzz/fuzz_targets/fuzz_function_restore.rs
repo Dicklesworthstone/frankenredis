@@ -158,8 +158,14 @@ fn render_function_library(
     }
 
     let mut lines = vec![format!("#!lua name={library_name}")];
+    let mut seen_names = std::collections::HashSet::new();
     for (index, registration) in registrations.into_iter().enumerate() {
-        let function_name = sanitize_ident(registration.name, &format!("fn_{index}"));
+        // Ensure unique function names by appending index if needed
+        let mut function_name = sanitize_ident(registration.name, &format!("fn_{index}"));
+        while seen_names.contains(&function_name) {
+            function_name = format!("{}_{}", function_name, index);
+        }
+        seen_names.insert(function_name.clone());
         match registration.style {
             RegistrationStyle::Call => lines.push(format!(
                 "redis.register_function('{function_name}', function(keys, args) return {} end)",
@@ -185,11 +191,12 @@ fn render_seed_library(library_name: &str, function_name: &str) -> String {
 }
 
 fn sanitize_ident(bytes: Vec<u8>, fallback: &str) -> String {
+    // Library/function names only allow letters, numbers, and underscore (no dash)
     let filtered: String = bytes
         .into_iter()
         .filter_map(|byte| {
             let ch = byte as char;
-            (ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')).then_some(ch)
+            (ch.is_ascii_alphanumeric() || ch == '_').then_some(ch)
         })
         .take(MAX_IDENT_LEN)
         .collect();
