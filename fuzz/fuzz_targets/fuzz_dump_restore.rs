@@ -62,7 +62,9 @@ fuzz_target!(|data: &[u8]| {
 
 fn fuzz_valid_roundtrip(case: ValidDumpRestoreCase) {
     let key = normalized_key(case.key);
-    let ttl_ms = case.ttl_ms.map(u64::from);
+    // TTL=0 causes immediate expiry, so use at least 1ms.
+    // Add buffer to ensure key doesn't expire before dump_key is called.
+    let ttl_ms = case.ttl_ms.map(|v| u64::from(v).max(1000));
 
     let mut original = Store::new();
     install_value(&mut original, &key, ttl_ms, case.value);
