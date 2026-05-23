@@ -1802,6 +1802,8 @@ const CORE_DEBUG_LIVE_STABLE_CASES: &[&str] = &[
 struct VendoredRedisOracle {
     child: Child,
     port: u16,
+    /// Dedicated temp dir for this oracle instance to avoid loading stray RDB files.
+    _temp_dir: PathBuf,
 }
 
 impl VendoredRedisOracle {
@@ -1824,8 +1826,14 @@ impl VendoredRedisOracle {
                 .port();
             drop(listener);
 
-            // Use temp dir to avoid loading stray dump.rdb files from other processes
-            let temp_dir = std::env::temp_dir();
+            // Create a unique temp dir for this oracle to avoid loading stray RDB files
+            let unique_dir = std::env::temp_dir().join(format!(
+                "vendored_redis_oracle_{}_{}",
+                std::process::id(),
+                port
+            ));
+            let _ = fs::create_dir_all(&unique_dir);
+
             let mut child = Command::new(&server_path)
                 .args([
                     "--save",
@@ -1839,7 +1847,7 @@ impl VendoredRedisOracle {
                     "--enable-debug-command",
                     "local",
                     "--dir",
-                    &temp_dir.to_string_lossy(),
+                    &unique_dir.to_string_lossy(),
                 ])
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -1848,8 +1856,14 @@ impl VendoredRedisOracle {
                 .expect("spawn vendored redis-server");
 
             if wait_for_redis_ready(port) {
-                return Self { child, port };
+                return Self {
+                    child,
+                    port,
+                    _temp_dir: unique_dir,
+                };
             }
+            // Clean up the temp dir if startup failed
+            let _ = fs::remove_dir_all(&unique_dir);
 
             // Check if the child exited early (indicates startup error)
             let exit_status = child.try_wait();
@@ -1914,7 +1928,15 @@ impl VendoredRedisOracle {
                 .port();
             drop(listener);
 
-            let config_path = write_vendored_redis_config(port);
+            // Create a unique temp dir for this oracle to avoid loading stray RDB files
+            let unique_dir = std::env::temp_dir().join(format!(
+                "vendored_redis_oracle_cfg_{}_{}",
+                std::process::id(),
+                port
+            ));
+            let _ = fs::create_dir_all(&unique_dir);
+
+            let config_path = write_vendored_redis_config(port, &unique_dir);
             let mut child = Command::new(&server_path)
                 .arg(&config_path)
                 .stdin(Stdio::null())
@@ -1924,8 +1946,14 @@ impl VendoredRedisOracle {
                 .expect("spawn vendored redis-server from config file");
 
             if wait_for_redis_ready(port) {
-                return Self { child, port };
+                return Self {
+                    child,
+                    port,
+                    _temp_dir: unique_dir,
+                };
             }
+            // Clean up the temp dir if startup failed
+            let _ = fs::remove_dir_all(&unique_dir);
 
             // Check if the child exited early (indicates startup error)
             let exit_status = child.try_wait();
@@ -1965,6 +1993,8 @@ impl Drop for VendoredRedisOracle {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // Clean up the unique temp directory
+        let _ = fs::remove_dir_all(&self._temp_dir);
     }
 }
 
@@ -1990,13 +2020,12 @@ fn wait_for_redis_ready(port: u16) -> bool {
     false
 }
 
-fn write_vendored_redis_config(port: u16) -> PathBuf {
+fn write_vendored_redis_config(port: u16, unique_dir: &Path) -> PathBuf {
     let timestamp_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_nanos();
-    let temp_root = std::env::temp_dir();
-    let config_path = temp_root.join(format!(
+    let config_path = unique_dir.join(format!(
         "fr_conformance_vendored_redis_{}_{}_{}.conf",
         std::process::id(),
         port,
@@ -2004,7 +2033,7 @@ fn write_vendored_redis_config(port: u16) -> PathBuf {
     ));
     let config = format!(
         "bind 127.0.0.1\nport {port}\nsave \"\"\nappendonly no\nenable-debug-command local\ndir {}\n",
-        temp_root.display()
+        unique_dir.display()
     );
     fs::write(&config_path, config).expect("write vendored redis config");
     config_path
