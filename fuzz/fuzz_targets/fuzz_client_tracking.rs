@@ -151,7 +151,7 @@ fn assert_success_invariants(state: &ClientTrackingState) {
     }
 
     assert_eq!(
-        client_trackinginfo_frame(state),
+        client_trackinginfo_frame(state, 2),
         expected_trackinginfo_frame(state),
         "TRACKINGINFO output must stay synchronized with the parsed tracking state",
     );
