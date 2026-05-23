@@ -13903,8 +13903,18 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         let _ = write!(info, "mem_fragmentation_ratio:{frag_ratio:.2}\r\n");
         info.push_str("mem_fragmentation_bytes:0\r\n");
         info.push_str("mem_not_counted_for_evict:0\r\n");
-        info.push_str("mem_replication_backlog:0\r\n");
-        info.push_str("mem_total_replication_buffers:0\r\n");
+        let _ = write!(
+            info,
+            "mem_replication_backlog:{}\r\n",
+            store.mem_replication_backlog
+        );
+        // mem_total_replication_buffers = backlog + per-replica output buffers.
+        // Currently only tracks backlog; replica output buffers aren't measured.
+        let _ = write!(
+            info,
+            "mem_total_replication_buffers:{}\r\n",
+            store.mem_replication_backlog
+        );
         // (frankenredis-d9mxz) Mirror the same per-client buffer
         // summation MEMORY STATS uses (zfu61). Vendored emits 0 for
         // mem_clients_slaves when no replicas are attached.

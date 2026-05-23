@@ -1572,6 +1572,10 @@ pub struct Store {
     /// True when AOF rewrite is scheduled. Used by INFO persistence's
     /// `aof_rewrite_scheduled` field. Populated by the runtime.
     pub aof_rewrite_scheduled: bool,
+    /// Memory used by the replication backlog buffer (aof_records). Used by
+    /// INFO memory's `mem_replication_backlog` field. Populated by the runtime
+    /// via refresh_store_runtime_info_context.
+    pub mem_replication_backlog: usize,
     /// (frankenredis-jrqgd) Max read-buffer length observed across any
     /// client since the last reset. Drives INFO clients'
     /// `client_recent_max_input_buffer:` field. Updated by the runtime
@@ -1888,6 +1892,7 @@ impl Default for Store {
             aof_rewrite_in_progress: false,
             aof_rewrite_start_time_sec: None,
             aof_rewrite_scheduled: false,
+            mem_replication_backlog: 0,
             stat_clients_recent_max_input_buffer: 0,
             stat_clients_recent_max_output_buffer: 0,
             stat_clients_normal_mem_bytes: 0,

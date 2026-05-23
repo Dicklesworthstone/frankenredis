@@ -4506,6 +4506,22 @@ impl Runtime {
         self.server.store.aof_rewrite_in_progress = self.server.aof_rewrite_pid.is_some();
         self.server.store.aof_rewrite_start_time_sec = self.server.aof_rewrite_start_time_sec;
         self.server.store.aof_rewrite_scheduled = self.server.aof_rewrite_scheduled;
+        // Compute replication backlog memory usage from aof_records buffer.
+        // Each AofRecord contains a Vec<Vec<u8>> for the command argv.
+        self.server.store.mem_replication_backlog = self
+            .server
+            .aof_records
+            .iter()
+            .map(|record| {
+                // Size estimate: Vec overhead + sum of argv element lengths + Vec overhead per element
+                std::mem::size_of::<fr_persist::AofRecord>()
+                    + record
+                        .argv
+                        .iter()
+                        .map(|arg| arg.len() + std::mem::size_of::<Vec<u8>>())
+                        .sum::<usize>()
+            })
+            .sum();
     }
 
     pub fn add_user(&mut self, username: Vec<u8>, password: Vec<u8>) {
