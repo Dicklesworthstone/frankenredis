@@ -176,11 +176,18 @@ fn render_invalid_case(case: InvalidKeyspaceCase) -> String {
             out.push_str(&render_valid_classes(&valid_suffix));
             out
         }
-        InvalidKeyspaceCase::OnlyInvalid { invalids } => invalids
-            .iter()
-            .take(MAX_TOKENS)
-            .map(|token| invalid_token_char(*token))
-            .collect(),
+        InvalidKeyspaceCase::OnlyInvalid { invalids } => {
+            // Empty string is valid (0 flags), so ensure at least one invalid token
+            if invalids.is_empty() {
+                "?".to_string()
+            } else {
+                invalids
+                    .iter()
+                    .take(MAX_TOKENS)
+                    .map(|token| invalid_token_char(*token))
+                    .collect()
+            }
+        }
     }
 }
 
