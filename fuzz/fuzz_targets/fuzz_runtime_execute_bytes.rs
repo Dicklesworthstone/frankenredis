@@ -39,7 +39,10 @@ fuzz_target!(|data: &[u8]| {
 
 fn fuzz_valid_command(case: StructuredCommand) {
     let argv = normalize_argv(case.argv);
-    let frame = argv_to_frame(argv);
+    let frame = argv_to_frame(argv.clone());
+    if command_has_nondeterministic_output(&frame) {
+        return;
+    }
     let input = frame.to_bytes();
     let now_ms = NOW_MS + u64::from(case.now_offset_ms);
 
@@ -56,11 +59,17 @@ fn fuzz_valid_command(case: StructuredCommand) {
 
 fn fuzz_raw_bytes(raw: Vec<u8>) {
     let raw = truncate_bytes(raw, MAX_RAW_LEN);
-    let mut runtime_bytes = Runtime::default_strict();
-    let output = runtime_bytes.execute_bytes(&raw, NOW_MS);
+    let mut runtime = Runtime::default_strict();
+    let output = runtime.execute_bytes(&raw, NOW_MS);
     let output_frames = decode_all_frames(&output);
 
     if let Ok(parsed) = parse_frame_with_config(&raw, &default_runtime_parser_config()) {
+        // Use a fresh runtime for the frame path so we compare semantics,
+        // not ephemeral per-runtime state. Commands with non-deterministic
+        // output (INFO, CLIENT ID, etc.) are filtered out below.
+        if command_has_nondeterministic_output(&parsed.frame) {
+            return;
+        }
         let mut runtime_frame = Runtime::default_strict();
         let expected = runtime_frame.execute_frame(parsed.frame, NOW_MS).to_bytes();
         let expected_frames = decode_all_frames(&expected);
@@ -69,6 +78,44 @@ fn fuzz_raw_bytes(raw: Vec<u8>) {
             "execute_bytes must match execute_frame for any raw input whose first frame parses under the live runtime parser limits"
         );
     }
+}
+
+fn command_has_nondeterministic_output(frame: &RespFrame) -> bool {
+    let RespFrame::Array(Some(parts)) = frame else {
+        return false;
+    };
+    let Some(RespFrame::BulkString(Some(cmd))) = parts.first() else {
+        return false;
+    };
+    // INFO contains run_id, process_id, uptime, etc. that differ per-runtime
+    if cmd.eq_ignore_ascii_case(b"INFO") {
+        return true;
+    }
+    // HELLO response includes server info with run_id
+    if cmd.eq_ignore_ascii_case(b"HELLO") {
+        return true;
+    }
+    // CLIENT ID returns per-runtime client counter
+    if cmd.eq_ignore_ascii_case(b"CLIENT") {
+        if let Some(RespFrame::BulkString(Some(sub))) = parts.get(1) {
+            if sub.eq_ignore_ascii_case(b"ID") || sub.eq_ignore_ascii_case(b"INFO") {
+                return true;
+            }
+        }
+    }
+    // DEBUG SLEEP, DEBUG STRUCTSIZE vary by runtime
+    if cmd.eq_ignore_ascii_case(b"DEBUG") {
+        return true;
+    }
+    // TIME varies
+    if cmd.eq_ignore_ascii_case(b"TIME") {
+        return true;
+    }
+    // RANDOMKEY varies by hash seed
+    if cmd.eq_ignore_ascii_case(b"RANDOMKEY") {
+        return true;
+    }
+    false
 }
 
 fn argv_to_frame(argv: Vec<Vec<u8>>) -> RespFrame {

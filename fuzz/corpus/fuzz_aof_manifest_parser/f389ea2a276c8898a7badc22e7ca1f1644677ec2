@@ -1,0 +1,5 @@
+#
+file apf seq 6 type h
+file of seq 2 type h
+file f seq 2 type h
+fi

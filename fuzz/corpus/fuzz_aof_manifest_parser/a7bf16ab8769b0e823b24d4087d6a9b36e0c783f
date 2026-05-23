@@ -1,0 +1,7 @@
+
+file appnl seq 2 type h in igd
+
+file .lo seq 3 type h l &d
+
+file .inl seq 1 type h I; ap
+aof.

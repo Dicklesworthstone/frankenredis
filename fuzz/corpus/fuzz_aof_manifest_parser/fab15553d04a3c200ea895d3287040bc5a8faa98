@@ -1,0 +1,2 @@
+file "appendonly.aof.1.base.rdb" seq 1 type b
+file "aappeny 2.incr.aof" seq 2 type i

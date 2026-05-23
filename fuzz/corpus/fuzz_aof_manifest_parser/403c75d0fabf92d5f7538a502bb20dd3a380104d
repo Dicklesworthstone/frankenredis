@@ -1,0 +1,7 @@
+# bments are ignored
+
+file appenf.1.base.rdb seq 1 type b
+
+# history comes before active incremenzmanifests
+file appendonly.aof.2.incr.aof seq 3 type h
+file appendonly.aojjjjjjjjjjf.3.incr.aof seq 3 type i

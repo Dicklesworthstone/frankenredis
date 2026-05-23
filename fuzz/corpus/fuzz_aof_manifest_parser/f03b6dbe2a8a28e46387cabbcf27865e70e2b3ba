@@ -1,0 +1,2 @@
+file appendonly.aof.1.base.rdb seq 1 type b
+file ppendonly.aof.2.base.rdb seq 2 type b

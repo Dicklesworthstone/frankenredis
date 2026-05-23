@@ -1,0 +1,8 @@
+#bland
+
+file appendonly.aof.0.base.b seq 1 type b
+
+# hi incnored
+
+file appendonly.aof.n.i2r.caof seq 2 type h
+file appendnl3ype i
