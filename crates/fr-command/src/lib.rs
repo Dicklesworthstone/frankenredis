@@ -15103,6 +15103,8 @@ fn command_writes_or_may_replicate_in_readonly_script(argv: &[Vec<u8>]) -> bool 
     raw_cmd.eq_ignore_ascii_case(b"PUBLISH") || raw_cmd.eq_ignore_ascii_case(b"SPUBLISH")
 }
 
+// Redis 7.2.4 ACL categories - must match vendored exactly.
+// Notably: 'server' and 'generic' do NOT exist in 7.2.4.
 const ACL_CATEGORIES: &[&str] = &[
     "keyspace",
     "read",
@@ -15125,8 +15127,6 @@ const ACL_CATEGORIES: &[&str] = &[
     "connection",
     "transaction",
     "scripting",
-    "server",
-    "generic",
 ];
 
 struct AclCategoryMaps {
