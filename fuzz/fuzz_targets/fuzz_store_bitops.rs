@@ -233,7 +233,13 @@ fn apply_op(store: &mut Store, model: &mut [Option<Vec<u8>>], op: BitOpState, no
             match expected {
                 Ok(bytes) => {
                     assert_eq!(actual, Ok(bytes.len()));
-                    model[dest_slot] = Some(bytes);
+                    // Redis BITOP deletes dest when result is empty rather than
+                    // storing an empty string (upstream bitops.c::bitopCommand).
+                    if bytes.is_empty() {
+                        model[dest_slot] = None;
+                    } else {
+                        model[dest_slot] = Some(bytes);
+                    }
                 }
                 Err(err) => assert_eq!(actual, Err(err)),
             }

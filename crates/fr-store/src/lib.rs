@@ -11184,7 +11184,7 @@ impl Store {
         // key when the result length is 0, rather than storing an
         // empty string. (br-frankenredis-bitopempty)
         if len == 0 {
-            self.entries.remove(dest);
+            self.internal_entries_remove(dest);
         } else {
             // Upstream creates the destination via dbAdd which uses
             // raw encoding regardless of length.
