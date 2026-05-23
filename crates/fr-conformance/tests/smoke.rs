@@ -1805,6 +1805,8 @@ struct VendoredRedisOracle {
 }
 
 impl VendoredRedisOracle {
+    const MAX_SPAWN_ATTEMPTS: usize = 10;
+
     fn start(cfg: &HarnessConfig) -> Self {
         let server_path = cfg.oracle_root.join("src/redis-server");
         assert!(
@@ -1813,39 +1815,49 @@ impl VendoredRedisOracle {
             server_path.display()
         );
 
-        let listener =
-            TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port for vendored redis");
-        let port = listener
-            .local_addr()
-            .expect("ephemeral port address")
-            .port();
-        drop(listener);
+        for attempt in 0..Self::MAX_SPAWN_ATTEMPTS {
+            let listener =
+                TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port for vendored redis");
+            let port = listener
+                .local_addr()
+                .expect("ephemeral port address")
+                .port();
+            drop(listener);
 
-        let child = Command::new(&server_path)
-            .args([
-                "--save",
-                "",
-                "--appendonly",
-                "no",
-                "--bind",
-                "127.0.0.1",
-                "--port",
-                &port.to_string(),
-                "--enable-debug-command",
-                "local",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn vendored redis-server");
+            let mut child = Command::new(&server_path)
+                .args([
+                    "--save",
+                    "",
+                    "--appendonly",
+                    "no",
+                    "--bind",
+                    "127.0.0.1",
+                    "--port",
+                    &port.to_string(),
+                    "--enable-debug-command",
+                    "local",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn vendored redis-server");
 
-        assert!(
-            wait_for_redis_ready(port),
-            "vendored redis-server did not become ready on 127.0.0.1:{port}"
+            if wait_for_redis_ready(port) {
+                return Self { child, port };
+            }
+
+            let _ = child.kill();
+            let _ = child.wait();
+            if attempt + 1 < Self::MAX_SPAWN_ATTEMPTS {
+                sleep(Duration::from_millis(50));
+            }
+        }
+
+        panic!(
+            "vendored redis-server did not become ready after {} attempts",
+            Self::MAX_SPAWN_ATTEMPTS
         );
-
-        Self { child, port }
     }
 
     fn start_with_config_file(cfg: &HarnessConfig) -> Self {
@@ -1856,29 +1868,39 @@ impl VendoredRedisOracle {
             server_path.display()
         );
 
-        let listener =
-            TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port for vendored redis");
-        let port = listener
-            .local_addr()
-            .expect("ephemeral port address")
-            .port();
-        drop(listener);
+        for attempt in 0..Self::MAX_SPAWN_ATTEMPTS {
+            let listener =
+                TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port for vendored redis");
+            let port = listener
+                .local_addr()
+                .expect("ephemeral port address")
+                .port();
+            drop(listener);
 
-        let config_path = write_vendored_redis_config(port);
-        let child = Command::new(&server_path)
-            .arg(&config_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn vendored redis-server from config file");
+            let config_path = write_vendored_redis_config(port);
+            let mut child = Command::new(&server_path)
+                .arg(&config_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn vendored redis-server from config file");
 
-        assert!(
-            wait_for_redis_ready(port),
-            "vendored redis-server did not become ready on 127.0.0.1:{port}"
+            if wait_for_redis_ready(port) {
+                return Self { child, port };
+            }
+
+            let _ = child.kill();
+            let _ = child.wait();
+            if attempt + 1 < Self::MAX_SPAWN_ATTEMPTS {
+                sleep(Duration::from_millis(50));
+            }
+        }
+
+        panic!(
+            "vendored redis-server did not become ready after {} attempts",
+            Self::MAX_SPAWN_ATTEMPTS
         );
-
-        Self { child, port }
     }
 }
 
