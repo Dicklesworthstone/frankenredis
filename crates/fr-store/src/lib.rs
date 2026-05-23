@@ -13376,6 +13376,14 @@ impl Store {
         replace: bool,
         now_ms: u64,
     ) -> Result<(), StoreError> {
+        // Check if key exists first (before payload validation) to match Redis behavior.
+        // Redis returns BUSYKEY if the key exists and REPLACE is not specified, even
+        // if the payload is malformed.
+        self.drop_if_expired(key, now_ms);
+        if !replace && self.entries.contains_key(key) {
+            return Err(StoreError::BusyKey);
+        }
+
         if payload.len() < DUMP_TRAILER_LEN + 1 {
             return Err(StoreError::InvalidDumpPayload);
         }
@@ -13399,11 +13407,6 @@ impl Store {
         let computed_crc = fr_persist::crc64_redis(&payload[..crc_offset]);
         if stored_crc != computed_crc {
             return Err(StoreError::InvalidDumpPayload);
-        }
-        // Check if key exists and replace flag
-        self.drop_if_expired(key, now_ms);
-        if !replace && self.entries.contains_key(key) {
-            return Err(StoreError::BusyKey);
         }
         let type_byte = payload[0];
         let mut cursor = 1;
