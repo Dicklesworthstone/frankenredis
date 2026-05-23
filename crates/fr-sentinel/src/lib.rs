@@ -631,6 +631,13 @@ mod tests {
             if !path.is_file() {
                 continue;
             }
+            // Skip fuzz-generated binary seeds (40 hex char SHA-1 filenames).
+            // Only human-readable text seeds are validated against the contract.
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.len() == 40 && name.chars().all(|c| c.is_ascii_hexdigit()) {
+                    continue;
+                }
+            }
             let body = fs::read_to_string(&path).map_err(|err| {
                 format!(
                     "sentinel parser seed {} must be UTF-8: {err}",
