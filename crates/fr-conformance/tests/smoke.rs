@@ -1824,6 +1824,8 @@ impl VendoredRedisOracle {
                 .port();
             drop(listener);
 
+            // Use temp dir to avoid loading stray dump.rdb files from other processes
+            let temp_dir = std::env::temp_dir();
             let mut child = Command::new(&server_path)
                 .args([
                     "--save",
@@ -1836,10 +1838,12 @@ impl VendoredRedisOracle {
                     &port.to_string(),
                     "--enable-debug-command",
                     "local",
+                    "--dir",
+                    &temp_dir.to_string_lossy(),
                 ])
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .spawn()
                 .expect("spawn vendored redis-server");
 
@@ -1847,17 +1851,50 @@ impl VendoredRedisOracle {
                 return Self { child, port };
             }
 
+            // Check if the child exited early (indicates startup error)
+            let exit_status = child.try_wait();
+
+            // Capture stdout for diagnostics (redis logs to stdout)
+            let stdout_output = if let Some(mut stdout) = child.stdout.take() {
+                let mut buf = String::new();
+                let _ = stdout.read_to_string(&mut buf);
+                buf
+            } else {
+                String::new()
+            };
+
+            // Capture stderr for diagnostics
+            let stderr_output = if let Some(mut stderr) = child.stderr.take() {
+                let mut buf = String::new();
+                let _ = stderr.read_to_string(&mut buf);
+                buf
+            } else {
+                String::new()
+            };
+
             let _ = child.kill();
             let _ = child.wait();
-            if attempt + 1 < Self::MAX_SPAWN_ATTEMPTS {
-                sleep(Duration::from_millis(50));
+
+            if attempt + 1 >= Self::MAX_SPAWN_ATTEMPTS {
+                let exit_info = match exit_status {
+                    Ok(Some(status)) => format!("exited with {status}"),
+                    Ok(None) => "still running (timeout)".to_string(),
+                    Err(e) => format!("status error: {e}"),
+                };
+                let combined_output = format!(
+                    "stdout: {}\nstderr: {}",
+                    if stdout_output.is_empty() { "(empty)" } else { stdout_output.trim() },
+                    if stderr_output.is_empty() { "(empty)" } else { stderr_output.trim() }
+                );
+                panic!(
+                    "vendored redis-server did not become ready after {} attempts on port {}. Process: {}.\n{}",
+                    Self::MAX_SPAWN_ATTEMPTS, port, exit_info, combined_output
+                );
             }
+            sleep(Duration::from_millis(50));
         }
 
-        panic!(
-            "vendored redis-server did not become ready after {} attempts",
-            Self::MAX_SPAWN_ATTEMPTS
-        );
+        unreachable!();
     }
 
     fn start_with_config_file(cfg: &HarnessConfig) -> Self {
@@ -1882,7 +1919,7 @@ impl VendoredRedisOracle {
                 .arg(&config_path)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(Stdio::piped())
                 .spawn()
                 .expect("spawn vendored redis-server from config file");
 
@@ -1890,17 +1927,37 @@ impl VendoredRedisOracle {
                 return Self { child, port };
             }
 
+            // Check if the child exited early (indicates startup error)
+            let exit_status = child.try_wait();
+
+            // Capture stderr for diagnostics
+            let stderr_output = if let Some(mut stderr) = child.stderr.take() {
+                let mut buf = String::new();
+                let _ = stderr.read_to_string(&mut buf);
+                buf
+            } else {
+                String::new()
+            };
+
             let _ = child.kill();
             let _ = child.wait();
-            if attempt + 1 < Self::MAX_SPAWN_ATTEMPTS {
-                sleep(Duration::from_millis(50));
+
+            if attempt + 1 >= Self::MAX_SPAWN_ATTEMPTS {
+                let exit_info = match exit_status {
+                    Ok(Some(status)) => format!("exited with {status}"),
+                    Ok(None) => "still running (timeout)".to_string(),
+                    Err(e) => format!("status error: {e}"),
+                };
+                panic!(
+                    "vendored redis-server did not become ready after {} attempts on port {} (with config). Process: {}. stderr: {}",
+                    Self::MAX_SPAWN_ATTEMPTS, port, exit_info,
+                    if stderr_output.is_empty() { "(empty)" } else { stderr_output.trim() }
+                );
             }
+            sleep(Duration::from_millis(50));
         }
 
-        panic!(
-            "vendored redis-server did not become ready after {} attempts",
-            Self::MAX_SPAWN_ATTEMPTS
-        );
+        unreachable!();
     }
 }
 
