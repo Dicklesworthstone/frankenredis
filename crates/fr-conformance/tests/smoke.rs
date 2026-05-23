@@ -14,7 +14,7 @@ use fr_config::{
 use fr_conformance::{
     CaseOutcome, ConformanceCase, ConformanceFixture, HarnessConfig, LiveInfoContractCase,
     LiveInfoFieldComparison, LiveInfoFieldContract, LiveOptionalReplyCase, LiveOracleConfig,
-    run_fixture, run_live_redis_diff, run_live_redis_diff_for_cases,
+    run_fixture, run_live_redis_diff, run_live_redis_diff_excluding, run_live_redis_diff_for_cases,
     run_live_redis_info_contract_diff, run_live_redis_multi_client_diff,
     run_live_redis_optional_reply_sequence_diff, run_protocol_fixture, run_replay_fixture,
     run_replication_handshake_fixture, run_smoke,
@@ -2476,9 +2476,21 @@ fn dynamic_replication_metadata_case(name: &str) -> bool {
 /// connection when it attempts to handle the replication request. These cases
 /// ARE tested by core_replication_conformance (fixture-based); skipping from
 /// live oracle avoids spurious "Connection reset" flakiness. (frankenredis-t3ylj)
-fn replication_oracle_connection_reset_case(name: &str) -> bool {
-    name.starts_with("slaveof_") || name.starts_with("replicaof_")
-}
+const REPLICATION_ORACLE_XFAIL_CASES: &[&str] = &[
+    "slaveof_no_one",
+    "slaveof_no_one_case_insensitive",
+    "slaveof_host_port",
+    "slaveof_wrong_arity_one_arg",
+    "slaveof_wrong_arity_no_args",
+    "slaveof_case_insensitive_command",
+    "slaveof_rejects_leading_plus_port",
+    "slaveof_rejects_leading_zero_port",
+    "slaveof_rejects_negative_port",
+    "replicaof_no_one",
+    "replicaof_after_slaveof_no_one",
+    "replicaof_wrong_arity_no_args",
+    "replicaof_wrong_arity_one_arg",
+];
 
 fn parse_fullresync_reply(frame: &RespFrame) -> (String, i64) {
     let reply = match frame {
@@ -4131,23 +4143,25 @@ fn core_replication_live_redis_matches_runtime() {
         port: oracle_server.port,
         ..LiveOracleConfig::default()
     };
-    let report =
-        run_live_redis_diff(&cfg, "core_replication.json", &oracle).expect("replication live diff");
+    // (frankenredis-t3ylj) SLAVEOF/REPLICAOF commands cause vendored Redis to
+    // close the client connection when handling the replication request. Exclude
+    // them from live oracle testing; they're covered by fixture-based conformance.
+    let report = run_live_redis_diff_excluding(
+        &cfg,
+        "core_replication.json",
+        &REPLICATION_ORACLE_XFAIL_CASES,
+        &oracle,
+    )
+    .expect("replication live diff");
     let dynamic_failures = report
         .failed
         .iter()
         .filter(|failure| dynamic_replication_metadata_case(&failure.name))
         .collect::<Vec<_>>();
-    // (frankenredis-t3ylj) SLAVEOF wrong-arity cases cause vendored Redis to
-    // close the connection when attempting to handle the replication request.
-    // These are covered by fixture-based conformance; exclude from live oracle.
     let unexpected_failures = report
         .failed
         .iter()
-        .filter(|failure| {
-            !dynamic_replication_metadata_case(&failure.name)
-                && !replication_oracle_connection_reset_case(&failure.name)
-        })
+        .filter(|failure| !dynamic_replication_metadata_case(&failure.name))
         .collect::<Vec<_>>();
 
     assert!(
