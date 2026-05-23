@@ -2472,13 +2472,12 @@ fn dynamic_replication_metadata_case(name: &str) -> bool {
     )
 }
 
-/// SLAVEOF commands cause vendored Redis 7.2.4 to close the client connection
-/// when it attempts to handle the replication request (even SLAVEOF NO ONE).
-/// These cases ARE tested by core_replication_conformance (fixture-based);
-/// skipping from live oracle avoids spurious "Connection reset" flakiness.
-/// (frankenredis-t3ylj)
-fn slaveof_oracle_connection_reset_case(name: &str) -> bool {
-    name.starts_with("slaveof_")
+/// SLAVEOF/REPLICAOF commands cause vendored Redis 7.2.4 to close the client
+/// connection when it attempts to handle the replication request. These cases
+/// ARE tested by core_replication_conformance (fixture-based); skipping from
+/// live oracle avoids spurious "Connection reset" flakiness. (frankenredis-t3ylj)
+fn replication_oracle_connection_reset_case(name: &str) -> bool {
+    name.starts_with("slaveof_") || name.starts_with("replicaof_")
 }
 
 fn parse_fullresync_reply(frame: &RespFrame) -> (String, i64) {
@@ -4147,7 +4146,7 @@ fn core_replication_live_redis_matches_runtime() {
         .iter()
         .filter(|failure| {
             !dynamic_replication_metadata_case(&failure.name)
-                && !slaveof_oracle_connection_reset_case(&failure.name)
+                && !replication_oracle_connection_reset_case(&failure.name)
         })
         .collect::<Vec<_>>();
 
