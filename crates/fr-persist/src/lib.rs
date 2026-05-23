@@ -497,7 +497,10 @@ pub fn decode_aof_stream(input: &[u8]) -> Result<Vec<AofRecord>, PersistError> {
 
 const AOF_MAX_BULK_LEN: usize = 1024 * 1024 * 1024;
 const AOF_MAX_ARRAY_LEN: usize = 10 * 1024 * 1024;
-const AOF_MAX_RECURSION_DEPTH: usize = 1024;
+// Recursion depth limit for nested RESP arrays. 64 is plenty for any
+// valid Redis command while preventing stack overflow from malicious
+// deeply-nested input (the parser recurses before checking depth).
+const AOF_MAX_RECURSION_DEPTH: usize = 64;
 
 fn aof_parser_config() -> fr_protocol::ParserConfig {
     fr_protocol::ParserConfig {
