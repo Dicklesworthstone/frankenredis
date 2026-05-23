@@ -1559,10 +1559,16 @@ pub struct Store {
     /// persistence's `rdb_bgsave_in_progress` field. Populated by the
     /// runtime from `server.rdb_bgsave_pid.is_some()`.
     pub rdb_bgsave_in_progress: bool,
+    /// Unix timestamp (seconds) when current BGSAVE started. Used by INFO
+    /// persistence's `rdb_current_bgsave_time_sec` to compute elapsed duration.
+    pub rdb_bgsave_start_time_sec: Option<u64>,
     /// True when a BGREWRITEAOF child process is currently running. Used by
     /// INFO persistence's `aof_rewrite_in_progress` field. Populated by the
     /// runtime from `server.aof_rewrite_pid.is_some()`.
     pub aof_rewrite_in_progress: bool,
+    /// Unix timestamp (seconds) when current AOF rewrite started. Used by INFO
+    /// persistence's `aof_current_rewrite_time_sec` to compute elapsed duration.
+    pub aof_rewrite_start_time_sec: Option<u64>,
     /// True when AOF rewrite is scheduled. Used by INFO persistence's
     /// `aof_rewrite_scheduled` field. Populated by the runtime.
     pub aof_rewrite_scheduled: bool,
@@ -1878,7 +1884,9 @@ impl Default for Store {
             stat_tracking_total_items: 0,
             stat_tracking_total_prefixes: 0,
             rdb_bgsave_in_progress: false,
+            rdb_bgsave_start_time_sec: None,
             aof_rewrite_in_progress: false,
+            aof_rewrite_start_time_sec: None,
             aof_rewrite_scheduled: false,
             stat_clients_recent_max_input_buffer: 0,
             stat_clients_recent_max_output_buffer: 0,

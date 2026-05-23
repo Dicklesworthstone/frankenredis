@@ -13961,7 +13961,15 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
                 .stat_rdb_last_bgsave_time_sec
                 .map_or(-1, |ts| ts as i64)
         );
-        info.push_str("rdb_current_bgsave_time_sec:-1\r\n");
+        let rdb_current_bgsave_time_sec: i64 = store
+            .rdb_bgsave_start_time_sec
+            .map(|start| (now_ms / 1000).saturating_sub(start) as i64)
+            .unwrap_or(-1);
+        let _ = write!(
+            info,
+            "rdb_current_bgsave_time_sec:{}\r\n",
+            rdb_current_bgsave_time_sec
+        );
         let _ = write!(info, "rdb_saves:{}\r\n", store.stat_rdb_saves);
         info.push_str("rdb_last_cow_size:0\r\n");
         let _ = write!(
@@ -13992,7 +14000,15 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
                 .stat_aof_last_rewrite_time_sec
                 .map_or(-1, |ts| ts as i64)
         );
-        info.push_str("aof_current_rewrite_time_sec:-1\r\n");
+        let aof_current_rewrite_time_sec: i64 = store
+            .aof_rewrite_start_time_sec
+            .map(|start| (now_ms / 1000).saturating_sub(start) as i64)
+            .unwrap_or(-1);
+        let _ = write!(
+            info,
+            "aof_current_rewrite_time_sec:{}\r\n",
+            aof_current_rewrite_time_sec
+        );
         let _ = write!(
             info,
             "aof_last_bgrewrite_status:{}\r\n",

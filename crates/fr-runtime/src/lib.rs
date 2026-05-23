@@ -2319,8 +2319,14 @@ pub struct ServerState {
     appendfsync_mode: AppendFsyncMode,
     /// Child PID for BGSAVE
     pub rdb_bgsave_pid: Option<i32>,
+    /// Unix timestamp (seconds) when current BGSAVE started. Used to compute
+    /// INFO persistence's `rdb_current_bgsave_time_sec` elapsed duration.
+    pub rdb_bgsave_start_time_sec: Option<u64>,
     /// Child PID for BGREWRITEAOF
     pub aof_rewrite_pid: Option<i32>,
+    /// Unix timestamp (seconds) when current AOF rewrite started. Used to compute
+    /// INFO persistence's `aof_current_rewrite_time_sec` elapsed duration.
+    pub aof_rewrite_start_time_sec: Option<u64>,
     /// Whether an AOF rewrite is pending because another background child is active.
     pub aof_rewrite_scheduled: bool,
     /// Path for RDB persistence file (used by SAVE/BGSAVE).
@@ -2437,7 +2443,9 @@ impl Default for ServerState {
             aof_config_path: None,
             appendfsync_mode: AppendFsyncMode::Everysec,
             rdb_bgsave_pid: None,
+            rdb_bgsave_start_time_sec: None,
             aof_rewrite_pid: None,
+            aof_rewrite_start_time_sec: None,
             aof_rewrite_scheduled: false,
             rdb_path: None,
             config_file_path: None,
@@ -4494,7 +4502,9 @@ impl Runtime {
         self.server.store.stat_tracking_total_prefixes = total_prefixes;
         self.server.store.maxmemory_bytes_live = self.server.maxmemory_bytes;
         self.server.store.rdb_bgsave_in_progress = self.server.rdb_bgsave_pid.is_some();
+        self.server.store.rdb_bgsave_start_time_sec = self.server.rdb_bgsave_start_time_sec;
         self.server.store.aof_rewrite_in_progress = self.server.aof_rewrite_pid.is_some();
+        self.server.store.aof_rewrite_start_time_sec = self.server.aof_rewrite_start_time_sec;
         self.server.store.aof_rewrite_scheduled = self.server.aof_rewrite_scheduled;
     }
 
@@ -4665,6 +4675,7 @@ impl Runtime {
                 let res = libc::waitpid(pid, &mut status, libc::WNOHANG);
                 if res == pid {
                     self.server.rdb_bgsave_pid = None;
+                    self.server.rdb_bgsave_start_time_sec = None;
                     let success = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
                     self.server.store.record_bgsave_status(success);
                 }
@@ -4674,6 +4685,7 @@ impl Runtime {
                 let res = libc::waitpid(pid, &mut status, libc::WNOHANG);
                 if res == pid {
                     self.server.aof_rewrite_pid = None;
+                    self.server.aof_rewrite_start_time_sec = None;
                     let success = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
                     // For now, AOF rewrite CoW is just tracked, but let's record status generically
                     self.server.store.record_aof_bgrewrite_status(success);
@@ -4692,6 +4704,7 @@ impl Runtime {
                 let mut status = 0;
                 libc::waitpid(pid, &mut status, 0); // Blocking wait
                 self.server.rdb_bgsave_pid = None;
+                self.server.rdb_bgsave_start_time_sec = None;
                 let success = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
                 self.server.store.record_bgsave_status(success);
             }
@@ -4699,6 +4712,7 @@ impl Runtime {
                 let mut status = 0;
                 libc::waitpid(pid, &mut status, 0); // Blocking wait
                 self.server.aof_rewrite_pid = None;
+                self.server.aof_rewrite_start_time_sec = None;
                 let success = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
                 self.server.store.record_aof_bgrewrite_status(success);
             }
@@ -11146,6 +11160,7 @@ impl Runtime {
                 }
                 pid => {
                     self.server.rdb_bgsave_pid = Some(pid);
+                    self.server.rdb_bgsave_start_time_sec = Some(now_ms / 1000);
                     self.server.store.record_save(now_ms, true);
                     self.server.store.record_bgsave_status(true);
                     self.server.last_save_time_sec = self.server.store.last_save_time_sec;
