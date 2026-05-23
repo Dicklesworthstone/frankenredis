@@ -77,6 +77,10 @@ impl StructuredInline {
                         match seg {
                             QuotedSegment::Literal(bytes) => {
                                 for &b in bytes {
+                                    // Skip CR/LF as they terminate inline commands
+                                    if b == b'\r' || b == b'\n' {
+                                        continue;
+                                    }
                                     if b == b'"' || b == b'\\' {
                                         out.push(b'\\');
                                     }
@@ -96,8 +100,11 @@ impl StructuredInline {
                                 out.push(b"0123456789abcdef"[(b & 0xf) as usize]);
                             }
                             QuotedSegment::RawEscape(b) => {
-                                out.push(b'\\');
-                                out.push(*b);
+                                // Skip CR/LF escapes as they terminate inline commands
+                                if *b != b'\r' && *b != b'\n' {
+                                    out.push(b'\\');
+                                    out.push(*b);
+                                }
                             }
                         }
                     }
@@ -108,6 +115,9 @@ impl StructuredInline {
                     for &b in bytes {
                         if b == b'\'' {
                             out.extend_from_slice(b"\\'");
+                        } else if b == b'\r' || b == b'\n' {
+                            // Inline commands cannot have literal CR/LF in arguments;
+                            // Redis treats them as line terminators. Skip them.
                         } else {
                             out.push(b);
                         }
