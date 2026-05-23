@@ -75,6 +75,8 @@ enum BlockingOp {
     BXreadgroup { argv: Vec<Vec<u8>> },
     /// WAITAOF: wait for local and/or replica fsync thresholds.
     Waitaof { argv: Vec<Vec<u8>> },
+    /// WAIT: wait for replica ACK count to reach required threshold.
+    Wait { argv: Vec<Vec<u8>> },
 }
 
 impl BlockingOp {
@@ -107,7 +109,7 @@ impl BlockingOp {
                     Vec::new()
                 }
             }
-            BlockingOp::Waitaof { .. } => Vec::new(),
+            BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. } => Vec::new(),
         }
     }
 }
@@ -1389,7 +1391,8 @@ fn process_buffered_frames(
                 // client instead of sending the nil response immediately.
                 let should_block = response == RespFrame::Array(None)
                     || response == RespFrame::BulkString(None)
-                    || waitaof_should_block(&parsed_frame, &response);
+                    || waitaof_should_block(&parsed_frame, &response)
+                    || wait_should_block(&parsed_frame, &response);
                 if should_block
                     && let Some(blocked) = try_build_blocked_state(&parsed_frame, ts).and_then(
                         |BlockedState { op, deadline_ms }| {
@@ -2213,6 +2216,20 @@ fn parse_waitaof_deadline_argv(argv: &[Vec<u8>], now_ms: u64) -> Option<u64> {
     now_ms.checked_add(timeout_ms as u64)
 }
 
+fn parse_wait_deadline_argv(argv: &[Vec<u8>], now_ms: u64) -> Option<u64> {
+    if argv.len() != 3 {
+        return None;
+    }
+    let timeout_ms: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
+    if timeout_ms < 0 {
+        return None;
+    }
+    if timeout_ms == 0 {
+        return Some(u64::MAX);
+    }
+    now_ms.checked_add(timeout_ms as u64)
+}
+
 fn resolve_xread_block_argv(
     argv: &[Vec<u8>],
     runtime: &mut Runtime,
@@ -2347,6 +2364,12 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
             op: BlockingOp::Waitaof { argv },
             deadline_ms,
         })
+    } else if cmd.eq_ignore_ascii_case(b"WAIT") {
+        let deadline_ms = parse_wait_deadline_argv(&argv, now_ms)?;
+        Some(BlockedState {
+            op: BlockingOp::Wait { argv },
+            deadline_ms,
+        })
     } else {
         None
     }
@@ -2396,10 +2419,40 @@ fn waitaof_should_block(frame: &RespFrame, response: &RespFrame) -> bool {
     !waitaof_response_satisfies(&argv, response)
 }
 
+fn wait_response_satisfies(argv: &[Vec<u8>], response: &RespFrame) -> bool {
+    if argv.len() != 3 {
+        return false;
+    }
+    let required_replicas: i64 = match std::str::from_utf8(&argv[1])
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        Some(value) => value,
+        None => return false,
+    };
+    let RespFrame::Integer(acked_replicas) = response else {
+        return false;
+    };
+    *acked_replicas >= required_replicas
+}
+
+fn wait_should_block(frame: &RespFrame, response: &RespFrame) -> bool {
+    let Ok(argv) = fr_command::frame_to_argv(frame) else {
+        return false;
+    };
+    let Some(command) = argv.first() else {
+        return false;
+    };
+    if !command.eq_ignore_ascii_case(b"WAIT") {
+        return false;
+    }
+    !wait_response_satisfies(&argv, response)
+}
+
 fn blocked_timeout_response(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> RespFrame {
     match op {
         BlockingOp::BLmove { .. } => RespFrame::BulkString(None),
-        BlockingOp::Waitaof { argv } => runtime.execute_frame(
+        BlockingOp::Waitaof { argv } | BlockingOp::Wait { argv } => runtime.execute_frame(
             RespFrame::Array(Some(
                 argv.iter()
                     .map(|arg| RespFrame::BulkString(Some(arg.clone())))
@@ -2456,7 +2509,7 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
         };
 
         let mut should_check =
-            ts >= blocked.deadline_ms || matches!(&blocked.op, BlockingOp::Waitaof { .. });
+            ts >= blocked.deadline_ms || matches!(&blocked.op, BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. });
         if !should_check {
             for key in blocked.op.keys() {
                 if ready_keys.contains(&key) {
@@ -2871,6 +2924,21 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
             let response = runtime.execute_frame(frame, now_ms);
             if matches!(response, RespFrame::Error(_))
                 || waitaof_response_satisfies(argv, &response)
+            {
+                Some(response)
+            } else {
+                None
+            }
+        }
+        BlockingOp::Wait { argv } => {
+            let frame = RespFrame::Array(Some(
+                argv.iter()
+                    .map(|arg| RespFrame::BulkString(Some(arg.clone())))
+                    .collect(),
+            ));
+            let response = runtime.execute_frame(frame, now_ms);
+            if matches!(response, RespFrame::Error(_))
+                || wait_response_satisfies(argv, &response)
             {
                 Some(response)
             } else {
