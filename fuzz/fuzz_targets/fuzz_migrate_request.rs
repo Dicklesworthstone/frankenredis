@@ -227,10 +227,12 @@ fn expected_request(case: &ValidMigrateCase) -> MigrateRequest {
         copy: case
             .option_steps
             .iter()
+            .take(MAX_ARGS)
             .any(|step| matches!(step, ValidOptionStep::Copy)),
         replace: case
             .option_steps
             .iter()
+            .take(MAX_ARGS)
             .any(|step| matches!(step, ValidOptionStep::Replace)),
         auth_username,
         auth_password,
@@ -326,10 +328,16 @@ fn canonical_migrate_argv(request: &MigrateRequest) -> Vec<Vec<u8>> {
         request.port_arg.clone(),
     ];
 
-    if request.keys.len() <= 1 {
-        argv.push(request.keys.first().cloned().unwrap_or_default());
+    // Use KEYS mode when:
+    // - More than one key, OR
+    // - Exactly one key that is empty (can't distinguish from no keys in scalar mode)
+    let use_keys_mode =
+        request.keys.len() > 1 || (request.keys.len() == 1 && request.keys[0].is_empty());
+
+    if use_keys_mode {
+        argv.push(Vec::new()); // KEYS mode requires empty key arg
     } else {
-        argv.push(Vec::new());
+        argv.push(request.keys.first().cloned().unwrap_or_default());
     }
 
     argv.push(request.destination_db.to_string().into_bytes());
@@ -353,7 +361,7 @@ fn canonical_migrate_argv(request: &MigrateRequest) -> Vec<Vec<u8>> {
         }
     }
 
-    if request.keys.len() > 1 {
+    if use_keys_mode {
         argv.push(b"KEYS".to_vec());
         argv.extend(request.keys.iter().cloned());
     }
@@ -457,7 +465,12 @@ fn invalid_utf8_token(tail: Vec<u8>) -> Vec<u8> {
 }
 
 fn unknown_option_token(token: Vec<u8>) -> Vec<u8> {
-    let mut token = limit_arg_len(token);
+    // Filter to ASCII to ensure valid UTF-8 (so we get SyntaxError not InvalidUtf8)
+    let mut token: Vec<u8> = token
+        .into_iter()
+        .filter(|b| b.is_ascii())
+        .take(MAX_ARG_LEN)
+        .collect();
     if token.is_empty() {
         return b"NOPE".to_vec();
     }
