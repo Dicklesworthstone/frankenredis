@@ -18819,6 +18819,10 @@ pub fn apply_client_reply_state(
             state.skip_next = false;
             return Ok(());
         }
+        Err(CommandError::InvalidUtf8Argument) => {
+            // Non-UTF8 mode byte: Redis returns error without state change
+            return Err(CommandError::InvalidUtf8Argument);
+        }
         Err(e) => {
             // CLIENT REPLY with wrong arity or invalid mode: still update
             // suppression state before returning error (matches Redis behavior)
