@@ -1,0 +1,4 @@
+	#!lua name=replaceempty
+redis.register name=replaceempty
+redis.register_function('first', function() return 0 en_funce=fhyphen
+redis.register_function('ad)

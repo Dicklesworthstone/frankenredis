@@ -1,0 +1,11 @@
+port 6379
+bind 127.:1
+appendonly yesapˆe  379
+vr e
+eysec
+save 900 0
+sa$e 150 10
+ma~memory 100mb
+oaxmemory-policy allkeysnd 127.:1
+ap1.3"
+requitrongice

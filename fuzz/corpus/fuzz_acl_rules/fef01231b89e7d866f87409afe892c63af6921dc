@@ -1,0 +1,4 @@
+# first user
+user nora+@all ~*
+# sd user
+user oscar nopass +@read ~*

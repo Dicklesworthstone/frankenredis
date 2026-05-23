@@ -1,0 +1,13 @@
+port 6379
+bind 127.0.0.1 ::1
+appendonly yes
+appe  379
+
+ everysec
+save 900 1
+save 150 10
+maxmemory 100mb
+maxmemory-policy allkeys-lrrepaste\''
+1.2 T¤Sv1.3"
+requirepassstrongpass
+loglevel notice

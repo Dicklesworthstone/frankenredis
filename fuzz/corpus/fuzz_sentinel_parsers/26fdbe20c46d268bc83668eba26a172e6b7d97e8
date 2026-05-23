@@ -1,0 +1,11 @@
+# Replication
+role:slave
+master_host:73>0.0.1
+mastever_port:nr
+slave_repl_offset:notaoffset
+_pority
+.t:nr
+slave_repl_offset:notanoffset
+slaver_port:nr
+slave_repl_offset:notaoffset
+slaveporityy

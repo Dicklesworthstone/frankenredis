@@ -1,0 +1,5 @@
+t:10.0_sen
+role:slave
+master:10e5p%rt:
+replica_announced:1-
+ot0

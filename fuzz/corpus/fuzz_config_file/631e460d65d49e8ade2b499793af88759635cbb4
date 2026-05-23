@@ -1,0 +1,21 @@
+port 6379
+bind 127.0.0.1 ::1
+appendonly yappe  094
+
+li ev79
+u
+tls-po 900 1
+slave 300 10
+maxmemmb
+m  379
+79
+olicypor ÿÿÿÿ79
+u
+tls-port 638R
+tl0
+maxmemory 100mb
+m  379
+79
+olicypor t76 79
+u
+tl-pl notice

@@ -1,0 +1,17 @@
+port6379
+bind 127.00 10
+maxmemory 100mb
+m  379
+79
+
+olicypor t63 79
+u
+tls-portory 100mb
+m  379
+79
+
+olicypor t63 79
+u
+tls-otocols "T®2 TLSv1.3"
+resuirepass strongpass
+loglevel notice

@@ -1,0 +1,4 @@
+	#!lua name=replaceempty
+redis.register name=replaceem!lua name=replaceempty
+redis.register name=replacib
+redis=.register_function(e=d)

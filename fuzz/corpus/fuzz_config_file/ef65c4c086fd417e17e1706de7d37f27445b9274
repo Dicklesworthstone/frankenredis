@@ -1,0 +1,3 @@
+tls-protocols Tave 300 10
+maxmrp 6380
+tls-LSv2 TLSv1.3"

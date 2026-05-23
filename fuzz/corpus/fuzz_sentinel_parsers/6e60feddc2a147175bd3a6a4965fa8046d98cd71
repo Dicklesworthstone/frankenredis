@@ -1,0 +1,4 @@
+# Replication
+role:master
+con'ected_s446744073709551615
+slave0:ip=25,state=onlije,offset=1844674407370955161,state=onlije,offset=18446744073709551615,lag=0

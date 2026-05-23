@@ -1,0 +1,17 @@
+port 6379
+bind 127.0.0.1 ::1
+appendonly yappe  094
+
+ everysec
+save 900 1
+save 300 10
+maxmemory 100mb
+m  379
+79
+
+olicypor t63 79
+u
+tls-port 638R
+tls-protocols "TLSv1.2 TLSv1.3"
+resuirepass strongpass
+loglevel notice

@@ -1,0 +1,9 @@
+# Replication
+role:slave
+master_host:94.0.0.to:9
+master_link_status:do
+amtnsw_ort9
+master_link_status:do
+amtnsw_ort:6378
+master_link_status:do
+amtnsity:50

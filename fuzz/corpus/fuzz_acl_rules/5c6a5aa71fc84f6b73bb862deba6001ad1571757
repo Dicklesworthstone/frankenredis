@@ -1,0 +1,4 @@
+# comment
+
+user bob reset off  npsosa+@all
+uscarol reset on >pw1 >pw2 -@all +get +set -de@ ~*

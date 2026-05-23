@@ -1,0 +1,1 @@
+user l -@admin -flushall -keys -@-sht +set*

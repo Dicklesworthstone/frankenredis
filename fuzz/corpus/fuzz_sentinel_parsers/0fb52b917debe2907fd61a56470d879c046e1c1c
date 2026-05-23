@@ -1,0 +1,3 @@
+# #set=1,lag=0
+slaveA:ip=10.0.0.12,pora=bttsd:ip=1sd:551615ez0ab,   ipX=10.0.0.12,pora=btsd2,pora=btsd:ip=10.0.0.12,pora=btsd,t:ip=1,t:ip=10xe#set=1,lag=0
+slaveA:ip=10.0.0.12,d:ip=10.0.0.12,pora=bt0.12,pora=btsd,t:ip=1,t:ip=10xe,o,t:ip=1,t:ip=10xe,ortt:0.0_s=eb,o,t:ip=1,t:ip=10xe,ortt:10.0.0_s

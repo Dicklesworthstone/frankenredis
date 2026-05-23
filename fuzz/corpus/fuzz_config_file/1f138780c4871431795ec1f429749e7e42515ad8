@@ -1,0 +1,8 @@
+port 6379
+bind 127.0e  379
+
+ everysec
+save axmemory 100mb
+maxmemory-policy allkeys-lru
+tls-port 6 strongpass
+loglevel notice

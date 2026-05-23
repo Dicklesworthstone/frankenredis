@@ -1,0 +1,4 @@
+# fi
+user noall ~*
+# sd ,ser
+user  +@read ~*

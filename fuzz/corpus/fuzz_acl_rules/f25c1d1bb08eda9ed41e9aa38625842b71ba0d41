@@ -1,0 +1,2 @@
+user aliceeset on nopass +±all ~*
+user bob res@read ~ro:*

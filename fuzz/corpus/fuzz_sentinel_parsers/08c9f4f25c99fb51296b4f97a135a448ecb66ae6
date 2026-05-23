@@ -1,0 +1,4 @@
+# Rn
+role:slave
+master_port:6379
+replica_announced:70957s

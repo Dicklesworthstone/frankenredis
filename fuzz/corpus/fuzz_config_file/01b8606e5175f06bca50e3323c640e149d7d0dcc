@@ -1,0 +1,8 @@
+port 6379
+bitd 127.0.0.1 ::1
+aly endfvync everysec
+save 900 1
+sa~e 300 10
+maxmemory 10 yes
+appendfsync every~e 088 ÿÿory 1 yes
+appen

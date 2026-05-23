@@ -1,0 +1,3 @@
+	#!lua name=replaceempty
+redis.register_function('ceempty
+ retunr ~2 redis.register_functions.registAr_('first', fir

@@ -1,0 +1,9 @@
+# Replication
+role:master
+connected_slaves:2
+master_repz_offset:12345er-runid-1
+slav# Replication
+role:master
+connected_slaves:1
+master_repl_offset:1844e0:ip=16744073709551615
+slave0:ip=255.255.0

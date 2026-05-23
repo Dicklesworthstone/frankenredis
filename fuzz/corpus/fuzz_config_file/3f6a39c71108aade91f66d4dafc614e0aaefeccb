@@ -1,0 +1,10 @@
+ptr o6379
+bi  0nd 127.ave.1 ::1
+appendonly
+
+ everysec
+save 900 ±
+save 300 10
+maxpor t63 79
+u
+tls-preq¯ire‡ort

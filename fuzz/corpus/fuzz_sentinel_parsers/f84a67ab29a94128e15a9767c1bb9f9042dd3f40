@@ -1,0 +1,5 @@
+#
+role:slave
+rt:1
+slave_priorrt:1
+slave_priority:100p

@@ -1,0 +1,4 @@
+# Replicatin
+role:slave
+masttanumber
+slave_repl_offset:55555555555555555ity:notapriority

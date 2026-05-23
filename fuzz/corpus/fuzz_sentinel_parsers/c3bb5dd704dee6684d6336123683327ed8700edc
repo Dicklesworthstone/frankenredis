@@ -1,0 +1,4 @@
+# Replication
+role:slave
+master_hbear
+slave_repl_offset:noity

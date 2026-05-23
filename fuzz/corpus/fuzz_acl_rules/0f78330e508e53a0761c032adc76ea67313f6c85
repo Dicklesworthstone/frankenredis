@@ -1,0 +1,8 @@
+user reader reset on nopass +@read -@admin ~ ~*
+user writeeset on nopass +@read -@admin ~ ~*
+user writer reset on >rous ~*- on nopass +@read -@admin ~ ~*
+user writer reset on >rous ~*-
+u ~*
+usein reset on >ap +@all 
+u ~*
+usein reset on >ap +@all ~*

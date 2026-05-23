@@ -1,0 +1,4 @@
+ireqŒš)œš‹\
+nclude /etc/redis/conf.d/*.conf
+tls-protocols "TLSv1.2 ’’’’’’’’’’’’’’’’’’’’TLSv1.3"
+module.opt

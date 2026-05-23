@@ -1,0 +1,3 @@
+0#!lua name=seedlib
+redis.r!lua name=seedlib
+redis.register_function('alpha', function(keys, anuitcon(keys, rgs)args) re 

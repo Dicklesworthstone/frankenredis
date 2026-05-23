@@ -1,0 +1,5 @@
+imaster
+connected_slaves:3
+sla0vr=3,lagster=
+connected_slaves:0=0
+ffs,lag=0

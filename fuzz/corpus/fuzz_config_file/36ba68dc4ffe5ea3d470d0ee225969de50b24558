@@ -1,0 +1,8 @@
+port 6379
+0e ß379
+
+ everysec
+save axmeb
+maxmemory-policy allkeys-lru
+tls-port 6 strongpass
+loglevel notice

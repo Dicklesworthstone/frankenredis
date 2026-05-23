@@ -1,0 +1,17 @@
+port 6379
+nd 127.0.0.1 ::1
+appendonly yes
+appendfsync evurysec
+savÿÿ900 1
+sa
+
+
+
+
+ 10
+maxmemolkeys-lru
+tls-port 638lt;
+s-protobols 
+
+appeverysec
+sotice

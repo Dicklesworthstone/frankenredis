@@ -1,0 +1,3 @@
+use@all	~*
+reset	pnrn		ss	+@all	+@all	~*~*
+reset	on	nopass	+@all	~*

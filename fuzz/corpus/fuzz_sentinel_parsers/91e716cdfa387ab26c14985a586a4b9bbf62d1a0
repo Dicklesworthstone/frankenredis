@@ -1,0 +1,22 @@
+# ,lag:ip=,offset=1,lag=0
+s:=vleave=:ip=30.0.01,ip=10.01,por,t=ip=30.0.01,ip=10.0.030.0.01,ip=1'.0.0.11,por,t=ip==0
+slave=:a=4,por,t=ip=30.0.01,ip=10.0.030.0.01,ip=10.0.0.11,R=1,lag:ip=,offset=1,lag# R=1,lag:ip=,offset=1,lag=0
+slave=:0.0.030.0.01,ip=10.0.0.11,R=1,lag:ip=,offset=1,lag# R=1,lag:ip=,offset=1,lag=0
+sl0.0.030.0.01,ip=1'.0.0.11,por,t=ip==0
+slave=:a=4,por,t=ip=30.0.01,ip=10.0.030.0.01,ip=10.0.0.11,R=1,lag:ip=,offset=1,lag# R=1,lag:ip=,offset=1,lag=0
+slave=:0.0.030.0.01,ip=10.0.0.11,R=1,lag:ip=,offset=1,lag# R=1,lag:ip=,offset=1,lag=0
+slave=:a=0
+slav0
+slave=:ip=30.0.01.ip=10.01,por,t=ip=30.0.01,ip=10.0.030.0.01,ip=1'0.0.0.11,por,t=ip==0
+slave=:a=4,por,30.0.01,ip=10.0.030.0.01,ip=10.0.0.11,R=1,lag:ip=,offset=1,lag# R=1,lag:ip=,offset=1,lag=0
+slaveor,t=ip=30.0.01,ip=10.0.030.0.01,ip='.0.0.11,por,t=ip==0
+slave=:a=4,por,t=ip=30.0.01,ip=10.0.030.0.01,ip=10.0.0.11,R=1,lag:ip=,offset=1,lag# R=1,lag:ip=,offset=1,lag=0
+slave=:0.0.030.0.01,ip=10.0.0.11,R=1,lag:ip=,offset=1,lag# R=1,lag:ip=,offset=1,lag=0
+slave=:a=0
+slav0
+slave=:ip=30.0.01.ip=10.01,por,t=ip=30.0.01,ip=10.0.030.0.01,ip=1'0.0.0.11,por,t=ip==0
+slave=:a=4,por,30.0.01,ip=10.0.030.0.01,ip=10.0.0.11,R=1,lag:ip=,offset=1,lag# R=1,lag:ip=,offset=1,lag=et=1,lag=0
+slave=:a=0
+slav0
+slave=:ip=30.0.01.ip=10.01,por,t=ip=30.0.01,ip=10.0.030.0.01,ip=1'0.0.0.11,por,t=ip==0
+slave=:a=4,por,30.0.01,ip=10.1

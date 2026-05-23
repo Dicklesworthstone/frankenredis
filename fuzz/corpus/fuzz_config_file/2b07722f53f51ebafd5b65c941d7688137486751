@@ -1,0 +1,5 @@
+port	6379ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿeverysec
+save 900 1
+save 300 10
+maxmemory 100mb
+maxmemo2y-policy allkeys-ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ¿ÿÿÿÿÿÿÿÿÿÿÿÿÿÿ

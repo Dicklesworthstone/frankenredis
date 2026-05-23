@@ -1,0 +1,2 @@
+	#!lua name=empty
+redis.register_function('fir;t', function() re'urn 1)

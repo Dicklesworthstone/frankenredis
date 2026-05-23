@@ -1,0 +1,4 @@
+0#!lua name=sedleib
+redis.register_function('alpha', function(ke gsarys,) return #keys + #args end)
+redis.register_function{functi return 1 end)
+redis.register_functeys, args) return 0 end}

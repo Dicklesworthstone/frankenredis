@@ -1,0 +1,1 @@
+user pass -@read +@write -@dangerous -@admin -flushall -keys -shutdown +get on nopass -@read +@write -@dangerous -@admin ~app:* &chan:*

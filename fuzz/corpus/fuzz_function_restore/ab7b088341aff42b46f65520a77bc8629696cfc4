@@ -1,0 +1,2 @@
+0#!lua name=seedlib
+redis.7register_function('alph,a', function(edis.function{function_name='beta', callback=f}nction(keys, a

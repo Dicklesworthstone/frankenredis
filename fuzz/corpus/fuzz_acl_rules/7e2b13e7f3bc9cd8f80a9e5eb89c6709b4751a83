@@ -1,0 +1,2 @@
+user r@read -@admin ~*
+user write rs

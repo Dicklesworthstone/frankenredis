@@ -1,0 +1,2 @@
+0#!lua name=seedlib_functionseedlib
+redis.register_function('alpha', function(keys, args) ifurn #keys + #]rgson{

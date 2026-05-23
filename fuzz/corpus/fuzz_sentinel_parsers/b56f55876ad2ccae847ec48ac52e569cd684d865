@@ -1,0 +1,6 @@
+# Replrole:er_link_status:down
+master_link_down_since_seconds:42
+s_status:down
+master_link_down_since_seconds:42
+sle_replfset:99
+replica_priority:50

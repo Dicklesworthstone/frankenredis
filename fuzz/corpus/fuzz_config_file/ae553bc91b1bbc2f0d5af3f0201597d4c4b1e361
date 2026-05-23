@@ -1,0 +1,21 @@
+port 6379
+bnly yes
+appe  094
+
+ eind 127.0.0.1 5:1
+appendonly yes
+appe  094
+
+ everysec
+syes
+appe  094
+
+  094
+
+ everysec
+save 900 1
+save 300 10
+maxmemory 100mb
+maxmemory-t 638R
+tlerysec
+dvel notice

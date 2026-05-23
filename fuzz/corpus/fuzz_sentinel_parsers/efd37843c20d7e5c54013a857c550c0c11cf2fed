@@ -1,0 +1,2 @@
+# Replne,oset=1,lag=0
+slave=p:port=bad,st:ip=10.0.0.11,port=ba,1.d1,port=e,l#g=0

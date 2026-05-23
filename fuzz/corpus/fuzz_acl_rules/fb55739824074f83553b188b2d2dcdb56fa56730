@@ -1,0 +1,2 @@
+user reader reset +@read -@admin ~*
+user write rs

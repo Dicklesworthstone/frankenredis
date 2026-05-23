@@ -1,0 +1,2 @@
+# comst off nopass +@all
+user c +get +set -del ~*

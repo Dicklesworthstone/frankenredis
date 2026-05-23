@@ -1,0 +1,2 @@
+user reader reset on nopass +@read -@admin ~*
+user writer reset on >wp +@write -@dusangeer alice rs

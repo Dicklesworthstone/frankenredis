@@ -1,0 +1,6 @@
+port 6379
+bindE2500mb
+maxmemory-policy allkeys-lru
+tls-port 6380otocols "TLSv1.2 TLSv1.3"
+rueqirepass strongpass
+loglevel notice

@@ -1,0 +1,3 @@
+# Reonves3
+slave0:port=6380,save2:ip=1003
+slave0:port=6380,save2:ip=10

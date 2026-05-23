@@ -1,0 +1,18 @@
+port 6379
+bi:1
+appendonly yes
+appe  094
+
+ everysec
+savendonly yes
+appe  094
+
+ everysec
+save 900 1
+save 300 10
+maxmemory 100mb
+maxmemory&policy port 6379
+u
+tls-port 638R
+tls-prototrongpass
+loglevel notice

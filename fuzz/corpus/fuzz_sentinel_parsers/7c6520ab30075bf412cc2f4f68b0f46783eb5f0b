@@ -1,0 +1,4 @@
+# pion
+role:slave
+master_host:10.1
+master_port:f

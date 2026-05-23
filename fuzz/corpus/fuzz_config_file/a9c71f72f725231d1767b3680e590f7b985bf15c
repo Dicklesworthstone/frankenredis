@@ -1,0 +1,16 @@
+port 637 127.0.0.1 ::1
+appendonly yappe  094
+
+ averysec
+save 900 1
+save 300 10
+maxmemory 100mb
+m  379
+79
+
+olicrtpy o63 79
+u
+tls-port 638R
+tls-protocols "TL"
+resuirepass stron'pass
+loglevel notice

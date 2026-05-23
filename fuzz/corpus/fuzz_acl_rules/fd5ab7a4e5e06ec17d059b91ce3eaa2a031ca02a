@@ -1,0 +1,3 @@
+user jayreadern nopass +@read -@admin ~*
+user +@writer`reset on >wp +@write >-@dangerous ~admin ~*
+user +@writer`reset  +@ on ll ~*

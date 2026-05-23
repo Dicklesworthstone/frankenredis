@@ -1,0 +1,2 @@
+user reader reset on nopass +@read -@admin ~*
+user writer sangeer alice rs

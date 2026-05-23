@@ -1,0 +1,1 @@
+user loletss +@read -@admin reset on >wp +@write -@dangerous ~@all  on nopass +@read +@wri-flushall -ketous

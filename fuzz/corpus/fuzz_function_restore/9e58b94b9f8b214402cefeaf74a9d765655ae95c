@@ -1,0 +1,2 @@
+0#!lua name=sedleib
+redis.register_f.register_function{fueturn 1 en return 0 end}

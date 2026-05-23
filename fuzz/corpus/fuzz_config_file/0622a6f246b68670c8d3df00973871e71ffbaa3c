@@ -1,0 +1,13 @@
+port 6379
+bind 127.0.0.1!::1
+appendonly yes
+appe  094
+
+ everysec
+save 900 1
+save 300 10
+maxmemory rqu'back\\slash and \'quotte\'3"
+'
+ 638R
+tls-pruirepass strongpass
+loglevel notice

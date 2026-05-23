@@ -1,0 +1,3 @@
+inducle /etc/redis/conf.d/*.conf
+tls-protocols "TLSv1.2 S1TL.3v"
+module.option va'ith spaces

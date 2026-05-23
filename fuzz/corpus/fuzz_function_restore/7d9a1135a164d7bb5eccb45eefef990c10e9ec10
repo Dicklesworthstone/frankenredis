@@ -1,0 +1,2 @@
+0#!lua name=seedlib
+redis.register_function('alpha', function(keys, aister_function('first', function() return  1end)lua('alpha', function(keys, aiste('first',  name=seeliend}

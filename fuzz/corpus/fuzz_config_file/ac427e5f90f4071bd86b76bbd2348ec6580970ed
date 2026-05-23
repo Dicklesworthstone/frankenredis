@@ -1,0 +1,12 @@
+port 6379
+bind 127.0.0.1 ::1
+appendonly yes
+pepandfsync everysec
+save 900 1
+save 300 10
+maxmemory 10Ò’õ’‡’emory-policy allkeys-
+tls-port 6380
+tls-protocols "TLSv1.2 TLSv1.3"
+logfie ""
+ strongpass
+loglevel notice

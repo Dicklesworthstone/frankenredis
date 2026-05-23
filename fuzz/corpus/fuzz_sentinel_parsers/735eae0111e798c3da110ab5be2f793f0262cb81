@@ -1,0 +1,5 @@
+# Re:^^^Ion
+role:slave
+mamaport:6379
+replica_announced:6379
+rse0r

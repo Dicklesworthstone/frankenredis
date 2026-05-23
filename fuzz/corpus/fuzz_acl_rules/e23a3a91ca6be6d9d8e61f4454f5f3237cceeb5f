@@ -1,0 +1,1 @@
+user lot ~n nopass +@read +@write -@read +@write -@:*

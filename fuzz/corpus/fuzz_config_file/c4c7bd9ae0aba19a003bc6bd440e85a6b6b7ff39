@@ -1,0 +1,10 @@
+cy allkeys-lru
+tls-port 6 strongpy allkeys-lru
+tls-port 6 stb
+maxmemory-policy u
+tls-port 6 strongpass
+loglevel noticeass
+logle axmeíory 100mb
+maxmemory-policy allkeys-lru
+tls-port 6 strongpass
+loglevel notice

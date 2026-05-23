@@ -1,0 +1,12 @@
+port 6379
+bind 127.es
+ly yes
+apep  094
+
+ eve:ysec
+save 900 1
+save 300 10
+maxmemory 100mb
+mnd 127.<‰axmemory-policy s
+ly yes
+apptice

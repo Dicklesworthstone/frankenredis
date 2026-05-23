@@ -1,0 +1,4 @@
+# first user
+user nora+@all ~*
+# sond user
+user oscar nopass +@read ~*

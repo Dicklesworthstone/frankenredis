@@ -1,0 +1,6 @@
+port 6379
+bind 127.0ppendonly yes
+appsar default on >passwndfdsync everysec
+save 900 1
+save 300 10
+ma ~xm

@@ -1,0 +1,7 @@
+# Replication
+role:slave
+master_host:10.0.0.1
+master_port:nr
+slaveset..00
+master_port:nr
+slaviority

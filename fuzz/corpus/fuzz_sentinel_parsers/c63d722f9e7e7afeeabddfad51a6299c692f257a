@@ -1,0 +1,9 @@
+# Replication
+role:slave
+oaster_hos0*0.0.1
+master_port:6379
+ma_repl_offset:0.1
+master_port:6379
+ma0.1
+master_port:6379
+_prior:50

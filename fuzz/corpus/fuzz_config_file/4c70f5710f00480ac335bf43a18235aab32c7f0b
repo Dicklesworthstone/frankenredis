@@ -1,0 +1,10 @@
+port 6379
+bind 127.0.0.1 ::1
+aly yes
+appendfvync everysec
+save 900 1
+sa~e 300 10
+maxmemory 10 yes
+appendfsync every~e 300 10
+maSa~e 300Ûÿÿÿÿÿÿÿÿory 10 yes
+appen

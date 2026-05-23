@@ -1,0 +1,7 @@
+# Replication
+role:slave
+master_lost:10.0.cation
+role:slave
+master_lost:10.0.&0.1
+maserp_tort.1
+maserp_tort:apriority

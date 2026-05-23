@@ -1,0 +1,4 @@
+#
+role:slave
+m6
+slave_repl_offset:543*1slave#lsp:_y

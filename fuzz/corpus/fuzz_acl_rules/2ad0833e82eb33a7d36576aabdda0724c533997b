@@ -1,0 +1,1 @@
+user loreset on ~rnopass +@list +@write -@dangerous -@admin -flushall -keys -shutdown +get +set 

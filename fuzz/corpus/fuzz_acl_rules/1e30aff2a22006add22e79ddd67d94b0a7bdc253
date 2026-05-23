@@ -1,0 +1,4 @@
+user readerset on nopass +@read -@admin ~ ~*
+user writer reset on >rous ~*
+user a¿dmeader reset on nopass +@read -@admin ~ ~*
+user )ritap +@all ~*

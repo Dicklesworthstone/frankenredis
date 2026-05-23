@@ -1,0 +1,7 @@
+## Replication
+role:slave
+master_port:
+o0.1
+master_port:
+otapt
+m

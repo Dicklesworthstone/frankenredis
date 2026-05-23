@@ -1,0 +1,4 @@
+user read@read -@admin ~ ~*
+user writer +@read -@admin ~ ~*
+user writer reset on >rous ~*
+usein r~set on >ap +@all ~*

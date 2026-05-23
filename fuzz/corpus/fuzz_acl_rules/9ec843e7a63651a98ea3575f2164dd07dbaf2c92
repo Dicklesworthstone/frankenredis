@@ -1,0 +1,3 @@
+user readert on nopass +@read -@admin +@write -@dangerous ~on >wp +@write -@dangerous ~*
+user ad +@write -@dangerous ~on >wp +@write -@dangerous ~*
+usemin reset on >ap +@all ~*

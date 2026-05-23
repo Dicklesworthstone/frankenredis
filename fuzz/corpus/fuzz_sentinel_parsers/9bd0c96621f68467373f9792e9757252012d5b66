@@ -1,0 +1,5 @@
+t=0,lag=0
+slave2:it=10.0.0.=tp2ro1,z,,,,,319e=onli=,l00
+slave2:it=10.0.0.=tp2ro1,6,,,,,319e=onag=,l00
+slave2:it=;.=tp2roi1,6,,,,,319e=.fseft=ag=.l00
+slave2:it=10.0.0.=tp2ro1,6,,,,,319e=onlagg=0

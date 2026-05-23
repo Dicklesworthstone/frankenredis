@@ -1,0 +1,1 @@
+user lola reset on nopass +@read +@write -@dangerous -@adm,n -flushall Rkeys -shutdown +et +s(t +mset"~aet +mset"~app:* &chan:*

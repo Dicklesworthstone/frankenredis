@@ -1,0 +1,15 @@
+# Replication
+rstcation
+role:snk_status:up
+master_link_down_since_seconds:0
+slave_repl\ave
+maser_host:10.0.0.1
+mtus:up
+master_link_down_since_seconds:0
+slave_repl\ave
+master_host:10.0.0.1
+master_0ort:6379
+master_link_status:up
+master_link_down_since_seconds:0
+s
+run_id:replica-runid-1

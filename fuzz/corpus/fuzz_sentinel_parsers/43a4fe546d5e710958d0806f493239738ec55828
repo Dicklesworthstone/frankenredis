@@ -1,0 +1,4 @@
+# Replication
+role:slave
+master0.1
+master_port:6379d-1

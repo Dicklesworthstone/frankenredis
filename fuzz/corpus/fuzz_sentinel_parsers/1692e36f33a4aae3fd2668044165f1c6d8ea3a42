@@ -1,0 +1,7 @@
+# Replication
+role:slave
+mast
+master_port:notapormaster_link_status:up
+master_link_down_since_seconds:notanumr
+slave_repl_offset:notanoffset
+slave_priority:notapriority

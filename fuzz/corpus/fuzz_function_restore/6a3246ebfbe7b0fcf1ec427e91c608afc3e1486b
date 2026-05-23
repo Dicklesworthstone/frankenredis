@@ -1,0 +1,2 @@
+0#!lua name=seedlib
+redis.register_function('alpha', function(ks ye,args) !lua name=end registration 0lag

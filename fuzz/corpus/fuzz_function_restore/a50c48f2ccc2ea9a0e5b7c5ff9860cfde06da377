@@ -1,0 +1,3 @@
+0#!lua name=seedlib
+redis.regigister_funackcster_functionseedlib
+redis.register_function('alpt

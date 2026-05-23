@@ -1,0 +1,5 @@
+# caon
+role:slave
+mas(ds:0
+slave_repl_offset:521*1
+slave_prio_oefpl

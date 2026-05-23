@@ -1,0 +1,18 @@
+# Replication
+role:slave
+5+.0.1
+master_port:nr
+slave_repl_o1
+master_port:nr
+slav10.0.0.1
+master_port:nr
+nr
+slave_repl_o1
+master_port:nr
+slav1
+master_port:nr
+slave0.0.1
+master_port:_repl_0.0.1
+master_port:ne_repl_o1
+master_port:nrport:nr
+slav10.0

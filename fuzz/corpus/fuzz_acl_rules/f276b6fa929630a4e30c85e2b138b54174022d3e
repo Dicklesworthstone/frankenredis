@@ -1,0 +1,7 @@
+user reader reset on nopass +@read -@admin ~ ~*
+user writeeset on nopass +@read -set on nopass +@read -@admin ~ ~*
+user writeeset on nopass +@read -@admin ~ ~*
+user writer reset on >ss +@read -@admin ~ ~*
+uÿÿÿÿÿÿÿÿ@admin ~ ~*
+user writer reset on >ss +@read -@admin ~ ~*
+uÿÿÿÿÿÿÿÿser writer reset mn+@`ll ~*

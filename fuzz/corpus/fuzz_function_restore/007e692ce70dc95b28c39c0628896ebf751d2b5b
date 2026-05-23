@@ -1,0 +1,4 @@
+0#!lua name=seedlib
+redis.register_function('alpha', function(keys, Args) return #keys + #args ifd)
+redis.regist'er_function{function_name='beta', callback=fun=seedlib
+redis.register_function

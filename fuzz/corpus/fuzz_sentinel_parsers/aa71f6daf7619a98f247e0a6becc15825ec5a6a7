@@ -1,0 +1,3 @@
+# Replication
+ro073709551615
+slave0:ip=255.255.255.255,port=65535,stat15,lag=0

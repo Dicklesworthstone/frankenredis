@@ -1,0 +1,1 @@
+user lo nopass +@read +@dangerous -@admin -flushall -keys -shutdown +get +set +del +mget +del +mget +mset ~aet +del +mget +del +mget +mset ~app:*t ~el +mget +del +mget +msa -flu

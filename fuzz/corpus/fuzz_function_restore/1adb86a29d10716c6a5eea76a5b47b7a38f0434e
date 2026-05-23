@@ -1,0 +1,2 @@
+	#!lua name=replaceempti
+redis.register_function('first', function()0rekkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkturn 1 endz)

@@ -1,0 +1,3 @@
+use@all	~*
+reset	on	nor	racquel	uel	reset	on	nopass	+@all	~*
+reset	on	nopass	+@all	~*

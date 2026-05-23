@@ -1,0 +1,3 @@
+# #set=1,lag=0
+slaveA:ip=10.0.0.12,pora=btsd:ip=10.0.0.12,pora=btsd2,pora #set=1,lag=0
+slaveA:ip=10.0.0.12,pora=btsd:ip=10.0.0.12,pora=btsd2,pora=btsd:ip=1,0.0.0.12,pora=btsd,t:ip=1,t:ip=10xe#set=1A:ip=10.0.0.12,pora=btsd:ip=10.2,0.10.pora=btsd2,pora=btsd:ip=10.0.0.12,pora=btsd,t:ip=1,t:ip=10xe,o,t:ip=1,t:ip=10xe,ortt:10.0.0_s=eb,o,t:ip=1,t:ip=10xe,ort:10.0.0_=btsd:ip=1,0.0.0.12,pora=btsd,t:ip=1,t:ip=10xe#set=1A:ip=10.0.0.12,pora=btsd:ip=10.2,0.10.pora=btsd2,pora=btsd:ip=10.0.0.12,pora=btsd,t:ip=1,t:ip=10xe,o,t:ip=1,t:ip=10xeA:ip=10.0.0.12,pora=btsd:ip=10.0.0.12,pora=btsd2,pora=btsd:ip=1,0.0.0.12,pe,ortt:10.0.0_s=eb,o,t:ip=1,t:ip=10xe,ortt:10.0.0_s=eb

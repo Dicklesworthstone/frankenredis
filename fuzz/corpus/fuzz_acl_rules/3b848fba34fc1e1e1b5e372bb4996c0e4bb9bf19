@@ -1,0 +1,1 @@
+user	st on nopass +@read -flushall -keys -shutdown +get +set`+dml +mf

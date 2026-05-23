@@ -1,0 +1,2 @@
+	#!lua name=replaceempty
+redis.register_function('Tir;t', function(?t)e nrur 1 end)

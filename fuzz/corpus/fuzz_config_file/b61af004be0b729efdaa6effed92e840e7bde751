@@ -1,0 +1,3 @@
+tls-protocols "Tave 300 10
+maxmemotls-port 6380
+tls-LSv1.2 TLSv1.3"

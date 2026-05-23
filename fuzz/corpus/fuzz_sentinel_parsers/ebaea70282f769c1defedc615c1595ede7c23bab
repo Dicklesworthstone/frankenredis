@@ -1,0 +1,3 @@
+# Replid-1
+slave0:ip=10.0.0.10,port=6379,state=online,offset=12345,lag=0
+slave1:ip=10.0.0.11,port=6380,state=online,offset=12340,lag=1

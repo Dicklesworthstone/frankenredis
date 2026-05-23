@@ -1,0 +1,4 @@
+# lneffset_vers0
+slave=:ip=10.0.01,ip=lag=0
+sl
+slave=:ip=10.0.0,ip=1:if=10.0,p=

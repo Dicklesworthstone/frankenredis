@@ -1,0 +1,11 @@
+# Replication
+role:slave
+mast
+master_port:ntaport
+master_link_status:up
+aport
+master_link_status:up
+er_link_statuus:up
+aport
+master_link_status:up
+master_

@@ -1,0 +1,12 @@
+# Replication
+role:slave
+master_host:10.0.0.1
+master_port:6379
+master_link_status:do
+amtns_ortster_port:6379
+master_link_status:do
+amtnsw_ort:6379
+master_link_status:do
+am
+master_link_status:do
+amtnsince_seconds:iority:00

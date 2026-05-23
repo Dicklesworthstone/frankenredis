@@ -1,0 +1,1 @@
+user s -@admin -flushall -keys -shutdown +get +set 

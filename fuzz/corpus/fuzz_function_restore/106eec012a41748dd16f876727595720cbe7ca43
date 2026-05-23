@@ -1,0 +1,4 @@
+0#!lua name=seedlib
+redis.register_function('alpha', function(keys, args) retd)
+clpha', functiedlib
+redis.register_function('alpha', function(keysname=''atbe, caalp end}

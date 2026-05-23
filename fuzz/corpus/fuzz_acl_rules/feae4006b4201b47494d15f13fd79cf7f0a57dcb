@@ -1,0 +1,1 @@
+user lol@write -@dangerous -@admin -flushall -keys -shutdown +get +set +del +mget +mset ~app:* &rrrchana reset on nopass +@read +@write -@dangerous -@admin -flushall -keys -shutdown +get +set +del +mget +mset ~app:* &rrrchan:*

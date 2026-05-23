@@ -1,0 +1,2 @@
+0#!lua name=seedlibister_functionseedlib
+redis.register_function('alpha', function(keys, args) urn #keys + #]rgson{

@@ -1,0 +1,18 @@
+port 6379
+nd 127.0.0.1 ::1
+appendonly yes
+appendfsync everysec
+save 900 1
+sa
+
+
+
+
+
+ 10
+maxmemolkeys-lru
+tls-port 638;
+tls-protocols "TLSv1.2 TLnc Sv1.2 TLSv1.3"
+
+appendfsync everysec
+sotice

@@ -1,0 +1,5 @@
+# eliion
+role:slave
+m_downds:0
+slave_repl_offset:54321epreplnotaport
+id-n

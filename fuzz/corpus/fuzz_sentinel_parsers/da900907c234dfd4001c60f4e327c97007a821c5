@@ -1,0 +1,5 @@
+senA Replication
+role:slave
+mot:6379
+master_link_status:up
+t

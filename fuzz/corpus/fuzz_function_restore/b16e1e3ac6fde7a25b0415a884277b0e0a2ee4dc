@@ -1,0 +1,4 @@
+0#!lua name=seedlib
+red name=funcemptry
+rdis.register_function('', function() ret#key 1 s + #args"end)
+enrd

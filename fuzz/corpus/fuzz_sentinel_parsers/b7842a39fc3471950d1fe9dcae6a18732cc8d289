@@ -1,0 +1,6 @@
+# Rest:11.t:nr
+slave_repl_offset:notanoffset
+slaver_port:nr
+slave_repl_offset:_ost:11.t:nr
+slave_repl_offset:not
+slave_repl_offset:nove_pority

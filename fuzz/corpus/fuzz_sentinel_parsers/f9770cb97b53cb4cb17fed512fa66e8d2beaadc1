@@ -1,0 +1,16 @@
+# Replic&tion
+role:slavn
+role:slavn
+role:slava
+:doter10.0.0.1
+master_n
+role:slavn
+role:slavn
+role:slava
+:doter_host:10.0.0.1
+master_rvp6379
+master:run_im
+role:slava
+:im
+role:slava
+:do_link_mast

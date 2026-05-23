@@ -1,0 +1,3 @@
+user alice reset on nopass +@all ~*
+user bff nopass +@read ~r +@all ~*
+user bff

@@ -1,0 +1,2 @@
+	#!lua name=replaceempty
+redis.register_function('first', function() reurn 1 end)
