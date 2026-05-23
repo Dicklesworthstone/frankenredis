@@ -1,0 +1,1 @@
+user	st  +@read -flushall -keys -shutdown +get +set`+dml +mf

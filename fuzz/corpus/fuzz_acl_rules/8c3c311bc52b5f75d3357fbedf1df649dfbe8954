@@ -1,0 +1,2 @@
+user ce reset on nopass +@all ~+
+user bff nopass +@read ~r

@@ -1,0 +1,1 @@
+user pass -@read +@write -@dangerous -@admin nopass +@read ~ro@reaead ~rs>pass~hall nopass -@read +@write -@an:*

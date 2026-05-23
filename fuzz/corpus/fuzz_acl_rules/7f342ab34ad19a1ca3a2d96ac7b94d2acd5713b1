@@ -1,0 +1,3 @@
+user readd -@admin ~ ~*
+user writer +@read -@admin ~ ~*
+user

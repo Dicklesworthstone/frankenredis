@@ -1,0 +1,7 @@
+port 6379td 12: ::1
+aly endfvync ever
+save 900 1
+sa~e 300 10
+maxmemory 10 yes
+appendfsysc every~e 088 ÿÿor´ 1 yes
+appen

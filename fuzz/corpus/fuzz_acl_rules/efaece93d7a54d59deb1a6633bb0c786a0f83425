@@ -1,0 +1,7 @@
+user reader reset on nopass +@read -@admin ~ ~reset on >rous ~*
+user admeader reset on nopass +@read -@admin ~ ~*
+user  -@admin ~ ~*
+user writer reset on >rous ~*
+user arous ~*
+user ad reset on nopass +@read -@admin ~ ~*
+user )riterll ~*

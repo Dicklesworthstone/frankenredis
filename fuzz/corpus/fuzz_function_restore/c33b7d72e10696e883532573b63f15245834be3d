@@ -1,0 +1,3 @@
+	#!lua name=relaceempty
+rsdis.register name=replaceemp.register_function('t{
+r@lesedis.t

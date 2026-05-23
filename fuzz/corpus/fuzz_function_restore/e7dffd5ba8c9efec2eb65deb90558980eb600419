@@ -1,0 +1,4 @@
+	#!lua name=replaceempty
+redis.register namrp=empty
+redis.register_function('first', function() return`0 en_funce=on{functio:_?name='beta',fhyphen
+redis.register_function(e=d)

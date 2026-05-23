@@ -1,0 +1,2 @@
+	#!lua name=repy
+n{function_?name='beta',fedis.register_function'fist'(end)

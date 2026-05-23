@@ -1,0 +1,3 @@
+user alicpass +@all ~*
+user bff nopass +@read ~r +@all ~*
+user bff
