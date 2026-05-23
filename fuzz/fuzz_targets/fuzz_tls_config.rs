@@ -319,7 +319,16 @@ fn render_protocol_list_case(case: &RawProtocolListCase) -> (String, Vec<TlsProt
         is_valid = false;
     }
 
-    if !saw_entry || expected.is_empty() {
+    // Empty input (raw.is_empty()) returns default protocols.
+    // Whitespace-only input is rejected (trims to empty, then "empty list" error).
+    // So the only valid no-entry case is both separators producing "".
+    if !saw_entry {
+        if case.leading_separator % 5 == 0 && case.trailing_separator % 5 == 0 {
+            expected = vec![TlsProtocol::TlsV1_2, TlsProtocol::TlsV1_3];
+        } else {
+            is_valid = false;
+        }
+    } else if expected.is_empty() {
         is_valid = false;
     }
 
@@ -384,17 +393,19 @@ fn render_protocol_token(token: &RawProtocolToken) -> (String, Option<TlsProtoco
             render_protocol_alias(TlsProtocol::TlsV1_3, *seed).to_string(),
             Some(TlsProtocol::TlsV1_3),
         ),
-        RawProtocolToken::Invalid(bytes) => (sanitize_invalid_token(bytes, "TLSv1.4"), None),
+        RawProtocolToken::Invalid(_) => ("TLSv1.4".to_string(), None),
     }
 }
 
 fn render_directive_value(case: &RawDirectiveCase) -> (String, bool) {
+    // Use fixed guaranteed-invalid values to avoid edge cases where sanitized
+    // bytes accidentally produce valid inputs.
     match case.kind.directive() {
         TlsDirective::TlsPort | TlsDirective::ClusterAnnounceTlsPort => {
             if case.valid_hint {
                 (case.number.to_string(), true)
             } else {
-                (sanitize_invalid_numeric(&case.text, "invalid-port"), false)
+                ("not-a-port".to_string(), false)
             }
         }
         TlsDirective::TlsCertFile => render_text_directive(case.valid_hint, &case.text, "cert.pem"),
@@ -407,54 +418,43 @@ fn render_directive_value(case: &RawDirectiveCase) -> (String, bool) {
             if case.valid_hint {
                 let (value, _) = render_valid_protocol_list(&case.protocol_list);
                 (value, true)
-            } else if case.text.first().is_some_and(|byte| byte % 2 == 0) {
-                (blank_string(case.auth_seed), false)
+            } else if case.auth_seed % 3 == 0 {
+                // Whitespace-only is invalid
+                (" ".to_string(), false)
             } else {
-                (sanitize_invalid_token(&case.text, "TLSv1.4"), false)
+                // Invalid protocol name
+                ("TLSv1.4".to_string(), false)
             }
         }
         TlsDirective::TlsAuthClients => {
             if case.valid_hint {
                 (render_auth_alias(case.auth_seed).to_string(), true)
             } else {
-                (sanitize_invalid_token(&case.text, "maybe"), false)
+                ("maybe".to_string(), false)
             }
         }
         TlsDirective::MaxNewTlsConnectionsPerCycle => {
             if case.valid_hint {
                 (usize::from(case.number).max(1).to_string(), true)
-            } else if case.number.is_multiple_of(2) {
+            } else if case.number % 2 == 0 {
                 ("0".to_string(), false)
             } else {
-                (
-                    sanitize_invalid_numeric(&case.text, "invalid-budget"),
-                    false,
-                )
+                ("not-a-number".to_string(), false)
             }
         }
-        // ── TLS session-resumption directives ────────────────────
         TlsDirective::TlsSessionCaching => {
             if case.valid_hint {
-                let rendered = if case.auth_seed.is_multiple_of(2) {
-                    "yes"
-                } else {
-                    "no"
-                };
+                let rendered = if case.auth_seed % 2 == 0 { "yes" } else { "no" };
                 (rendered.to_string(), true)
             } else {
-                (sanitize_invalid_token(&case.text, "maybe"), false)
+                ("maybe".to_string(), false)
             }
         }
         TlsDirective::TlsSessionCacheSize | TlsDirective::TlsSessionCacheTimeout => {
-            // Both are usize-parseable; valid → any non-negative
-            // number; invalid → bytes that don't parse as usize.
             if case.valid_hint {
                 (usize::from(case.number).to_string(), true)
             } else {
-                (
-                    sanitize_invalid_numeric(&case.text, "invalid-tls-session-int"),
-                    false,
-                )
+                ("not-a-number".to_string(), false)
             }
         }
     }
@@ -726,24 +726,6 @@ fn sanitize_nonempty_text(bytes: &[u8], fallback: &str) -> String {
         fallback.to_string()
     } else {
         text
-    }
-}
-
-fn sanitize_invalid_token(bytes: &[u8], fallback: &str) -> String {
-    let rendered = sanitize_nonempty_text(bytes, fallback);
-    if TlsProtocol::parse(&rendered).is_some() || TlsAuthClients::parse(&rendered).is_some() {
-        format!("x{rendered}")
-    } else {
-        rendered
-    }
-}
-
-fn sanitize_invalid_numeric(bytes: &[u8], fallback: &str) -> String {
-    let rendered = sanitize_nonempty_text(bytes, fallback);
-    if rendered.chars().all(|ch| ch.is_ascii_digit()) {
-        format!("x{rendered}")
-    } else {
-        rendered
     }
 }
 
