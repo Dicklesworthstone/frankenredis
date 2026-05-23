@@ -1,0 +1,1 @@
+user lodanger -flushall -keys -shutdown +get -set 

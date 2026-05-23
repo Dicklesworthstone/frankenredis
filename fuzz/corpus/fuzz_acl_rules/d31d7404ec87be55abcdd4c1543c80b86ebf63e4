@@ -1,0 +1,3 @@
+user read@read -@admin ~ ~*
+user writer +@read -@admin ~ ~*
+user writer reset on >ro~set ~*
