@@ -1,0 +1,3 @@
+	#!lua name=replaceempty
+receempty
+redis.register_function('fst', function('

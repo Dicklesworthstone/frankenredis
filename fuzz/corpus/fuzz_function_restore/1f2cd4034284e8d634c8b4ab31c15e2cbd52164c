@@ -1,0 +1,2 @@
+0#!lua name=seedlib
+redis.register_function('alp#1', function(keys_name=t's'ifr, cal#[lback=e""""""""""""""k#e ys ""#"""""db

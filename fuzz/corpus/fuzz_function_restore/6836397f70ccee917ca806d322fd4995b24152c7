@@ -1,0 +1,3 @@
+	#!lua name=relaceempty
+rp.register_function('t{
+r@lesedis.t

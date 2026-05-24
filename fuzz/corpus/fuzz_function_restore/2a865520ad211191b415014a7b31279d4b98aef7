@@ -1,0 +1,2 @@
+	#!lua name=raceempty
+register_function('Tir;t', function(?) retur1

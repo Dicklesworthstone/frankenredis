@@ -1,0 +1,2 @@
+0#!lua name=seedlib
+redis.register_function('alpha', function(keys, args) retgister_function{functiongsction{function_name=callback=f}ncon(keys, args) return 1 end}
