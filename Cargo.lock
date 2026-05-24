@@ -303,6 +303,7 @@ dependencies = [
  "fr-expire",
  "fr-persist",
  "fr-sentinel",
+ "indexmap",
  "libc",
  "proptest",
 ]

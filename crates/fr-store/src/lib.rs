@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use fr_expire::evaluate_expiry;
+use indexmap::IndexMap;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
@@ -579,7 +580,8 @@ impl From<std::collections::HashMap<Vec<u8>, f64>> for SortedSet {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     String(Vec<u8>),
-    Hash(BTreeMap<Vec<u8>, Vec<u8>>),
+    /// Hash: uses IndexMap to preserve insertion order like Redis listpack.
+    Hash(IndexMap<Vec<u8>, Vec<u8>>),
     List(VecDeque<Vec<u8>>),
     Set(BTreeSet<Vec<u8>>),
     /// Sorted set: dual-indexed for efficiency.
@@ -4965,7 +4967,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(BTreeMap::new()), now_ms);
+        self.internal_entry(key.to_vec(), Value::Hash(IndexMap::new()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let result = self
@@ -5267,7 +5269,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(BTreeMap::new()), now_ms);
+        self.internal_entry(key.to_vec(), Value::Hash(IndexMap::new()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self
@@ -5326,7 +5328,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(BTreeMap::new()), now_ms);
+        self.internal_entry(key.to_vec(), Value::Hash(IndexMap::new()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let result = self
@@ -5337,7 +5339,7 @@ impl Store {
                 let Value::Hash(m) = &mut entry.value else {
                     return Err(StoreError::WrongType);
                 };
-                if let std::collections::btree_map::Entry::Vacant(slot) = m.entry(field) {
+                if let indexmap::map::Entry::Vacant(slot) = m.entry(field) {
                     slot.insert(value);
                     entry.touch_write(now_ms);
                     // (frankenredis-yp503) Lock hashtable encoding if
@@ -5409,7 +5411,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(BTreeMap::new()), now_ms);
+        self.internal_entry(key.to_vec(), Value::Hash(IndexMap::new()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self
@@ -13502,7 +13504,7 @@ impl Store {
                 if count == 0 {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                let mut hash = BTreeMap::new();
+                let mut hash = IndexMap::new();
                 for _ in 0..count {
                     let (field, fc) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += fc;
@@ -14644,12 +14646,12 @@ fn decode_listpack_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
         .map_err(|_| StoreError::InvalidDumpPayload)
 }
 
-fn hash_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, StoreError> {
+fn hash_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<IndexMap<Vec<u8>, Vec<u8>>, StoreError> {
     let mut chunks = entries.chunks_exact(2);
     if !chunks.remainder().is_empty() {
         return Err(StoreError::InvalidDumpPayload);
     }
-    let mut hash = BTreeMap::new();
+    let mut hash = IndexMap::new();
     for pair in &mut chunks {
         if hash.insert(pair[0].clone(), pair[1].clone()).is_some() {
             return Err(StoreError::InvalidDumpPayload);
@@ -14679,7 +14681,7 @@ fn zset_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<SortedSet, StoreError
     Ok(zs)
 }
 
-fn decode_zipmap_pairs(data: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, StoreError> {
+fn decode_zipmap_pairs(data: &[u8]) -> Result<IndexMap<Vec<u8>, Vec<u8>>, StoreError> {
     const ZIPMAP_BIGLEN: u8 = 254;
     const ZIPMAP_END: u8 = 255;
 
@@ -14693,7 +14695,7 @@ fn decode_zipmap_pairs(data: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, StoreE
         .ok_or(StoreError::InvalidDumpPayload)?;
     let mut cursor = 1;
     let payload_end = data.len() - 1;
-    let mut hash = BTreeMap::new();
+    let mut hash = IndexMap::new();
 
     while cursor < payload_end {
         let (key_len, key_len_size) = decode_zipmap_len(data, cursor, payload_end)?;
@@ -15380,7 +15382,7 @@ fn is_int_encoded_string(bytes: &[u8]) -> bool {
     n.to_string() == s
 }
 
-fn estimate_hash_memory_usage_bytes(fields: &BTreeMap<Vec<u8>, Vec<u8>>) -> usize {
+fn estimate_hash_memory_usage_bytes(fields: &IndexMap<Vec<u8>, Vec<u8>>) -> usize {
     if fields
         .iter()
         .all(|(field, value)| field.len() <= 64 && value.len() <= 64)
@@ -19817,16 +19819,17 @@ mod tests {
     }
 
     #[test]
-    fn hgetall_returns_sorted_pairs() {
+    fn hgetall_returns_pairs_in_insertion_order() {
         let mut store = Store::new();
         store.hset(b"h", b"b".to_vec(), b"2".to_vec(), 0).unwrap();
         store.hset(b"h", b"a".to_vec(), b"1".to_vec(), 0).unwrap();
         let pairs = store.hgetall(b"h", 0).unwrap();
+        // IndexMap preserves insertion order like Redis listpack
         assert_eq!(
             pairs,
             vec![
-                (b"a".to_vec(), b"1".to_vec()),
-                (b"b".to_vec(), b"2".to_vec())
+                (b"b".to_vec(), b"2".to_vec()),
+                (b"a".to_vec(), b"1".to_vec())
             ]
         );
     }
@@ -19862,17 +19865,18 @@ mod tests {
     }
 
     #[test]
-    fn hkeys_and_hvals() {
+    fn hkeys_and_hvals_preserve_insertion_order() {
         let mut store = Store::new();
         store.hset(b"h", b"b".to_vec(), b"2".to_vec(), 0).unwrap();
         store.hset(b"h", b"a".to_vec(), b"1".to_vec(), 0).unwrap();
+        // IndexMap preserves insertion order like Redis listpack
         assert_eq!(
             store.hkeys(b"h", 0).unwrap(),
-            vec![b"a".to_vec(), b"b".to_vec()]
+            vec![b"b".to_vec(), b"a".to_vec()]
         );
         assert_eq!(
             store.hvals(b"h", 0).unwrap(),
-            vec![b"1".to_vec(), b"2".to_vec()]
+            vec![b"2".to_vec(), b"1".to_vec()]
         );
     }
 

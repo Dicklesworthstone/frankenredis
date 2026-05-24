@@ -3486,8 +3486,8 @@
                     "value": "alice"
                   },
                   {
-                    "kind": "integer",
-                    "value": 2
+                    "kind": "bulk",
+                    "value": "2"
                   }
                 ]
               },
@@ -3499,8 +3499,8 @@
                     "value": "bob"
                   },
                   {
-                    "kind": "integer",
-                    "value": 1
+                    "kind": "bulk",
+                    "value": "1"
                   }
                 ]
               }
@@ -3742,8 +3742,8 @@
                     "value": "alice"
                   },
                   {
-                    "kind": "integer",
-                    "value": 1
+                    "kind": "bulk",
+                    "value": "1"
                   }
                 ]
               },
@@ -3755,8 +3755,8 @@
                     "value": "bob"
                   },
                   {
-                    "kind": "integer",
-                    "value": 1
+                    "kind": "bulk",
+                    "value": "1"
                   }
                 ]
               }

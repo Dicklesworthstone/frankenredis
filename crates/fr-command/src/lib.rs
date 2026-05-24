@@ -7650,9 +7650,12 @@ fn xpending(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
 
         let mut consumer_frames = Vec::with_capacity(per_consumer.len());
         for (consumer, pending_count) in per_consumer {
+            // Upstream t_stream.c (xpendingCommand summary form) emits each
+            // per-consumer pending count as a BULK STRING, not an integer.
+            // Vendored 7.2.4 returns "1", not :1. (gauntlet B1)
             consumer_frames.push(RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(consumer)),
-                RespFrame::Integer(i64::try_from(pending_count).unwrap_or(i64::MAX)),
+                RespFrame::BulkString(Some(pending_count.to_string().into_bytes())),
             ])));
         }
 
@@ -20927,6 +20930,12 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             result.push((member, score));
         }
     }
+    // (gauntlet B3) zset reply order: score asc, ties by member byte-lex.
+    result.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
     let mut frames = Vec::new();
     for (member, score) in result {
         frames.push(RespFrame::BulkString(Some(member)));
@@ -21027,6 +21036,12 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             result.push((member, combined));
         }
     }
+    // (gauntlet B3) zset reply order: score asc, ties by member byte-lex.
+    result.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
     let mut frames = Vec::new();
     for (member, score) in result {
         frames.push(RespFrame::BulkString(Some(member)));
@@ -21079,7 +21094,14 @@ fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         }
     }
     let mut entries: Vec<(Vec<u8>, f64)> = combined.into_iter().collect();
-    entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    // (gauntlet B3) Vendored zunionInterDiffGenericCommand replies in zset order:
+    // score ascending, ties broken by member byte-lex. The HashMap above loses
+    // ordering, so the tie-break is required for determinism.
+    entries.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
     let mut frames = Vec::new();
     for (member, score) in entries {
         frames.push(RespFrame::BulkString(Some(member)));
@@ -27887,13 +27909,14 @@ mod tests {
         .expect("hset");
         let out =
             dispatch_argv(&[b"HGETALL".to_vec(), b"h".to_vec()], &mut store, 0).expect("hgetall");
+        // IndexMap preserves insertion order like Redis listpack
         assert_eq!(
             out,
             RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"a".to_vec())),
-                RespFrame::BulkString(Some(b"1".to_vec())),
                 RespFrame::BulkString(Some(b"b".to_vec())),
                 RespFrame::BulkString(Some(b"2".to_vec())),
+                RespFrame::BulkString(Some(b"a".to_vec())),
+                RespFrame::BulkString(Some(b"1".to_vec())),
             ]))
         );
     }
@@ -27916,11 +27939,12 @@ mod tests {
         .expect("hset");
         let keys_out =
             dispatch_argv(&[b"HKEYS".to_vec(), b"h".to_vec()], &mut store, 0).expect("hkeys");
+        // IndexMap preserves insertion order like Redis listpack
         assert_eq!(
             keys_out,
             RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"a".to_vec())),
                 RespFrame::BulkString(Some(b"b".to_vec())),
+                RespFrame::BulkString(Some(b"a".to_vec())),
             ]))
         );
         let vals_out =
@@ -27928,8 +27952,8 @@ mod tests {
         assert_eq!(
             vals_out,
             RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"1".to_vec())),
                 RespFrame::BulkString(Some(b"2".to_vec())),
+                RespFrame::BulkString(Some(b"1".to_vec())),
             ]))
         );
     }
@@ -33466,11 +33490,13 @@ mod tests {
                 RespFrame::Array(Some(vec![
                     RespFrame::Array(Some(vec![
                         RespFrame::BulkString(Some(b"c1".to_vec())),
-                        RespFrame::Integer(2),
+                        // Summary per-consumer count is a bulk string in vendored
+                        // 7.2.4 (t_stream.c), not an integer. (gauntlet B1)
+                        RespFrame::BulkString(Some(b"2".to_vec())),
                     ])),
                     RespFrame::Array(Some(vec![
                         RespFrame::BulkString(Some(b"c2".to_vec())),
-                        RespFrame::Integer(1),
+                        RespFrame::BulkString(Some(b"1".to_vec())),
                     ])),
                 ])),
             ]))
@@ -33772,11 +33798,12 @@ mod tests {
                 RespFrame::Array(Some(vec![
                     RespFrame::Array(Some(vec![
                         RespFrame::BulkString(Some(b"c1".to_vec())),
-                        RespFrame::Integer(1),
+                        // gauntlet B1: summary count is a bulk string in 7.2.4.
+                        RespFrame::BulkString(Some(b"1".to_vec())),
                     ])),
                     RespFrame::Array(Some(vec![
                         RespFrame::BulkString(Some(b"c2".to_vec())),
-                        RespFrame::Integer(1),
+                        RespFrame::BulkString(Some(b"1".to_vec())),
                     ])),
                 ])),
             ]))
