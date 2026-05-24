@@ -6137,21 +6137,30 @@ fn format_stream_id(id: StreamId) -> Vec<u8> {
 }
 
 #[inline]
-fn next_auto_stream_id(last_id: Option<StreamId>, now_ms: u64) -> StreamId {
-    let mut id = match last_id {
+fn next_auto_stream_id(last_id: Option<StreamId>, now_ms: u64) -> Option<StreamId> {
+    let id = match last_id {
         Some((last_ms, last_seq)) => {
             if now_ms > last_ms {
                 (now_ms, 0)
             } else {
-                (last_ms, last_seq.saturating_add(1))
+                // Try to increment sequence; if exhausted, try next ms
+                match last_seq.checked_add(1) {
+                    Some(next_seq) => (last_ms, next_seq),
+                    None => {
+                        // Sequence exhausted at this ms, try next ms
+                        let next_ms = last_ms.checked_add(1)?;
+                        (next_ms, 0)
+                    }
+                }
             }
         }
         None => (now_ms, 0),
     };
     if id == (0, 0) {
-        id.1 = 1;
+        Some((0, 1))
+    } else {
+        Some(id)
     }
-    id
 }
 
 // Upstream t_stream.c::streamIncrID — successor in lexicographic (ms, seq)
@@ -6416,11 +6425,29 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         return Ok(RespFrame::BulkString(None));
     }
     let id = if eq_ascii_command(&argv[id_idx], b"*") {
-        next_auto_stream_id(last_id, now_ms)
+        match next_auto_stream_id(last_id, now_ms) {
+            Some(id) => id,
+            None => {
+                return Ok(RespFrame::Error(
+                    "ERR The stream has exhausted the last possible ID, unable to add more items"
+                        .to_string(),
+                ));
+            }
+        }
     } else if let Some(partial_ms) = parse_partial_auto_id(&argv[id_idx]) {
         // "ms-*" format: explicit timestamp, auto-generate sequence
         let seq = match last_id {
-            Some((last_ms, last_seq)) if partial_ms == last_ms => last_seq.saturating_add(1),
+            Some((last_ms, last_seq)) if partial_ms == last_ms => {
+                match last_seq.checked_add(1) {
+                    Some(next_seq) => next_seq,
+                    None => {
+                        return Ok(RespFrame::Error(
+                            "ERR The stream has exhausted the last possible ID, unable to add more items"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
             Some((last_ms, _)) if partial_ms < last_ms => {
                 return Ok(RespFrame::Error(
                     "ERR The ID specified in XADD is equal or smaller than the target stream top item"
