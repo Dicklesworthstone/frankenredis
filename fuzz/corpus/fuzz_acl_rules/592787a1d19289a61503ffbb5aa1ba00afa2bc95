@@ -1,0 +1,2 @@
+user read nopass +@read -@admin ~  nopass +@read -@admin ~ ~*
+user w@admin ~  nopass +@read -@admin ~ ~ ~*all ~*

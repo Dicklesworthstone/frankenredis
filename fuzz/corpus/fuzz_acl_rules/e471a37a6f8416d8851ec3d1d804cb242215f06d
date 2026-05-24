@@ -1,0 +1,2 @@
+user readet on nopass +@read -@admin ~  nopass +@read -@admin ~ ~*
+user w@admin ~  nopass +@read -@admin ~ p +@all ~*

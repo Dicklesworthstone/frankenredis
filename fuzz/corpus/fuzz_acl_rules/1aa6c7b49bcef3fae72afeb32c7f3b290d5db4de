@@ -1,0 +1,1 @@
+user .pa -@read +@write -@dangerous -@admin -flushall  -@read +@write -@a*
