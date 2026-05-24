@@ -1,0 +1,1 @@
+file ./appendonly.aof eq 1 pe b

@@ -1,0 +1,5 @@
+#
+file appendonly.1.base.rdb seq 1 type b
+file appendonly.aoincr.aof seq 2 type h
+file appendonly.aof.[[ seq 3 type i
+file appendonly.aof.5f seq 4 type i
