@@ -11443,6 +11443,52 @@ impl<'a> JsonParser<'a> {
     }
 }
 
+impl Drop for LuaState<'_> {
+    fn drop(&mut self) {
+        // Break Rc<RefCell<LuaTableInner>> cycles to prevent memory leaks.
+        // User scripts can create cyclic tables (e.g., `t.self = t`) which
+        // form Rc cycles that won't be reclaimed without manual clearing.
+        // We recursively clear all tables reachable from globals to break
+        // these cycles on LuaState destruction.
+        fn clear_table_recursive(table: &LuaTable, visited: &mut HashSet<usize>) {
+            let ptr = Rc::as_ptr(&table.inner) as usize;
+            if !visited.insert(ptr) {
+                return;
+            }
+            let inner = &mut *table.inner.borrow_mut();
+            for value in inner.array.drain(..) {
+                if let LuaValue::Table(t) = value {
+                    clear_table_recursive(&t, visited);
+                }
+            }
+            for (_, value) in inner.string_hash.drain() {
+                if let LuaValue::Table(t) = value {
+                    clear_table_recursive(&t, visited);
+                }
+            }
+            for (k, v) in inner.other_hash.drain(..) {
+                if let LuaValue::Table(t) = k {
+                    clear_table_recursive(&t, visited);
+                }
+                if let LuaValue::Table(t) = v {
+                    clear_table_recursive(&t, visited);
+                }
+            }
+            inner.other_keys.clear();
+            if let Some(mt) = inner.metatable.take() {
+                clear_table_recursive(&mt, visited);
+            }
+        }
+
+        let mut visited = HashSet::new();
+        for value in self.globals.values() {
+            if let LuaValue::Table(t) = value {
+                clear_table_recursive(t, &mut visited);
+            }
+        }
+    }
+}
+
 // ── Public entry point ──────────────────────────────────────────────────
 
 pub fn eval_script(
@@ -11484,6 +11530,9 @@ pub fn eval_script(
 
     let result = state.execute(executed_script)?;
     let frame = lua_to_resp(&result);
+    // Drop state explicitly to release the mutable borrow of store before
+    // accessing store.dispatch_client_ctx below.
+    drop(state);
     // (frankenredis-luaresp2map) Upstream src/script_lua.c::
     // luaReplyToRedisReply emits Map/Set/Push/Double/etc only when the
     // caller connection is RESP3; for RESP2 it auto-downconverts
