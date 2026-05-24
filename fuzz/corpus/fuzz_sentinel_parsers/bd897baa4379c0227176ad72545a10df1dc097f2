@@ -1,0 +1,3 @@
+
+role:slave
+master_port:6379

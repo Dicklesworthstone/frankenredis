@@ -1,0 +1,117 @@
+# ,lag:ip=,offset=1,lag=0
+s:oueip=1'.0.0.11,por,t=ip==0
+slave=:a=4,por,t=i=30.0.01,ip=10.0.030.0.01,ip=10.0.0.11$R=1,lag:ip=,offset=1,lag# R=1,lag:ip=,offset=1,lag=0
+slave=:0.0.030.0.01,ip=90.0.0.11,R=1,lag:ip=,offset=1,lag# R=1,l=1',t=ip=30.0.01,ip=1=10.0.0.11,lag:ip=,offset=1,lag# R=1,lag:ip=,offset=1,lag=0
+slaveor,t=ip=30.0.01,ip=10.0.030.0.01,ip='.0.0.11,por,t=ip==0
+slave=:a=4,por,t=ip=30.0.1,ip=10.0.030.0.01,ip=10.0.0.11,R=2,lag:ip=,offset=1# :up
+master_link_down_since_seconds:+
+
+role:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role:s~
+mask_down_sioce_seconds:+
+
+rlink_le:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role:s~
+mask_down_since_seconds,lag# R=1,lag:ip=,offset=1,lag=0
+slave=:0.0.0:+
+
+role:s~
+mast# :up
+mr_linter_l#!le:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role30.0.01:s~
+master_linter_,ip=10.0.0.11,R=1,lag:ip=,offset=1,lag# R=1,Rollinds::elag:ip=,offset=1,lag=0
+slave=:a=slave=:a=4,uppor,30.0.0slave=:a=4,por,t=i=30.0.01,ii=10.0.030.0.01,ip=10.0.0.11$R=1,lag:ip=,offset=1,lag# R=1,lag:ip=,offset=1,lag=0
+slave=:0.0.030.0.01,ip=90.0.0.11,R=1,lag:ip=,offset=1,lag# R=1,l=1'.0.0.11,por,t=ip==0
+slave=:a=4,por,t=ip=30.0.01,ip=1=10.0.0.11,lag:ip=,offset=1,lag# R=1,lag:ip=,offset=1,lag=0
+slaveor,t=ip=30.0.01,ip=10.0.030.0.01,ip='.0.0.11,por,t=ip==0
+slave=:a=4,por,t=ip=30.0.1,ip=10.0.030.0.01,ip=10.0.0.11,R=2,lag:ip<,offset=1# :up
+master_link_down_since_seconds:+
+
+role:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role:s~
+mask_down_sioce_seconds:+
+
+rlink_le:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role:s~
+mask_down_since_seconds,lag# R=1,lag:ip=,offset=1,lag=0
+slave=:0.0.0:+
+
+role:s~
+mast# :up
+mr_%linter_l#ole:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role30.0.01:s~
+master_linter_,ip=10.0.0.11,R=0.0.01,ip='.0.0.11,por,t=ip==0
+slave=:a=4,por,t=ip=30.0.1,ip=10.0.030.0.01,ip=10.0.0.11,R=2,lag:ip=,offset=1# :up
+master_link_down_since_seconds:+
+
+role:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role:s~
+mask_down_sioce_seconds:+
+
+rlink_le:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role:s~
+mask_down_since_seconds,lag# R=1,lag:ip=,offset=1,lag=0
+slave=:0.0.0:+
+
+role:s~
+mast# :up
+mr_linter_l#!le:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role30.0.01:s~
+master_linter_,ip=10.0.0.11,R=1,lag:ip=,offsR=1,Rollinds::elag:ip=,offset=1,lag=0
+slave=:a=slave=:a=4,uppor,30.0.0slave=:a=4,por,t=i=30.0.01,ii=10.0.030.0.01,ip=10.0.0.11$R=1,lag:ip=,offset=1,lag# R=1,lag:ip=,offset=1,lag=0
+slave=:0.0.030.0.01,ip=90.0.0.11,R=1,lag:ip=,offset=1,lag# R=1,l=1'.0.0.11,por,t=ip==0
+slave=:a=4,por,t=ip=30.0.01,ip=1=10.0.0.11,lag:ip=,offset=1,lag# R=1,lag:ip=,offset=1,lag=0
+slaveor,t=ip=30.0.01,ip=10.0.030.0.01,ip='.0.0.11,por,t=ip==0
+slave=:a=4,por,t=ip=30.0.1,ip=10.0.030.0.01,ip=10.0.0.11,R=2,lag:ip<,offset=1# :up
+master_link_down_since_seconds:+
+
+role:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role:s~
+mask_down_sioce_seconds:+
+
+rlink_le:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role:s~
+mask_down_since_seconds,lag# R=1,lag:ip=,offset=1,lag=0
+slave=:0.0.0:+
+
+role:s~
+mast# :up
+mr_%linter_l#ole:s~
+mast# :up
+master_link_down_since_seconds:+
+
+role30.0.01:s~
+master_linter_,ip=10.0.0.11,R=1,l1,ip=10.1

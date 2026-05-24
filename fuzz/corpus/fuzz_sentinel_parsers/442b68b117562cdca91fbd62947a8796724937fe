@@ -1,0 +1,4 @@
+#ipen
+role:slave
+mast_e1
+slave_repl_offset:55555550

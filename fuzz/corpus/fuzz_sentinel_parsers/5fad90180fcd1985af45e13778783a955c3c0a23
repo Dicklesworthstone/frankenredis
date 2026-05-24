@@ -1,0 +1,4 @@
+# Replica
+role:slave
+mas
+master_port:6379d

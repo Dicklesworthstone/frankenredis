@@ -1,0 +1,4 @@
+#
+role:slave
+
+slave_repl_offset:543*1slave#lvp2y

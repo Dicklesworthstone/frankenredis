@@ -1,0 +1,7 @@
+# Replication
+role:slave
+mast10.ds:0
+slave_repl_offset:1
+ss:0
+slave_repl_offset:50
+slave_repl_offset:c

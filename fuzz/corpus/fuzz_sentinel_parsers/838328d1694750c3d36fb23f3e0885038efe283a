@@ -1,0 +1,10 @@
+# Replica:up
+master_link_down_since_seconds:1
+slave
+mp
+master_link_down_since_seconds:0
+slave_repl\`ve
+masteup
+master_link_down_since_seconds:0
+s
+run_id:replnid-1

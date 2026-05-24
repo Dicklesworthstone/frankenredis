@@ -1,0 +1,5 @@
+#ati
+role:slave
+mt
+slave_priority:not
+slave_priority:nota1

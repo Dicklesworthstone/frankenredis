@@ -1,0 +1,5 @@
+# Replne,set=1,lag=0
+soffset=1,lag=0
+slave=:ip=10.0.01,port=0.11,port=bad,port=bad,.11,set=1,lag=0
+slave=:ip=10.0.01,port=bad,st:ip=10.0.0.11,port=bad,.0.01,port=bad,st0.1110.0.01,port=0.11,port=bad,.e=:ip=10offset=1,lag=0
+slave=:ip=1,port=bad,.11,set=1,lag=p=10.0.0.11,port=bad,.0.01,port=b,port=bad,.11,poad,st0.11@,port=bad,.11,port=bbd,st@,port=bad,.11,port=bbd,st,offseT=3,l

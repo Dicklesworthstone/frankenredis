@@ -1,0 +1,5 @@
+pre
+slave_priority:astet
+slave_priority:ip=apiFt
+slave_priority:not
+slave_priority:poapriorri

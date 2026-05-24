@@ -1,0 +1,5 @@
+# Rep
+slave1:ip=20
+slave1:ip=10=0
+slave0:ip==0
+slave1:ip=ro6

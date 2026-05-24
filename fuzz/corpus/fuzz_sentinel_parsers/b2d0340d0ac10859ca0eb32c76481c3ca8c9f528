@@ -1,0 +1,8 @@
+# Resication
+role:slave
+.t:nr
+slave_repl_offset:nfset
+slaverr
+slave_repl_offset:tnr
+slave_repl_offset:ngtanoffsnr
+slave_repl_offset:notanoffity

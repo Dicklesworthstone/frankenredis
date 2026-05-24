@@ -1,0 +1,3 @@
+#
+role:slave
+slave_repl_offset:5511111111111111611qq

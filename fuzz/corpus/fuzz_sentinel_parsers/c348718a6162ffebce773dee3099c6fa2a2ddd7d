@@ -1,0 +1,4 @@
+# n
+role:slave
+mast:6379
+replica_announced:70957s

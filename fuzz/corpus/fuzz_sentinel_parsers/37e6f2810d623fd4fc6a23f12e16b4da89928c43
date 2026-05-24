@@ -1,0 +1,3 @@
+# Replin
+role:slave
+slave_repl_offset:55555555555555555555qq
