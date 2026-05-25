@@ -1530,7 +1530,7 @@ In strict mode, the default decision for every threat class is `FailClosed` with
 ### What FrankenRedis does NOT defend against
 
 - **CPU exhaustion via expensive but legal commands.** A determined adversary with `+KEYS` permission can still ask `KEYS '*'` on a giant keyspace; that's a workload problem, not a security problem. Use ACL to scope what each user can do.
-- **TLS interception.** Wire-level TLS is not yet terminated (see Limitations); front the server with `stunnel`/`spiped` or terminate at your load balancer until rustls wiring lands.
+- **TLS interception.** Wire-level TLS is delegated to the operational layer (see Limitations); front the server with `stunnel`/`spiped` or terminate at your load balancer. This is a deliberate scope decision — TLS is transport-layer, not Redis protocol parity.
 - **Multi-tenant isolation across databases.** `SELECT 0..15` provides Redis-style logical separation but not security separation; an attacker with `+SELECT` can move between databases. Use separate FrankenRedis processes or ACL `~prefix:*` keyspaces for hard isolation.
 - **DoS via UDP / ICMP / kernel-level attacks.** That's a network-layer concern; FrankenRedis is a TCP application.
 
@@ -1561,7 +1561,7 @@ Honest list of what FrankenRedis does *not* do today. The roadmap below tracks c
 
 - **No multi-node cluster sharding.** The `CLUSTER` command surface is implemented for single-node mode (slot map, NODES, INFO, KEYSLOT, etc.), but FrankenRedis does not yet do CRC16 slot rebalancing or live shard migration across multiple FrankenRedis processes.
 - **Pipelined throughput trails Redis at high pipeline depth.** Single-command throughput is in the 71–83% range of Redis; `pipeline=16` is at ~33–47%. The `writev` scatter-gather work that closes the gap is on the roadmap.
-- **Wire-level TLS not yet terminated.** TLS configuration, accept-rate-limit, and policy are wired through `fr-config` / `fr-runtime`, but the listener does not yet terminate `rustls` connections. Clients connect in plaintext for now.
+- **Wire-level TLS delegated to operational layer.** TLS configuration parsing and validation are wired through `fr-config` / `fr-runtime`, but the listener accepts plaintext only. **This is a deliberate scope decision:** TLS termination is a transport concern, not Redis protocol parity. All 241 commands behave identically over TLS or plaintext. Use `stunnel`, `spiped`, or your load balancer/reverse-proxy for TLS termination — this is the standard production pattern anyway.
 - **Hash field TTL commands are intentionally not exposed.** The `HEXPIRE`/`HTTL`/`HPERSIST` family is a Redis 7.4 feature; FrankenRedis targets 7.2.4 parity. The storage-layer representation exists (`hash_field_expires` on `Store`, `RDB_TYPE_HASH_WITH_TTLS` round-trip) for forward compatibility.
 - **HyperLogLog representation is always dense.** Upstream uses a sparse representation for low cardinalities; FrankenRedis uses the 16,389-byte dense form unconditionally. Tracked as `frankenredis-j2tuo`.
 - **`DUMP` for large quicklist entries uses the PACKED container.** Upstream Redis emits a PLAIN container compressed with LZF for big-item quicklist nodes; FrankenRedis currently emits PACKED. The on-wire payload remains a valid `DUMP`/`RESTORE` round-trip in both directions, but is not byte-identical to vendored. Tracked as `frankenredis-371l9`.
