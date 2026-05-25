@@ -42,6 +42,51 @@ fn sanitize_inline_body(s: &str) -> String {
         .collect()
 }
 
+/// Fast integer-to-bytes without format machinery. Writes decimal representation
+/// of `n` directly into `out`. Avoids the allocation overhead of write!().
+fn push_i64(out: &mut Vec<u8>, n: i64) {
+    if n == 0 {
+        out.push(b'0');
+        return;
+    }
+    let (neg, mut val) = if n < 0 {
+        (true, (n as i128).unsigned_abs() as u64)
+    } else {
+        (false, n as u64)
+    };
+    // Max i64 is 19 digits + sign = 20 bytes
+    let mut buf = [0u8; 20];
+    let mut pos = 20;
+    while val > 0 {
+        pos -= 1;
+        buf[pos] = b'0' + (val % 10) as u8;
+        val /= 10;
+    }
+    if neg {
+        pos -= 1;
+        buf[pos] = b'-';
+    }
+    out.extend_from_slice(&buf[pos..]);
+}
+
+/// Fast usize-to-bytes for lengths (always non-negative).
+fn push_usize(out: &mut Vec<u8>, n: usize) {
+    if n == 0 {
+        out.push(b'0');
+        return;
+    }
+    let mut val = n;
+    // Max usize on 64-bit is 20 digits
+    let mut buf = [0u8; 20];
+    let mut pos = 20;
+    while val > 0 {
+        pos -= 1;
+        buf[pos] = b'0' + (val % 10) as u8;
+        val /= 10;
+    }
+    out.extend_from_slice(&buf[pos..]);
+}
+
 fn push_inline_sanitized(out: &mut Vec<u8>, body: &[u8]) {
     let needs_sanitize = body.iter().any(|&b| b == b'\r' || b == b'\n');
     if !needs_sanitize {
@@ -67,7 +112,6 @@ impl RespFrame {
     }
 
     pub fn encode_into(&self, out: &mut Vec<u8>) {
-        use std::io::Write;
         match self {
             Self::SimpleString(s) => {
                 out.extend_from_slice(b"+");
@@ -81,13 +125,13 @@ impl RespFrame {
             }
             Self::Integer(n) => {
                 out.extend_from_slice(b":");
-                let _ = write!(out, "{}", n);
+                push_i64(out, *n);
                 out.extend_from_slice(b"\r\n");
             }
             Self::BulkString(None) => out.extend_from_slice(b"$-1\r\n"),
             Self::BulkString(Some(bytes)) => {
                 out.extend_from_slice(b"$");
-                let _ = write!(out, "{}", bytes.len());
+                push_usize(out, bytes.len());
                 out.extend_from_slice(b"\r\n");
                 out.extend_from_slice(bytes);
                 out.extend_from_slice(b"\r\n");
@@ -95,7 +139,7 @@ impl RespFrame {
             Self::Array(None) => out.extend_from_slice(b"*-1\r\n"),
             Self::Array(Some(frames)) => {
                 out.extend_from_slice(b"*");
-                let _ = write!(out, "{}", frames.len());
+                push_usize(out, frames.len());
                 out.extend_from_slice(b"\r\n");
                 for frame in frames {
                     frame.encode_into(out);
@@ -104,7 +148,7 @@ impl RespFrame {
             Self::Map(None) => out.extend_from_slice(b"%-1\r\n"),
             Self::Map(Some(entries)) => {
                 out.extend_from_slice(b"%");
-                let _ = write!(out, "{}", entries.len());
+                push_usize(out, entries.len());
                 out.extend_from_slice(b"\r\n");
                 for (key, value) in entries {
                     key.encode_into(out);
@@ -113,7 +157,7 @@ impl RespFrame {
             }
             Self::Push(frames) => {
                 out.extend_from_slice(b">");
-                let _ = write!(out, "{}", frames.len());
+                push_usize(out, frames.len());
                 out.extend_from_slice(b"\r\n");
                 for frame in frames {
                     frame.encode_into(out);
@@ -132,7 +176,7 @@ impl RespFrame {
             Self::Set(None) => out.extend_from_slice(b"~-1\r\n"),
             Self::Set(Some(frames)) => {
                 out.extend_from_slice(b"~");
-                let _ = write!(out, "{}", frames.len());
+                push_usize(out, frames.len());
                 out.extend_from_slice(b"\r\n");
                 for frame in frames {
                     frame.encode_into(out);
@@ -142,7 +186,7 @@ impl RespFrame {
                 // RESP3 verbatim string: =<len>\r\ntxt:<body>\r\n
                 // len includes the "txt:" prefix (4 bytes)
                 out.extend_from_slice(b"=");
-                let _ = write!(out, "{}", s.len() + 4);
+                push_usize(out, s.len() + 4);
                 out.extend_from_slice(b"\r\ntxt:");
                 out.extend_from_slice(s.as_bytes());
                 out.extend_from_slice(b"\r\n");
