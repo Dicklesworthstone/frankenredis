@@ -4345,7 +4345,7 @@ impl Store {
             && let Value::Hash(map) = &mut entry.value
         {
             for field in &expired_fields {
-                if map.remove(field.as_slice()).is_some() {
+                if map.shift_remove(field.as_slice()).is_some() {
                     reaped += 1;
                 }
             }
@@ -4395,7 +4395,7 @@ impl Store {
         if let Some(entry) = self.entries.get_mut(key)
             && let Value::Hash(map) = &mut entry.value
         {
-            if map.remove(field).is_some() {
+            if map.shift_remove(field).is_some() {
                 removed = true;
             }
             became_empty = map.is_empty();
