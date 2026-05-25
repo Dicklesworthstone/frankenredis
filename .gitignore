@@ -150,6 +150,7 @@ ubs_*.jsonl
 /*.md
 !README.md
 !FEATURE_PARITY.md
+!PARITY-COVERAGE.md
 !CHANGELOG.md
 !AGENTS.md
 !CONTRIBUTING.md
