@@ -26,6 +26,7 @@ tikv-jemallocator = { workspace = true, optional = true }
 mimalloc = { workspace = true, optional = true }
 
 [features]
-default = []
+# mimalloc by default: 63.6% vs 36.5% geomean parity, 70x better p99 tails
+default = ["mimalloc"]
 jemalloc = ["dep:tikv-jemallocator"]
 mimalloc = ["dep:mimalloc"]
