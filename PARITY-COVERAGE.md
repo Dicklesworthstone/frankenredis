@@ -302,6 +302,7 @@ These are intentional divergences where FrankenRedis behavior is more correct or
 | INCRBYFLOAT | Higher precision output | Rust f64 preserves more digits than Redis C sprintf %.17g |
 | cjson.encode | Deterministic key order | FR uses sorted BTreeMap; Redis uses Lua hash arbitrary order |
 | SCAN cursor | Always returns 0 | FR uses BTreeSet (ordered iteration) vs Redis dict bucket traversal |
+| Eviction | Fresh samples vs EVPOOL | FR samples fresh each round; Redis merges into sorted pool |
 
 ## Out of Scope (Not Redis 7.2.4)
 
