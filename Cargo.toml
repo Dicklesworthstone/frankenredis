@@ -21,6 +21,18 @@ edition = "2024"
 version = "0.1.0"
 license-file = "LICENSE"
 
+# (gauntlet) Dedicated profiling profile per the keep-gate rules: perf claims
+# must be measured here, never on size-optimized `--release`. Inherits release
+# but pins LTO/codegen-units for stable attribution and keeps frame pointers +
+# symbols so flamegraph/samply/perf can resolve frames.
+[profile.release-perf]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+strip = false
+
 [workspace.dependencies]
 arbitrary = { version = "1.4.2", features = ["derive"] }
 hdrhistogram = "7.5.4"
