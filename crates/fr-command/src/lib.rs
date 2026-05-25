@@ -4675,33 +4675,41 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         } else {
             (min_lex.as_slice(), max_lex.as_slice())
         };
-        let mut members = store.zrangebylex(&argv[1], lo, hi, now_ms)?;
-        if rev {
-            members.reverse();
-        }
-        if let Some(offset) = limit_offset {
-            // In-place LIMIT: drain skipped prefix, then truncate to count.
-            // Avoids allocating a second Vec via .collect(). (frankenredis-5qwm6)
-            if offset > 0 && offset < members.len() {
-                members.drain(0..offset);
-            } else if offset >= members.len() {
-                members.clear();
-            }
-            if let Some(count) = limit_count {
-                members.truncate(count);
-            }
-        }
         if withscores {
-            // (frankenredis-jnf53) Lex ranges look up scores individually
-            // and feed the (member, score) pairs through the same shape
-            // helper so RESP3 emits Array<[member, score]>.
-            let mut pairs: Vec<(Vec<u8>, f64)> = Vec::with_capacity(members.len());
-            for m in members {
-                let score = store.zscore(&argv[1], &m, now_ms)?.unwrap_or(0.0);
-                pairs.push((m, score));
+            // (frankenredis-ry0sr) Use zrangebylex_withscores to get scores in O(1)
+            // per element rather than O(n) individual zscore lookups.
+            let mut pairs = store.zrangebylex_withscores(&argv[1], lo, hi, now_ms)?;
+            if rev {
+                pairs.reverse();
+            }
+            if let Some(offset) = limit_offset {
+                // In-place LIMIT. (frankenredis-5qwm6)
+                if offset > 0 && offset < pairs.len() {
+                    pairs.drain(0..offset);
+                } else if offset >= pairs.len() {
+                    pairs.clear();
+                }
+                if let Some(count) = limit_count {
+                    pairs.truncate(count);
+                }
             }
             zrange_emit_with_resp(pairs, true, store.dispatch_client_ctx.resp_protocol_version)
         } else {
+            let mut members = store.zrangebylex(&argv[1], lo, hi, now_ms)?;
+            if rev {
+                members.reverse();
+            }
+            if let Some(offset) = limit_offset {
+                // In-place LIMIT. (frankenredis-5qwm6)
+                if offset > 0 && offset < members.len() {
+                    members.drain(0..offset);
+                } else if offset >= members.len() {
+                    members.clear();
+                }
+                if let Some(count) = limit_count {
+                    members.truncate(count);
+                }
+            }
             let frames = members
                 .into_iter()
                 .map(|m| RespFrame::BulkString(Some(m)))

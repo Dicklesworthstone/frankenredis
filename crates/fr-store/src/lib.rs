@@ -8716,6 +8716,47 @@ impl Store {
         }
     }
 
+    /// Like `zrangebylex` but returns (member, score) pairs. Avoids O(n) individual
+    /// zscore lookups when ZRANGE BYLEX WITHSCORES is requested. (frankenredis-ry0sr)
+    pub fn zrangebylex_withscores(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        validate_lex_range_bounds(min, max)?;
+        self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let result: Vec<(Vec<u8>, f64)> = zs
+                            .iter_asc()
+                            .filter(|(m, _)| lex_in_range(m, min, max))
+                            .map(|(m, s)| (m.clone(), *s))
+                            .collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub fn zrevrangebyscore_withscores(
         &mut self,
         key: &[u8],
