@@ -4418,9 +4418,17 @@ fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
                 other => other.into(),
             })?;
         match result {
-            Some(new_score) => Ok(RespFrame::BulkString(Some(
-                redis_score_to_string(new_score).into_bytes(),
-            ))),
+            // (gauntlet B5) ZADD INCR returns the new score as RESP3 Double
+            // under HELLO 3, matching ZSCORE/ZINCRBY.
+            Some(new_score) => {
+                if store.dispatch_client_ctx.resp_protocol_version == 3 {
+                    Ok(RespFrame::double_from_f64(new_score))
+                } else {
+                    Ok(RespFrame::BulkString(Some(
+                        redis_score_to_string(new_score).into_bytes(),
+                    )))
+                }
+            }
             None => Ok(RespFrame::BulkString(None)),
         }
     } else {
@@ -4921,6 +4929,16 @@ fn zpop_count_emit(pairs: Vec<(Vec<u8>, f64)>, resp_protocol_version: i64) -> Re
     }
 }
 
+/// (gauntlet B5) A single score element: RESP3 Double under HELLO 3, bulk string
+/// under RESP2. Used by the no-count ZPOPMIN/ZPOPMAX flat `[member, score]` reply.
+fn zpop_score_frame(score: f64, resp_protocol_version: i64) -> RespFrame {
+    if resp_protocol_version == 3 {
+        RespFrame::double_from_f64(score)
+    } else {
+        RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes()))
+    }
+}
+
 fn zpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     // (frankenredis-bexnm) Upstream t_zset.c:4028 `zpopMinMaxCommand`
     // checks `c->argc > 3` and emits `shared.syntaxerr` — not the
@@ -4956,9 +4974,10 @@ fn zpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         ));
     }
     match store.zpopmin(&argv[1], now_ms)? {
+        // (gauntlet B5) flat [member, score]; score is RESP3 Double under HELLO 3.
         Some((member, score)) => Ok(RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(member)),
-            RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
+            zpop_score_frame(score, store.dispatch_client_ctx.resp_protocol_version),
         ]))),
         None => Ok(RespFrame::Array(Some(vec![]))),
     }
@@ -4982,9 +5001,10 @@ fn zpopmax(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         ));
     }
     match store.zpopmax(&argv[1], now_ms)? {
+        // (gauntlet B5) flat [member, score]; score is RESP3 Double under HELLO 3.
         Some((member, score)) => Ok(RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(member)),
-            RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
+            zpop_score_frame(score, store.dispatch_client_ctx.resp_protocol_version),
         ]))),
         None => Ok(RespFrame::Array(Some(vec![]))),
     }
@@ -20992,16 +21012,9 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.0.cmp(&b.0))
     });
-    let mut frames = Vec::new();
-    for (member, score) in result {
-        frames.push(RespFrame::BulkString(Some(member)));
-        if withscores {
-            frames.push(RespFrame::BulkString(Some(
-                redis_score_to_string(score).into_bytes(),
-            )));
-        }
-    }
-    Ok(RespFrame::Array(Some(frames)))
+    // (gauntlet B5) WITHSCORES emits RESP3 Double + nested pairs under HELLO 3,
+    // flat bulk-string array under RESP2 — same shape as ZRANGE WITHSCORES.
+    zrange_emit_with_resp(result, withscores, store.dispatch_client_ctx.resp_protocol_version)
 }
 
 fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -21098,16 +21111,8 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.0.cmp(&b.0))
     });
-    let mut frames = Vec::new();
-    for (member, score) in result {
-        frames.push(RespFrame::BulkString(Some(member)));
-        if withscores {
-            frames.push(RespFrame::BulkString(Some(
-                redis_score_to_string(score).into_bytes(),
-            )));
-        }
-    }
-    Ok(RespFrame::Array(Some(frames)))
+    // (gauntlet B5) WITHSCORES: RESP3 Double + nested pairs under HELLO 3.
+    zrange_emit_with_resp(result, withscores, store.dispatch_client_ctx.resp_protocol_version)
 }
 
 fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -21158,16 +21163,8 @@ fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.0.cmp(&b.0))
     });
-    let mut frames = Vec::new();
-    for (member, score) in entries {
-        frames.push(RespFrame::BulkString(Some(member)));
-        if withscores {
-            frames.push(RespFrame::BulkString(Some(
-                redis_score_to_string(score).into_bytes(),
-            )));
-        }
-    }
-    Ok(RespFrame::Array(Some(frames)))
+    // (gauntlet B5) WITHSCORES: RESP3 Double + nested pairs under HELLO 3.
+    zrange_emit_with_resp(entries, withscores, store.dispatch_client_ctx.resp_protocol_version)
 }
 
 fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -61281,7 +61278,7 @@ mod tests {
             out,
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"d".to_vec())),
-                RespFrame::BulkString(Some(b"5".to_vec())),
+                RespFrame::Double("5".to_string()),
             ]))
         );
     }
