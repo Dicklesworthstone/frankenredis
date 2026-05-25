@@ -10451,12 +10451,20 @@ impl Runtime {
                 } else {
                     return RespFrame::Error("ERR syntax error".to_string());
                 };
-                return RespFrame::BulkString(Some(payload));
+                // RESP3 clients expect verbatim string for CLIENT LIST output
+                return if self.session.resp_protocol_version == 3 {
+                    RespFrame::Verbatim(String::from_utf8_lossy(&payload).into_owned())
+                } else {
+                    RespFrame::BulkString(Some(payload))
+                };
             }
-            RespFrame::BulkString(Some(
-                self.client_info_line_for_session(&self.session, now_ms)
-                    .into_bytes(),
-            ))
+            // RESP3 clients expect verbatim string for CLIENT INFO output
+            let info_str = self.client_info_line_for_session(&self.session, now_ms);
+            if self.session.resp_protocol_version == 3 {
+                RespFrame::Verbatim(info_str)
+            } else {
+                RespFrame::BulkString(Some(info_str.into_bytes()))
+            }
         } else if sub.eq_ignore_ascii_case("NO-EVICT") {
             // Error-reply wording must match upstream
             // networking.c::clientSubcommand — plain syntax error,
@@ -12158,7 +12166,14 @@ impl Runtime {
             info.truncate(info.len() - 2);
         }
 
-        Ok(RespFrame::BulkString(Some(info)))
+        // RESP3 clients expect verbatim string for INFO output
+        if self.session.resp_protocol_version == 3 {
+            Ok(RespFrame::Verbatim(
+                String::from_utf8_lossy(&info).into_owned(),
+            ))
+        } else {
+            Ok(RespFrame::BulkString(Some(info)))
+        }
     }
 
     fn handle_info_keyspace_section(&mut self, _now_ms: u64) -> RespFrame {
@@ -15568,6 +15583,7 @@ mod tests {
 
         let client_list = rt.execute_frame(command(&[b"CLIENT", b"LIST"]), 1);
         let info = match client_list {
+            RespFrame::Verbatim(s) => s,
             RespFrame::BulkString(Some(info)) => String::from_utf8(info).expect("client info utf8"),
             other => unreachable!("unexpected client list response: {other:?}"),
         };
