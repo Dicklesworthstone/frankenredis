@@ -1897,12 +1897,23 @@ impl VendoredRedisOracle {
                 };
                 let combined_output = format!(
                     "stdout: {}\nstderr: {}",
-                    if stdout_output.is_empty() { "(empty)" } else { stdout_output.trim() },
-                    if stderr_output.is_empty() { "(empty)" } else { stderr_output.trim() }
+                    if stdout_output.is_empty() {
+                        "(empty)"
+                    } else {
+                        stdout_output.trim()
+                    },
+                    if stderr_output.is_empty() {
+                        "(empty)"
+                    } else {
+                        stderr_output.trim()
+                    }
                 );
                 panic!(
                     "vendored redis-server did not become ready after {} attempts on port {}. Process: {}.\n{}",
-                    Self::MAX_SPAWN_ATTEMPTS, port, exit_info, combined_output
+                    Self::MAX_SPAWN_ATTEMPTS,
+                    port,
+                    exit_info,
+                    combined_output
                 );
             }
             sleep(Duration::from_millis(50));
@@ -1978,8 +1989,14 @@ impl VendoredRedisOracle {
                 };
                 panic!(
                     "vendored redis-server did not become ready after {} attempts on port {} (with config). Process: {}. stderr: {}",
-                    Self::MAX_SPAWN_ATTEMPTS, port, exit_info,
-                    if stderr_output.is_empty() { "(empty)" } else { stderr_output.trim() }
+                    Self::MAX_SPAWN_ATTEMPTS,
+                    port,
+                    exit_info,
+                    if stderr_output.is_empty() {
+                        "(empty)"
+                    } else {
+                        stderr_output.trim()
+                    }
                 );
             }
             sleep(Duration::from_millis(50));

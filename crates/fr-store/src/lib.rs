@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use fr_expire::evaluate_expiry;
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
@@ -583,7 +583,8 @@ pub enum Value {
     /// Hash: uses IndexMap to preserve insertion order like Redis listpack.
     Hash(IndexMap<Vec<u8>, Vec<u8>>),
     List(VecDeque<Vec<u8>>),
-    Set(BTreeSet<Vec<u8>>),
+    /// Set: uses IndexSet to preserve insertion order like Redis listpack/intset.
+    Set(IndexSet<Vec<u8>>),
     /// Sorted set: dual-indexed for efficiency.
     SortedSet(SortedSet),
     /// Stream entries keyed by `(milliseconds, sequence)` stream IDs.
@@ -2521,12 +2522,12 @@ impl Store {
         true
     }
 
-    fn set_fits_intset(set: &BTreeSet<Vec<u8>>, max_intset_entries: usize) -> bool {
+    fn set_fits_intset(set: &IndexSet<Vec<u8>>, max_intset_entries: usize) -> bool {
         set.len() <= max_intset_entries && set.iter().all(|member| parse_i64(member).is_ok())
     }
 
     fn set_fits_listpack(
-        set: &BTreeSet<Vec<u8>>,
+        set: &IndexSet<Vec<u8>>,
         max_listpack_entries: usize,
         max_listpack_value: usize,
     ) -> bool {
@@ -2607,7 +2608,7 @@ impl Store {
         }
     }
 
-    fn set_entry(&self, set: BTreeSet<Vec<u8>>, expires_at_ms: Option<u64>, now_ms: u64) -> Entry {
+    fn set_entry(&self, set: IndexSet<Vec<u8>>, expires_at_ms: Option<u64>, now_ms: u64) -> Entry {
         let mut entry = Entry::new(Value::Set(set), expires_at_ms, now_ms);
         Self::refresh_set_encoding_flags(
             &mut entry,
@@ -3299,24 +3300,24 @@ impl Store {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
             match &mut entry.value {
-            Value::String(v) => {
-                let old_len = v.len();
-                if v.len() <= byte_idx {
-                    v.resize(byte_idx + 1, 0);
-                }
-                let old_bit = (v[byte_idx] >> bit_idx) & 1 == 1;
-                if value {
-                    v[byte_idx] |= 1 << bit_idx;
-                } else {
-                    v[byte_idx] &= !(1 << bit_idx);
-                }
-                let changed = old_len != v.len() || old_bit != value;
-                entry.touch_write(now_ms);
-                // Upstream bitops.c::setbitCommand calls
-                // dbUnshareStringValue which always converts the
-                // value to raw, regardless of length.
-                // (br-frankenredis-setbitenc)
-                entry.force_raw_encoding = true;
+                Value::String(v) => {
+                    let old_len = v.len();
+                    if v.len() <= byte_idx {
+                        v.resize(byte_idx + 1, 0);
+                    }
+                    let old_bit = (v[byte_idx] >> bit_idx) & 1 == 1;
+                    if value {
+                        v[byte_idx] |= 1 << bit_idx;
+                    } else {
+                        v[byte_idx] &= !(1 << bit_idx);
+                    }
+                    let changed = old_len != v.len() || old_bit != value;
+                    entry.touch_write(now_ms);
+                    // Upstream bitops.c::setbitCommand calls
+                    // dbUnshareStringValue which always converts the
+                    // value to raw, regardless of length.
+                    // (br-frankenredis-setbitenc)
+                    entry.force_raw_encoding = true;
                     Ok((old_bit, changed))
                 }
                 _ => Err(StoreError::WrongType),
@@ -5046,7 +5047,7 @@ impl Store {
             };
             let mut removed = 0_u64;
             for field in fields {
-                if m.remove(*field).is_some() {
+                if m.shift_remove(*field).is_some() {
                     removed += 1;
                 }
             }
@@ -6086,51 +6087,51 @@ impl Store {
                 }
                 match &entry.value {
                     Value::List(l) => {
-                    let len = l.len();
-                    let limit = if maxlen == 0 { len } else { maxlen.min(len) };
-                    let max_results = match count {
-                        Some(0) => usize::MAX,
-                        Some(n) => n as usize,
-                        None => 1,
-                    };
-                    let mut results = Vec::new();
-                    let abs_rank = rank.unsigned_abs() as usize;
-                    let skip = if abs_rank > 0 { abs_rank - 1 } else { 0 };
-                    let mut matched = 0_usize;
+                        let len = l.len();
+                        let limit = if maxlen == 0 { len } else { maxlen.min(len) };
+                        let max_results = match count {
+                            Some(0) => usize::MAX,
+                            Some(n) => n as usize,
+                            None => 1,
+                        };
+                        let mut results = Vec::new();
+                        let abs_rank = rank.unsigned_abs() as usize;
+                        let skip = if abs_rank > 0 { abs_rank - 1 } else { 0 };
+                        let mut matched = 0_usize;
 
-                    if rank >= 0 {
-                        // Forward scan
-                        for (i, item) in l.iter().enumerate().take(limit) {
-                            if item.as_slice() == element {
-                                matched += 1;
-                                if matched > skip {
-                                    results.push(i);
-                                    if results.len() >= max_results {
-                                        break;
+                        if rank >= 0 {
+                            // Forward scan
+                            for (i, item) in l.iter().enumerate().take(limit) {
+                                if item.as_slice() == element {
+                                    matched += 1;
+                                    if matched > skip {
+                                        results.push(i);
+                                        if results.len() >= max_results {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Reverse scan
+                            for (i, item) in l
+                                .iter()
+                                .enumerate()
+                                .take(len)
+                                .skip(len.saturating_sub(limit))
+                                .rev()
+                            {
+                                if item.as_slice() == element {
+                                    matched += 1;
+                                    if matched > skip {
+                                        results.push(i);
+                                        if results.len() >= max_results {
+                                            break;
+                                        }
                                     }
                                 }
                             }
                         }
-                    } else {
-                        // Reverse scan
-                        for (i, item) in l
-                            .iter()
-                            .enumerate()
-                            .take(len)
-                            .skip(len.saturating_sub(limit))
-                            .rev()
-                        {
-                            if item.as_slice() == element {
-                                matched += 1;
-                                if matched > skip {
-                                    results.push(i);
-                                    if results.len() >= max_results {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
                         entry.touch(now_ms);
                         Ok(results)
                     }
@@ -6417,38 +6418,38 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &mut entry.value {
-                Value::List(l) => {
-                    let len = l.len() as i64;
-                    let s = normalize_index(start, len).max(0);
-                    let e = normalize_index(stop, len).min(len - 1);
-                    let old_len = l.len();
-                    if s > e || s >= len || e < 0 {
-                        l.clear();
-                    } else {
-                        let s = s as usize;
-                        let e = e as usize;
-                        for _ in 0..s {
-                            l.pop_front();
+                    Value::List(l) => {
+                        let len = l.len() as i64;
+                        let s = normalize_index(start, len).max(0);
+                        let e = normalize_index(stop, len).min(len - 1);
+                        let old_len = l.len();
+                        if s > e || s >= len || e < 0 {
+                            l.clear();
+                        } else {
+                            let s = s as usize;
+                            let e = e as usize;
+                            for _ in 0..s {
+                                l.pop_front();
+                            }
+                            while l.len() > (e - s + 1) {
+                                l.pop_back();
+                            }
                         }
-                        while l.len() > (e - s + 1) {
-                            l.pop_back();
+                        let removed = old_len - l.len();
+                        if l.is_empty() {
+                            self.internal_entries_remove(key);
+                            self.stream_groups.remove(key);
+                            self.stream_last_ids.remove(key);
+                        } else if removed > 0 {
+                            Self::mark_digest_stale_fields(
+                                &mut self.digest_stale,
+                                &mut self.digest_mutations,
+                            );
+                            entry.touch_write(now_ms);
                         }
-                    }
-                    let removed = old_len - l.len();
-                    if l.is_empty() {
-                        self.internal_entries_remove(key);
-                        self.stream_groups.remove(key);
-                        self.stream_last_ids.remove(key);
-                    } else if removed > 0 {
-                        Self::mark_digest_stale_fields(
-                            &mut self.digest_stale,
-                            &mut self.digest_mutations,
-                        );
-                        entry.touch_write(now_ms);
-                    }
-                    if removed > 0 {
-                        self.dirty = self.dirty.saturating_add(removed as u64);
-                    }
+                        if removed > 0 {
+                            self.dirty = self.dirty.saturating_add(removed as u64);
+                        }
                         Ok(())
                     }
                     _ => Err(StoreError::WrongType),
@@ -6692,6 +6693,12 @@ impl Store {
                 entry.touch_write(now_ms);
                 match &mut entry.value {
                     Value::Set(s) => {
+                        // (gauntlet B2) Was this set intset-encoded *before* the
+                        // add? Mirrors vendored t_set.c maybeConvertIntset, which
+                        // only fires when an integer is added to an existing intset.
+                        let was_intset_encoded = !entry.force_set_listpack_encoding
+                            && !entry.force_set_hashtable_encoding
+                            && Self::set_fits_intset(s, max_intset_entries);
                         let mut added = 0_u64;
                         for m in members {
                             if s.insert(m.clone()) {
@@ -6699,10 +6706,22 @@ impl Store {
                             }
                         }
                         if added > 0 {
+                            // An intset that overflows set-max-intset-entries via an
+                            // integer add converts DIRECTLY to hashtable, never
+                            // listpack (regardless of set-max-listpack-entries). A
+                            // non-integer member instead takes the listpack-or-
+                            // hashtable path in refresh_set_encoding_flags.
+                            let intset_int_overflow = was_intset_encoded
+                                && s.len() > max_intset_entries
+                                && s.iter().all(|m| parse_i64(m).is_ok());
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
+                            if intset_int_overflow {
+                                entry.force_set_hashtable_encoding = true;
+                                entry.force_set_listpack_encoding = false;
+                            }
                             Self::refresh_set_encoding_flags(
                                 entry,
                                 max_intset_entries,
@@ -6717,7 +6736,7 @@ impl Store {
                 }
             }
             None => {
-                let mut s = BTreeSet::new();
+                let mut s = IndexSet::new();
                 let mut added = 0_u64;
                 for m in members {
                     if s.insert(m.clone()) {
@@ -6752,7 +6771,7 @@ impl Store {
                     Value::Set(s) => {
                         let mut removed = 0_u64;
                         for m in members {
-                            if s.remove(*m) {
+                            if s.shift_remove(*m) {
                                 removed += 1;
                             }
                         }
@@ -7282,7 +7301,7 @@ impl Store {
                         let idx = (rand_val as usize) % s.len();
                         let member = s.iter().nth(idx).cloned();
                         if let Some(ref m) = member {
-                            s.remove(m);
+                            s.shift_remove(m);
                         }
                         if s.is_empty() {
                             should_remove_key = true;
@@ -7504,7 +7523,7 @@ impl Store {
         let was_removed = if let Some(entry) = self.entries.get_mut(source) {
             let r = match &mut entry.value {
                 Value::Set(s) => {
-                    let r = s.remove(member);
+                    let r = s.shift_remove(member);
                     if r {
                         source_empty = s.is_empty();
                     }
@@ -7554,7 +7573,7 @@ impl Store {
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
-            let set: BTreeSet<Vec<u8>> = result.into_iter().collect();
+            let set: IndexSet<Vec<u8>> = result.into_iter().collect();
             let entry = self.set_entry(set, None, now_ms);
             self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
@@ -7576,7 +7595,7 @@ impl Store {
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
-            let set: BTreeSet<Vec<u8>> = result.into_iter().collect();
+            let set: IndexSet<Vec<u8>> = result.into_iter().collect();
             let entry = self.set_entry(set, None, now_ms);
             self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
@@ -7598,7 +7617,7 @@ impl Store {
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
-            let set: BTreeSet<Vec<u8>> = result.into_iter().collect();
+            let set: IndexSet<Vec<u8>> = result.into_iter().collect();
             let entry = self.set_entry(set, None, now_ms);
             self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
@@ -11096,34 +11115,34 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
-                Value::String(v) => {
-                    let result = v.clone();
-                    if let Some(exp) = new_expires_at_ms {
-                        let was_exp = entry.expires_at_ms.is_some();
-                        let is_exp = exp.is_some();
-                        if was_exp != is_exp {
-                            let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
-                            if is_exp {
-                                self.expires_count = self.expires_count.saturating_add(1);
-                                if db < self.database_count {
-                                    self.db_expires_counts[db] =
-                                        self.db_expires_counts[db].saturating_add(1);
-                                }
-                            } else {
-                                self.expires_count = self.expires_count.saturating_sub(1);
-                                if db < self.database_count {
-                                    self.db_expires_counts[db] =
-                                        self.db_expires_counts[db].saturating_sub(1);
+                    Value::String(v) => {
+                        let result = v.clone();
+                        if let Some(exp) = new_expires_at_ms {
+                            let was_exp = entry.expires_at_ms.is_some();
+                            let is_exp = exp.is_some();
+                            if was_exp != is_exp {
+                                let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+                                if is_exp {
+                                    self.expires_count = self.expires_count.saturating_add(1);
+                                    if db < self.database_count {
+                                        self.db_expires_counts[db] =
+                                            self.db_expires_counts[db].saturating_add(1);
+                                    }
+                                } else {
+                                    self.expires_count = self.expires_count.saturating_sub(1);
+                                    if db < self.database_count {
+                                        self.db_expires_counts[db] =
+                                            self.db_expires_counts[db].saturating_sub(1);
+                                    }
                                 }
                             }
+                            entry.expires_at_ms = exp;
+                            Self::mark_digest_stale_fields(
+                                &mut self.digest_stale,
+                                &mut self.digest_mutations,
+                            );
+                            self.dirty = self.dirty.saturating_add(1);
                         }
-                        entry.expires_at_ms = exp;
-                        Self::mark_digest_stale_fields(
-                            &mut self.digest_stale,
-                            &mut self.digest_mutations,
-                        );
-                        self.dirty = self.dirty.saturating_add(1);
-                    }
                         Ok(Some(result))
                     }
                     _ => Err(StoreError::WrongType),
@@ -11715,59 +11734,61 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
-                Value::Hash(h) => {
-                    // (frankenredis-yvxq6) Upstream
-                    // t_hash.c::hscanCommand short-circuits on
-                    // listpack-encoded hashes: the entire
-                    // collection is returned in a single round
-                    // with cursor=0, regardless of COUNT or input
-                    // cursor (so an out-of-range cursor still
-                    // surfaces all entries instead of an empty
-                    // reply). COUNT only matters for the hashtable
-                    // path.
-                    let fits_listpack = h.len() <= max_listpack_entries
-                        && h.iter().all(|(k, v)| {
-                            k.len() <= max_listpack_value && v.len() <= max_listpack_value
-                        });
-                    if fits_listpack {
-                        let result: Vec<(Vec<u8>, Vec<u8>)> = h
-                            .iter()
-                            .filter(|(field, _)| pattern.is_none_or(|pat| glob_match(pat, field)))
-                            .map(|(f, v)| (f.clone(), v.clone()))
-                            .collect();
-                        return Ok((0, result));
-                    }
-                    let start = cursor as usize;
-                    let batch_size = count.max(1);
-                    let mut result = Vec::new();
-                    let mut pos = start;
+                    Value::Hash(h) => {
+                        // (frankenredis-yvxq6) Upstream
+                        // t_hash.c::hscanCommand short-circuits on
+                        // listpack-encoded hashes: the entire
+                        // collection is returned in a single round
+                        // with cursor=0, regardless of COUNT or input
+                        // cursor (so an out-of-range cursor still
+                        // surfaces all entries instead of an empty
+                        // reply). COUNT only matters for the hashtable
+                        // path.
+                        let fits_listpack = h.len() <= max_listpack_entries
+                            && h.iter().all(|(k, v)| {
+                                k.len() <= max_listpack_value && v.len() <= max_listpack_value
+                            });
+                        if fits_listpack {
+                            let result: Vec<(Vec<u8>, Vec<u8>)> = h
+                                .iter()
+                                .filter(|(field, _)| {
+                                    pattern.is_none_or(|pat| glob_match(pat, field))
+                                })
+                                .map(|(f, v)| (f.clone(), v.clone()))
+                                .collect();
+                            return Ok((0, result));
+                        }
+                        let start = cursor as usize;
+                        let batch_size = count.max(1);
+                        let mut result = Vec::new();
+                        let mut pos = start;
 
-                    let total_fields = h.len();
-                    if start >= total_fields {
-                        return Ok((0, Vec::new()));
-                    }
+                        let total_fields = h.len();
+                        if start >= total_fields {
+                            return Ok((0, Vec::new()));
+                        }
 
-                    let mut processed = 0;
-                    for (field, value) in h.iter().skip(start) {
-                        pos += 1;
-                        processed += 1;
-                        if let Some(pat) = pattern
-                            && !glob_match(pat, field)
-                        {
+                        let mut processed = 0;
+                        for (field, value) in h.iter().skip(start) {
+                            pos += 1;
+                            processed += 1;
+                            if let Some(pat) = pattern
+                                && !glob_match(pat, field)
+                            {
+                                if processed >= batch_size {
+                                    break;
+                                }
+                                continue;
+                            }
+                            result.push((field.clone(), value.clone()));
                             if processed >= batch_size {
                                 break;
                             }
-                            continue;
                         }
-                        result.push((field.clone(), value.clone()));
-                        if processed >= batch_size {
-                            break;
-                        }
-                    }
 
-                    let next = if pos >= total_fields { 0 } else { pos as u64 };
-                    // SCAN-family commands are read-only: do NOT touch LRU
-                    Ok((next, result))
+                        let next = if pos >= total_fields { 0 } else { pos as u64 };
+                        // SCAN-family commands are read-only: do NOT touch LRU
+                        Ok((next, result))
                     }
                     _ => Err(StoreError::WrongType),
                 }
@@ -11803,56 +11824,56 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
-                Value::Set(s) => {
-                    // (frankenredis-yvxq6) Upstream
-                    // t_set.c::sscanCommand short-circuits on the
-                    // listpack and intset encodings: full
-                    // collection in one shot with cursor=0,
-                    // regardless of cursor/COUNT. Only the
-                    // hashtable-encoded path honors them.
-                    let is_listpack_or_intset = !entry.force_set_hashtable_encoding
-                        && (Self::set_fits_intset(s, max_intset_entries)
-                            || Self::set_fits_listpack(
-                                s,
-                                max_listpack_entries,
-                                max_listpack_value,
-                            ));
-                    if is_listpack_or_intset {
-                        let result: Vec<Vec<u8>> = s
-                            .iter()
-                            .filter(|member| pattern.is_none_or(|pat| glob_match(pat, member)))
-                            .cloned()
-                            .collect();
-                        return Ok((0, result));
-                    }
-                    let start = cursor as usize;
-                    if start >= s.len() {
-                        return Ok((0, Vec::new()));
-                    }
+                    Value::Set(s) => {
+                        // (frankenredis-yvxq6) Upstream
+                        // t_set.c::sscanCommand short-circuits on the
+                        // listpack and intset encodings: full
+                        // collection in one shot with cursor=0,
+                        // regardless of cursor/COUNT. Only the
+                        // hashtable-encoded path honors them.
+                        let is_listpack_or_intset = !entry.force_set_hashtable_encoding
+                            && (Self::set_fits_intset(s, max_intset_entries)
+                                || Self::set_fits_listpack(
+                                    s,
+                                    max_listpack_entries,
+                                    max_listpack_value,
+                                ));
+                        if is_listpack_or_intset {
+                            let result: Vec<Vec<u8>> = s
+                                .iter()
+                                .filter(|member| pattern.is_none_or(|pat| glob_match(pat, member)))
+                                .cloned()
+                                .collect();
+                            return Ok((0, result));
+                        }
+                        let start = cursor as usize;
+                        if start >= s.len() {
+                            return Ok((0, Vec::new()));
+                        }
 
-                    let batch_size = count.max(1);
-                    let mut result = Vec::new();
-                    let mut pos = start;
-                    let mut processed = 0;
-                    for member in s.iter().skip(start) {
-                        pos += 1;
-                        processed += 1;
-                        if let Some(pat) = pattern
-                            && !glob_match(pat, member)
-                        {
+                        let batch_size = count.max(1);
+                        let mut result = Vec::new();
+                        let mut pos = start;
+                        let mut processed = 0;
+                        for member in s.iter().skip(start) {
+                            pos += 1;
+                            processed += 1;
+                            if let Some(pat) = pattern
+                                && !glob_match(pat, member)
+                            {
+                                if processed >= batch_size {
+                                    break;
+                                }
+                                continue;
+                            }
+                            result.push(member.clone());
                             if processed >= batch_size {
                                 break;
                             }
-                            continue;
                         }
-                        result.push(member.clone());
-                        if processed >= batch_size {
-                            break;
-                        }
-                    }
 
-                    let next = if pos >= s.len() { 0 } else { pos as u64 };
-                    // SCAN-family commands are read-only: do NOT touch LRU
+                        let next = if pos >= s.len() { 0 } else { pos as u64 };
+                        // SCAN-family commands are read-only: do NOT touch LRU
                         Ok((next, result))
                     }
                     _ => Err(StoreError::WrongType),
@@ -11889,52 +11910,54 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
-                Value::SortedSet(zs) => {
-                    // (frankenredis-yvxq6) Upstream
-                    // t_zset.c::zscanCommand short-circuits on the
-                    // listpack encoding: full collection in one
-                    // shot with cursor=0. COUNT and cursor only
-                    // matter for the skiplist path.
-                    let fits_listpack = zs.len() <= zset_max_listpack_entries
-                        && zs.keys().all(|k| k.len() <= zset_max_listpack_value);
-                    if fits_listpack {
-                        let result: Vec<(Vec<u8>, f64)> = zs
-                            .iter_asc()
-                            .filter(|(member, _)| pattern.is_none_or(|pat| glob_match(pat, member)))
-                            .map(|(m, s)| (m.clone(), *s))
-                            .collect();
-                        return Ok((0, result));
-                    }
-                    let start = cursor as usize;
-                    if start >= zs.len() {
-                        return Ok((0, Vec::new()));
-                    }
+                    Value::SortedSet(zs) => {
+                        // (frankenredis-yvxq6) Upstream
+                        // t_zset.c::zscanCommand short-circuits on the
+                        // listpack encoding: full collection in one
+                        // shot with cursor=0. COUNT and cursor only
+                        // matter for the skiplist path.
+                        let fits_listpack = zs.len() <= zset_max_listpack_entries
+                            && zs.keys().all(|k| k.len() <= zset_max_listpack_value);
+                        if fits_listpack {
+                            let result: Vec<(Vec<u8>, f64)> = zs
+                                .iter_asc()
+                                .filter(|(member, _)| {
+                                    pattern.is_none_or(|pat| glob_match(pat, member))
+                                })
+                                .map(|(m, s)| (m.clone(), *s))
+                                .collect();
+                            return Ok((0, result));
+                        }
+                        let start = cursor as usize;
+                        if start >= zs.len() {
+                            return Ok((0, Vec::new()));
+                        }
 
-                    let batch_size = count.max(1);
-                    let mut result = Vec::new();
-                    let mut pos = start;
-                    let mut processed = 0;
+                        let batch_size = count.max(1);
+                        let mut result = Vec::new();
+                        let mut pos = start;
+                        let mut processed = 0;
 
-                    for (member, score) in zs.iter_asc().skip(start) {
-                        pos += 1;
-                        processed += 1;
-                        if let Some(pat) = pattern
-                            && !glob_match(pat, member)
-                        {
+                        for (member, score) in zs.iter_asc().skip(start) {
+                            pos += 1;
+                            processed += 1;
+                            if let Some(pat) = pattern
+                                && !glob_match(pat, member)
+                            {
+                                if processed >= batch_size {
+                                    break;
+                                }
+                                continue;
+                            }
+                            result.push((member.clone(), *score));
                             if processed >= batch_size {
                                 break;
                             }
-                            continue;
                         }
-                        result.push((member.clone(), *score));
-                        if processed >= batch_size {
-                            break;
-                        }
-                    }
 
-                    let next = if pos >= zs.len() { 0 } else { pos as u64 };
-                    // SCAN-family commands are read-only: do NOT touch LRU
-                    Ok((next, result))
+                        let next = if pos >= zs.len() { 0 } else { pos as u64 };
+                        // SCAN-family commands are read-only: do NOT touch LRU
+                        Ok((next, result))
                     }
                     _ => Err(StoreError::WrongType),
                 }
@@ -13486,7 +13509,7 @@ impl Store {
                 if count == 0 {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                let mut set = BTreeSet::new();
+                let mut set = IndexSet::new();
                 for _ in 0..count {
                     let (member, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += consumed;
@@ -13673,7 +13696,7 @@ impl Store {
             RDB_TYPE_SET_INTSET => {
                 let (intset, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                let mut set = BTreeSet::new();
+                let mut set = IndexSet::new();
                 for member in decode_intset_members(&intset)? {
                     set.insert(member);
                 }
@@ -13686,7 +13709,7 @@ impl Store {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
                 let members = decode_listpack_strings(&listpack)?;
-                let mut set = BTreeSet::new();
+                let mut set = IndexSet::new();
                 for member in members {
                     if !set.insert(member) {
                         return Err(StoreError::InvalidDumpPayload);
@@ -15429,7 +15452,7 @@ fn estimate_list_memory_usage_bytes(items: &VecDeque<Vec<u8>>) -> usize {
     }
 }
 
-fn estimate_set_memory_usage_bytes(members: &BTreeSet<Vec<u8>>) -> usize {
+fn estimate_set_memory_usage_bytes(members: &IndexSet<Vec<u8>>) -> usize {
     if members.len() <= 512 && members.iter().all(|member| parse_i64(member).is_ok()) {
         let payload = 8usize.saturating_add(members.len().saturating_mul(REDIS_SCORE_BYTES));
         return REDIS_OBJECT_OVERHEAD_BYTES.saturating_add(redis_allocation_size(payload));
@@ -21428,14 +21451,14 @@ mod tests {
     }
 
     #[test]
-    fn smembers_returns_sorted() {
+    fn smembers_returns_insertion_order() {
         let mut store = Store::new();
         store
             .sadd(b"s", &[b"c".to_vec(), b"a".to_vec(), b"b".to_vec()], 0)
             .unwrap();
         assert_eq!(
             store.smembers(b"s", 0).unwrap(),
-            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+            vec![b"c".to_vec(), b"a".to_vec(), b"b".to_vec()]
         );
     }
 

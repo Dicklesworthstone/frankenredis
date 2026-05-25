@@ -6156,11 +6156,7 @@ fn next_auto_stream_id(last_id: Option<StreamId>, now_ms: u64) -> Option<StreamI
         }
         None => (now_ms, 0),
     };
-    if id == (0, 0) {
-        Some((0, 1))
-    } else {
-        Some(id)
-    }
+    if id == (0, 0) { Some((0, 1)) } else { Some(id) }
 }
 
 // Upstream t_stream.c::streamIncrID — successor in lexicographic (ms, seq)
@@ -6437,17 +6433,15 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     } else if let Some(partial_ms) = parse_partial_auto_id(&argv[id_idx]) {
         // "ms-*" format: explicit timestamp, auto-generate sequence
         let seq = match last_id {
-            Some((last_ms, last_seq)) if partial_ms == last_ms => {
-                match last_seq.checked_add(1) {
-                    Some(next_seq) => next_seq,
-                    None => {
-                        return Ok(RespFrame::Error(
+            Some((last_ms, last_seq)) if partial_ms == last_ms => match last_seq.checked_add(1) {
+                Some(next_seq) => next_seq,
+                None => {
+                    return Ok(RespFrame::Error(
                             "ERR The stream has exhausted the last possible ID, unable to add more items"
                                 .to_string(),
                         ));
-                    }
                 }
-            }
+            },
             Some((last_ms, _)) if partial_ms < last_ms => {
                 return Ok(RespFrame::Error(
                     "ERR The ID specified in XADD is equal or smaller than the target stream top item"
@@ -28892,11 +28886,12 @@ mod tests {
         .expect("sadd");
         let out =
             dispatch_argv(&[b"SMEMBERS".to_vec(), b"s".to_vec()], &mut store, 0).expect("smembers");
+        // IndexSet preserves insertion order: b was added before a
         assert_eq!(
             out,
             RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"a".to_vec())),
                 RespFrame::BulkString(Some(b"b".to_vec())),
+                RespFrame::BulkString(Some(b"a".to_vec())),
             ]))
         );
     }

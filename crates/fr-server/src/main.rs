@@ -2508,8 +2508,11 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
             continue;
         };
 
-        let mut should_check =
-            ts >= blocked.deadline_ms || matches!(&blocked.op, BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. });
+        let mut should_check = ts >= blocked.deadline_ms
+            || matches!(
+                &blocked.op,
+                BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. }
+            );
         if !should_check {
             for key in blocked.op.keys() {
                 if ready_keys.contains(&key) {
@@ -2937,9 +2940,7 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                     .collect(),
             ));
             let response = runtime.execute_frame(frame, now_ms);
-            if matches!(response, RespFrame::Error(_))
-                || wait_response_satisfies(argv, &response)
-            {
+            if matches!(response, RespFrame::Error(_)) || wait_response_satisfies(argv, &response) {
                 Some(response)
             } else {
                 None
