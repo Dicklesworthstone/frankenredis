@@ -3166,6 +3166,16 @@ impl Runtime {
         self.server.store.server_port
     }
 
+    /// Enable Sentinel mode (gates SENTINEL command dispatch and discovery).
+    pub fn set_sentinel_mode(&mut self, enabled: bool) {
+        self.server.store.sentinel_mode = enabled;
+    }
+
+    #[must_use]
+    pub fn sentinel_mode(&self) -> bool {
+        self.server.store.sentinel_mode
+    }
+
     /// Load and replay AOF records from the configured path, restoring store state.
     ///
     /// Each AOF record is dispatched through the command router as if it were

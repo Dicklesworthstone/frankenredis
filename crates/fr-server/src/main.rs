@@ -246,6 +246,7 @@ OPTIONS:\n\
   --bind <ADDR>              Listen address (default: 127.0.0.1)\n\
   --port <PORT>              Listen port (default: {DEFAULT_PORT})\n\
   --mode <MODE>              Runtime mode: strict or hardened (default: hardened)\n\
+  --sentinel                 Run in Sentinel mode (enables SENTINEL command dispatch)\n\
   --config <PATH>            Load redis.conf startup directives and use path for CONFIG REWRITE\n\
   --aof <PATH>               AOF persistence file path (enables persistence)\n\
   --rdb <PATH>               RDB snapshot file path (enables SAVE/BGSAVE snapshots)\n\
@@ -495,6 +496,7 @@ fn main() -> ExitCode {
     let mut cli_aof = false;
     let mut cli_rdb = false;
     let mut cli_enable_debug_command: Option<String> = None;
+    let mut sentinel_mode = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -535,6 +537,9 @@ fn main() -> ExitCode {
                         return ExitCode::from(1);
                     }
                 };
+            }
+            "--sentinel" => {
+                sentinel_mode = true;
             }
             "--aof" => {
                 cli_aof = true;
@@ -668,6 +673,7 @@ fn main() -> ExitCode {
     };
     let mut runtime = Runtime::new(policy);
     runtime.set_server_port(port);
+    runtime.set_sentinel_mode(sentinel_mode);
     runtime.set_config_file_path(config_path.map(std::path::PathBuf::from));
     // CLI flag wins over config-file directive; both override the
     // runtime's "no" default which mirrors upstream Redis 7.2's
