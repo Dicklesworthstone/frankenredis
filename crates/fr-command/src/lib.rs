@@ -4647,10 +4647,15 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             pairs.reverse();
         }
         if let Some(offset) = limit_offset {
+            // In-place LIMIT: drain skipped prefix, then truncate to count.
+            // Avoids allocating a second Vec via .collect(). (frankenredis-5qwm6)
+            if offset > 0 && offset < pairs.len() {
+                pairs.drain(0..offset);
+            } else if offset >= pairs.len() {
+                pairs.clear();
+            }
             if let Some(count) = limit_count {
-                pairs = pairs.into_iter().skip(offset).take(count).collect();
-            } else {
-                pairs = pairs.into_iter().skip(offset).collect();
+                pairs.truncate(count);
             }
         }
         zrange_emit_with_resp(
@@ -4675,10 +4680,15 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             members.reverse();
         }
         if let Some(offset) = limit_offset {
+            // In-place LIMIT: drain skipped prefix, then truncate to count.
+            // Avoids allocating a second Vec via .collect(). (frankenredis-5qwm6)
+            if offset > 0 && offset < members.len() {
+                members.drain(0..offset);
+            } else if offset >= members.len() {
+                members.clear();
+            }
             if let Some(count) = limit_count {
-                members = members.into_iter().skip(offset).take(count).collect();
-            } else {
-                members = members.into_iter().skip(offset).collect();
+                members.truncate(count);
             }
         }
         if withscores {
@@ -4840,10 +4850,14 @@ fn zrangebyscore(
     let max = parse_score_bound(&argv[3])?;
     let mut pairs = store.zrangebyscore_withscores(&argv[1], min, max, now_ms)?;
     if let Some(offset) = limit_offset {
+        // In-place LIMIT. (frankenredis-5qwm6)
+        if offset > 0 && offset < pairs.len() {
+            pairs.drain(0..offset);
+        } else if offset >= pairs.len() {
+            pairs.clear();
+        }
         if let Some(count) = limit_count {
-            pairs = pairs.into_iter().skip(offset).take(count).collect();
-        } else {
-            pairs = pairs.into_iter().skip(offset).collect();
+            pairs.truncate(count);
         }
     }
     zrange_emit_with_resp(
@@ -9933,7 +9947,7 @@ fn zrangestore_cmd(
         ));
     }
 
-    let pairs: Vec<(Vec<u8>, f64)> = if byscore {
+    let mut pairs: Vec<(Vec<u8>, f64)> = if byscore {
         let min = parse_score_bound(&argv[3])?;
         let max = parse_score_bound(&argv[4])?;
         let (lo, hi) = if rev { (max, min) } else { (min, max) };
@@ -9982,17 +9996,17 @@ fn zrangestore_cmd(
     // offset/count fields are only consumed in the BYSCORE/BYLEX
     // paths). Mirroring that here means `LIMIT 1 -1` doesn't drop
     // the first element from a rank-mode ZRANGESTORE.
-    let pairs = if (byscore || bylex)
-        && let Some(offset) = limit_offset
-    {
-        if let Some(count) = limit_count {
-            pairs.into_iter().skip(offset).take(count).collect()
-        } else {
-            pairs.into_iter().skip(offset).collect()
+    // In-place LIMIT avoids second allocation. (frankenredis-5qwm6)
+    if (byscore || bylex) && let Some(offset) = limit_offset {
+        if offset > 0 && offset < pairs.len() {
+            pairs.drain(0..offset);
+        } else if offset >= pairs.len() {
+            pairs.clear();
         }
-    } else {
-        pairs
-    };
+        if let Some(count) = limit_count {
+            pairs.truncate(count);
+        }
+    }
 
     let count = pairs.len() as i64;
     if pairs.is_empty() {
@@ -11822,10 +11836,14 @@ fn zrevrangebyscore(
     let mut pairs = store.zrangebyscore_withscores(&argv[1], min, max, now_ms)?;
     pairs.reverse();
     if let Some(offset) = limit_offset {
+        // In-place LIMIT. (frankenredis-5qwm6)
+        if offset > 0 && offset < pairs.len() {
+            pairs.drain(0..offset);
+        } else if offset >= pairs.len() {
+            pairs.clear();
+        }
         if let Some(count) = limit_count {
-            pairs = pairs.into_iter().skip(offset).take(count).collect();
-        } else {
-            pairs = pairs.into_iter().skip(offset).collect();
+            pairs.truncate(count);
         }
     }
     zrange_emit_with_resp(
@@ -11866,10 +11884,14 @@ fn zrangebylex(
     }
     let mut members = store.zrangebylex(&argv[1], &argv[2], &argv[3], now_ms)?;
     if let Some(offset) = limit_offset {
+        // In-place LIMIT. (frankenredis-5qwm6)
+        if offset > 0 && offset < members.len() {
+            members.drain(0..offset);
+        } else if offset >= members.len() {
+            members.clear();
+        }
         if let Some(count) = limit_count {
-            members = members.into_iter().skip(offset).take(count).collect();
-        } else {
-            members = members.into_iter().skip(offset).collect();
+            members.truncate(count);
         }
     }
     let frames = members
@@ -11899,10 +11921,14 @@ fn zrevrangebylex(
     }
     let mut members = store.zrevrangebylex(&argv[1], &argv[2], &argv[3], now_ms)?;
     if let Some(offset) = limit_offset {
+        // In-place LIMIT. (frankenredis-5qwm6)
+        if offset > 0 && offset < members.len() {
+            members.drain(0..offset);
+        } else if offset >= members.len() {
+            members.clear();
+        }
         if let Some(count) = limit_count {
-            members = members.into_iter().skip(offset).take(count).collect();
-        } else {
-            members = members.into_iter().skip(offset).collect();
+            members.truncate(count);
         }
     }
     let frames = members
@@ -24313,6 +24339,7 @@ fn sort_generic(
     }
 
     // ── Apply LIMIT ──────────────────────────────────────────────────
+    // In-place LIMIT avoids second allocation. (frankenredis-5qwm6)
     let total = elements.len();
     let start = if limit_offset <= 0 {
         0
@@ -24326,7 +24353,13 @@ fn sort_generic(
         let count = usize::try_from(limit_count).map_err(|_| CommandError::InvalidInteger)?;
         count.min(total.saturating_sub(start))
     };
-    let sliced: Vec<Vec<u8>> = elements.into_iter().skip(start).take(count).collect();
+    if start > 0 && start < elements.len() {
+        elements.drain(0..start);
+    } else if start >= elements.len() {
+        elements.clear();
+    }
+    elements.truncate(count);
+    let sliced = elements;
 
     // ── Build output with GET patterns ───────────────────────────────
     let use_store = store_dest.is_some();
