@@ -7214,16 +7214,25 @@ fn xread(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             entry_frames.push(stream_record_to_frame(id, fields));
         }
 
-        out.push(RespFrame::Array(Some(vec![
+        out.push((
             RespFrame::BulkString(Some(key.clone())),
             RespFrame::Array(Some(entry_frames)),
-        ])));
+        ));
     }
 
     if out.is_empty() {
         Ok(RespFrame::Array(None))
     } else {
-        Ok(RespFrame::Array(Some(out)))
+        let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
+        if resp3 {
+            Ok(RespFrame::Map(Some(out)))
+        } else {
+            let array = out
+                .into_iter()
+                .map(|(k, v)| RespFrame::Array(Some(vec![k, v])))
+                .collect();
+            Ok(RespFrame::Array(Some(array)))
+        }
     }
 }
 
@@ -7335,16 +7344,25 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             entry_frames.push(stream_record_to_frame(id, fields));
         }
 
-        out.push(RespFrame::Array(Some(vec![
+        out.push((
             RespFrame::BulkString(Some(key.clone())),
             RespFrame::Array(Some(entry_frames)),
-        ])));
+        ));
     }
 
     if out.is_empty() {
         Ok(RespFrame::Array(None))
     } else {
-        Ok(RespFrame::Array(Some(out)))
+        let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
+        if resp3 {
+            Ok(RespFrame::Map(Some(out)))
+        } else {
+            let array = out
+                .into_iter()
+                .map(|(k, v)| RespFrame::Array(Some(vec![k, v])))
+                .collect();
+            Ok(RespFrame::Array(Some(array)))
+        }
     }
 }
 
