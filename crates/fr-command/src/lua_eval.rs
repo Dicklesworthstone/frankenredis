@@ -9212,6 +9212,8 @@ fn resp_to_lua(frame: &RespFrame) -> LuaValue {
             }
             LuaValue::Table(t)
         }
+        // RESP3 Verbatim: treat like string (strip the txt: prefix for Lua)
+        RespFrame::Verbatim(s) => LuaValue::Str(s.as_bytes().to_vec()),
     }
 }
 

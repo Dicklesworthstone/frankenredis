@@ -3378,7 +3378,16 @@ impl Runtime {
         now_ms: u64,
         cycle_kind: ActiveExpireCycleKind,
     ) -> ActiveExpireCycleStats {
-        self.server.run_active_expire_cycle(now_ms, cycle_kind)
+        let stats = self.server.run_active_expire_cycle(now_ms, cycle_kind);
+        // (gauntlet B8) The active-expire cycle queues `expired` keyspace events;
+        // on an idle server (no command follows) nothing else would flush them.
+        // Deliver here so background expirations notify subscribers like upstream.
+        if self.server.store.notify_keyspace_events != 0
+            && !self.server.store.keyspace_notifications.is_empty()
+        {
+            self.deliver_keyspace_notifications();
+        }
+        stats
     }
 
     #[must_use]
@@ -5618,6 +5627,9 @@ impl Runtime {
                                         || c.eq_ignore_ascii_case(b"RENAMENX")
                                 })
                                 .unwrap_or(false);
+                            let is_copy = argv
+                                .first()
+                                .is_some_and(|c| c.eq_ignore_ascii_case(b"COPY"));
                             if is_rename && cmd_keys.len() >= 2 {
                                 // RENAME emits rename_from on source, rename_to on dest
                                 self.server.store.notify_keyspace_event(
@@ -5629,6 +5641,16 @@ impl Runtime {
                                 self.server.store.notify_keyspace_event(
                                     event_type,
                                     "rename_to",
+                                    &cmd_keys[1],
+                                    db,
+                                );
+                            } else if is_copy && cmd_keys.len() >= 2 {
+                                // (gauntlet B7) Upstream COPY fires `copy_to` on the
+                                // DESTINATION key only; cmd_keys is [src, dst], and the
+                                // generic per-key loop would (wrongly) fire it twice.
+                                self.server.store.notify_keyspace_event(
+                                    event_type,
+                                    event,
                                     &cmd_keys[1],
                                     db,
                                 );
@@ -5649,6 +5671,16 @@ impl Runtime {
                         .is_some_and(|command| fr_command::is_write_command(command))
                 {
                     self.record_client_tracking_keys(&cmd_keys);
+                }
+                // (gauntlet B8) Lazy expiry on a read command (e.g. GET on an
+                // expired key) and the preflight active-expire cycle queue
+                // `expired` keyspace events without bumping the dirty counter, so
+                // they're missed by the dirty>0 write path above. Flush any
+                // remaining queued notifications here (no-op when already drained).
+                if self.server.store.notify_keyspace_events != 0
+                    && !self.server.store.keyspace_notifications.is_empty()
+                {
+                    self.deliver_keyspace_notifications();
                 }
                 reply
             }

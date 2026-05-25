@@ -82,6 +82,8 @@ fn canonicalize_to_resp2_shape(frame: &RespFrame) -> RespFrame {
             items.iter().map(canonicalize_to_resp2_shape).collect(),
         )),
         RespFrame::Set(None) => RespFrame::Array(None),
+        // RESP3 Verbatim -> RESP2 BulkString
+        RespFrame::Verbatim(s) => RespFrame::BulkString(Some(s.as_bytes().to_vec())),
         other => other.clone(),
     }
 }

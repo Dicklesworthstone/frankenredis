@@ -1965,7 +1965,7 @@ pub fn dispatch_argv(
         Some(CommandId::Restore) => return restore_cmd(argv, store, now_ms),
         Some(CommandId::Sort) => return sort_cmd(argv, store, now_ms),
         Some(CommandId::Copy) => return copy_cmd(argv, store, now_ms),
-        Some(CommandId::Lolwut) => return lolwut_cmd(argv),
+        Some(CommandId::Lolwut) => return lolwut_cmd(argv, store),
         Some(CommandId::Waitaof) => return waitaof_cmd(argv, store),
         Some(CommandId::Cluster) => return cluster_cmd(argv, store, now_ms),
         Some(CommandId::Replconf) => return replconf_cmd(argv, store),
@@ -8720,7 +8720,7 @@ fn xsetid_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
 
 // ── LOLWUT ──────────────────────────────────────────────────────────
 
-fn lolwut_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn lolwut_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
     // LOLWUT [VERSION version]
     // Upstream Redis 7.2 lolwut.c::lolwutCommand only enters the VERSION
     // branch when `argc >= 3 && strcasecmp(argv[1], "version") == 0`,
@@ -8754,7 +8754,12 @@ fn lolwut_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         }
     }
     let body = format!("Redis ver. {}\n", fr_store::REDIS_COMPAT_VERSION);
-    Ok(RespFrame::BulkString(Some(body.into_bytes())))
+    // RESP3 clients expect verbatim string for LOLWUT output
+    if store.dispatch_client_ctx.resp_protocol_version == 3 {
+        Ok(RespFrame::Verbatim(body))
+    } else {
+        Ok(RespFrame::BulkString(Some(body.into_bytes())))
+    }
 }
 
 // ── WAITAOF ─────────────────────────────────────────────────────────
@@ -14434,7 +14439,12 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("\r\n");
     }
 
-    Ok(RespFrame::BulkString(Some(info.into_bytes())))
+    // RESP3 clients expect verbatim string for INFO output
+    if store.dispatch_client_ctx.resp_protocol_version == 3 {
+        Ok(RespFrame::Verbatim(info))
+    } else {
+        Ok(RespFrame::BulkString(Some(info.into_bytes())))
+    }
 }
 
 /// Static command metadata table: (name, arity, flags, first_key, last_key, step)
@@ -19051,9 +19061,23 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             } else {
                 return Err(CommandError::SyntaxError);
             };
-            return Ok(RespFrame::BulkString(Some(payload)));
+            // RESP3 clients expect verbatim string for CLIENT LIST output
+            return if store.dispatch_client_ctx.resp_protocol_version == 3 {
+                Ok(RespFrame::Verbatim(
+                    String::from_utf8_lossy(&payload).into_owned(),
+                ))
+            } else {
+                Ok(RespFrame::BulkString(Some(payload)))
+            };
         }
-        Ok(RespFrame::BulkString(Some(info_line)))
+        // RESP3 clients expect verbatim string for CLIENT INFO output
+        if store.dispatch_client_ctx.resp_protocol_version == 3 {
+            Ok(RespFrame::Verbatim(
+                String::from_utf8_lossy(&info_line).into_owned(),
+            ))
+        } else {
+            Ok(RespFrame::BulkString(Some(info_line)))
+        }
     } else if sub.eq_ignore_ascii_case("NO-EVICT") || sub.eq_ignore_ascii_case("NO-TOUCH") {
         if argv.len() != 3 {
             return Err(client_wrong_subcommand_arity(sub));
@@ -20114,12 +20138,16 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         // follow-up; fr does not yet surface those metrics.
         // (br-frankenredis-yj7h)
         const APPROX_5MB_KEY_THRESHOLD: usize = 50_000;
-        let body: &[u8] = if store.dbsize(now_ms) >= APPROX_5MB_KEY_THRESHOLD {
-            b"Hi Sam, I can't find any memory issue in your instance. I can only account for what occurs on this base.\n"
+        let body: &str = if store.dbsize(now_ms) >= APPROX_5MB_KEY_THRESHOLD {
+            "Hi Sam, I can't find any memory issue in your instance. I can only account for what occurs on this base.\n"
         } else {
-            b"Hi Sam, this instance is empty or is using very little memory, my issues detector can't be used in these conditions. Please, leave for your mission on Earth and fill it with some data. The new Sam and I will be back to our programming as soon as I finished rebooting.\n"
+            "Hi Sam, this instance is empty or is using very little memory, my issues detector can't be used in these conditions. Please, leave for your mission on Earth and fill it with some data. The new Sam and I will be back to our programming as soon as I finished rebooting.\n"
         };
-        Ok(RespFrame::BulkString(Some(body.to_vec())))
+        if store.dispatch_client_ctx.resp_protocol_version == 3 {
+            Ok(RespFrame::Verbatim(body.to_string()))
+        } else {
+            Ok(RespFrame::BulkString(Some(body.as_bytes().to_vec())))
+        }
     } else if sub.eq_ignore_ascii_case("MALLOC-STATS") {
         if argv.len() != 2 {
             // (br-frankenredis-marg)
@@ -23050,9 +23078,12 @@ fn latency_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
         if store.script_nesting_level >= 1 {
             return Err(script_noscript_command_error());
         }
-        Ok(RespFrame::BulkString(Some(
-            latency_doctor_report(store).into_bytes(),
-        )))
+        let report = latency_doctor_report(store);
+        if store.dispatch_client_ctx.resp_protocol_version == 3 {
+            Ok(RespFrame::Verbatim(report))
+        } else {
+            Ok(RespFrame::BulkString(Some(report.into_bytes())))
+        }
     } else if sub.eq_ignore_ascii_case("HISTOGRAM") {
         if store.script_nesting_level >= 1 {
             return Err(script_noscript_command_error());
@@ -59640,10 +59671,11 @@ mod tests {
         assert_eq!(out, RespFrame::Integer(42));
 
         let out = dispatch_argv(&[b"CLIENT".to_vec(), b"INFO".to_vec()], &mut store, 0).unwrap();
-        let RespFrame::BulkString(Some(payload)) = out else {
-            panic!("expected bulk string"); // ubs:ignore — AI triage
+        let info = match out {
+            RespFrame::Verbatim(s) => s,
+            RespFrame::BulkString(Some(payload)) => String::from_utf8(payload).expect("utf8"),
+            _ => panic!("expected verbatim or bulk string"),
         };
-        let info = String::from_utf8(payload).expect("utf8");
         assert!(info.contains("id=42 "), "{info}");
         assert!(info.contains("addr=10.0.0.9:7777 "), "{info}");
         assert!(info.contains("name=alpha "), "{info}");

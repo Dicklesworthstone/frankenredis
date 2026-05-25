@@ -17,6 +17,9 @@ pub enum RespFrame {
     Double(String),
     /// RESP3 Set type (`~count\r\n` followed by elements).
     Set(Option<Vec<RespFrame>>),
+    /// RESP3 Verbatim string (`=<len>\r\ntxt:<body>\r\n`). Used for INFO, CLIENT INFO/LIST,
+    /// LOLWUT, LATENCY DOCTOR, MEMORY DOCTOR under HELLO 3.
+    Verbatim(String),
 }
 
 /// Sanitize bytes destined for an inline RESP frame body (`SimpleString`
@@ -134,6 +137,15 @@ impl RespFrame {
                 for frame in frames {
                     frame.encode_into(out);
                 }
+            }
+            Self::Verbatim(s) => {
+                // RESP3 verbatim string: =<len>\r\ntxt:<body>\r\n
+                // len includes the "txt:" prefix (4 bytes)
+                out.extend_from_slice(b"=");
+                let _ = write!(out, "{}", s.len() + 4);
+                out.extend_from_slice(b"\r\ntxt:");
+                out.extend_from_slice(s.as_bytes());
+                out.extend_from_slice(b"\r\n");
             }
         }
     }
