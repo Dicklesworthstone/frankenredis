@@ -13,6 +13,10 @@ pub enum RespFrame {
     Map(Option<Vec<(RespFrame, RespFrame)>>),
     Push(Vec<RespFrame>),
     Sequence(Vec<RespFrame>),
+    /// RESP3 Double type (`,value\r\n`). Stores string representation to allow Eq derive.
+    Double(String),
+    /// RESP3 Set type (`~count\r\n` followed by elements).
+    Set(Option<Vec<RespFrame>>),
 }
 
 /// Sanitize bytes destined for an inline RESP frame body (`SimpleString`
@@ -117,6 +121,36 @@ impl RespFrame {
                     frame.encode_into(out);
                 }
             }
+            Self::Double(s) => {
+                out.extend_from_slice(b",");
+                out.extend_from_slice(s.as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+            Self::Set(None) => out.extend_from_slice(b"~-1\r\n"),
+            Self::Set(Some(frames)) => {
+                out.extend_from_slice(b"~");
+                let _ = write!(out, "{}", frames.len());
+                out.extend_from_slice(b"\r\n");
+                for frame in frames {
+                    frame.encode_into(out);
+                }
+            }
+        }
+    }
+
+    /// Create a RESP3 Double frame from an f64. Uses Redis score formatting.
+    #[must_use]
+    pub fn double_from_f64(v: f64) -> Self {
+        if v.is_infinite() {
+            if v.is_sign_positive() {
+                Self::Double("inf".to_string())
+            } else {
+                Self::Double("-inf".to_string())
+            }
+        } else if v.is_nan() {
+            Self::Double("nan".to_string())
+        } else {
+            Self::Double(format!("{}", v))
         }
     }
 }

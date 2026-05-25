@@ -3854,12 +3854,17 @@ fn smembers(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     if argv.len() != 2 {
         return Err(CommandError::WrongArity("SMEMBERS"));
     }
+    let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let members = store.smembers(&argv[1], now_ms)?;
     let frames = members
         .into_iter()
         .map(|m| RespFrame::BulkString(Some(m)))
         .collect();
-    Ok(RespFrame::Array(Some(frames)))
+    if resp3 {
+        Ok(RespFrame::Set(Some(frames)))
+    } else {
+        Ok(RespFrame::Array(Some(frames)))
+    }
 }
 
 fn scard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -4446,10 +4451,17 @@ fn zscore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("ZSCORE"));
     }
+    let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     match store.zscore(&argv[1], &argv[2], now_ms)? {
-        Some(score) => Ok(RespFrame::BulkString(Some(
-            redis_score_to_string(score).into_bytes(),
-        ))),
+        Some(score) => {
+            if resp3 {
+                Ok(RespFrame::double_from_f64(score))
+            } else {
+                Ok(RespFrame::BulkString(Some(
+                    redis_score_to_string(score).into_bytes(),
+                )))
+            }
+        }
         None => Ok(RespFrame::BulkString(None)),
     }
 }
@@ -4723,7 +4735,7 @@ fn zrange_emit_with_resp(
             .map(|(member, score)| {
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(member)),
-                    RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
+                    RespFrame::double_from_f64(score),
                 ]))
             })
             .collect();
@@ -4847,6 +4859,7 @@ fn zincrby(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     if argv.len() != 4 {
         return Err(CommandError::WrongArity("ZINCRBY"));
     }
+    let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let delta = parse_score_f64_arg(&argv[2])?;
     let new_score = store
         .zincrby(&argv[1], argv[3].clone(), delta, now_ms)
@@ -4862,9 +4875,13 @@ fn zincrby(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
                 other => other.into(),
             }
         })?;
-    Ok(RespFrame::BulkString(Some(
-        redis_score_to_string(new_score).into_bytes(),
-    )))
+    if resp3 {
+        Ok(RespFrame::double_from_f64(new_score))
+    } else {
+        Ok(RespFrame::BulkString(Some(
+            redis_score_to_string(new_score).into_bytes(),
+        )))
+    }
 }
 
 fn parse_zpop_count(arg: &[u8]) -> Result<usize, CommandError> {
@@ -4879,7 +4896,7 @@ fn parse_zpop_count(arg: &[u8]) -> Result<usize, CommandError> {
 /// (frankenredis-1g3ao) Upstream zpopMinMaxCommand sets
 /// use_nested_array = (c->resp > 2 && count != -1). Under RESP3 with the
 /// COUNT form, each (member, score) is wrapped in a 2-Array; under RESP2
-/// or the no-COUNT form, the wire stays flat.
+/// or the no-COUNT form, the wire stays flat. Scores use Double type under RESP3.
 fn zpop_count_emit(pairs: Vec<(Vec<u8>, f64)>, resp_protocol_version: i64) -> RespFrame {
     if resp_protocol_version == 3 {
         let frames = pairs
@@ -4887,7 +4904,7 @@ fn zpop_count_emit(pairs: Vec<(Vec<u8>, f64)>, resp_protocol_version: i64) -> Re
             .map(|(member, score)| {
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(member)),
-                    RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
+                    RespFrame::double_from_f64(score),
                 ]))
             })
             .collect();
@@ -11027,39 +11044,54 @@ fn sinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("SINTER"));
     }
+    let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let keys: Vec<&[u8]> = argv[1..].iter().map(Vec::as_slice).collect();
     let members = store.sinter(&keys, now_ms)?;
     let frames = members
         .into_iter()
         .map(|m| RespFrame::BulkString(Some(m)))
         .collect();
-    Ok(RespFrame::Array(Some(frames)))
+    if resp3 {
+        Ok(RespFrame::Set(Some(frames)))
+    } else {
+        Ok(RespFrame::Array(Some(frames)))
+    }
 }
 
 fn sunion(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("SUNION"));
     }
+    let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let keys: Vec<&[u8]> = argv[1..].iter().map(Vec::as_slice).collect();
     let members = store.sunion(&keys, now_ms)?;
     let frames = members
         .into_iter()
         .map(|m| RespFrame::BulkString(Some(m)))
         .collect();
-    Ok(RespFrame::Array(Some(frames)))
+    if resp3 {
+        Ok(RespFrame::Set(Some(frames)))
+    } else {
+        Ok(RespFrame::Array(Some(frames)))
+    }
 }
 
 fn sdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("SDIFF"));
     }
+    let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let keys: Vec<&[u8]> = argv[1..].iter().map(Vec::as_slice).collect();
     let members = store.sdiff(&keys, now_ms)?;
     let frames = members
         .into_iter()
         .map(|m| RespFrame::BulkString(Some(m)))
         .collect();
-    Ok(RespFrame::Array(Some(frames)))
+    if resp3 {
+        Ok(RespFrame::Set(Some(frames)))
+    } else {
+        Ok(RespFrame::Array(Some(frames)))
+    }
 }
 
 fn spop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -11097,12 +11129,17 @@ fn spop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             Some("set") | None => {}
             Some(_) => return Err(CommandError::Store(StoreError::WrongType)),
         }
+        let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
         let members = store.spop_count(&argv[1], count, now_ms)?;
         let arr = members
             .into_iter()
             .map(|m| RespFrame::BulkString(Some(m)))
             .collect();
-        return Ok(RespFrame::Array(Some(arr)));
+        if resp3 {
+            return Ok(RespFrame::Set(Some(arr)));
+        } else {
+            return Ok(RespFrame::Array(Some(arr)));
+        }
     }
     match store.spop(&argv[1], now_ms)? {
         Some(m) => Ok(RespFrame::BulkString(Some(m))),
@@ -11329,12 +11366,19 @@ fn zmscore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("ZMSCORE"));
     }
+    let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let members: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
     let scores = store.zmscore(&argv[1], &members, now_ms)?;
     let frames = scores
         .into_iter()
         .map(|s| match s {
-            Some(score) => RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
+            Some(score) => {
+                if resp3 {
+                    RespFrame::double_from_f64(score)
+                } else {
+                    RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes()))
+                }
+            }
             None => RespFrame::BulkString(None),
         })
         .collect();
@@ -29198,11 +29242,11 @@ mod tests {
             RespFrame::Array(Some(vec![
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"a".to_vec())),
-                    RespFrame::BulkString(Some(b"1".to_vec())),
+                    RespFrame::Double("1".to_string()),
                 ])),
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"b".to_vec())),
-                    RespFrame::BulkString(Some(b"2".to_vec())),
+                    RespFrame::Double("2".to_string()),
                 ])),
             ]))
         );
@@ -61176,11 +61220,11 @@ mod tests {
             RespFrame::Array(Some(vec![
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"a".to_vec())),
-                    RespFrame::BulkString(Some(b"1".to_vec())),
+                    RespFrame::Double("1".to_string()),
                 ])),
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"b".to_vec())),
-                    RespFrame::BulkString(Some(b"2".to_vec())),
+                    RespFrame::Double("2".to_string()),
                 ])),
             ]))
         );
@@ -61196,7 +61240,7 @@ mod tests {
             out,
             RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"c".to_vec())),
-                RespFrame::BulkString(Some(b"3".to_vec())),
+                RespFrame::Double("3".to_string()),
             ]))]))
         );
 

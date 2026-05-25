@@ -9201,6 +9201,17 @@ fn resp_to_lua(frame: &RespFrame) -> LuaValue {
             }
             LuaValue::Table(t)
         }
+        // RESP3 Double: parse as f64 number
+        RespFrame::Double(s) => LuaValue::Number(s.parse::<f64>().unwrap_or(f64::NAN)),
+        // RESP3 Set: treat like array
+        RespFrame::Set(None) => LuaValue::Bool(false),
+        RespFrame::Set(Some(items)) => {
+            let t = LuaTable::new();
+            for (i, item) in items.iter().enumerate() {
+                t.set(LuaValue::Number((i + 1) as f64), resp_to_lua(item));
+            }
+            LuaValue::Table(t)
+        }
     }
 }
 

@@ -75,6 +75,13 @@ fn canonicalize_to_resp2_shape(frame: &RespFrame) -> RespFrame {
         RespFrame::Array(Some(items)) => RespFrame::Array(Some(
             items.iter().map(canonicalize_to_resp2_shape).collect(),
         )),
+        // RESP3 Double -> RESP2 BulkString of the same ASCII representation
+        RespFrame::Double(s) => RespFrame::BulkString(Some(s.as_bytes().to_vec())),
+        // RESP3 Set -> RESP2 Array
+        RespFrame::Set(Some(items)) => RespFrame::Array(Some(
+            items.iter().map(canonicalize_to_resp2_shape).collect(),
+        )),
+        RespFrame::Set(None) => RespFrame::Array(None),
         other => other.clone(),
     }
 }
@@ -294,8 +301,9 @@ fn mr_zrange_withscores_resp3_pairs_match_resp2_flat_alternating() {
                 flat[i * 2],
                 "{argv:?}: pair {i} member byte drift"
             );
+            // RESP3 scores are Double, RESP2 are BulkString — canonicalize before comparing
             assert_eq!(
-                pair_items[1],
+                canonicalize_to_resp2_shape(&pair_items[1]),
                 flat[i * 2 + 1],
                 "{argv:?}: pair {i} score byte drift"
             );
@@ -345,7 +353,8 @@ fn mr_zpop_with_count_resp3_pairs_match_resp2_flat_alternating() {
                 panic!("{command:?}: RESP3 element {i} must be 2-Array"); // ubs:ignore — AI triage
             };
             assert_eq!(pair_items[0], flat[i * 2]);
-            assert_eq!(pair_items[1], flat[i * 2 + 1]);
+            // RESP3 scores are Double, RESP2 are BulkString — canonicalize before comparing
+            assert_eq!(canonicalize_to_resp2_shape(&pair_items[1]), flat[i * 2 + 1]);
         }
     }
 }
