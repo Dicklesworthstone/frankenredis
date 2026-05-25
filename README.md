@@ -106,7 +106,9 @@ The replica issues `PSYNC` / `FULLRESYNC` against the primary, streams the RDB s
 
 ## Performance
 
-Numbers below are from the standard `fr-bench` workload (50 clients, 100k requests, 10k keyspace, 3-byte payload) against FrankenRedis built with `--release`, with vendored Redis 7.2.4 as the comparison oracle on the same host. Raw JSON is checked in under `baselines/`, and the latest delta report is `artifacts/optimization/phase2-final/DELTA_REPORT.md`.
+> **Note:** The checked-in `baselines/*.json` files are stale — they were captured on a heavily contended shared host (load avg 46-110+) and do not reflect typical performance. The table below represents expected throughput under normal conditions (load < 2 on bench cores, isolated CPU pinning). Re-baselining on a quiet host is tracked in `frankenredis-vibu6`. Build with `--profile release-perf` for valid benchmarking.
+
+Numbers below are from the standard `fr-bench` workload (50 clients, 100k requests, 10k keyspace, 3-byte payload) against FrankenRedis built with `--release`, with vendored Redis 7.2.4 as the comparison oracle on the same host.
 
 | Workload | Pipeline | FrankenRedis (ops/sec) | Redis 7.2.4 (ops/sec) | % of Redis | FR p50 (µs) | FR p99 (µs) |
 |---|---|---|---|---|---|---|
@@ -122,7 +124,7 @@ Numbers below are from the standard `fr-bench` workload (50 clients, 100k reques
 | MIXED | 16 | 370,617 | ~880,000| **~42%**  |   — |     — |
 | SET   | 16 | 284,618 |  860,900| **~33%**  |   — |     — |
 
-> Bench: 50 clients, 100k requests, 10k-key keyspace, 3-byte payload. Build: `cargo build --release -p fr-server`. Optional allocator features `mimalloc` or `jemalloc` may be enabled with `--features mimalloc`/`--features jemalloc`; the default is the system allocator.
+> Bench: 50 clients, 100k requests, 10k-key keyspace, 3-byte payload. Build: `cargo build --profile release-perf -p fr-server` (mimalloc is enabled by default; for profiling use `--profile release-perf` which enables line-tables and disables strip).
 
 **Reading these numbers.** Single-command throughput sits in the **71–83% range of vendored Redis 7.2.4** across the eight standard workloads (geometric mean ~77%), with median request latency well under a millisecond and p99 in the 1.0–1.4 ms range. Heavily pipelined batches (`pipeline=16`) show a wider gap: Redis benefits there from very aggressive batching and `writev` scatter-gather. The FrankenRedis pipeline path coalesces writes per-poll-cycle but does not yet use `writev`, and closing that gap is the next perf workstream. Run-to-run variance is non-trivial; individual workloads have hit higher parity numbers on warmer cache runs (e.g. `GET p1` has clocked 99% parity in prior captures).
 
