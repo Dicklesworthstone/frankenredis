@@ -393,7 +393,12 @@ pub fn validate_read_path(
     if fatal_read_error {
         return Err(ReadPathError::FatalErrorDisconnect);
     }
-    let next_query_buffer_len = current_query_buffer_len.saturating_add(newly_read_bytes);
+    let Some(next_query_buffer_len) = current_query_buffer_len.checked_add(newly_read_bytes) else {
+        return Err(ReadPathError::QueryBufferLimitExceeded {
+            observed: usize::MAX,
+            limit: query_buffer_limit,
+        });
+    };
     if next_query_buffer_len > query_buffer_limit {
         return Err(ReadPathError::QueryBufferLimitExceeded {
             observed: next_query_buffer_len,
@@ -797,6 +802,20 @@ mod tests {
             ReadPathError::QueryBufferLimitExceeded {
                 observed: 11,
                 limit: 10
+            }
+        );
+        assert_eq!(err.reason_code(), "eventloop.read.querybuf_limit_exceeded");
+    }
+
+    #[test]
+    fn read_path_rejects_query_buffer_length_overflow() {
+        let err = validate_read_path(usize::MAX - 1, 2, usize::MAX, false)
+            .expect_err("overflow must fail closed");
+        assert_eq!(
+            err,
+            ReadPathError::QueryBufferLimitExceeded {
+                observed: usize::MAX,
+                limit: usize::MAX
             }
         );
         assert_eq!(err.reason_code(), "eventloop.read.querybuf_limit_exceeded");
