@@ -483,13 +483,13 @@ fn parse_resp3_verbatim(
     if input[consumed + data_len] != b'\r' || input[consumed + data_len + 1] != b'\n' {
         return Err(RespParseError::InvalidBulkLength);
     }
-    // Verbatim string body is `<3-char-type>:<payload>` — strip the
-    // 4-byte prefix when present.
-    let mut bytes = input[consumed..consumed + data_len].to_vec();
-    if bytes.len() >= 4 && bytes[3] == b':' {
-        bytes.drain(..4);
+    // Verbatim string body is `<3-char-type>:<payload>`. The format
+    // tag is mandatory even when the payload is empty.
+    let body = &input[consumed..consumed + data_len];
+    if body.len() < 4 || body[3] != b':' {
+        return Err(RespParseError::InvalidBulkLength);
     }
-    Ok((RespFrame::BulkString(Some(bytes)), end))
+    Ok((RespFrame::BulkString(Some(body[4..].to_vec())), end))
 }
 
 fn parse_resp3_blob_error(
@@ -1441,6 +1441,44 @@ mod tests {
                 .unwrap_or_else(|err| panic!("canonical big number {ok:?} should parse: {err:?}"));
             assert!(matches!(parsed.frame, RespFrame::BulkString(Some(_))));
         }
+    }
+
+    #[test]
+    fn resp3_verbatim_rejects_missing_format_prefix() -> Result<(), String> {
+        // (frankenredis-gg805) RESP3 verbatim bodies are
+        // `<3-byte-format>:<payload>`. Accepting bodies without the
+        // mandatory format prefix lets malformed replies pass through
+        // as ordinary bulk strings once allow_resp3 is enabled.
+        let allow = ParserConfig {
+            allow_resp3: true,
+            ..ParserConfig::default()
+        };
+
+        for (input, context) in [
+            (
+                &b"=3\r\nabc\r\n"[..],
+                "verbatim body shorter than the format prefix",
+            ),
+            (&b"=4\r\nabcd\r\n"[..], "verbatim body with no prefix colon"),
+            (
+                &b"=0\r\n\r\n"[..],
+                "empty verbatim body cannot carry the mandatory format prefix",
+            ),
+        ] {
+            let actual = parse_frame_with_config(input, &allow);
+            if actual != Err(RespParseError::InvalidBulkLength) {
+                return Err(format!("{context} should reject; got {actual:?}"));
+            }
+        }
+
+        let parsed = parse_frame_with_config(b"=4\r\ntxt:\r\n", &allow)
+            .map_err(|err| format!("empty verbatim payload with prefix should parse: {err:?}"))?;
+        if parsed.frame != RespFrame::BulkString(Some(Vec::new())) {
+            return Err(format!(
+                "empty verbatim payload stripped incorrectly: {parsed:?}"
+            ));
+        }
+        Ok(())
     }
 
     #[test]
