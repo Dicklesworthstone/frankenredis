@@ -1272,15 +1272,44 @@ fn handle_readable(
     runtime.observe_client_buffer_sizes(0, conn.write_buf.len());
     runtime.record_client_session(&conn.session);
 
-    // If there's data to write, ensure we're registered for WRITABLE so the
-    // writable handler can flush once per poll cycle.
+    // `process_buffered_frames` has already coalesced all currently
+    // readable pipeline replies for this client. Try the nonblocking
+    // flush now and only arm WRITABLE for the rare partial/WouldBlock
+    // case; this avoids an epoll_ctl add/remove pair on the hot path.
     if !conn.write_buf.is_empty() {
-        write_tokens.insert(token);
-        let _ = poll.registry().reregister(
-            &mut conn.stream,
-            token,
-            Interest::READABLE | Interest::WRITABLE,
-        );
+        if budget_exhausted {
+            write_tokens.insert(token);
+            let _ = poll.registry().reregister(
+                &mut conn.stream,
+                token,
+                Interest::READABLE | Interest::WRITABLE,
+            );
+        } else {
+            let had_write_interest = write_tokens.contains(&token);
+            match conn.try_flush() {
+                Ok(true) => {
+                    write_tokens.remove(&token);
+                    if had_write_interest {
+                        let _ =
+                            poll.registry()
+                                .reregister(&mut conn.stream, token, Interest::READABLE);
+                    }
+                }
+                Ok(false) => {
+                    write_tokens.insert(token);
+                    let _ = poll.registry().reregister(
+                        &mut conn.stream,
+                        token,
+                        Interest::READABLE | Interest::WRITABLE,
+                    );
+                }
+                Err(_) => {
+                    conn.closing = true;
+                    closing_tokens.insert(token);
+                }
+            }
+            conn.session.output_buffer_bytes = conn.write_buf.len();
+        }
     }
 }
 

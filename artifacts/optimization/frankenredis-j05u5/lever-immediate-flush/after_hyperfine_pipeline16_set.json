@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "command": "target/release-perf/fr-bench --host 127.0.0.1 --port 6399 --workload set --requests 50000 --clients 50 --pipeline 16 --datasize 3 --keyspace 10000 --json-out artifacts/optimization/frankenredis-j05u5/lever-immediate-flush/after_fr_bench_pipeline16_set.json --key-prefix j05u5_after_",
+      "mean": 0.39583827806000005,
+      "stddev": 0.009140200277540714,
+      "median": 0.39583283206000003,
+      "user": 0.0526283,
+      "system": 0.10020764,
+      "min": 0.38211105106000004,
+      "max": 0.40768238606,
+      "times": [
+        0.39813718606000004,
+        0.40768238606,
+        0.39542793506,
+        0.38211105106000004,
+        0.39583283206000003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780357828335,
+  "host": "127.0.0.1",
+  "port": 6398,
+  "workload": "set",
+  "clients": 50,
+  "requests": 50000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "j05u5_before_",
+  "total_time_ms": 412,
+  "ops_per_sec": 121284.17106626817,
+  "bytes_sent": 2694499,
+  "bytes_received": 250000,
+  "latency_us": {
+    "min": 818,
+    "p50": 5983,
+    "p95": 8519,
+    "p99": 9743,
+    "p999": 11735,
+    "max": 11743,
+    "mean": 6462.276560000004,
+    "samples": 50000
+  }
+}

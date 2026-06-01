@@ -1,0 +1,2 @@
+0c310db326760bdae940bbc76356372ccc488b270bb89dd86e3e82280a33a13e  artifacts/optimization/frankenredis-j05u5/lever-immediate-flush/golden_request.resp
+7bb6b41852c5de6128967ecb3e278117fb2baf1947a54c5a6d935155c53c321c  artifacts/optimization/frankenredis-j05u5/lever-immediate-flush/before_golden_output.resp
