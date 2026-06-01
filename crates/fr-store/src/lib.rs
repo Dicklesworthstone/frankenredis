@@ -4579,13 +4579,15 @@ impl Store {
             };
         }
 
+        let ordered_key_count = self.ordered_keys.len();
         let keys_to_check: Vec<Vec<u8>> = match start_cursor {
             Some(ref k) => {
                 let mut it = self.ordered_keys.range(k.clone()..).cloned();
                 let mut collected: Vec<Vec<u8>> = it.by_ref().take(sample_limit).collect();
                 if collected.len() < sample_limit {
-                    // Wrap around
-                    let remaining = sample_limit - collected.len();
+                    // Wrap around without sampling any ordered key twice.
+                    let remaining_unique_keys = ordered_key_count.saturating_sub(collected.len());
+                    let remaining = (sample_limit - collected.len()).min(remaining_unique_keys);
                     collected.extend(self.ordered_keys.iter().take(remaining).cloned());
                 }
                 collected
@@ -4620,12 +4622,16 @@ impl Store {
             }
         }
 
-        let next_cursor = keys_to_check.last().and_then(|last| {
-            self.ordered_keys
-                .range((Excluded(last.clone()), Unbounded))
-                .next()
-                .cloned()
-        });
+        let next_cursor = if keys_to_check.len() >= ordered_key_count {
+            None
+        } else {
+            keys_to_check.last().and_then(|last| {
+                self.ordered_keys
+                    .range((Excluded(last.clone()), Unbounded))
+                    .next()
+                    .cloned()
+            })
+        };
 
         ActiveExpireCycleResult {
             sampled_keys: keys_to_check.len(),
@@ -18442,6 +18448,20 @@ mod tests {
         let second = store.run_active_expire_cycle(10, first.next_cursor.clone(), 2);
         assert_eq!(second.sampled_keys, 2);
         assert_eq!(second.evicted_keys, 1);
+    }
+
+    #[test]
+    fn active_expire_cycle_wraparound_samples_each_key_once() {
+        let mut store = Store::new();
+        store.set(b"a".to_vec(), b"1".to_vec(), Some(10_000), 0);
+        store.set(b"b".to_vec(), b"2".to_vec(), Some(10_000), 0);
+        store.set(b"c".to_vec(), b"3".to_vec(), Some(10_000), 0);
+
+        let result = store.run_active_expire_cycle(1, Some(b"b".to_vec()), 5);
+
+        assert_eq!(result.sampled_keys, 3);
+        assert_eq!(result.evicted_keys, 0);
+        assert_eq!(result.next_cursor, None);
     }
 
     #[test]
