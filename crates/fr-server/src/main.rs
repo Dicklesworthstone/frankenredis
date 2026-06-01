@@ -38,6 +38,7 @@ use mio::{Events, Interest, Poll, Token};
 
 /// Default port matching Redis convention.
 const DEFAULT_PORT: u16 = 6379;
+const DEFAULT_MODE: &str = "strict";
 
 /// Token for the TCP listener socket.
 const LISTENER: Token = Token(0); // ubs:ignore
@@ -245,7 +246,7 @@ USAGE: frankenredis [OPTIONS]\n\n\
 OPTIONS:\n\
   --bind <ADDR>              Listen address (default: 127.0.0.1)\n\
   --port <PORT>              Listen port (default: {DEFAULT_PORT})\n\
-  --mode <MODE>              Runtime mode: strict or hardened (default: hardened)\n\
+  --mode <MODE>              Runtime mode: strict or hardened (default: {DEFAULT_MODE})\n\
   --sentinel                 Run in Sentinel mode (enables SENTINEL command dispatch)\n\
   --config <PATH>            Load redis.conf startup directives and use path for CONFIG REWRITE\n\
   --aof <PATH>               AOF persistence file path (enables persistence)\n\
@@ -480,7 +481,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
     let mut port = DEFAULT_PORT;
-    let mut mode_str = "hardened";
+    let mut mode_str = DEFAULT_MODE;
     let mut bind_addr = "127.0.0.1".to_string();
     let mut aof_path: Option<String> = None;
     let mut rdb_path: Option<String> = None;
@@ -3349,6 +3350,7 @@ mod tests {
         assert!(help.contains("--bind <ADDR>"));
         assert!(help.contains("--port <PORT>"));
         assert!(help.contains("--mode <MODE>"));
+        assert!(help.contains("Runtime mode: strict or hardened (default: strict)"));
         assert!(help.contains("--aof <PATH>"));
         assert!(help.contains("--rdb <PATH>"));
         assert!(help.contains("--replicaof <HOST> <PORT>"));
