@@ -10763,6 +10763,14 @@ impl Store {
                 let Value::String(data) = &mut entry.value else {
                     return Err(StoreError::WrongType);
                 };
+                // (frankenredis-hllval) Upstream pfcountCommand validates the
+                // object via isHLLObjectOrReply BEFORE consulting the cardinality
+                // cache. A string carrying the `HYLL` cache-header shape but a
+                // malformed encoding/length must surface WRONGTYPE, not the stale
+                // bytes that happen to sit in the cache slot.
+                if hll_has_redis_cache_header(data) && !hll_redis_header_is_valid(data) {
+                    return Err(StoreError::InvalidHllValue);
+                }
                 if let Some(card) = hll_cache_read(data) {
                     Outcome::Hit(card)
                 } else {
@@ -16941,6 +16949,28 @@ fn hll_has_redis_cache_header(data: &[u8]) -> bool {
     data.starts_with(HLL_REDIS_MAGIC)
         && data.len() >= HLL_REDIS_HEADER_SIZE
         && data.len() != HLL_LEGACY_DATA_SIZE
+}
+
+/// O(1) structural validation of a Redis HLL header, mirroring upstream
+/// `hyperloglog.c::isHLLObjectOrReply`: magic `HYLL`, a header of at least 16
+/// bytes, an encoding byte of 0 (dense) or 1 (sparse), and — for the dense
+/// encoding — a string length that exactly matches the dense register payload.
+/// The caller must ensure `data` carries the Redis cache-header form
+/// (`hll_has_redis_cache_header`). This guards the cardinality-cache fast path:
+/// upstream validates the object BEFORE reading the cache, so a `HYLL` string
+/// with a bogus encoding/length surfaces WRONGTYPE rather than a stale cache.
+/// (frankenredis-hllval)
+fn hll_redis_header_is_valid(data: &[u8]) -> bool {
+    let Some(&encoding) = data.get(HLL_REDIS_MAGIC.len()) else {
+        return false;
+    };
+    if encoding > HLL_REDIS_SPARSE_ENCODING {
+        return false;
+    }
+    if encoding == HLL_REDIS_DENSE_ENCODING && data.len() != HLL_REDIS_DENSE_SIZE {
+        return false;
+    }
+    true
 }
 
 /// Read the cached cardinality from a Redis HLL header when it is valid (the
@@ -24995,6 +25025,52 @@ mod tests {
             store.pfadd(b"hll", &[b"x".to_vec()], 0),
             Err(StoreError::InvalidHllValue)
         );
+    }
+
+    #[test]
+    fn pfcount_validates_redis_header_before_reading_cache() {
+        // (frankenredis-hllval) Single-key PFCOUNT consults the HLL cardinality
+        // cache (bytes 8..16 of the Redis header). A string carrying the `HYLL`
+        // cache-header SHAPE but a malformed encoding/length used to return the
+        // stale bytes sitting in the cache slot instead of WRONGTYPE. Upstream
+        // pfcountCommand validates via isHLLObjectOrReply first, so each of
+        // these must error rather than report a bogus cardinality.
+        let cases: &[Vec<u8>] = &[
+            // HYLL + dense encoding(0) but far too short for the dense payload;
+            // cache bytes are all zero so the stale read would have said 0.
+            {
+                let mut v = HLL_REDIS_MAGIC.to_vec();
+                v.extend_from_slice(&[0u8; 12]); // 16 bytes total, enc=0
+                v
+            },
+            // HYLL + an out-of-range encoding byte (0x5f) and arbitrary tail;
+            // a non-zero cache slot would have produced a garbage integer.
+            b"HYLL_invalid_header_padding_xxxxxx".to_vec(),
+            // HYLL + dense encoding(0) at 34 bytes (still != dense size).
+            {
+                let mut v = HLL_REDIS_MAGIC.to_vec();
+                v.extend_from_slice(&[0u8; 30]);
+                v
+            },
+        ];
+        for raw in cases {
+            let mut store = Store::new();
+            store.set(b"k".to_vec(), raw.clone(), None, 0);
+            assert_eq!(
+                store.pfcount(&[b"k"], 0),
+                Err(StoreError::InvalidHllValue),
+                "malformed HYLL string must be WRONGTYPE, not a cached value: {raw:?}",
+            );
+        }
+
+        // A genuine 16-byte sparse header (encoding=1, empty body) is valid and
+        // reports cardinality 0 — the validator must not reject it.
+        let mut store = Store::new();
+        let mut sparse = HLL_REDIS_MAGIC.to_vec();
+        sparse.push(HLL_REDIS_SPARSE_ENCODING);
+        sparse.extend_from_slice(&[0u8; 11]);
+        store.set(b"s".to_vec(), sparse, None, 0);
+        assert_eq!(store.pfcount(&[b"s"], 0), Ok(0));
     }
 
     #[test]
