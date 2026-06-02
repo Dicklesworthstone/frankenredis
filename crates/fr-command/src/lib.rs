@@ -4260,6 +4260,21 @@ fn format_coord_human(value: f64) -> String {
     s
 }
 
+/// Emits a GEOPOS / GEOSEARCH WITHCOORD coordinate the way upstream's
+/// geo.c does via `addReplyHumanLongDouble`: a RESP3 Double (`,`) when the
+/// client negotiated RESP3, otherwise a bulk string. The textual payload is
+/// identical in both cases (17-significant-digit human form); only the wire
+/// type tag differs. (frankenredis geopos RESP3 double fidelity)
+#[inline]
+fn geo_coord_frame(value: f64, resp3: bool) -> RespFrame {
+    let s = format_coord_human(value);
+    if resp3 {
+        RespFrame::Double(s)
+    } else {
+        RespFrame::BulkString(Some(s.into_bytes()))
+    }
+}
+
 #[inline]
 fn geo_unit_to_meters(unit: &[u8]) -> Option<f64> {
     if eq_ascii_command(unit, b"M") {
@@ -5126,13 +5141,14 @@ fn geopos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("GEOPOS"));
     }
+    let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let mut frames = Vec::with_capacity(argv.len().saturating_sub(2));
     for member in &argv[2..] {
         let frame = match store.zscore(&argv[1], member, now_ms)? {
             Some(score) => match geo_decode_score(score) {
                 Some((longitude, latitude)) => RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(format_coord_human(longitude).into_bytes())),
-                    RespFrame::BulkString(Some(format_coord_human(latitude).into_bytes())),
+                    geo_coord_frame(longitude, resp3),
+                    geo_coord_frame(latitude, resp3),
                 ])),
                 None => RespFrame::Array(None),
             },
@@ -5263,6 +5279,7 @@ fn geo_search_reply(
     withdist: bool,
     withhash: bool,
     to_meter: f64,
+    resp3: bool,
 ) -> RespFrame {
     let frames: Vec<RespFrame> = results
         .iter()
@@ -5283,8 +5300,8 @@ fn geo_search_reply(
             }
             if withcoord {
                 parts.push(RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(format_coord_human(*lon).into_bytes())),
-                    RespFrame::BulkString(Some(format_coord_human(*lat).into_bytes())),
+                    geo_coord_frame(*lon, resp3),
+                    geo_coord_frame(*lat, resp3),
                 ])));
             }
             RespFrame::Array(Some(parts))
@@ -5601,7 +5618,12 @@ fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         geo_store_results(store, &dest, &results, unit_mult, storedist, now_ms)
     } else {
         Ok(geo_search_reply(
-            &results, withcoord, withdist, withhash, unit_mult,
+            &results,
+            withcoord,
+            withdist,
+            withhash,
+            unit_mult,
+            store.dispatch_client_ctx.resp_protocol_version == 3,
         ))
     }
 }
@@ -5671,7 +5693,12 @@ fn georadiusbymember(
         geo_store_results(store, &dest, &results, unit_mult, storedist, now_ms)
     } else {
         Ok(geo_search_reply(
-            &results, withcoord, withdist, withhash, unit_mult,
+            &results,
+            withcoord,
+            withdist,
+            withhash,
+            unit_mult,
+            store.dispatch_client_ctx.resp_protocol_version == 3,
         ))
     }
 }
@@ -5859,7 +5886,12 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     if let Some(rm) = radius_m {
         let results = geo_search_core(store, &argv[1], cx, cy, rm, count, sort, any, now_ms)?;
         Ok(geo_search_reply(
-            &results, withcoord, withdist, withhash, unit_mult,
+            &results,
+            withcoord,
+            withdist,
+            withhash,
+            unit_mult,
+            store.dispatch_client_ctx.resp_protocol_version == 3,
         ))
     } else if let (Some(w), Some(h)) = (box_width_m, box_height_m) {
         // BYBOX: filter by bounding box
@@ -5901,7 +5933,12 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             results.truncate(limit);
         }
         Ok(geo_search_reply(
-            &results, withcoord, withdist, withhash, unit_mult,
+            &results,
+            withcoord,
+            withdist,
+            withhash,
+            unit_mult,
+            store.dispatch_client_ctx.resp_protocol_version == 3,
         ))
     } else {
         Ok(RespFrame::Error(
@@ -24660,8 +24697,8 @@ mod tests {
         client_wrong_subcommand_arity, cluster_disabled_error, cluster_reset_with_keys_error,
         cluster_wrong_subcommand_arity, command_acl_categories, commands_in_acl_category,
         dispatch_argv, drain_pubsub_messages, eq_ascii_command, eval_script, execute_migrate,
-        format_coord_human, format_eval_read_only_script_error, frame_to_argv, hello_bulk,
-        hello_simple, is_known_acl_command_selector, is_write_command,
+        format_coord_human, format_eval_read_only_script_error, frame_to_argv, geo_coord_frame,
+        hello_bulk, hello_simple, is_known_acl_command_selector, is_write_command,
         parse_blocking_deadline_milliseconds, parse_migrate_request, pubsub_message_to_frame,
         pubsub_message_to_frame_for_protocol, stream_full_group_lag_frame,
     };
@@ -49133,6 +49170,21 @@ mod tests {
         assert!(format_coord_human(f64::NAN) == "nan");
         assert_eq!(format_coord_human(f64::INFINITY), "inf");
         assert_eq!(format_coord_human(f64::NEG_INFINITY), "-inf");
+    }
+
+    #[test]
+    fn geo_coord_frame_uses_resp3_double_else_bulk() {
+        // Upstream geo.c emits GEOPOS / GEOSEARCH WITHCOORD coordinates via
+        // addReplyHumanLongDouble: a RESP3 Double (`,`) under RESP3 and a bulk
+        // string under RESP2, with byte-identical textual payload. Verified
+        // byte-exact against vendored Redis 7.2.4.
+        let v = 13.361_389_338_970_184_33_f64;
+        let payload = format_coord_human(v);
+        assert_eq!(geo_coord_frame(v, true), RespFrame::Double(payload.clone()));
+        assert_eq!(
+            geo_coord_frame(v, false),
+            RespFrame::BulkString(Some(payload.into_bytes()))
+        );
     }
 
     #[test]
