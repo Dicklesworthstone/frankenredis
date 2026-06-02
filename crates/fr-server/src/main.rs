@@ -1167,7 +1167,11 @@ fn handle_readable(
         return;
     };
 
-    // Read available data into the client's buffer.
+    // Read available data into the client's buffer. Blocked clients keep the
+    // historical drain-to-WouldBlock behavior so their kernel buffers do not
+    // grow while commands are deferred; normal clients process after one read
+    // and rely on level-triggered readiness for any remaining bytes.
+    let drain_until_would_block = conn.blocked.is_some();
     let mut buf = [0u8; 8192];
     loop {
         match conn.stream.read(&mut buf) {
@@ -1188,6 +1192,9 @@ fn handle_readable(
                     Ok(_) => {
                         conn.read_buf.extend_from_slice(&buf[..n]);
                         runtime.track_net_input_bytes(n as u64);
+                        if !drain_until_would_block {
+                            break;
+                        }
                     }
                     Err(e) => {
                         eprintln!("warn: client disconnected: {}", e.reason_code());
