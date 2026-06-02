@@ -7829,6 +7829,15 @@ fn xpending(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
             ])));
         }
 
+        // Upstream t_stream.c::xpendingCommand summary form: when there are
+        // no pending entries it emits the consumers field as a NULL array
+        // (addReplyNullArray → *-1 / _), not an empty array. fr was emitting
+        // *0. min/max are already null in that case. (frankenredis-b2okv)
+        let consumers_frame = if total == 0 {
+            RespFrame::Array(None)
+        } else {
+            RespFrame::Array(Some(consumer_frames))
+        };
         return Ok(RespFrame::Array(Some(vec![
             RespFrame::Integer(i64::try_from(total).unwrap_or(i64::MAX)),
             min_id
@@ -7837,7 +7846,7 @@ fn xpending(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
             max_id
                 .map(|id| RespFrame::BulkString(Some(format_stream_id(id))))
                 .unwrap_or(RespFrame::BulkString(None)),
-            RespFrame::Array(Some(consumer_frames)),
+            consumers_frame,
         ])));
     }
 
@@ -13599,9 +13608,10 @@ fn zmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                         Some((member, score)) => {
                             popped.push(RespFrame::Array(Some(vec![
                                 RespFrame::BulkString(Some(member)),
-                                RespFrame::BulkString(Some(
-                                    redis_score_to_string(score).into_bytes(),
-                                )),
+                                zpop_score_frame(
+                                    score,
+                                    store.dispatch_client_ctx.resp_protocol_version,
+                                ),
                             ])));
                         }
                         None => break,
@@ -24345,6 +24355,7 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         }
         idx += 1;
     }
+    let resp = store.dispatch_client_ctx.resp_protocol_version;
     for ki in 0..numkeys {
         let key = &argv[3 + ki];
         let popped = if use_min {
@@ -24359,7 +24370,7 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                     .map(|(member, score)| {
                         RespFrame::Array(Some(vec![
                             RespFrame::BulkString(Some(member)),
-                            RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
+                            zpop_score_frame(score, resp),
                         ]))
                     })
                     .collect();
@@ -41444,6 +41455,95 @@ mod tests {
             let out = dispatch_argv(&argv, &mut store, 0).expect("lmpop error frame");
             assert_eq!(out, RespFrame::Error(expected.to_string()));
         }
+    }
+
+    #[test]
+    fn zmpop_score_is_resp3_double_else_bulk() {
+        // (frankenredis-d77az) The popped member's score must be a RESP3
+        // Double (,) under HELLO 3 and a bulk string under RESP2 — same as
+        // ZPOPMIN/ZPOPMAX. Verified byte-exact vs vendored 7.2.4.
+        fn pop_score(resp: i64) -> RespFrame {
+            let mut store = Store::new();
+            store.dispatch_client_ctx.resp_protocol_version = resp;
+            dispatch_argv(
+                &[
+                    b"ZADD".to_vec(),
+                    b"z".to_vec(),
+                    b"1.5".to_vec(),
+                    b"a".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("zadd");
+            let out = dispatch_argv(
+                &[
+                    b"ZMPOP".to_vec(),
+                    b"1".to_vec(),
+                    b"z".to_vec(),
+                    b"MIN".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("zmpop");
+            // out = [key, [[member, score]]]
+            let RespFrame::Array(Some(top)) = out else {
+                panic!("zmpop shape"); // ubs:ignore — AI triage
+            };
+            let RespFrame::Array(Some(pairs)) = &top[1] else {
+                panic!("pairs shape"); // ubs:ignore — AI triage
+            };
+            let RespFrame::Array(Some(pair)) = &pairs[0] else {
+                panic!("pair shape"); // ubs:ignore — AI triage
+            };
+            pair[1].clone()
+        }
+        assert_eq!(pop_score(3), RespFrame::Double("1.5".to_string()));
+        assert_eq!(pop_score(2), RespFrame::BulkString(Some(b"1.5".to_vec())));
+    }
+
+    #[test]
+    fn xpending_summary_empty_group_consumers_is_null_array() {
+        // (frankenredis-b2okv) Upstream xpendingCommand summary form emits a
+        // NULL array for the consumers field when there are no pending
+        // entries (addReplyNullArray), not an empty array.
+        let mut store = Store::new();
+        for c in [
+            vec![
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"1-1".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            vec![
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"0".to_vec(),
+            ],
+        ] {
+            dispatch_argv(&c, &mut store, 0).expect("setup");
+        }
+        let out = dispatch_argv(
+            &[b"XPENDING".to_vec(), b"s".to_vec(), b"g".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("xpending");
+        let RespFrame::Array(Some(summary)) = out else {
+            panic!("summary shape"); // ubs:ignore — AI triage
+        };
+        assert_eq!(summary[0], RespFrame::Integer(0));
+        assert_eq!(summary[1], RespFrame::BulkString(None));
+        assert_eq!(summary[2], RespFrame::BulkString(None));
+        assert_eq!(
+            summary[3],
+            RespFrame::Array(None),
+            "consumers must be null array"
+        );
     }
 
     #[test]
