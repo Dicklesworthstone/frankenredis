@@ -7234,10 +7234,13 @@ impl Runtime {
         // alternating k/v entries. Same shape pattern as
         // CLIENT TRACKINGINFO (i40x2). (frankenredis-e4njz)
         if self.session.resp_protocol_version == 3 {
+            // Upstream acl.c::aclCommand GETUSER emits the `flags` value via
+            // addReplySetLen, so under RESP3 it is a Set (~), not an Array.
+            // `passwords`/`selectors` stay Arrays. (frankenredis-42abp)
             RespFrame::Map(Some(vec![
                 (
                     RespFrame::BulkString(Some(b"flags".to_vec())),
-                    RespFrame::Array(Some(flags)),
+                    RespFrame::Set(Some(flags)),
                 ),
                 (
                     RespFrame::BulkString(Some(b"passwords".to_vec())),
@@ -26298,6 +26301,13 @@ mod tests {
         assert_eq!(keys[3], &RespFrame::BulkString(Some(b"keys".to_vec())));
         assert_eq!(keys[4], &RespFrame::BulkString(Some(b"channels".to_vec())));
         assert_eq!(keys[5], &RespFrame::BulkString(Some(b"selectors".to_vec())));
+        // (frankenredis-42abp) The `flags` value is emitted via addReplySetLen,
+        // so under RESP3 it must be a Set (~), not an Array.
+        assert!(
+            matches!(entries[0].1, RespFrame::Set(_)),
+            "RESP3 ACL GETUSER flags must be a Set, got {:?}",
+            entries[0].1
+        );
     }
 
     #[test]
