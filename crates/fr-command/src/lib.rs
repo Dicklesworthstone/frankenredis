@@ -292,7 +292,18 @@ pub fn command_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
             return Vec::new();
         }
         let mut keys = vec![1];
-        let mut i = 2;
+        // STORE / STOREDIST options only appear AFTER the fixed positional
+        // arguments, so the scan must skip them first — otherwise a member
+        // or coordinate literally named "STORE" is mis-read as the option.
+        // Upstream geo.c::georadiusGetKeys advances past the fixed args:
+        // GEORADIUS has 5 (key lon lat radius unit) → options from argv[6];
+        // GEORADIUSBYMEMBER has 4 (key member radius unit) → from argv[5].
+        // (frankenredis-u48rd)
+        let mut i = if cmd_name.eq_ignore_ascii_case("GEORADIUSBYMEMBER") {
+            5
+        } else {
+            6
+        };
         while i < argv.len() {
             if let Ok(s) = std::str::from_utf8(&argv[i])
                 && (s.eq_ignore_ascii_case("STORE") || s.eq_ignore_ascii_case("STOREDIST"))
@@ -24886,12 +24897,12 @@ mod tests {
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
         SCRIPT_NOSCRIPT_ERROR, SUBCOMMAND_TABLE, acl_command_selectors_for_argv, classify_command,
         client_wrong_subcommand_arity, cluster_disabled_error, cluster_reset_with_keys_error,
-        cluster_wrong_subcommand_arity, command_acl_categories, commands_in_acl_category,
-        dispatch_argv, drain_pubsub_messages, eq_ascii_command, eval_script, execute_migrate,
-        format_coord_human, format_eval_read_only_script_error, frame_to_argv, geo_coord_frame,
-        hello_bulk, hello_simple, is_known_acl_command_selector, is_write_command,
-        parse_blocking_deadline_milliseconds, parse_migrate_request, pubsub_message_to_frame,
-        pubsub_message_to_frame_for_protocol, stream_full_group_lag_frame,
+        cluster_wrong_subcommand_arity, command_acl_categories, command_key_indexes,
+        commands_in_acl_category, dispatch_argv, drain_pubsub_messages, eq_ascii_command,
+        eval_script, execute_migrate, format_coord_human, format_eval_read_only_script_error,
+        frame_to_argv, geo_coord_frame, hello_bulk, hello_simple, is_known_acl_command_selector,
+        is_write_command, parse_blocking_deadline_milliseconds, parse_migrate_request,
+        pubsub_message_to_frame, pubsub_message_to_frame_for_protocol, stream_full_group_lag_frame,
     };
 
     fn classify_command_linear(cmd: &[u8]) -> Option<CommandId> {
@@ -56198,6 +56209,50 @@ mod tests {
             };
             assert_eq!(dst[1], ow_update, "{verb:?} STORE dst must be OW/update");
         }
+    }
+
+    #[test]
+    fn command_key_indexes_georadius_skips_fixed_args_before_store_scan() {
+        // (frankenredis-u48rd) STORE/STOREDIST options only follow the fixed
+        // positional args, so the option scan must skip them — otherwise a
+        // GEORADIUSBYMEMBER member (argv[2]) literally named "STORE" is
+        // mis-read as the STORE option. Mirrors geo.c::georadiusGetKeys.
+        let argv: Vec<Vec<u8>> = [
+            b"GEORADIUSBYMEMBER".as_slice(),
+            b"src",
+            b"STORE",
+            b"1",
+            b"km",
+            b"STORE",
+            b"dst",
+        ]
+        .iter()
+        .map(|a| a.to_vec())
+        .collect();
+        // Source key at index 1 plus the genuine STORE dst at index 6; the
+        // member "STORE" at index 2 must NOT be treated as an option.
+        assert_eq!(command_key_indexes(&argv), vec![1, 6]);
+
+        // Normal forms still resolve correctly.
+        let g: Vec<Vec<u8>> = [
+            b"GEORADIUS".as_slice(),
+            b"src",
+            b"0",
+            b"0",
+            b"1",
+            b"m",
+            b"STORE",
+            b"dst",
+        ]
+        .iter()
+        .map(|a| a.to_vec())
+        .collect();
+        assert_eq!(command_key_indexes(&g), vec![1, 7]);
+        let plain: Vec<Vec<u8>> = [b"GEORADIUSBYMEMBER".as_slice(), b"src", b"m", b"1", b"km"]
+            .iter()
+            .map(|a| a.to_vec())
+            .collect();
+        assert_eq!(command_key_indexes(&plain), vec![1]);
     }
 
     #[test]
