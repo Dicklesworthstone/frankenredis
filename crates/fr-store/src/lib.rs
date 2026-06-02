@@ -6505,13 +6505,21 @@ impl Store {
                         for v in values {
                             l.push_front(v.clone());
                         }
+                        let len = l.len();
                         if !values.is_empty() {
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
+                            // (frankenredis-lpushx-dirty) LPUSHX mutates the
+                            // list, so it must update the write time and bump
+                            // dirty — otherwise the push is invisible to
+                            // RDB/AOF persistence, replication, and keyspace
+                            // notifications (all gate on dirty changing).
+                            entry.touch_write(now_ms);
+                            self.dirty = self.dirty.saturating_add(values.len() as u64);
                         }
-                        Ok(l.len())
+                        Ok(len)
                     }
                     _ => Err(StoreError::WrongType),
                 }
@@ -6545,13 +6553,21 @@ impl Store {
                         for v in values {
                             l.push_back(v.clone());
                         }
+                        let len = l.len();
                         if !values.is_empty() {
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
+                            // (frankenredis-lpushx-dirty) RPUSHX mutates the
+                            // list, so it must update the write time and bump
+                            // dirty — otherwise the push is invisible to
+                            // RDB/AOF persistence, replication, and keyspace
+                            // notifications (all gate on dirty changing).
+                            entry.touch_write(now_ms);
+                            self.dirty = self.dirty.saturating_add(values.len() as u64);
                         }
-                        Ok(l.len())
+                        Ok(len)
                     }
                     _ => Err(StoreError::WrongType),
                 }
@@ -21580,6 +21596,29 @@ mod tests {
         // Redis parity: LTRIM 0 -100 clears the list
         store.ltrim(b"l", 0, -100, 0).unwrap();
         assert!(!store.exists(b"l", 0));
+    }
+
+    #[test]
+    fn lpushx_rpushx_bump_dirty_by_pushed_count() {
+        // (frankenredis-maggg) LPUSHX/RPUSHX mutate an existing list, so they
+        // must bump dirty by the number of values pushed — otherwise the
+        // push is invisible to RDB/AOF persistence, replication, and keyspace
+        // notifications. A no-op on a missing key must NOT dirty.
+        let mut store = Store::new();
+        store.rpush(b"l", &[b"a".to_vec()], 0).unwrap();
+        let before = store.dirty;
+        store
+            .rpushx(b"l", &[b"b".to_vec(), b"c".to_vec()], 0)
+            .unwrap();
+        assert_eq!(store.dirty, before + 2, "RPUSHX must dirty by pushed count");
+        let before = store.dirty;
+        store.lpushx(b"l", &[b"z".to_vec()], 0).unwrap();
+        assert_eq!(store.dirty, before + 1, "LPUSHX must dirty by pushed count");
+        // No-op on a missing key — no dirty.
+        let before = store.dirty;
+        assert_eq!(store.rpushx(b"missing", &[b"x".to_vec()], 0).unwrap(), 0);
+        assert_eq!(store.lpushx(b"missing", &[b"x".to_vec()], 0).unwrap(), 0);
+        assert_eq!(store.dirty, before, "no-op PUSHX must not dirty");
     }
 
     #[test]
