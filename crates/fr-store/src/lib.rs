@@ -10734,6 +10734,61 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
+
+        // (frankenredis-twdut) Single-key PFCOUNT uses the HLL header cache,
+        // mirroring upstream hyperloglog.c::pfcountCommand: a VALID cache
+        // returns the stored cardinality with no recompute; an INVALID cache
+        // (set by any prior PFADD/PFMERGE) is recomputed, written back into
+        // the header, and bumps dirty so the cache update replicates and
+        // persists (the modified key is propagated to AOF/replicas as the
+        // deterministic PFCOUNT). Multi-key PFCOUNT never touches the cache.
+        if keys.len() == 1 {
+            let key = keys[0];
+            self.drop_if_expired(key, now_ms);
+            let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+                self.next_rand()
+            } else {
+                0
+            };
+            let Some(entry) = self.entries.get_mut(key) else {
+                return Ok(0);
+            };
+            if lfu_tracking_enabled {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+            }
+            enum Outcome {
+                Hit(u64),
+                Recomputed(u64, bool),
+            }
+            let outcome = {
+                let Value::String(data) = &mut entry.value else {
+                    return Err(StoreError::WrongType);
+                };
+                if let Some(card) = hll_cache_read(data) {
+                    Outcome::Hit(card)
+                } else {
+                    let registers = hll_parse_registers(data)?;
+                    let card = hll_estimate(&registers);
+                    let wrote = hll_cache_write(data, card);
+                    Outcome::Recomputed(card, wrote)
+                }
+            };
+            entry.touch(now_ms);
+            return match outcome {
+                Outcome::Hit(card) => Ok(card),
+                Outcome::Recomputed(card, wrote) => {
+                    if wrote {
+                        Self::mark_digest_stale_fields(
+                            &mut self.digest_stale,
+                            &mut self.digest_mutations,
+                        );
+                        self.dirty = self.dirty.saturating_add(1);
+                    }
+                    Ok(card)
+                }
+            };
+        }
+
         let mut merged = vec![0u8; HLL_REGISTERS];
         for &key in keys {
             self.drop_if_expired(key, now_ms);
@@ -16862,6 +16917,44 @@ fn hll_parse(data: &[u8]) -> Result<(HllEncoding, Vec<u8>), StoreError> {
 
 fn hll_parse_registers(data: &[u8]) -> Result<Vec<u8>, StoreError> {
     hll_parse(data).map(|(_, registers)| registers)
+}
+
+/// True when `data` is the Redis HLL serialization — `HYLL` magic plus a
+/// 16-byte header whose trailing 8 bytes carry the cardinality cache — as
+/// opposed to the header-less legacy form or fr's internal `HYL2` form.
+/// (frankenredis-twdut)
+fn hll_has_redis_cache_header(data: &[u8]) -> bool {
+    data.starts_with(HLL_REDIS_MAGIC)
+        && data.len() >= HLL_REDIS_HEADER_SIZE
+        && data.len() != HLL_LEGACY_DATA_SIZE
+}
+
+/// Read the cached cardinality from a Redis HLL header when it is valid (the
+/// high bit of the last cache byte is clear). Returns `None` when the cache
+/// has been invalidated by a modification or the value isn't in the Redis
+/// 16-byte-header form. Mirrors upstream `HLL_VALID_CACHE`. (frankenredis-twdut)
+fn hll_cache_read(data: &[u8]) -> Option<u64> {
+    if !hll_has_redis_cache_header(data) {
+        return None;
+    }
+    let card: [u8; 8] = data[8..16].try_into().ok()?;
+    if card[7] & 0x80 != 0 {
+        return None; // HLL_INVALIDATE_CACHE bit set
+    }
+    Some(u64::from_le_bytes(card))
+}
+
+/// Store `card` into the Redis HLL header cache, clearing the invalid bit.
+/// Returns whether the value carried a Redis header to update. Cardinalities
+/// fit far below 2^56, so the little-endian value's top "invalid" bit is
+/// naturally 0. Mirrors upstream which writes `card[0..8]` and clears
+/// `HLL_INVALIDATE_CACHE`. (frankenredis-twdut)
+fn hll_cache_write(data: &mut [u8], card: u64) -> bool {
+    if !hll_has_redis_cache_header(data) {
+        return false;
+    }
+    data[8..16].copy_from_slice(&card.to_le_bytes());
+    true
 }
 
 fn hll_encode(registers: &[u8], encoding: HllEncoding) -> Vec<u8> {
@@ -24714,6 +24807,45 @@ mod tests {
         let count = store.pfcount(&[b"hll"], 0).unwrap();
         // HLL is approximate; allow 100 ± 10
         assert!((90..=110).contains(&count), "count={count}, expected ~100");
+    }
+
+    #[test]
+    fn pfcount_single_key_caches_and_dirties_like_upstream() {
+        // (frankenredis-twdut) Single-key PFCOUNT recomputes + writes the HLL
+        // header cache + dirties when the cache is invalid (after a PFADD),
+        // then serves the cached value with no dirty until the next PFADD.
+        // Multi-key PFCOUNT never caches/dirties.
+        let mut store = Store::new();
+        store
+            .pfadd(b"a", &[b"x".to_vec(), b"y".to_vec()], 0)
+            .unwrap();
+        store.pfadd(b"b", &[b"z".to_vec()], 0).unwrap();
+
+        // First count: cache invalid -> recompute, write, dirty + digest stale.
+        let before = store.dirty;
+        let c1 = store.pfcount(&[b"a"], 0).unwrap();
+        assert_eq!(store.dirty, before + 1, "first single PFCOUNT dirties");
+
+        // Second count: cache valid -> no dirty, same value.
+        let before = store.dirty;
+        assert_eq!(store.pfcount(&[b"a"], 0).unwrap(), c1);
+        assert_eq!(store.dirty, before, "cached single PFCOUNT does not dirty");
+
+        // Multi-key never caches/dirties.
+        let before = store.dirty;
+        store.pfcount(&[b"a", b"b"], 0).unwrap();
+        assert_eq!(store.dirty, before, "multi-key PFCOUNT does not dirty");
+
+        // A PFADD invalidates the cache, so the next single count re-dirties.
+        store.pfadd(b"a", &[b"w".to_vec()], 0).unwrap();
+        let before = store.dirty;
+        store.pfcount(&[b"a"], 0).unwrap();
+        assert_eq!(store.dirty, before + 1, "PFCOUNT after PFADD re-dirties");
+
+        // Missing key counts 0 with no dirty.
+        let before = store.dirty;
+        assert_eq!(store.pfcount(&[b"missing"], 0).unwrap(), 0);
+        assert_eq!(store.dirty, before);
     }
 
     #[test]
