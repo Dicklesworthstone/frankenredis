@@ -281,6 +281,65 @@ impl RespFrame {
         }
     }
 
+    /// Encode this frame to RESP3 wire bytes. Identical to [`encode_into`]
+    /// except that every null reply uses the RESP3 null type `_\r\n` — redis
+    /// 7.2 emits `_` for all nulls under `HELLO 3`, never the RESP2 `$-1` /
+    /// `*-1` / `~-1` / `%-1`. Container frames recurse through this method so
+    /// nested nulls (e.g. `MGET k missing`, the XPENDING summary's null
+    /// consumers field) are promoted too. Scalar and already-RESP3 types
+    /// (Double, Verbatim, populated Set/Map) encode identically to
+    /// [`encode_into`], so this only diverges on the null leaves.
+    ///
+    /// [`encode_into`]: Self::encode_into
+    pub fn encode_into_resp3(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::BulkString(None) | Self::Array(None) | Self::Map(None) | Self::Set(None) => {
+                out.extend_from_slice(b"_\r\n");
+            }
+            Self::Array(Some(frames)) => {
+                out.extend_from_slice(b"*");
+                push_usize(out, frames.len());
+                out.extend_from_slice(b"\r\n");
+                for frame in frames {
+                    frame.encode_into_resp3(out);
+                }
+            }
+            Self::Map(Some(entries)) => {
+                out.extend_from_slice(b"%");
+                push_usize(out, entries.len());
+                out.extend_from_slice(b"\r\n");
+                for (key, value) in entries {
+                    key.encode_into_resp3(out);
+                    value.encode_into_resp3(out);
+                }
+            }
+            Self::Set(Some(frames)) => {
+                out.extend_from_slice(b"~");
+                push_usize(out, frames.len());
+                out.extend_from_slice(b"\r\n");
+                for frame in frames {
+                    frame.encode_into_resp3(out);
+                }
+            }
+            Self::Push(frames) => {
+                out.extend_from_slice(b">");
+                push_usize(out, frames.len());
+                out.extend_from_slice(b"\r\n");
+                for frame in frames {
+                    frame.encode_into_resp3(out);
+                }
+            }
+            Self::Sequence(frames) => {
+                for frame in frames {
+                    frame.encode_into_resp3(out);
+                }
+            }
+            // Scalars (SimpleString/Error/Integer/Double/Verbatim/populated
+            // BulkString) carry no nulls and encode identically.
+            _ => self.encode_into(out),
+        }
+    }
+
     /// Create a RESP3 Double frame from an f64. Uses Redis score formatting.
     #[must_use]
     pub fn double_from_f64(v: f64) -> Self {
@@ -1271,6 +1330,55 @@ mod tests {
             "protocol.null_semantics_drift",
         );
         event.assert_schema_contract();
+    }
+
+    #[test]
+    fn encode_into_resp3_promotes_nulls_and_recurses() {
+        // (frankenredis-pgplm) Redis 7.2 emits the RESP3 null type `_\r\n`
+        // for every null under HELLO 3 — bulk, array, map, set — never the
+        // RESP2 `$-1` / `*-1`. encode_into_resp3 promotes null leaves and
+        // recurses into containers; non-null scalars are byte-identical to
+        // encode_into.
+        fn r3(frame: &RespFrame) -> Vec<u8> {
+            let mut out = Vec::new();
+            frame.encode_into_resp3(&mut out);
+            out
+        }
+        assert_eq!(r3(&RespFrame::BulkString(None)), b"_\r\n");
+        assert_eq!(r3(&RespFrame::Array(None)), b"_\r\n");
+        assert_eq!(r3(&RespFrame::Map(None)), b"_\r\n");
+        assert_eq!(r3(&RespFrame::Set(None)), b"_\r\n");
+
+        // Nested nulls (MGET-style array with a hit and two misses).
+        let mget = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"1".to_vec())),
+            RespFrame::BulkString(None),
+            RespFrame::BulkString(None),
+        ]));
+        assert_eq!(r3(&mget), b"*3\r\n$1\r\n1\r\n_\r\n_\r\n");
+
+        // XPENDING-style summary: count + three nulls (min/max/consumers).
+        let xpending = RespFrame::Array(Some(vec![
+            RespFrame::Integer(0),
+            RespFrame::BulkString(None),
+            RespFrame::BulkString(None),
+            RespFrame::Array(None),
+        ]));
+        assert_eq!(r3(&xpending), b"*4\r\n:0\r\n_\r\n_\r\n_\r\n");
+
+        // Non-null scalars and populated containers are identical to RESP2
+        // encoding (only the null leaves differ).
+        for frame in [
+            RespFrame::SimpleString("OK".to_string()),
+            RespFrame::Integer(42),
+            RespFrame::BulkString(Some(b"hi".to_vec())),
+            RespFrame::Double("1.5".to_string()),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1)])),
+        ] {
+            let mut a = Vec::new();
+            frame.encode_into(&mut a);
+            assert_eq!(r3(&frame), a, "non-null frame must encode identically");
+        }
     }
 
     #[test]

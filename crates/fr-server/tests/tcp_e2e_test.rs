@@ -1900,9 +1900,15 @@ fn tcp_resp3_tracking_invalidation_redirect_uses_push_wire_frame() {
         ]),
         RespFrame::SimpleString("OK".to_string())
     );
+    // (frankenredis-pgplm) The tracker negotiated RESP3, so a GET miss
+    // replies with the RESP3 null type `_`, not the RESP2 `$-1`. Read the
+    // raw RESP3 bytes (the default read_response parser is RESP2-only and
+    // would reject `_`).
+    tracker_client.write_all(&encode_command(&[b"GET", b"foo:1"]));
     assert_eq!(
-        tracker_client.send_command(&[b"GET", b"foo:1"]),
-        RespFrame::BulkString(None)
+        tracker_client.read_resp3_response_bytes(),
+        b"_\r\n",
+        "RESP3 GET miss must use the _ null type"
     );
 
     let mut writer = connect_client(port);

@@ -1428,10 +1428,15 @@ fn process_buffered_frames(
                 }
                 let response = runtime.execute_frame_with_unix_time_us(frame.clone(), ts, ts_us);
                 let parsed_frame = frame;
+                // (frankenredis-pgplm) Choose the RESP3 null encoding (`_`)
+                // when the client negotiated HELLO 3. Captured before the
+                // block-detection check below, which still compares the
+                // unmutated `response`.
+                let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
 
                 // Check for QUIT command.
                 if is_quit_frame(&parsed_frame) {
-                    response.encode_into(&mut conn.write_buf);
+                    encode_client_reply(&response, client_resp3, &mut conn.write_buf);
                     write_tokens.insert(token);
                     conn.closing = true;
                     closing_tokens.insert(token);
@@ -1459,7 +1464,7 @@ fn process_buffered_frames(
                     // try_build_blocked_state only returns Some if it's a blocking command.
                     if let Some(immediate_response) = try_fulfill_blocked(&blocked.op, runtime, ts)
                     {
-                        immediate_response.encode_into(&mut conn.write_buf);
+                        encode_client_reply(&immediate_response, client_resp3, &mut conn.write_buf);
                     } else {
                         conn.blocked = Some(blocked);
                         blocked_tokens.insert(token);
@@ -1471,7 +1476,7 @@ fn process_buffered_frames(
                     // Redis treats REPLCONF ACK/GETACK as internal control
                     // frames and does not send a direct reply on client links.
                 } else {
-                    response.encode_into(&mut conn.write_buf);
+                    encode_client_reply(&response, client_resp3, &mut conn.write_buf);
                 }
                 if let Some(follow_up) =
                     replication_follow_up_bytes(runtime, &parsed_frame, &response, ts)
@@ -2580,7 +2585,12 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
 
         // Check timeout first.
         if ts >= blocked.deadline_ms {
-            blocked_timeout_response(&blocked.op, runtime, ts).encode_into(&mut conn.write_buf);
+            let resp3 = conn.session.resp_protocol_version() == 3;
+            encode_client_reply(
+                &blocked_timeout_response(&blocked.op, runtime, ts),
+                resp3,
+                &mut conn.write_buf,
+            );
             conn.blocked = None;
             blocked_tokens.remove(&token);
             runtime.mark_client_unblocked(conn.session.client_id);
@@ -2616,7 +2626,10 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
         let result = try_fulfill_blocked(&blocked.op, runtime, ts);
 
         if let Some(response) = result {
-            response.encode_into(&mut conn.write_buf);
+            // (frankenredis-pgplm) Session is swapped into `runtime` here, so
+            // its negotiated protocol drives the RESP3 null encoding.
+            let resp3 = runtime.client_session().resp_protocol_version() == 3;
+            encode_client_reply(&response, resp3, &mut conn.write_buf);
             conn.blocked = None;
             blocked_tokens.remove(&token);
             runtime.mark_client_unblocked(runtime.client_id());
@@ -2702,7 +2715,8 @@ fn apply_pending_client_unblocks(ctx: PendingClientUnblocksContext<'_>) {
             }
         };
 
-        response.encode_into(&mut conn.write_buf);
+        let resp3 = conn.session.resp_protocol_version() == 3;
+        encode_client_reply(&response, resp3, &mut conn.write_buf);
         conn.blocked = None;
         blocked_tokens.remove(&token);
         runtime.mark_client_unblocked(client_id);
@@ -3199,6 +3213,19 @@ fn is_quit_frame(frame: &RespFrame) -> bool {
         .ok()
         .and_then(|argv| argv.first().cloned())
         .is_some_and(|cmd| cmd.eq_ignore_ascii_case(b"QUIT"))
+}
+
+/// Encode a command reply to a client, choosing the RESP3 null encoding
+/// (`_`) when the client negotiated RESP3. Frames are never mutated, so the
+/// caller's block-detection comparisons against `BulkString(None)` /
+/// `Array(None)` are unaffected. (frankenredis-pgplm)
+#[inline]
+fn encode_client_reply(frame: &RespFrame, resp3: bool, out: &mut Vec<u8>) {
+    if resp3 {
+        frame.encode_into_resp3(out);
+    } else {
+        frame.encode_into(out);
+    }
 }
 
 fn suppress_client_network_reply(
