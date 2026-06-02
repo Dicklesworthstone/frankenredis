@@ -4977,23 +4977,28 @@ impl Store {
         self.internal_entry(key.to_vec(), Value::Hash(IndexMap::new()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
-        let result = self
-            .with_mutated_entry(key, |entry| {
-                if should_bump_lfu {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+        let result = {
+            let entry = self.entries.get_mut(key).expect("hash entry was ensured");
+            if should_bump_lfu {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+            }
+            match &mut entry.value {
+                Value::Hash(m) => {
+                    let is_new = !m.contains_key(&field);
+                    m.insert(field, value);
+                    entry.touch_write(now_ms);
+                    // (frankenredis-yp503) Lock the encoding into hashtable
+                    // once the hash crosses either listpack threshold.
+                    Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+                    Self::mark_digest_stale_fields(
+                        &mut self.digest_stale,
+                        &mut self.digest_mutations,
+                    );
+                    Ok(is_new)
                 }
-                let Value::Hash(m) = &mut entry.value else {
-                    return Err(StoreError::WrongType);
-                };
-                let is_new = !m.contains_key(&field);
-                m.insert(field, value);
-                entry.touch_write(now_ms);
-                // (frankenredis-yp503) Lock the encoding into hashtable
-                // once the hash crosses either listpack threshold.
-                Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
-                Ok(is_new)
-            })
-            .expect("hash entry was ensured");
+                _ => Err(StoreError::WrongType),
+            }
+        };
         self.dirty = self.dirty.saturating_add(1);
         result
     }
@@ -18611,6 +18616,14 @@ mod tests {
         store
             .getex(b"ttl", Some(Some(5_000)), 100)
             .expect("getex should set expiry");
+        assert_digest_matches(&mut store);
+
+        store
+            .hset(b"hash", b"field".to_vec(), b"value".to_vec(), 0)
+            .expect("hset should create hash");
+        store
+            .hset(b"hash", b"field".to_vec(), b"updated".to_vec(), 1)
+            .expect("hset should update hash field");
         assert_digest_matches(&mut store);
 
         store
