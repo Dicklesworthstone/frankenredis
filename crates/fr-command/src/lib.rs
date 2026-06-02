@@ -15836,12 +15836,18 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
         // (frankenredis-99to6) Upstream server.c::commandCommand walks
         // both the top-level commands dict AND each container's
         // subcommand_dict, so the reply contains both groups.
+        let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
         let entries: Vec<RespFrame> = COMMAND_TABLE
             .iter()
             .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
             .chain(SUBCOMMAND_TABLE.iter())
             .map(|&(name, arity, flags, first_key, last_key, step)| {
-                command_info_entry(name, arity, flags, first_key, last_key, step)
+                let entry = command_info_entry(name, arity, flags, first_key, last_key, step);
+                if resp3 {
+                    command_info_entry_to_resp3(entry)
+                } else {
+                    entry
+                }
             })
             .collect();
         return Ok(RespFrame::Array(Some(entries)));
@@ -15939,6 +15945,7 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
             .collect();
         Ok(RespFrame::Array(Some(names)))
     } else if sub.eq_ignore_ascii_case("INFO") {
+        let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
         if argv.len() < 3 {
             // (frankenredis-99to6) Bare COMMAND INFO mirrors the
             // top-level + subcommand walk.
@@ -15947,7 +15954,12 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
                 .chain(SUBCOMMAND_TABLE.iter())
                 .map(|&(name, arity, flags, first_key, last_key, step)| {
-                    command_info_entry(name, arity, flags, first_key, last_key, step)
+                    let entry = command_info_entry(name, arity, flags, first_key, last_key, step);
+                    if resp3 {
+                        command_info_entry_to_resp3(entry)
+                    } else {
+                        entry
+                    }
                 })
                 .collect();
             return Ok(RespFrame::Array(Some(entries)));
@@ -15968,9 +15980,12 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name));
             match found {
                 Some(&(name, arity, flags, first_key, last_key, step)) => {
-                    entries.push(command_info_entry(
-                        name, arity, flags, first_key, last_key, step,
-                    ));
+                    let entry = command_info_entry(name, arity, flags, first_key, last_key, step);
+                    entries.push(if resp3 {
+                        command_info_entry_to_resp3(entry)
+                    } else {
+                        entry
+                    });
                 }
                 None => entries.push(RespFrame::BulkString(None)),
             }
@@ -16997,6 +17012,143 @@ fn command_docs_subcommands(name: &str, resp: i64) -> Vec<RespFrame> {
         ));
     }
     out
+}
+
+/// Read the field-name string out of a COMMAND INFO map key frame
+/// (always a bulk or simple string in the RESP2 array shape we build).
+fn command_info_field_name(frame: &RespFrame) -> Option<&str> {
+    match frame {
+        RespFrame::BulkString(Some(bytes)) => std::str::from_utf8(bytes).ok(),
+        RespFrame::SimpleString(s) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// Re-tag a built-as-Array reply element as a RESP3 Set, leaving the
+/// element order (and thus the wire bytes apart from the `*`→`~` tag)
+/// untouched. Non-array frames pass through unchanged.
+fn command_info_array_to_set(frame: RespFrame) -> RespFrame {
+    match frame {
+        RespFrame::Array(Some(items)) => RespFrame::Set(Some(items)),
+        other => other,
+    }
+}
+
+/// Pair up an alternating `[k, v, k, v, ...]` array into a RESP3 Map,
+/// preserving order. Used for the leaf `spec` sub-objects of a key_spec
+/// (e.g. `{index: 2}`, `{lastkey, keystep, limit}`).
+fn command_info_array_to_plain_map(frame: RespFrame) -> RespFrame {
+    let RespFrame::Array(Some(items)) = frame else {
+        return frame;
+    };
+    let mut pairs = Vec::with_capacity(items.len() / 2);
+    let mut it = items.into_iter();
+    while let (Some(k), Some(v)) = (it.next(), it.next()) {
+        pairs.push((k, v));
+    }
+    RespFrame::Map(Some(pairs))
+}
+
+/// Convert a key_spec `begin_search` / `find_keys` sub-object from its
+/// RESP2 alternating-array form `[type, <t>, spec, <specarr>]` into a
+/// RESP3 Map, recursing the nested `spec` array into a Map. (frankenredis-u3x8o)
+fn command_info_begin_find_to_resp3(frame: RespFrame) -> RespFrame {
+    let RespFrame::Array(Some(items)) = frame else {
+        return frame;
+    };
+    let mut pairs = Vec::with_capacity(items.len() / 2);
+    let mut it = items.into_iter();
+    while let (Some(k), Some(v)) = (it.next(), it.next()) {
+        let conv = if command_info_field_name(&k) == Some("spec") {
+            command_info_array_to_plain_map(v)
+        } else {
+            v
+        };
+        pairs.push((k, conv));
+    }
+    RespFrame::Map(Some(pairs))
+}
+
+/// Convert one key_spec from its RESP2 alternating-array form into the
+/// RESP3 Map shape upstream emits via server.c::addReplyCommandKeySpecs:
+/// the spec is a Map, its `flags` value a Set, and its `begin_search` /
+/// `find_keys` values Maps (with their own nested `spec` Maps).
+/// (frankenredis-u3x8o)
+fn command_info_keyspec_to_resp3(frame: RespFrame) -> RespFrame {
+    let RespFrame::Array(Some(items)) = frame else {
+        return frame;
+    };
+    let mut pairs = Vec::with_capacity(items.len() / 2);
+    let mut it = items.into_iter();
+    while let (Some(k), Some(v)) = (it.next(), it.next()) {
+        let conv = match command_info_field_name(&k) {
+            Some("flags") => command_info_array_to_set(v),
+            Some("begin_search") | Some("find_keys") => command_info_begin_find_to_resp3(v),
+            _ => v,
+        };
+        pairs.push((k, conv));
+    }
+    RespFrame::Map(Some(pairs))
+}
+
+/// Transform a fully-built RESP2 COMMAND INFO entry (a fixed 10-element
+/// positional array) into its RESP3 shape: `flags`, `acl_categories`,
+/// `tips`, `key_specs`, and `subcommands` become Sets; each key_spec
+/// becomes a Map; subcommand entries are transformed recursively. The
+/// outer 10-element array tag is unchanged. RESP2 callers never touch
+/// this path, so the legacy wire is byte-for-byte preserved.
+/// (frankenredis-u3x8o)
+fn command_info_entry_to_resp3(frame: RespFrame) -> RespFrame {
+    let RespFrame::Array(Some(items)) = frame else {
+        return frame;
+    };
+    if items.len() != 10 {
+        return RespFrame::Array(Some(items));
+    }
+    let mut it = items.into_iter();
+    let name = it.next().unwrap();
+    let arity = it.next().unwrap();
+    let flags = it.next().unwrap();
+    let first_key = it.next().unwrap();
+    let last_key = it.next().unwrap();
+    let step = it.next().unwrap();
+    let acl = it.next().unwrap();
+    let tips = it.next().unwrap();
+    let key_specs = it.next().unwrap();
+    let subcommands = it.next().unwrap();
+
+    let key_specs = match key_specs {
+        RespFrame::Array(Some(specs)) => RespFrame::Set(Some(
+            specs
+                .into_iter()
+                .map(command_info_keyspec_to_resp3)
+                .collect(),
+        )),
+        other => other,
+    };
+    // Upstream server.c::addReplyCommandSubCommands has an asymmetry: a
+    // command with NO subcommands replies an empty Set (`~0`), but a
+    // populated subcommands field is an Array (`*N`) whose entries are
+    // each recursively in RESP3 shape. (frankenredis-u3x8o)
+    let subcommands = match subcommands {
+        RespFrame::Array(Some(subs)) if subs.is_empty() => RespFrame::Set(Some(Vec::new())),
+        RespFrame::Array(Some(subs)) => RespFrame::Array(Some(
+            subs.into_iter().map(command_info_entry_to_resp3).collect(),
+        )),
+        other => other,
+    };
+    RespFrame::Array(Some(vec![
+        name,
+        arity,
+        command_info_array_to_set(flags),
+        first_key,
+        last_key,
+        step,
+        command_info_array_to_set(acl),
+        command_info_array_to_set(tips),
+        key_specs,
+        subcommands,
+    ]))
 }
 
 /// Build a Redis COMMAND INFO entry.
@@ -55163,6 +55315,131 @@ mod tests {
         assert_eq!(
             inner_items[1],
             RespFrame::BulkString(Some(b"Returns the string value of a key.".to_vec()))
+        );
+    }
+
+    #[test]
+    fn command_info_under_resp3_uses_sets_and_keyspec_maps() {
+        // (frankenredis-u3x8o) Upstream server.c::addReplyCommandInfo emits
+        // flags, acl_categories, tips, and key_specs as RESP3 Sets, each
+        // key_spec as a Map (with a Set `flags` and Map begin_search /
+        // find_keys), and an empty subcommands field as an empty Set.
+        // Verified byte-exact vs vendored 7.2.4.
+        let mut store = Store::new();
+        store.dispatch_client_ctx.resp_protocol_version = 3;
+        let out = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"INFO".to_vec(), b"GET".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("command info resp3");
+        let RespFrame::Array(Some(entries)) = out else {
+            panic!("outer must be Array"); // ubs:ignore — AI triage
+        };
+        let RespFrame::Array(Some(e)) = &entries[0] else {
+            panic!("entry must be 10-field Array"); // ubs:ignore — AI triage
+        };
+        assert_eq!(e.len(), 10);
+        assert!(matches!(e[2], RespFrame::Set(_)), "flags must be Set");
+        assert!(matches!(e[6], RespFrame::Set(_)), "acl cats must be Set");
+        assert!(matches!(e[7], RespFrame::Set(_)), "tips must be Set");
+        let RespFrame::Set(Some(specs)) = &e[8] else {
+            panic!("key_specs must be Set"); // ubs:ignore — AI triage
+        };
+        let RespFrame::Map(Some(spec0)) = &specs[0] else {
+            panic!("each key_spec must be Map"); // ubs:ignore — AI triage
+        };
+        // Within the key_spec map: flags -> Set, begin_search -> Map.
+        let flags_v = spec0
+            .iter()
+            .find(|(k, _)| *k == RespFrame::BulkString(Some(b"flags".to_vec())))
+            .map(|(_, v)| v)
+            .expect("key_spec has flags");
+        assert!(
+            matches!(flags_v, RespFrame::Set(_)),
+            "key_spec flags must be Set"
+        );
+        let bs_v = spec0
+            .iter()
+            .find(|(k, _)| *k == RespFrame::BulkString(Some(b"begin_search".to_vec())))
+            .map(|(_, v)| v)
+            .expect("key_spec has begin_search");
+        assert!(
+            matches!(bs_v, RespFrame::Map(_)),
+            "begin_search must be Map"
+        );
+        // GET has no subcommands -> empty Set.
+        assert!(
+            matches!(&e[9], RespFrame::Set(Some(v)) if v.is_empty()),
+            "empty subcommands must be empty Set"
+        );
+    }
+
+    #[test]
+    fn command_info_under_resp3_populated_subcommands_is_array() {
+        // (frankenredis-u3x8o) server.c::addReplyCommandSubCommands has an
+        // asymmetry: no subcommands -> empty Set, but a populated
+        // subcommands field is an Array of RESP3-shaped sub-entries (each
+        // with a Set `flags` and an empty Set for its own subcommands).
+        let mut store = Store::new();
+        store.dispatch_client_ctx.resp_protocol_version = 3;
+        let out = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"INFO".to_vec(), b"OBJECT".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("command info object resp3");
+        let RespFrame::Array(Some(entries)) = out else {
+            panic!("outer must be Array"); // ubs:ignore — AI triage
+        };
+        let RespFrame::Array(Some(e)) = &entries[0] else {
+            panic!("entry must be Array"); // ubs:ignore — AI triage
+        };
+        let RespFrame::Array(Some(subs)) = &e[9] else {
+            panic!("populated subcommands must be Array"); // ubs:ignore — AI triage
+        };
+        assert!(!subs.is_empty());
+        let RespFrame::Array(Some(se)) = &subs[0] else {
+            panic!("sub-entry must be Array"); // ubs:ignore — AI triage
+        };
+        assert!(
+            matches!(se[2], RespFrame::Set(_)),
+            "sub-entry flags must be Set"
+        );
+        assert!(
+            matches!(&se[9], RespFrame::Set(Some(v)) if v.is_empty()),
+            "sub-entry's own subcommands must be empty Set"
+        );
+    }
+
+    #[test]
+    fn command_info_under_resp2_stays_arrays() {
+        // (frankenredis-u3x8o) Companion pin: the RESP2 wire is unchanged —
+        // flags, key_specs, and subcommands all stay plain Arrays.
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"INFO".to_vec(), b"GET".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("command info resp2");
+        let RespFrame::Array(Some(entries)) = out else {
+            panic!("outer must be Array"); // ubs:ignore — AI triage
+        };
+        let RespFrame::Array(Some(e)) = &entries[0] else {
+            panic!("entry must be Array"); // ubs:ignore — AI triage
+        };
+        assert!(
+            matches!(e[2], RespFrame::Array(_)),
+            "RESP2 flags stay Array"
+        );
+        assert!(
+            matches!(e[8], RespFrame::Array(_)),
+            "RESP2 key_specs stay Array"
+        );
+        assert!(
+            matches!(e[9], RespFrame::Array(_)),
+            "RESP2 subcommands stay Array"
         );
     }
 
