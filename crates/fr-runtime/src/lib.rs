@@ -4798,12 +4798,15 @@ impl Runtime {
     }
 
     pub fn execute_frame(&mut self, frame: RespFrame, now_ms: u64) -> RespFrame {
-        self.execute_frame_with_optional_unix_time_us(frame, now_ms, None)
+        // The dispatch chain only reads the frame while it materializes argv, so
+        // borrow it. The network hot path keeps owning the parsed frame for
+        // post-dispatch checks without deep-cloning it.
+        self.execute_frame_with_optional_unix_time_us(&frame, now_ms, None)
     }
 
     pub fn execute_frame_with_unix_time_us(
         &mut self,
-        frame: RespFrame,
+        frame: &RespFrame,
         now_ms: u64,
         unix_time_us: u64,
     ) -> RespFrame {
@@ -4812,7 +4815,7 @@ impl Runtime {
 
     fn execute_frame_with_optional_unix_time_us(
         &mut self,
-        frame: RespFrame,
+        frame: &RespFrame,
         now_ms: u64,
         unix_time_us: Option<u64>,
     ) -> RespFrame {
@@ -4823,7 +4826,7 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.refresh_store_runtime_info_context();
         // Parse once, reuse for both stats and execution (eliminates double parse).
-        let argv_result = frame_to_argv(&frame);
+        let argv_result = frame_to_argv(frame);
         if let Ok(argv) = &argv_result {
             self.session.last_command_name = client_info_command_name(argv);
         }
@@ -5079,13 +5082,13 @@ impl Runtime {
 
     fn execute_frame_internal(
         &mut self,
-        frame: RespFrame,
+        frame: &RespFrame,
         argv_result: Result<Vec<Vec<u8>>, CommandError>,
         now_ms: u64,
         packet_id: u64,
         unix_time_us: Option<u64>,
     ) -> RespFrame {
-        if let Some(reply) = self.preflight_gate(&frame, now_ms, packet_id) {
+        if let Some(reply) = self.preflight_gate(frame, now_ms, packet_id) {
             return reply;
         }
 
@@ -5110,7 +5113,7 @@ impl Runtime {
                             argv.len(),
                             MAX_COMMAND_ARITY
                         ),
-                        input_source: ThreatInputDigestSource::Frame(&frame),
+                        input_source: ThreatInputDigestSource::Frame(frame),
                         output: &reply,
                     });
                     return reply;
@@ -5129,7 +5132,7 @@ impl Runtime {
                     action: "reject_frame",
                     reason_code: "invalid_command_frame",
                     reason: "invalid command frame".to_string(),
-                    input_source: ThreatInputDigestSource::Frame(&frame),
+                    input_source: ThreatInputDigestSource::Frame(frame),
                     output: &reply,
                 });
                 return reply;
@@ -6384,7 +6387,7 @@ impl Runtime {
         match fr_protocol::parse_frame_with_config(input, &parser_config) {
             Ok(parsed) => {
                 let argv_result = frame_to_argv(&parsed.frame);
-                self.execute_frame_internal(parsed.frame, argv_result, now_ms, packet_id, None)
+                self.execute_frame_internal(&parsed.frame, argv_result, now_ms, packet_id, None)
                     .to_bytes()
             }
             Err(err) => {
@@ -15378,7 +15381,7 @@ mod tests {
 
         assert_eq!(
             rt.execute_frame_with_unix_time_us(
-                command(&[b"TIME"]),
+                &command(&[b"TIME"]),
                 1_778_390_164_120,
                 1_778_390_164_118_366,
             ),

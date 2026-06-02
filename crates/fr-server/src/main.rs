@@ -1426,7 +1426,9 @@ fn process_buffered_frames(
                     paused_tokens.insert(token);
                     break;
                 }
-                let response = runtime.execute_frame_with_unix_time_us(frame.clone(), ts, ts_us);
+                // Borrow for dispatch, then keep owning the parsed frame for
+                // post-dispatch quit/block/replication checks.
+                let response = runtime.execute_frame_with_unix_time_us(&frame, ts, ts_us);
                 let parsed_frame = frame;
                 // (frankenredis-pgplm) Choose the RESP3 null encoding (`_`)
                 // when the client negotiated HELLO 3. Captured before the
