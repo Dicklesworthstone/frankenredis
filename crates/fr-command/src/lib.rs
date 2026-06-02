@@ -21523,7 +21523,7 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
     let w0 = weights.first().copied().unwrap_or(1.0);
     for (member, score) in first_members {
-        let mut combined = score * w0;
+        let mut combined = normalize_weighted_score_cmd(score, w0);
         let mut in_all = true;
         for (i, &key) in keys[1..].iter().enumerate() {
             match store.zget_score_or_set_member(key, &member, now_ms)? {
@@ -21577,7 +21577,7 @@ fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         let w = weights.get(i).copied().unwrap_or(1.0);
         let members = store.zget_members_with_scores(key, now_ms)?;
         for (member, score) in members {
-            let weighted = score * w;
+            let weighted = normalize_weighted_score_cmd(score, w);
             use std::collections::hash_map::Entry as HEntry;
             match combined.entry(member) {
                 HEntry::Vacant(e) => {
@@ -24018,8 +24018,17 @@ fn aggregate_scores_for_cmd(a: f64, b: f64, aggregate: &[u8]) -> f64 {
     } else if aggregate.eq_ignore_ascii_case(b"MAX") {
         a.max(b)
     } else {
-        a + b
+        // SUM. Upstream zunionInterAggregate resolves +inf + -inf (NaN) to 0.0.
+        let r = a + b;
+        if r.is_nan() { 0.0 } else { r }
     }
+}
+
+/// (frankenredis-zsetnan) Mirrors upstream `if (isnan(score)) score = 0;` on
+/// each weighted source score — 0 * ±inf is NaN, which Redis stores as 0.0.
+fn normalize_weighted_score_cmd(score: f64, weight: f64) -> f64 {
+    let s = score * weight;
+    if s.is_nan() { 0.0 } else { s }
 }
 
 fn swapdb_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {

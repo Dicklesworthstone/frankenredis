@@ -11469,7 +11469,7 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 let mut add_member = |member: &Vec<u8>, score: f64| {
-                    let weighted = score * weight;
+                    let weighted = normalize_weighted_score(score, weight);
                     use std::collections::hash_map::Entry as HEntry;
                     match combined.entry(member.clone()) {
                         HEntry::Vacant(e) => {
@@ -11609,10 +11609,15 @@ impl Store {
                 }
                 let w = weights.get(min_idx).copied().unwrap_or(1.0);
                 let res = match &entry.value {
-                    Value::SortedSet(zs) => {
-                        zs.dict.iter().map(|(m, &s)| (m.clone(), s * w)).collect()
-                    }
-                    Value::Set(s) => s.iter().map(|m| (m.clone(), 1.0 * w)).collect(),
+                    Value::SortedSet(zs) => zs
+                        .dict
+                        .iter()
+                        .map(|(m, &s)| (m.clone(), normalize_weighted_score(s, w)))
+                        .collect(),
+                    Value::Set(s) => s
+                        .iter()
+                        .map(|m| (m.clone(), normalize_weighted_score(1.0, w)))
+                        .collect(),
                     _ => return Err(StoreError::WrongType),
                 };
                 entry.touch(now_ms);
@@ -15846,9 +15851,19 @@ fn aggregate_scores(a: f64, b: f64, aggregate: &[u8]) -> f64 {
     } else if eq_ascii_ci(aggregate, b"MAX") {
         a.max(b)
     } else {
-        // Default is SUM
-        a + b
+        // Default is SUM. Upstream zunionInterAggregate (t_zset.c) keeps the
+        // convention that +inf + -inf (which is NaN) resolves to 0.0.
+        let r = a + b;
+        if r.is_nan() { 0.0 } else { r }
     }
+}
+
+/// (frankenredis-zsetnan) Upstream zunionInterDiffGenericCommand normalizes
+/// every weighted source score with `if (isnan(score)) score = 0;` — e.g.
+/// 0 * ±inf yields NaN, which Redis stores as 0.0.
+fn normalize_weighted_score(score: f64, weight: f64) -> f64 {
+    let s = score * weight;
+    if s.is_nan() { 0.0 } else { s }
 }
 
 fn parse_i64(bytes: &[u8]) -> Result<i64, StoreError> {
@@ -20771,6 +20786,50 @@ mod tests {
         store.zstore_from_pairs(b"d".to_vec(), vec![(b"a".to_vec(), 1.0)], 0);
         assert_eq!(store.dirty, before + 1);
         assert!(store.key_is_present(b"d"));
+    }
+
+    #[test]
+    fn zunion_zinterstore_normalize_nan_scores_to_zero() {
+        // (frankenredis-zsetnan) Upstream zunionInterDiffGenericCommand maps a
+        // weighted source score of NaN (0 * ±inf) to 0.0, and the SUM
+        // aggregate resolves +inf + -inf (NaN) to 0.0. fr previously stored the
+        // raw NaN.
+        let mut store = Store::new();
+        store.zadd(b"z", &[(0.0, b"x".to_vec())], 0).expect("zadd");
+
+        let inf = f64::INFINITY;
+        let ninf = f64::NEG_INFINITY;
+
+        // 0 * inf and 0 * -inf are both NaN -> 0; SUM -> 0.
+        let n = store
+            .zunionstore(b"u", &[b"z", b"z"], &[inf, ninf], b"SUM", 0)
+            .expect("zunionstore");
+        assert_eq!(n, 1);
+        assert_eq!(store.zscore(b"u", b"x", 0).expect("zscore"), Some(0.0));
+
+        // +inf + -inf (SUM result NaN) -> 0 on a non-zero score.
+        store
+            .zadd(b"a", &[(1.0, b"m".to_vec())], 0)
+            .expect("zadd a");
+        store
+            .zadd(b"b", &[(1.0, b"m".to_vec())], 0)
+            .expect("zadd b");
+        store
+            .zunionstore(b"u2", &[b"a", b"b"], &[inf, ninf], b"SUM", 0)
+            .expect("zunionstore2");
+        assert_eq!(store.zscore(b"u2", b"m", 0).expect("zscore"), Some(0.0));
+
+        // ZINTERSTORE first-key normalization: 0 * inf -> 0, + (5 * 1) = 5.
+        store
+            .zadd(b"c", &[(0.0, b"m".to_vec())], 0)
+            .expect("zadd c");
+        store
+            .zadd(b"d", &[(5.0, b"m".to_vec())], 0)
+            .expect("zadd d");
+        store
+            .zinterstore(b"i", &[b"c", b"d"], &[inf, 1.0], b"SUM", 0)
+            .expect("zinterstore");
+        assert_eq!(store.zscore(b"i", b"m", 0).expect("zscore"), Some(5.0));
     }
 
     #[test]
