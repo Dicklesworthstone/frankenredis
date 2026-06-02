@@ -5802,6 +5802,14 @@ impl Runtime {
             "zadd"
         } else if cmd.eq_ignore_ascii_case(b"ZREM") {
             "zrem"
+        } else if cmd.eq_ignore_ascii_case(b"ZREMRANGEBYRANK") {
+            // Upstream t_zset.c::zremrangeGenericCommand fires the
+            // range-specific event names. (frankenredis-fytt4)
+            "zremrangebyrank"
+        } else if cmd.eq_ignore_ascii_case(b"ZREMRANGEBYSCORE") {
+            "zremrangebyscore"
+        } else if cmd.eq_ignore_ascii_case(b"ZREMRANGEBYLEX") {
+            "zremrangebylex"
         } else if cmd.eq_ignore_ascii_case(b"ZINCRBY") {
             // Upstream t_zset.c::zincrbyCommand fires NOTIFY_ZSET "zincr",
             // not "zincrby". (frankenredis-ylu1p)
@@ -26403,6 +26411,15 @@ mod tests {
         assert_eq!(ev(&[b"GETDEL", b"k"]), "del");
         assert_eq!(ev(&[b"GETEX", b"k", b"EX", b"100"]), "expire");
         assert_eq!(ev(&[b"GETEX", b"k", b"PERSIST"]), "persist");
+        assert_eq!(
+            ev(&[b"ZREMRANGEBYRANK", b"z", b"0", b"1"]),
+            "zremrangebyrank"
+        );
+        assert_eq!(
+            ev(&[b"ZREMRANGEBYSCORE", b"z", b"0", b"1"]),
+            "zremrangebyscore"
+        );
+        assert_eq!(ev(&[b"ZREMRANGEBYLEX", b"z", b"-", b"+"]), "zremrangebylex");
         // Regression guard: the plain SET family stays "set".
         assert_eq!(ev(&[b"SET", b"k", b"v"]), "set");
         assert_eq!(ev(&[b"GETSET", b"k", b"v"]), "set");
