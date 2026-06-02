@@ -8263,6 +8263,11 @@ impl Store {
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
         self.internal_entries_insert(key, Entry::new(Value::SortedSet(zs), None, now_ms));
+        // (frankenredis-bhd3u) Writing the destination set is a keyspace
+        // mutation — bump dirty so ZRANGESTORE is persisted to RDB/AOF,
+        // replicated, and surfaces keyspace notifications (all gate on the
+        // dirty counter changing). Only caller is zrangestore_cmd.
+        self.dirty = self.dirty.saturating_add(1);
     }
 
     /// Count members with scores within the given bounds.
@@ -20607,6 +20612,19 @@ mod tests {
             other => return Err(format!("RPOP COUNT LFU mismatch: {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn zstore_from_pairs_bumps_dirty_counter() {
+        // (frankenredis-bhd3u) ZRANGESTORE writes its destination via
+        // zstore_from_pairs, which must bump dirty — otherwise the new key is
+        // invisible to RDB/AOF persistence, replication, and keyspace
+        // notifications (all gate on the dirty counter changing).
+        let mut store = Store::new();
+        let before = store.dirty;
+        store.zstore_from_pairs(b"d".to_vec(), vec![(b"a".to_vec(), 1.0)], 0);
+        assert_eq!(store.dirty, before + 1);
+        assert!(store.key_is_present(b"d"));
     }
 
     #[test]
