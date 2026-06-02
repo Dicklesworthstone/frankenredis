@@ -1111,65 +1111,74 @@ fn encode_rdb_internal(
             .then_with(|| left.key.cmp(&right.key))
     });
 
-    let mut current_db: Option<usize> = None;
-    for (index, entry) in sorted_entries.iter().enumerate() {
-        let needs_db_header = current_db != Some(entry.db);
-        if needs_db_header {
-            current_db = Some(entry.db);
-            buf.push(RDB_OPCODE_SELECTDB);
-            rdb_encode_length(&mut buf, entry.db);
-            let db_entries = sorted_entries
-                .iter()
-                .filter(|candidate| candidate.db == entry.db)
-                .count();
-            let db_expires = sorted_entries
-                .iter()
-                .filter(|candidate| candidate.db == entry.db && candidate.expire_ms.is_some())
-                .count();
-            buf.push(RDB_OPCODE_RESIZEDB);
-            rdb_encode_length(&mut buf, db_entries);
-            rdb_encode_length(&mut buf, db_expires);
-        }
-
-        // Expiry
-        if let Some(ms) = entry.expire_ms {
-            buf.push(RDB_OPCODE_EXPIRETIME_MS);
-            buf.extend_from_slice(&ms.to_le_bytes());
-        }
-
-        // Type + key + value
-        match &entry.value {
-            RdbValue::String(v) => {
-                buf.push(RDB_TYPE_STRING);
-                rdb_encode_string(&mut buf, &entry.key);
-                rdb_encode_string(&mut buf, v);
+    let mut group_start = 0usize;
+    while group_start < sorted_entries.len() {
+        let db = sorted_entries[group_start].db;
+        let mut group_end = group_start;
+        let mut db_expires = 0usize;
+        while group_end < sorted_entries.len() && sorted_entries[group_end].db == db {
+            if sorted_entries[group_end].expire_ms.is_some() {
+                db_expires += 1;
             }
-            RdbValue::List(items) => {
-                if let Some(thresholds) = options.compact.as_ref()
-                    && let Some(payload) = encode_compact_list_quicklist2(items, thresholds)
-                {
-                    buf.push(RDB_TYPE_LIST_QUICKLIST_2);
+            group_end += 1;
+        }
+
+        buf.push(RDB_OPCODE_SELECTDB);
+        rdb_encode_length(&mut buf, db);
+        buf.push(RDB_OPCODE_RESIZEDB);
+        rdb_encode_length(&mut buf, group_end - group_start);
+        rdb_encode_length(&mut buf, db_expires);
+
+        for &entry in &sorted_entries[group_start..group_end] {
+            // Expiry
+            if let Some(ms) = entry.expire_ms {
+                buf.push(RDB_OPCODE_EXPIRETIME_MS);
+                buf.extend_from_slice(&ms.to_le_bytes());
+            }
+
+            // Type + key + value
+            match &entry.value {
+                RdbValue::String(v) => {
+                    buf.push(RDB_TYPE_STRING);
                     rdb_encode_string(&mut buf, &entry.key);
-                    buf.extend_from_slice(&payload);
-                } else {
-                    buf.push(RDB_TYPE_LIST);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    rdb_encode_length(&mut buf, items.len());
-                    for item in items {
-                        rdb_encode_string(&mut buf, item);
+                    rdb_encode_string(&mut buf, v);
+                }
+                RdbValue::List(items) => {
+                    if let Some(thresholds) = options.compact.as_ref()
+                        && let Some(payload) = encode_compact_list_quicklist2(items, thresholds)
+                    {
+                        buf.push(RDB_TYPE_LIST_QUICKLIST_2);
+                        rdb_encode_string(&mut buf, &entry.key);
+                        buf.extend_from_slice(&payload);
+                    } else {
+                        buf.push(RDB_TYPE_LIST);
+                        rdb_encode_string(&mut buf, &entry.key);
+                        rdb_encode_length(&mut buf, items.len());
+                        for item in items {
+                            rdb_encode_string(&mut buf, item);
+                        }
                     }
                 }
-            }
-            RdbValue::Set(members) => {
-                if let Some(thresholds) = options.compact.as_ref() {
-                    if let Some(payload) = encode_compact_set_intset(members, thresholds) {
-                        buf.push(RDB_TYPE_SET_INTSET);
-                        rdb_encode_string(&mut buf, &entry.key);
-                        buf.extend_from_slice(&payload);
-                    } else if let Some(payload) = encode_compact_set_listpack(members, thresholds) {
-                        buf.push(RDB_TYPE_SET_LISTPACK);
-                        rdb_encode_string(&mut buf, &entry.key);
-                        buf.extend_from_slice(&payload);
+                RdbValue::Set(members) => {
+                    if let Some(thresholds) = options.compact.as_ref() {
+                        if let Some(payload) = encode_compact_set_intset(members, thresholds) {
+                            buf.push(RDB_TYPE_SET_INTSET);
+                            rdb_encode_string(&mut buf, &entry.key);
+                            buf.extend_from_slice(&payload);
+                        } else if let Some(payload) =
+                            encode_compact_set_listpack(members, thresholds)
+                        {
+                            buf.push(RDB_TYPE_SET_LISTPACK);
+                            rdb_encode_string(&mut buf, &entry.key);
+                            buf.extend_from_slice(&payload);
+                        } else {
+                            buf.push(RDB_TYPE_SET);
+                            rdb_encode_string(&mut buf, &entry.key);
+                            rdb_encode_length(&mut buf, members.len());
+                            for member in members {
+                                rdb_encode_string(&mut buf, member);
+                            }
+                        }
                     } else {
                         buf.push(RDB_TYPE_SET);
                         rdb_encode_string(&mut buf, &entry.key);
@@ -1178,76 +1187,69 @@ fn encode_rdb_internal(
                             rdb_encode_string(&mut buf, member);
                         }
                     }
-                } else {
-                    buf.push(RDB_TYPE_SET);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    rdb_encode_length(&mut buf, members.len());
-                    for member in members {
-                        rdb_encode_string(&mut buf, member);
+                }
+                RdbValue::Hash(fields) => {
+                    if let Some(thresholds) = options.compact.as_ref()
+                        && let Some(payload) = encode_compact_hash_listpack(fields, thresholds)
+                    {
+                        buf.push(RDB_TYPE_HASH_LISTPACK);
+                        rdb_encode_string(&mut buf, &entry.key);
+                        buf.extend_from_slice(&payload);
+                    } else {
+                        buf.push(RDB_TYPE_HASH);
+                        rdb_encode_string(&mut buf, &entry.key);
+                        rdb_encode_length(&mut buf, fields.len());
+                        for (field, value) in fields {
+                            rdb_encode_string(&mut buf, field);
+                            rdb_encode_string(&mut buf, value);
+                        }
                     }
                 }
-            }
-            RdbValue::Hash(fields) => {
-                if let Some(thresholds) = options.compact.as_ref()
-                    && let Some(payload) = encode_compact_hash_listpack(fields, thresholds)
-                {
-                    buf.push(RDB_TYPE_HASH_LISTPACK);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    buf.extend_from_slice(&payload);
-                } else {
-                    buf.push(RDB_TYPE_HASH);
+                RdbValue::HashWithTtls(fields) => {
+                    buf.push(RDB_TYPE_HASH_WITH_TTLS);
                     rdb_encode_string(&mut buf, &entry.key);
                     rdb_encode_length(&mut buf, fields.len());
-                    for (field, value) in fields {
+                    for (field, value, expires_ms) in fields {
                         rdb_encode_string(&mut buf, field);
                         rdb_encode_string(&mut buf, value);
+                        // u64::MAX sentinel = "no TTL". Any other value is
+                        // the absolute ms-since-epoch deadline.
+                        let encoded = expires_ms.unwrap_or(u64::MAX);
+                        buf.extend_from_slice(&encoded.to_le_bytes());
                     }
                 }
-            }
-            RdbValue::HashWithTtls(fields) => {
-                buf.push(RDB_TYPE_HASH_WITH_TTLS);
-                rdb_encode_string(&mut buf, &entry.key);
-                rdb_encode_length(&mut buf, fields.len());
-                for (field, value, expires_ms) in fields {
-                    rdb_encode_string(&mut buf, field);
-                    rdb_encode_string(&mut buf, value);
-                    // u64::MAX sentinel = "no TTL". Any other value is
-                    // the absolute ms-since-epoch deadline.
-                    let encoded = expires_ms.unwrap_or(u64::MAX);
-                    buf.extend_from_slice(&encoded.to_le_bytes());
-                }
-            }
-            RdbValue::SortedSet(members) => {
-                if let Some(thresholds) = options.compact.as_ref()
-                    && let Some(payload) = encode_compact_zset_listpack(members, thresholds)
-                {
-                    buf.push(RDB_TYPE_ZSET_LISTPACK);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    buf.extend_from_slice(&payload);
-                } else {
-                    buf.push(RDB_TYPE_ZSET_2);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    rdb_encode_length(&mut buf, members.len());
-                    for (member, score) in members {
-                        rdb_encode_string(&mut buf, member);
-                        // ZSET2 encoding: 8-byte LE double
-                        buf.extend_from_slice(&score.to_le_bytes());
+                RdbValue::SortedSet(members) => {
+                    if let Some(thresholds) = options.compact.as_ref()
+                        && let Some(payload) = encode_compact_zset_listpack(members, thresholds)
+                    {
+                        buf.push(RDB_TYPE_ZSET_LISTPACK);
+                        rdb_encode_string(&mut buf, &entry.key);
+                        buf.extend_from_slice(&payload);
+                    } else {
+                        buf.push(RDB_TYPE_ZSET_2);
+                        rdb_encode_string(&mut buf, &entry.key);
+                        rdb_encode_length(&mut buf, members.len());
+                        for (member, score) in members {
+                            rdb_encode_string(&mut buf, member);
+                            // ZSET2 encoding: 8-byte LE double
+                            buf.extend_from_slice(&score.to_le_bytes());
+                        }
                     }
                 }
-            }
-            RdbValue::Stream(stream_entries, watermark, groups, metadata, entries_added) => {
-                encode_stream_rdb_value(
-                    &mut buf,
-                    &entry.key,
-                    stream_entries,
-                    *watermark,
-                    groups,
-                    metadata,
-                    *entries_added,
-                );
+                RdbValue::Stream(stream_entries, watermark, groups, metadata, entries_added) => {
+                    encode_stream_rdb_value(
+                        &mut buf,
+                        &entry.key,
+                        stream_entries,
+                        *watermark,
+                        groups,
+                        metadata,
+                        *entries_added,
+                    );
+                }
             }
         }
-        debug_assert!(index < sorted_entries.len());
+        group_start = group_end;
     }
 
     // EOF
@@ -5894,6 +5896,53 @@ mod tests {
             assert!(
                 encoded.contains(&0xFE),
                 "RDB must contain SELECTDB opcode (0xFE)"
+            );
+        }
+
+        #[test]
+        fn golden_rdb_resizedb_counts_multiple_databases() {
+            let entries = vec![
+                RdbEntry {
+                    db: 7,
+                    key: b"c".to_vec(),
+                    value: RdbValue::String(b"vc".to_vec()),
+                    expire_ms: Some(7000),
+                },
+                RdbEntry {
+                    db: 2,
+                    key: b"a".to_vec(),
+                    value: RdbValue::String(b"va".to_vec()),
+                    expire_ms: None,
+                },
+                RdbEntry {
+                    db: 9,
+                    key: b"d".to_vec(),
+                    value: RdbValue::String(b"vd".to_vec()),
+                    expire_ms: None,
+                },
+                RdbEntry {
+                    db: 2,
+                    key: b"b".to_vec(),
+                    value: RdbValue::String(b"vb".to_vec()),
+                    expire_ms: Some(2000),
+                },
+            ];
+            let encoded = encode_rdb(&entries, &[]);
+            let headers: Vec<[u8; 5]> = encoded
+                .windows(5)
+                .filter_map(|window| {
+                    (window[0] == RDB_OPCODE_SELECTDB && window[2] == RDB_OPCODE_RESIZEDB)
+                        .then(|| [window[0], window[1], window[2], window[3], window[4]])
+                })
+                .collect();
+
+            assert_eq!(
+                headers,
+                vec![
+                    [RDB_OPCODE_SELECTDB, 2, RDB_OPCODE_RESIZEDB, 2, 1],
+                    [RDB_OPCODE_SELECTDB, 7, RDB_OPCODE_RESIZEDB, 1, 1],
+                    [RDB_OPCODE_SELECTDB, 9, RDB_OPCODE_RESIZEDB, 1, 0],
+                ],
             );
         }
 
