@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "command": "target/release-perf/fr-bench --host 127.0.0.1 --port 6401 --workload set --requests 50000 --clients 50 --pipeline 16 --datasize 3 --keyspace 10000 --json-out artifacts/optimization/frankenredis-clear-flush/after_fr_bench_pipeline16_set.json --key-prefix clear_after_",
+      "mean": 0.41946271902000004,
+      "stddev": 0.023296919467505672,
+      "median": 0.41906860662,
+      "user": 0.05512444,
+      "system": 0.10218769999999999,
+      "min": 0.39925801362,
+      "max": 0.45716708862,
+      "times": [
+        0.39925801362,
+        0.40104381562,
+        0.45716708862,
+        0.42077607062,
+        0.41906860662
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

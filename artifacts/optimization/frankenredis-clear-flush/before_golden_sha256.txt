@@ -1,0 +1,2 @@
+efbd095092ef9ed587900a01eeded2dc52b5ffacc67f70ba80ea2543fdbbd818  artifacts/optimization/frankenredis-clear-flush/golden_request.resp
+7bb6b41852c5de6128967ecb3e278117fb2baf1947a54c5a6d935155c53c321c  artifacts/optimization/frankenredis-clear-flush/before_golden_output.resp
