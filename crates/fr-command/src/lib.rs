@@ -985,6 +985,27 @@ fn command_key_references_with_exact_flags(
         }]));
     }
 
+    // SETRANGE / XSETID: single key, RW/update — upstream commands/
+    // {setrange,xsetid}.json key_specs declare no `access`, but the generic
+    // write fallback added it. (frankenredis-getkeysflags-rwupdate)
+    if cmd_name.eq_ignore_ascii_case("SETRANGE") || cmd_name.eq_ignore_ascii_case("XSETID") {
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_RW_UPDATE,
+        }]));
+    }
+
+    // RESTORE / RESTORE-ASKING: single key, OW/update — the command
+    // deserializes a fresh value over the key, so upstream commands/
+    // restore.json key_specs flag it OW (overwrite), not RW/access.
+    // (frankenredis-getkeysflags-rwupdate)
+    if cmd_name.eq_ignore_ascii_case("RESTORE") || cmd_name.eq_ignore_ascii_case("RESTORE-ASKING") {
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_OW_UPDATE,
+        }]));
+    }
+
     // SORT: source key is RO/access, optional STORE dst is OW/update.
     // (br-frankenredis-keyflagsupd)
     if cmd_name.eq_ignore_ascii_case("SORT") || cmd_name.eq_ignore_ascii_case("SORT_RO") {
@@ -56208,6 +56229,46 @@ mod tests {
                 panic!("dst ref shape"); // ubs:ignore — AI triage
             };
             assert_eq!(dst[1], ow_update, "{verb:?} STORE dst must be OW/update");
+        }
+    }
+
+    #[test]
+    fn command_getkeysandflags_setrange_xsetid_restore_use_exact_flags() {
+        // (frankenredis-vc88p) The generic write-command fallback tagged
+        // every key RW/access/update. Upstream commands/*.json key_specs
+        // declare SETRANGE/XSETID as RW/update (no access) and RESTORE as
+        // OW/update (overwrite). Verified byte-exact vs vendored 7.2.4.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &[&str])] = &[
+            (b"SETRANGE", &["RW", "update"]),
+            (b"XSETID", &["RW", "update"]),
+            (b"RESTORE", &["OW", "update"]),
+        ];
+        for (verb, want) in cases {
+            let argv: Vec<Vec<u8>> = [
+                b"COMMAND".as_slice(),
+                b"GETKEYSANDFLAGS",
+                verb,
+                b"k",
+                b"0",
+                b"x",
+            ]
+            .iter()
+            .map(|a| a.to_vec())
+            .collect();
+            let frame = dispatch_argv(&argv, &mut store, 0).expect("getkeysandflags");
+            let RespFrame::Array(Some(refs)) = frame else {
+                panic!("expected array for {verb:?}"); // ubs:ignore — AI triage
+            };
+            let RespFrame::Array(Some(entry)) = &refs[0] else {
+                panic!("entry shape for {verb:?}"); // ubs:ignore — AI triage
+            };
+            let want_frame = RespFrame::Array(Some(
+                want.iter()
+                    .map(|f| RespFrame::SimpleString((*f).to_string()))
+                    .collect(),
+            ));
+            assert_eq!(entry[1], want_frame, "{verb:?} flags mismatch");
         }
     }
 
