@@ -10551,7 +10551,7 @@ impl Store {
                     let Some(group_state) = groups.get_mut(group) else {
                         return Ok(None);
                     };
-                    group_state.consumers.remove(consumer);
+                    let consumer_existed = group_state.consumers.remove(consumer);
                     // (frankenredis-p4dpj) Drop the metadata alongside.
                     group_state.consumer_metadata.remove(consumer);
                     let mut removed_pending = 0_u64;
@@ -10562,8 +10562,16 @@ impl Store {
                         }
                         keep
                     });
-                    if removed_pending > 0 {
-                        self.dirty = self.dirty.saturating_add(1); // Redis treats this as 1 mutation
+                    // (frankenredis-xgdelcon-dirty) Upstream t_stream.c::
+                    // xgroupCommand bumps server.dirty (and fires the
+                    // "xgroup-delconsumer" event) once whenever the consumer
+                    // ACTUALLY EXISTED and was removed — regardless of how many
+                    // pending entries it held. Deleting a non-existent consumer
+                    // is a no-op (no dirty, no event). fr previously gated on
+                    // removed_pending > 0, so dropping a consumer with no
+                    // pending entries was silently not persisted/replicated.
+                    if consumer_existed {
+                        self.dirty = self.dirty.saturating_add(1);
                     }
                     Ok(Some(removed_pending))
                 }
@@ -23624,6 +23632,39 @@ mod tests {
             store.xgroup_createconsumer(b"str", b"g1", b"alice", 0),
             Err(StoreError::WrongType)
         );
+    }
+
+    #[test]
+    fn stream_xgroup_delconsumer_dirties_on_existing_consumer_only() {
+        // (frankenredis-pt04m) DELCONSUMER bumps dirty once whenever the
+        // consumer actually existed and was removed — regardless of pending
+        // count. Deleting a non-existent consumer is a no-op (no dirty).
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+        assert!(store.xgroup_create(b"s", b"g", (0, 0), false, 0).unwrap());
+        store.xgroup_createconsumer(b"s", b"g", b"c", 0).unwrap();
+
+        // Existing consumer with zero pending entries — must still dirty.
+        let before = store.dirty;
+        assert_eq!(
+            store.xgroup_delconsumer(b"s", b"g", b"c", 0).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            store.dirty,
+            before + 1,
+            "deleting an existing consumer dirties"
+        );
+
+        // Non-existent consumer — no-op, no dirty.
+        let before = store.dirty;
+        assert_eq!(
+            store.xgroup_delconsumer(b"s", b"g", b"nope", 0).unwrap(),
+            Some(0)
+        );
+        assert_eq!(store.dirty, before, "no-op DELCONSUMER must not dirty");
     }
 
     #[test]
