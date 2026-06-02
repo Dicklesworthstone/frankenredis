@@ -10276,12 +10276,21 @@ fn function_cmd(
                         Some(d) => RespFrame::BulkString(Some(d.as_bytes().to_vec())),
                         None => RespFrame::BulkString(None),
                     };
-                    let flags_frame = RespFrame::Array(Some(
-                        f.flags
-                            .iter()
-                            .map(|fl| RespFrame::BulkString(Some(fl.as_bytes().to_vec())))
-                            .collect(),
-                    ));
+                    // Upstream functions.c emits each function flag via
+                    // addReplyStatus (a simple string `+`), and wraps the
+                    // list in addReplySetLen — so it is a Set (~) in RESP3
+                    // and a flat Array of simple strings in RESP2. fr was
+                    // emitting bulk strings inside an Array. (frankenredis-fnflags)
+                    let flag_elems: Vec<RespFrame> = f
+                        .flags
+                        .iter()
+                        .map(|fl| RespFrame::SimpleString(fl.to_string()))
+                        .collect();
+                    let flags_frame = if resp == 3 {
+                        RespFrame::Set(Some(flag_elems))
+                    } else {
+                        RespFrame::Array(Some(flag_elems))
+                    };
                     if resp == 3 {
                         RespFrame::Map(Some(vec![
                             (RespFrame::BulkString(Some(b"name".to_vec())), name_frame),
@@ -58643,6 +58652,14 @@ mod tests {
         assert_eq!(
             func_pairs[2].0,
             RespFrame::BulkString(Some(b"flags".to_vec()))
+        );
+        // (frankenredis-z3v65) Upstream functions.c wraps the flag list in
+        // addReplySetLen, so the `flags` value is a Set under RESP3 (its
+        // elements are simple strings via addReplyStatus).
+        assert!(
+            matches!(func_pairs[2].1, RespFrame::Set(_)),
+            "RESP3 function flags must be a Set, got {:?}",
+            func_pairs[2].1
         );
     }
 
