@@ -7349,6 +7349,14 @@ impl Store {
             self.stream_groups.remove(key);
             self.stream_last_ids.remove(key);
         }
+        // (frankenredis-bbutt) A successful pop mutates the keyspace and must
+        // bump the dirty counter — otherwise SPOP is invisible to RDB/AOF
+        // persistence, replication, and keyspace notifications (all of which
+        // gate on dirty changing). spop_count loops this, so it inherits the
+        // per-member increment, matching upstream server.dirty += popped.
+        if member.is_some() {
+            self.dirty = self.dirty.saturating_add(1);
+        }
         Ok(member)
     }
 
@@ -20534,6 +20542,33 @@ mod tests {
             other => return Err(format!("RPOP COUNT LFU mismatch: {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn spop_bumps_dirty_counter() {
+        // (frankenredis-bbutt) SPOP mutates the keyspace, so it must bump the
+        // dirty counter — otherwise the pop is invisible to RDB/AOF
+        // persistence, replication, and keyspace notifications.
+        let mut store = Store::new();
+        store
+            .sadd(b"s", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 0)
+            .expect("sadd");
+        let before = store.dirty;
+        store.spop(b"s", 0).expect("spop");
+        assert_eq!(store.dirty, before + 1, "single SPOP must bump dirty by 1");
+        // spop_count loops spop, so a 2-member pop bumps dirty by 2.
+        let before = store.dirty;
+        let popped = store.spop_count(b"s", 5, 0).expect("spop_count");
+        assert_eq!(popped.len(), 2);
+        assert_eq!(
+            store.dirty,
+            before + 2,
+            "SPOP count must bump dirty per member"
+        );
+        // A no-op SPOP on a missing key must not bump dirty.
+        let before = store.dirty;
+        assert!(store.spop(b"missing", 0).expect("spop missing").is_none());
+        assert_eq!(store.dirty, before, "no-op SPOP must not bump dirty");
     }
 
     #[test]
