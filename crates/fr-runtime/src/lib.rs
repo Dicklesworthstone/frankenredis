@@ -5641,7 +5641,16 @@ impl Runtime {
                                     || c.eq_ignore_ascii_case(b"RPOPLPUSH")
                                     || c.eq_ignore_ascii_case(b"BRPOPLPUSH")
                             });
-                            if is_list_move && cmd_keys.len() >= 2 {
+                            // (frankenredis-4ayjf) SMOVE emits its own
+                            // srem/del/sadd from Store::smove (it has the
+                            // add-signal the post-hoc dispatcher lacks), so the
+                            // generic path must not fire a "smove" for it.
+                            let is_smove = argv
+                                .first()
+                                .is_some_and(|c| c.eq_ignore_ascii_case(b"SMOVE"));
+                            if is_smove {
+                                // Events already queued by Store::smove.
+                            } else if is_list_move && cmd_keys.len() >= 2 {
                                 let (pop_ev, push_ev) = Self::list_move_events(&argv);
                                 self.server.store.notify_keyspace_event(
                                     fr_store::NOTIFY_LIST,
@@ -5986,7 +5995,9 @@ impl Runtime {
             // they must NOT also go through the generic trailing-del loop.
             b"SREM",
             b"SPOP",
-            b"SMOVE",
+            // SMOVE fires its own srem/del/sadd from Store::smove (it knows
+            // the dst add-signal); it must NOT also hit the generic
+            // trailing-del loop. (frankenredis-4ayjf)
             b"HDEL",
             b"ZREM",
             b"ZPOPMIN",
@@ -26502,7 +26513,7 @@ mod tests {
         // and the delete-family (which fires "del" as its primary) are out.
         let yes: &[&[u8]] = &[
             b"LPOP", b"RPOP", b"LREM", b"LTRIM", b"LMPOP", b"SREM", b"SPOP", b"HDEL", b"ZREM",
-            b"ZPOPMIN", b"ZPOPMAX", b"ZMPOP", b"SMOVE",
+            b"ZPOPMIN", b"ZPOPMAX", b"ZMPOP",
         ];
         for c in yes {
             assert!(
@@ -26511,9 +26522,10 @@ mod tests {
                 String::from_utf8_lossy(c)
             );
         }
-        // LMOVE/RPOPLPUSH (and blocking variants) are NOT in this set: their
-        // "del" is fired by the dedicated list-move branch in upstream order,
-        // not the generic trailing-del loop. (frankenredis-uw80w)
+        // LMOVE/RPOPLPUSH (and blocking variants) fire their "del" via the
+        // dedicated list-move branch (frankenredis-uw80w); SMOVE fires its
+        // own srem/del/sadd from Store::smove (frankenredis-4ayjf). None of
+        // them go through the generic trailing-del loop.
         let no: &[&[u8]] = &[
             b"SADD",
             b"LPUSH",
@@ -26526,6 +26538,7 @@ mod tests {
             b"RPOPLPUSH",
             b"BLMOVE",
             b"BRPOPLPUSH",
+            b"SMOVE",
         ];
         for c in no {
             assert!(

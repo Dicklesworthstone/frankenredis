@@ -7579,14 +7579,36 @@ impl Store {
             return Ok(false);
         }
 
+        // (frankenredis-4ayjf) Emit SMOVE's keyspace events here, where the
+        // exact state changes are known — the runtime post-hoc dispatcher
+        // can't see whether the destination gained the member. Upstream
+        // t_set.c::smoveCommand fires "srem" on the source, then "del" if the
+        // source emptied, then "sadd" on the destination ONLY when the member
+        // is newly added (setTypeAdd returned 1). The runtime excludes SMOVE
+        // from its generic keyspace path so these are the only events. These
+        // calls are no-ops when keyspace notifications are disabled.
+        let (src_db, src_logical) = match decode_db_key(source) {
+            Some((db, lk)) => (db, lk.to_vec()),
+            None => (0, source.to_vec()),
+        };
+        self.notify_keyspace_event(NOTIFY_SET, "srem", &src_logical, src_db);
+
         // Clean up empty source
         if source_empty {
             self.internal_entries_remove(source);
             self.stream_groups.remove(source);
             self.stream_last_ids.remove(source);
+            self.notify_keyspace_event(NOTIFY_GENERIC, "del", &src_logical, src_db);
         }
-        // Add to destination
-        self.sadd(destination, &[member.to_vec()], now_ms)?;
+        // Add to destination — "sadd" fires only on a genuinely new member.
+        let added = self.sadd(destination, &[member.to_vec()], now_ms)?;
+        if added > 0 {
+            let (dst_db, dst_logical) = match decode_db_key(destination) {
+                Some((db, lk)) => (db, lk.to_vec()),
+                None => (0, destination.to_vec()),
+            };
+            self.notify_keyspace_event(NOTIFY_SET, "sadd", &dst_logical, dst_db);
+        }
         Ok(true)
     }
 
@@ -18695,6 +18717,49 @@ mod tests {
 
         let expected = format!("{:016x}", store.state_digest_full_scan());
         assert_eq!(store.state_digest(), expected);
+    }
+
+    #[test]
+    fn smove_emits_keyspace_events_with_conditional_sadd() {
+        // (frankenredis-4ayjf) SMOVE fires srem(src), del(src if it empties),
+        // then sadd(dst) ONLY when the member is newly added to the
+        // destination. Verified byte-exact vs vendored 7.2.4 on the wire.
+        fn events(store: &mut Store) -> Vec<String> {
+            store
+                .drain_keyspace_notifications()
+                .into_iter()
+                .filter_map(|(chan, _key)| {
+                    String::from_utf8_lossy(&chan)
+                        .strip_prefix("__keyevent@0__:")
+                        .map(str::to_string)
+                })
+                .collect()
+        }
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | super::NOTIFY_SET | NOTIFY_GENERIC;
+
+        store
+            .sadd(b"a", &[b"x".to_vec(), b"y".to_vec()], 0)
+            .expect("seed a");
+        store.sadd(b"b", &[b"z".to_vec()], 0).expect("seed b");
+        let _ = events(&mut store);
+
+        // Normal move — destination gains the member: srem, sadd.
+        store.smove(b"a", b"b", b"x", 0).expect("smove x");
+        assert_eq!(events(&mut store), vec!["srem", "sadd"]);
+
+        // Source empties on this move: srem, del, sadd (y is new to b).
+        store.smove(b"a", b"b", b"y", 0).expect("smove y");
+        assert_eq!(events(&mut store), vec!["srem", "del", "sadd"]);
+
+        // Destination already holds the member: srem only, no sadd.
+        store
+            .sadd(b"c", &[b"m".to_vec(), b"n".to_vec()], 0)
+            .expect("seed c");
+        store.sadd(b"d", &[b"m".to_vec()], 0).expect("seed d");
+        let _ = events(&mut store);
+        store.smove(b"c", b"d", b"m", 0).expect("smove m");
+        assert_eq!(events(&mut store), vec!["srem"]);
     }
 
     #[test]
