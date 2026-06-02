@@ -5696,6 +5696,32 @@ impl Runtime {
                                     &cmd_keys[1],
                                     db,
                                 );
+                            } else if argv.first().is_some_and(|c| Self::is_store_command(c))
+                                && !cmd_keys.is_empty()
+                            {
+                                // (frankenredis-5wz6g) *STORE commands fire ONE
+                                // per-command event on the DESTINATION only (or
+                                // "del" on it when the result was empty and the
+                                // dest was deleted — reaching this dirty-gated
+                                // block means it existed). The generic loop would
+                                // wrongly fire on every source key too.
+                                let dest = if Self::store_command_dest_is_last(&argv[0]) {
+                                    &cmd_keys[cmd_keys.len() - 1]
+                                } else {
+                                    &cmd_keys[0]
+                                };
+                                if self.server.store.key_is_present(dest) {
+                                    self.server
+                                        .store
+                                        .notify_keyspace_event(event_type, event, dest, db);
+                                } else {
+                                    self.server.store.notify_keyspace_event(
+                                        fr_store::NOTIFY_GENERIC,
+                                        "del",
+                                        dest,
+                                        db,
+                                    );
+                                }
                             } else {
                                 for key in &cmd_keys {
                                     self.server
@@ -5902,16 +5928,21 @@ impl Runtime {
             "pfadd"
         } else if cmd.eq_ignore_ascii_case(b"PFMERGE") {
             "pfadd"
-        } else if cmd.eq_ignore_ascii_case(b"SINTERSTORE")
-            || cmd.eq_ignore_ascii_case(b"SUNIONSTORE")
-            || cmd.eq_ignore_ascii_case(b"SDIFFSTORE")
-        {
+        } else if cmd.eq_ignore_ascii_case(b"SINTERSTORE") {
+            // (frankenredis-5wz6g) Each *STORE command fires its OWN event
+            // name on the destination, not a shared one.
             "sinterstore"
-        } else if cmd.eq_ignore_ascii_case(b"ZUNIONSTORE")
-            || cmd.eq_ignore_ascii_case(b"ZINTERSTORE")
-            || cmd.eq_ignore_ascii_case(b"ZDIFFSTORE")
-            || cmd.eq_ignore_ascii_case(b"ZRANGESTORE")
-        {
+        } else if cmd.eq_ignore_ascii_case(b"SUNIONSTORE") {
+            "sunionstore"
+        } else if cmd.eq_ignore_ascii_case(b"SDIFFSTORE") {
+            "sdiffstore"
+        } else if cmd.eq_ignore_ascii_case(b"ZINTERSTORE") {
+            "zinterstore"
+        } else if cmd.eq_ignore_ascii_case(b"ZUNIONSTORE") {
+            "zunionstore"
+        } else if cmd.eq_ignore_ascii_case(b"ZDIFFSTORE") {
+            "zdiffstore"
+        } else if cmd.eq_ignore_ascii_case(b"ZRANGESTORE") {
             "zrangestore"
         } else if cmd.eq_ignore_ascii_case(b"SORT") || cmd.eq_ignore_ascii_case(b"SORT_RO") {
             "sortstore"
@@ -6027,6 +6058,33 @@ impl Runtime {
         let pop = if from_left { "lpop" } else { "rpop" };
         let push = if to_left { "lpush" } else { "rpush" };
         (pop, push)
+    }
+
+    /// Whether a command writes a single DESTINATION key from one or more
+    /// sources (`*STORE` family). Upstream fires ONE per-command-named event
+    /// on the destination only (or "del" on it when the result is empty),
+    /// never on the source keys. (frankenredis-5wz6g)
+    fn is_store_command(cmd: &[u8]) -> bool {
+        Self::store_command_dest_is_last(cmd)
+            || cmd.eq_ignore_ascii_case(b"SINTERSTORE")
+            || cmd.eq_ignore_ascii_case(b"SUNIONSTORE")
+            || cmd.eq_ignore_ascii_case(b"SDIFFSTORE")
+            || cmd.eq_ignore_ascii_case(b"ZINTERSTORE")
+            || cmd.eq_ignore_ascii_case(b"ZUNIONSTORE")
+            || cmd.eq_ignore_ascii_case(b"ZDIFFSTORE")
+            || cmd.eq_ignore_ascii_case(b"ZRANGESTORE")
+            || cmd.eq_ignore_ascii_case(b"GEOSEARCHSTORE")
+    }
+
+    /// For the *STORE family, whether the destination key is the LAST key in
+    /// `cmd_keys` (SORT/GEORADIUS put `STORE dest` after the source) rather
+    /// than the FIRST (the set/zset/geosearch stores). SORT_RO/`*_RO` and a
+    /// store-less SORT/GEORADIUS are read-only and never reach the
+    /// dirty-gated emission path. (frankenredis-5wz6g)
+    fn store_command_dest_is_last(cmd: &[u8]) -> bool {
+        cmd.eq_ignore_ascii_case(b"SORT")
+            || cmd.eq_ignore_ascii_case(b"GEORADIUS")
+            || cmd.eq_ignore_ascii_case(b"GEORADIUSBYMEMBER")
     }
 
     fn xgroup_keyspace_event(argv: &[Vec<u8>]) -> &'static str {
@@ -26479,10 +26537,62 @@ mod tests {
             "zremrangebyscore"
         );
         assert_eq!(ev(&[b"ZREMRANGEBYLEX", b"z", b"-", b"+"]), "zremrangebylex");
+        // (frankenredis-5wz6g) *STORE commands each fire their OWN name.
+        assert_eq!(ev(&[b"SINTERSTORE", b"d", b"s1", b"s2"]), "sinterstore");
+        assert_eq!(ev(&[b"SUNIONSTORE", b"d", b"s1", b"s2"]), "sunionstore");
+        assert_eq!(ev(&[b"SDIFFSTORE", b"d", b"s1", b"s2"]), "sdiffstore");
+        assert_eq!(
+            ev(&[b"ZINTERSTORE", b"d", b"2", b"z1", b"z2"]),
+            "zinterstore"
+        );
+        assert_eq!(
+            ev(&[b"ZUNIONSTORE", b"d", b"2", b"z1", b"z2"]),
+            "zunionstore"
+        );
+        assert_eq!(ev(&[b"ZDIFFSTORE", b"d", b"2", b"z1", b"z2"]), "zdiffstore");
+        assert_eq!(
+            ev(&[b"ZRANGESTORE", b"d", b"z1", b"0", b"-1"]),
+            "zrangestore"
+        );
+        assert_eq!(ev(&[b"SORT", b"l", b"STORE", b"d"]), "sortstore");
+        assert_eq!(ev(&[b"GEOSEARCHSTORE", b"d", b"s"]), "geosearchstore");
         // Regression guard: the plain SET family stays "set".
         assert_eq!(ev(&[b"SET", b"k", b"v"]), "set");
         assert_eq!(ev(&[b"GETSET", b"k", b"v"]), "set");
         assert_eq!(ev(&[b"SETNX", b"k", b"v"]), "set");
+    }
+
+    #[test]
+    fn is_store_command_and_dest_position() {
+        // (frankenredis-5wz6g) *STORE commands write a single destination key;
+        // SORT/GEORADIUS put it LAST (after STORE), the set/zset/geosearch
+        // stores put it FIRST.
+        for c in [
+            &b"SINTERSTORE"[..],
+            b"SUNIONSTORE",
+            b"SDIFFSTORE",
+            b"ZINTERSTORE",
+            b"ZUNIONSTORE",
+            b"ZDIFFSTORE",
+            b"ZRANGESTORE",
+            b"GEOSEARCHSTORE",
+            b"SORT",
+            b"GEORADIUS",
+            b"GEORADIUSBYMEMBER",
+        ] {
+            assert!(Runtime::is_store_command(c), "{c:?} is a *STORE command");
+        }
+        for c in [&b"SADD"[..], b"SET", b"SMOVE", b"COPY", b"SORT_RO"] {
+            assert!(
+                !Runtime::is_store_command(c),
+                "{c:?} is NOT a *STORE command"
+            );
+        }
+        assert!(Runtime::store_command_dest_is_last(b"SORT"));
+        assert!(Runtime::store_command_dest_is_last(b"GEORADIUS"));
+        assert!(Runtime::store_command_dest_is_last(b"GEORADIUSBYMEMBER"));
+        assert!(!Runtime::store_command_dest_is_last(b"SINTERSTORE"));
+        assert!(!Runtime::store_command_dest_is_last(b"ZRANGESTORE"));
     }
 
     #[test]
