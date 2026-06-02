@@ -951,6 +951,15 @@ fn command_key_references_with_exact_flags(
     }
 
     if cmd_name.eq_ignore_ascii_case("RENAME") || cmd_name.eq_ignore_ascii_case("RENAMENX") {
+        // Upstream commands/rename.json vs renamenx.json: the source key is
+        // RW/ACCESS/DELETE in both, but the destination key_spec differs —
+        // RENAME overwrites an existing dest (OW/UPDATE) whereas RENAMENX only
+        // succeeds when dest does NOT exist, so it is OW/INSERT.
+        let dst_flags = if cmd_name.eq_ignore_ascii_case("RENAMENX") {
+            KEY_FLAGS_OW_INSERT
+        } else {
+            KEY_FLAGS_OW_UPDATE
+        };
         return Ok(Some(vec![
             CommandKeyReference {
                 index: 1,
@@ -958,7 +967,7 @@ fn command_key_references_with_exact_flags(
             },
             CommandKeyReference {
                 index: 2,
-                flags: KEY_FLAGS_OW_UPDATE,
+                flags: dst_flags,
             },
         ]));
     }
@@ -57793,6 +57802,42 @@ mod tests {
                     RespFrame::Array(Some(vec![
                         RespFrame::SimpleString("OW".to_string()),
                         RespFrame::SimpleString("update".to_string()),
+                    ])),
+                ])),
+            ]))
+        );
+
+        // RENAMENX shares RENAME's source key_spec (RW/access/delete) but its
+        // destination is OW/INSERT, not OW/UPDATE — RENAMENX only renames when
+        // the destination does NOT already exist (commands/renamenx.json).
+        let renamenx = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"RENAMENX".to_vec(),
+                b"src".to_vec(),
+                b"dst".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            renamenx,
+            RespFrame::Array(Some(vec![
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"src".to_vec())),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::SimpleString("RW".to_string()),
+                        RespFrame::SimpleString("access".to_string()),
+                        RespFrame::SimpleString("delete".to_string()),
+                    ])),
+                ])),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"dst".to_vec())),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::SimpleString("OW".to_string()),
+                        RespFrame::SimpleString("insert".to_string()),
                     ])),
                 ])),
             ]))
