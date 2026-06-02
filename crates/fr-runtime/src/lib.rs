@@ -5675,6 +5675,27 @@ impl Runtime {
                                     );
                                 }
                             }
+                            // (frankenredis-g0crt) An element-removal command that
+                            // empties an aggregate causes upstream to dbDelete the
+                            // key and fire a secondary NOTIFY_GENERIC "del" after
+                            // its own event. Detect it by checking key presence
+                            // after the command (the key was just mutated, so it
+                            // cannot be a stale-expired entry).
+                            if argv
+                                .first()
+                                .is_some_and(|c| Self::command_can_empty_collection(c))
+                            {
+                                for key in &cmd_keys {
+                                    if !self.server.store.key_is_present(key) {
+                                        self.server.store.notify_keyspace_event(
+                                            fr_store::NOTIFY_GENERIC,
+                                            "del",
+                                            key,
+                                            db,
+                                        );
+                                    }
+                                }
+                            }
                             // Deliver queued keyspace notifications via pub/sub
                             self.deliver_keyspace_notifications();
                         }
@@ -5901,6 +5922,44 @@ impl Runtime {
             });
         }
         false
+    }
+
+    /// Whether a command removes elements from an aggregate type and can
+    /// therefore leave the key empty. Upstream deletes an emptied key via
+    /// dbDelete and fires a secondary NOTIFY_GENERIC "del" after the
+    /// command's own event. We mirror that by checking key presence after
+    /// these commands. The delete-family (DEL/GETDEL/...) already fires
+    /// "del" as its primary event and is excluded. (frankenredis-g0crt)
+    fn command_can_empty_collection(cmd: &[u8]) -> bool {
+        const SHRINKERS: &[&[u8]] = &[
+            b"LPOP",
+            b"RPOP",
+            b"LREM",
+            b"LTRIM",
+            b"LMPOP",
+            b"BLPOP",
+            b"BRPOP",
+            b"BLMPOP",
+            b"LMOVE",
+            b"BLMOVE",
+            b"RPOPLPUSH",
+            b"BRPOPLPUSH",
+            b"SREM",
+            b"SPOP",
+            b"SMOVE",
+            b"HDEL",
+            b"ZREM",
+            b"ZPOPMIN",
+            b"ZPOPMAX",
+            b"ZREMRANGEBYRANK",
+            b"ZREMRANGEBYSCORE",
+            b"ZREMRANGEBYLEX",
+            b"ZMPOP",
+            b"BZPOPMIN",
+            b"BZPOPMAX",
+            b"BZMPOP",
+        ];
+        SHRINKERS.iter().any(|s| cmd.eq_ignore_ascii_case(s))
     }
 
     fn xgroup_keyspace_event(argv: &[Vec<u8>]) -> &'static str {
@@ -26369,6 +26428,34 @@ mod tests {
         assert!(!f(&[b"SET", b"k", b"v"]));
         assert!(!f(&[b"SET", b"k", b"v", b"KEEPTTL"]));
         assert!(!f(&[b"MSET", b"a", b"1", b"b", b"2"]));
+    }
+
+    #[test]
+    fn command_can_empty_collection_covers_element_removers() {
+        // (frankenredis-g0crt) These commands remove elements and can leave a
+        // key empty, triggering a secondary "del" event. Non-removal writes
+        // and the delete-family (which fires "del" as its primary) are out.
+        let yes: &[&[u8]] = &[
+            b"LPOP", b"RPOP", b"LREM", b"LTRIM", b"LMPOP", b"SREM", b"SPOP", b"HDEL", b"ZREM",
+            b"ZPOPMIN", b"ZPOPMAX", b"ZMPOP", b"SMOVE", b"LMOVE",
+        ];
+        for c in yes {
+            assert!(
+                Runtime::command_can_empty_collection(c),
+                "{} should be a collection-emptier",
+                String::from_utf8_lossy(c)
+            );
+        }
+        let no: &[&[u8]] = &[
+            b"SADD", b"LPUSH", b"HSET", b"ZADD", b"SET", b"DEL", b"GETDEL",
+        ];
+        for c in no {
+            assert!(
+                !Runtime::command_can_empty_collection(c),
+                "{} should NOT be a collection-emptier",
+                String::from_utf8_lossy(c)
+            );
+        }
     }
 
     #[test]

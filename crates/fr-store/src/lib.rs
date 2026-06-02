@@ -2775,6 +2775,16 @@ impl Store {
         self.record_keyspace_lookup(key, now_ms)
     }
 
+    /// Pure presence check against the keyspace map — no lazy expiry, no
+    /// hit/miss stat bump, no events. Intended for post-command bookkeeping
+    /// (e.g. detecting that an element-removal command just deleted a key
+    /// because it became empty) where the key was just mutated and so cannot
+    /// be a stale-expired entry. (frankenredis-g0crt)
+    #[must_use]
+    pub fn key_is_present(&self, key: &[u8]) -> bool {
+        self.entries.contains_key(key)
+    }
+
     pub fn incr(&mut self, key: &[u8], now_ms: u64) -> Result<i64, StoreError> {
         self.drop_if_expired(key, now_ms);
         let (current, expires_at_ms) = match self.entries.get(key) {
