@@ -5661,6 +5661,20 @@ impl Runtime {
                                         .notify_keyspace_event(event_type, event, key, db);
                                 }
                             }
+                            // (frankenredis-hm2as) SET ... EX|PX|EXAT|PXAT and
+                            // SETEX/PSETEX set a TTL as a side effect, so upstream
+                            // t_string.c::setGenericCommand fires a second
+                            // NOTIFY_GENERIC "expire" event after "set".
+                            if Self::command_sets_expire_as_side_effect(&argv) {
+                                for key in &cmd_keys {
+                                    self.server.store.notify_keyspace_event(
+                                        fr_store::NOTIFY_GENERIC,
+                                        "expire",
+                                        key,
+                                        db,
+                                    );
+                                }
+                            }
                             // Deliver queued keyspace notifications via pub/sub
                             self.deliver_keyspace_notifications();
                         }
@@ -5864,6 +5878,29 @@ impl Runtime {
         } else {
             "generic"
         }
+    }
+
+    /// Whether a write command set a TTL as a side effect, which requires a
+    /// secondary NOTIFY_GENERIC "expire" event after its primary "set"
+    /// event (mirroring upstream t_string.c::setGenericCommand). SET fires
+    /// it only when an EX/PX/EXAT/PXAT option is present; SETEX and PSETEX
+    /// always set a TTL. (frankenredis-hm2as)
+    fn command_sets_expire_as_side_effect(argv: &[Vec<u8>]) -> bool {
+        let Some(cmd) = argv.first() else {
+            return false;
+        };
+        if cmd.eq_ignore_ascii_case(b"SETEX") || cmd.eq_ignore_ascii_case(b"PSETEX") {
+            return true;
+        }
+        if cmd.eq_ignore_ascii_case(b"SET") {
+            return argv.iter().skip(3).any(|a| {
+                a.eq_ignore_ascii_case(b"EX")
+                    || a.eq_ignore_ascii_case(b"PX")
+                    || a.eq_ignore_ascii_case(b"EXAT")
+                    || a.eq_ignore_ascii_case(b"PXAT")
+            });
+        }
+        false
     }
 
     fn xgroup_keyspace_event(argv: &[Vec<u8>]) -> &'static str {
@@ -26311,6 +26348,27 @@ mod tests {
         assert_eq!(ev(&[b"SET", b"k", b"v"]), "set");
         assert_eq!(ev(&[b"GETSET", b"k", b"v"]), "set");
         assert_eq!(ev(&[b"SETNX", b"k", b"v"]), "set");
+    }
+
+    #[test]
+    fn command_sets_expire_as_side_effect_matches_upstream() {
+        // (frankenredis-hm2as) SET with EX/PX/EXAT/PXAT and SETEX/PSETEX set
+        // a TTL, so upstream fires a secondary "expire" event after "set".
+        // Plain SET / KEEPTTL / MSET do not.
+        let f = |parts: &[&[u8]]| {
+            let argv: Vec<Vec<u8>> = parts.iter().map(|p| p.to_vec()).collect();
+            Runtime::command_sets_expire_as_side_effect(&argv)
+        };
+        assert!(f(&[b"SET", b"k", b"v", b"EX", b"100"]));
+        assert!(f(&[b"SET", b"k", b"v", b"PX", b"100"]));
+        assert!(f(&[b"SET", b"k", b"v", b"EXAT", b"100"]));
+        assert!(f(&[b"SET", b"k", b"v", b"PXAT", b"100"]));
+        assert!(f(&[b"SET", b"k", b"v", b"NX", b"EX", b"100"]));
+        assert!(f(&[b"SETEX", b"k", b"100", b"v"]));
+        assert!(f(&[b"PSETEX", b"k", b"100", b"v"]));
+        assert!(!f(&[b"SET", b"k", b"v"]));
+        assert!(!f(&[b"SET", b"k", b"v", b"KEEPTTL"]));
+        assert!(!f(&[b"MSET", b"a", b"1", b"b", b"2"]));
     }
 
     #[test]
