@@ -857,6 +857,15 @@ fn acl_access_from_key_flags(flags: &[&str]) -> (bool, bool) {
 /// malformed — callers treat that as "no key checks needed", matching the
 /// earlier `command_key_indexes`-based behaviour.
 pub fn command_acl_key_access(argv: &[Vec<u8>]) -> Vec<AclKeyAccess> {
+    if let [cmd, _, _] = argv
+        && cmd.eq_ignore_ascii_case(b"HGET")
+    {
+        return vec![AclKeyAccess {
+            index: 1,
+            read: true,
+            write: false,
+        }];
+    }
     match command_key_references(argv) {
         Ok(refs) => refs
             .into_iter()
@@ -10122,7 +10131,9 @@ fn zrangestore_cmd(
     // paths). Mirroring that here means `LIMIT 1 -1` doesn't drop
     // the first element from a rank-mode ZRANGESTORE.
     // In-place LIMIT avoids second allocation. (frankenredis-5qwm6)
-    if (byscore || bylex) && let Some(offset) = limit_offset {
+    if (byscore || bylex)
+        && let Some(offset) = limit_offset
+    {
         if offset > 0 && offset < pairs.len() {
             pairs.drain(0..offset);
         } else if offset >= pairs.len() {
@@ -21450,7 +21461,11 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     });
     // (gauntlet B5) WITHSCORES emits RESP3 Double + nested pairs under HELLO 3,
     // flat bulk-string array under RESP2 — same shape as ZRANGE WITHSCORES.
-    zrange_emit_with_resp(result, withscores, store.dispatch_client_ctx.resp_protocol_version)
+    zrange_emit_with_resp(
+        result,
+        withscores,
+        store.dispatch_client_ctx.resp_protocol_version,
+    )
 }
 
 fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -21548,7 +21563,11 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             .then_with(|| a.0.cmp(&b.0))
     });
     // (gauntlet B5) WITHSCORES: RESP3 Double + nested pairs under HELLO 3.
-    zrange_emit_with_resp(result, withscores, store.dispatch_client_ctx.resp_protocol_version)
+    zrange_emit_with_resp(
+        result,
+        withscores,
+        store.dispatch_client_ctx.resp_protocol_version,
+    )
 }
 
 fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -21600,7 +21619,11 @@ fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             .then_with(|| a.0.cmp(&b.0))
     });
     // (gauntlet B5) WITHSCORES: RESP3 Double + nested pairs under HELLO 3.
-    zrange_emit_with_resp(entries, withscores, store.dispatch_client_ctx.resp_protocol_version)
+    zrange_emit_with_resp(
+        entries,
+        withscores,
+        store.dispatch_client_ctx.resp_protocol_version,
+    )
 }
 
 fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -24979,12 +25002,13 @@ mod tests {
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
         SCRIPT_NOSCRIPT_ERROR, SUBCOMMAND_TABLE, acl_command_selectors_for_argv, classify_command,
         client_wrong_subcommand_arity, cluster_disabled_error, cluster_reset_with_keys_error,
-        cluster_wrong_subcommand_arity, command_acl_categories, command_key_indexes,
-        commands_in_acl_category, dispatch_argv, drain_pubsub_messages, eq_ascii_command,
-        eval_script, execute_migrate, format_coord_human, format_eval_read_only_script_error,
-        frame_to_argv, geo_coord_frame, hello_bulk, hello_simple, is_known_acl_command_selector,
-        is_write_command, parse_blocking_deadline_milliseconds, parse_migrate_request,
-        pubsub_message_to_frame, pubsub_message_to_frame_for_protocol, stream_full_group_lag_frame,
+        cluster_wrong_subcommand_arity, command_acl_categories, command_acl_key_access,
+        command_key_indexes, commands_in_acl_category, dispatch_argv, drain_pubsub_messages,
+        eq_ascii_command, eval_script, execute_migrate, format_coord_human,
+        format_eval_read_only_script_error, frame_to_argv, geo_coord_frame, hello_bulk,
+        hello_simple, is_known_acl_command_selector, is_write_command,
+        parse_blocking_deadline_milliseconds, parse_migrate_request, pubsub_message_to_frame,
+        pubsub_message_to_frame_for_protocol, stream_full_group_lag_frame,
     };
 
     fn classify_command_linear(cmd: &[u8]) -> Option<CommandId> {
@@ -49551,7 +49575,7 @@ mod tests {
         // addReplyHumanLongDouble: a RESP3 Double (`,`) under RESP3 and a bulk
         // string under RESP2, with byte-identical textual payload. Verified
         // byte-exact against vendored Redis 7.2.4.
-        let v = 13.361_389_338_970_184_33_f64;
+        let v = 13.361_389_338_970_184_f64;
         let payload = format_coord_human(v);
         assert_eq!(geo_coord_frame(v, true), RespFrame::Double(payload.clone()));
         assert_eq!(
@@ -56474,6 +56498,24 @@ mod tests {
             ));
             assert_eq!(entry[1], want_frame, "{verb:?} flags mismatch");
         }
+    }
+
+    #[test]
+    fn command_acl_key_access_hget_is_single_read_key() {
+        let argv = vec![b"hget".to_vec(), b"hash".to_vec(), b"field".to_vec()];
+        let access = command_acl_key_access(&argv);
+
+        assert_eq!(access.len(), 1);
+        assert_eq!(access[0].index, 1);
+        assert!(access[0].read);
+        assert!(!access[0].write);
+    }
+
+    #[test]
+    fn command_acl_key_access_hget_wrong_arity_stays_empty() {
+        let argv = vec![b"HGET".to_vec(), b"hash".to_vec()];
+
+        assert!(command_acl_key_access(&argv).is_empty());
     }
 
     #[test]

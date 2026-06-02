@@ -487,7 +487,8 @@ fn mr_command_docs_arguments_resp3_map_per_arg_matches_resp2_flat() {
     // expiration) + block subargs, so it exercises the recursion; GET is
     // the flat single-arg baseline.
     for cmd in [&b"SET"[..], &b"GET"[..]] {
-        let (resp2, resp3) = run_both_protocols(&[b"COMMAND".to_vec(), b"DOCS".to_vec(), cmd.to_vec()]);
+        let (resp2, resp3) =
+            run_both_protocols(&[b"COMMAND".to_vec(), b"DOCS".to_vec(), cmd.to_vec()]);
 
         // Outer COMMAND DOCS reply: RESP3 Map of {name -> doc map},
         // RESP2 flat Array. Pull the single command's doc body.
