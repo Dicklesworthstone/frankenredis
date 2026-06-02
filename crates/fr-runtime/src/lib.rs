@@ -5630,7 +5630,40 @@ impl Runtime {
                             let is_copy = argv
                                 .first()
                                 .is_some_and(|c| c.eq_ignore_ascii_case(b"COPY"));
-                            if is_rename && cmd_keys.len() >= 2 {
+                            // (frankenredis-uw80w) RPOPLPUSH / LMOVE (and the
+                            // blocking BRPOPLPUSH / BLMOVE) move an element
+                            // between two lists. Upstream lmoveGenericCommand
+                            // fires the DESTINATION push first, then the SOURCE
+                            // pop, then a "del" if the source emptied.
+                            let is_list_move = argv.first().is_some_and(|c| {
+                                c.eq_ignore_ascii_case(b"LMOVE")
+                                    || c.eq_ignore_ascii_case(b"BLMOVE")
+                                    || c.eq_ignore_ascii_case(b"RPOPLPUSH")
+                                    || c.eq_ignore_ascii_case(b"BRPOPLPUSH")
+                            });
+                            if is_list_move && cmd_keys.len() >= 2 {
+                                let (pop_ev, push_ev) = Self::list_move_events(&argv);
+                                self.server.store.notify_keyspace_event(
+                                    fr_store::NOTIFY_LIST,
+                                    push_ev,
+                                    &cmd_keys[1],
+                                    db,
+                                );
+                                self.server.store.notify_keyspace_event(
+                                    fr_store::NOTIFY_LIST,
+                                    pop_ev,
+                                    &cmd_keys[0],
+                                    db,
+                                );
+                                if !self.server.store.key_is_present(&cmd_keys[0]) {
+                                    self.server.store.notify_keyspace_event(
+                                        fr_store::NOTIFY_GENERIC,
+                                        "del",
+                                        &cmd_keys[0],
+                                        db,
+                                    );
+                                }
+                            } else if is_rename && cmd_keys.len() >= 2 {
                                 // RENAME emits rename_from on source, rename_to on dest
                                 self.server.store.notify_keyspace_event(
                                     event_type,
@@ -5948,10 +5981,9 @@ impl Runtime {
             b"BLPOP",
             b"BRPOP",
             b"BLMPOP",
-            b"LMOVE",
-            b"BLMOVE",
-            b"RPOPLPUSH",
-            b"BRPOPLPUSH",
+            // LMOVE/BLMOVE/RPOPLPUSH/BRPOPLPUSH are handled by the dedicated
+            // list-move branch (which fires push/pop/del in upstream order);
+            // they must NOT also go through the generic trailing-del loop.
             b"SREM",
             b"SPOP",
             b"SMOVE",
@@ -5968,6 +6000,22 @@ impl Runtime {
             b"BZMPOP",
         ];
         SHRINKERS.iter().any(|s| cmd.eq_ignore_ascii_case(s))
+    }
+
+    /// Returns `(pop_event_on_source, push_event_on_destination)` for a list
+    /// move command. RPOPLPUSH/BRPOPLPUSH are fixed rpop→lpush; LMOVE/BLMOVE
+    /// read the FROM (argv[3]) and TO (argv[4]) directions. (frankenredis-uw80w)
+    fn list_move_events(argv: &[Vec<u8>]) -> (&'static str, &'static str) {
+        let cmd = &argv[0];
+        if cmd.eq_ignore_ascii_case(b"RPOPLPUSH") || cmd.eq_ignore_ascii_case(b"BRPOPLPUSH") {
+            return ("rpop", "lpush");
+        }
+        // LMOVE / BLMOVE  src dst FROM TO [timeout]
+        let from_left = argv.get(3).is_some_and(|a| a.eq_ignore_ascii_case(b"LEFT"));
+        let to_left = argv.get(4).is_some_and(|a| a.eq_ignore_ascii_case(b"LEFT"));
+        let pop = if from_left { "lpop" } else { "rpop" };
+        let push = if to_left { "lpush" } else { "rpush" };
+        (pop, push)
     }
 
     fn xgroup_keyspace_event(argv: &[Vec<u8>]) -> &'static str {
@@ -26454,7 +26502,7 @@ mod tests {
         // and the delete-family (which fires "del" as its primary) are out.
         let yes: &[&[u8]] = &[
             b"LPOP", b"RPOP", b"LREM", b"LTRIM", b"LMPOP", b"SREM", b"SPOP", b"HDEL", b"ZREM",
-            b"ZPOPMIN", b"ZPOPMAX", b"ZMPOP", b"SMOVE", b"LMOVE",
+            b"ZPOPMIN", b"ZPOPMAX", b"ZMPOP", b"SMOVE",
         ];
         for c in yes {
             assert!(
@@ -26463,8 +26511,21 @@ mod tests {
                 String::from_utf8_lossy(c)
             );
         }
+        // LMOVE/RPOPLPUSH (and blocking variants) are NOT in this set: their
+        // "del" is fired by the dedicated list-move branch in upstream order,
+        // not the generic trailing-del loop. (frankenredis-uw80w)
         let no: &[&[u8]] = &[
-            b"SADD", b"LPUSH", b"HSET", b"ZADD", b"SET", b"DEL", b"GETDEL",
+            b"SADD",
+            b"LPUSH",
+            b"HSET",
+            b"ZADD",
+            b"SET",
+            b"DEL",
+            b"GETDEL",
+            b"LMOVE",
+            b"RPOPLPUSH",
+            b"BLMOVE",
+            b"BRPOPLPUSH",
         ];
         for c in no {
             assert!(
@@ -26473,6 +26534,39 @@ mod tests {
                 String::from_utf8_lossy(c)
             );
         }
+    }
+
+    #[test]
+    fn list_move_events_map_directions() {
+        // (frankenredis-uw80w) (pop_on_src, push_on_dst). RPOPLPUSH is fixed
+        // rpop→lpush; LMOVE reads FROM (argv[3]) / TO (argv[4]). Verified vs
+        // vendored 7.2.4.
+        let ev = |parts: &[&[u8]]| {
+            let argv: Vec<Vec<u8>> = parts.iter().map(|p| p.to_vec()).collect();
+            Runtime::list_move_events(&argv)
+        };
+        assert_eq!(ev(&[b"RPOPLPUSH", b"a", b"b"]), ("rpop", "lpush"));
+        assert_eq!(ev(&[b"BRPOPLPUSH", b"a", b"b", b"0"]), ("rpop", "lpush"));
+        assert_eq!(
+            ev(&[b"LMOVE", b"a", b"b", b"LEFT", b"RIGHT"]),
+            ("lpop", "rpush")
+        );
+        assert_eq!(
+            ev(&[b"LMOVE", b"a", b"b", b"RIGHT", b"LEFT"]),
+            ("rpop", "lpush")
+        );
+        assert_eq!(
+            ev(&[b"LMOVE", b"a", b"b", b"LEFT", b"LEFT"]),
+            ("lpop", "lpush")
+        );
+        assert_eq!(
+            ev(&[b"LMOVE", b"a", b"b", b"RIGHT", b"RIGHT"]),
+            ("rpop", "rpush")
+        );
+        assert_eq!(
+            ev(&[b"BLMOVE", b"a", b"b", b"LEFT", b"RIGHT", b"0"]),
+            ("lpop", "rpush")
+        );
     }
 
     #[test]
