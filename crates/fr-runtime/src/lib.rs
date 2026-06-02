@@ -12079,8 +12079,16 @@ impl Runtime {
                 let namespaced = this.namespace_argv_for_selected_db(&argv);
                 let mut reply = this.dispatch_with_client_context(&namespaced, now_ms)?;
                 this.strip_db_prefixes_from_frame(&mut reply);
-                if let RespFrame::BulkString(Some(bytes)) = reply {
-                    info.extend_from_slice(&bytes);
+                // The per-section sub-call runs under the same client context,
+                // so when the client negotiated RESP3 (HELLO 3) the INFO reply
+                // is a Verbatim string, not a BulkString. Extract the body from
+                // either so RESP3 clients still receive every section — matching
+                // only BulkString silently dropped server/clients/memory/stats/
+                // cpu/modules/errorstats/cluster under RESP3.
+                match reply {
+                    RespFrame::BulkString(Some(bytes)) => info.extend_from_slice(&bytes),
+                    RespFrame::Verbatim(text) => info.extend_from_slice(text.as_bytes()),
+                    _ => {}
                 }
                 Ok(())
             };
@@ -14806,6 +14814,46 @@ mod tests {
         };
         let all_body = String::from_utf8(bytes).expect("utf8 info");
         assert!(all_body.contains("# Commandstats"), "{all_body}");
+    }
+
+    #[test]
+    fn info_under_resp3_includes_all_command_owned_sections() {
+        // Regression (frankenredis-ffqgl follow-up): the INFO aggregator
+        // delegates server/clients/memory/stats/cpu/modules/errorstats/
+        // cluster to per-section INFO sub-calls. Under HELLO 3 those
+        // sub-calls return a RESP3 Verbatim string, not a BulkString, so
+        // an extract that only matched BulkString silently dropped every
+        // fr-command-owned section — leaving RESP3 clients with just the
+        // runtime-owned persistence/replication/keyspace trio.
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"HELLO", b"3"]), 0);
+
+        let info = rt.execute_frame(command(&[b"INFO"]), 1);
+        let body = match info {
+            // RESP3 INFO is a Verbatim string.
+            RespFrame::Verbatim(text) => text,
+            other => panic!("expected verbatim info response under RESP3, got {other:?}"),
+        };
+
+        // Every default section, in upstream order, must be present.
+        for section in [
+            "# Server",
+            "# Clients",
+            "# Memory",
+            "# Persistence",
+            "# Stats",
+            "# Replication",
+            "# CPU",
+            "# Modules",
+            "# Errorstats",
+            "# Cluster",
+            "# Keyspace",
+        ] {
+            assert!(
+                body.contains(section),
+                "RESP3 default INFO missing {section}:\n{body}"
+            );
+        }
     }
 
     /// (frankenredis-rot3d) Mirror upstream server.c::processCommand —
