@@ -1001,6 +1001,36 @@ fn command_key_references_with_exact_flags(
         return Ok(Some(refs));
     }
 
+    // GEORADIUS / GEORADIUSBYMEMBER: the source key is RO/access and the
+    // optional STORE / STOREDIST destination is OW/update — upstream geo.c
+    // declares two key specs (the second movable, found via georadiusGetKeys).
+    // The *_RO variants take no STORE option, so they fall through to the
+    // read-only generic path. Reuse command_key_indexes (already byte-exact
+    // for GETKEYS) for index detection and only correct the per-key flags:
+    // the source is always argv[1]; any further index is a STORE dst.
+    // (frankenredis-georadius-getkeysflags)
+    if cmd_name.eq_ignore_ascii_case("GEORADIUS")
+        || cmd_name.eq_ignore_ascii_case("GEORADIUSBYMEMBER")
+    {
+        let indexes = command_key_indexes(argv);
+        if indexes.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(
+            indexes
+                .into_iter()
+                .map(|index| CommandKeyReference {
+                    index,
+                    flags: if index == 1 {
+                        KEY_FLAGS_RO_ACCESS
+                    } else {
+                        KEY_FLAGS_OW_UPDATE
+                    },
+                })
+                .collect(),
+        ));
+    }
+
     // BITOP: dst is OW/update, source keys are RO/access.
     // (br-frankenredis-keyflagsupd)
     if cmd_name.eq_ignore_ascii_case("BITOP") && argv.len() >= 4 {
@@ -16073,19 +16103,28 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 "ERR wrong number of arguments for 'command|getkeysandflags' command".to_string(),
             ));
         }
+        // Upstream server.c::getKeysCommand wraps each key's flag list in
+        // addReplySetLen, so under RESP3 the per-key flags are a Set (`~`),
+        // not an Array. RESP2 keeps the flat array. (frankenredis-cmdgkaf-set)
+        let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
         match command_key_references(&argv[2..]) {
             Ok(references) => Ok(RespFrame::Array(Some(
                 references
                     .into_iter()
                     .map(|key| {
+                        let flag_frames: Vec<RespFrame> = key
+                            .flags
+                            .iter()
+                            .map(|flag| RespFrame::SimpleString((*flag).to_string()))
+                            .collect();
+                        let flags_frame = if resp3 {
+                            RespFrame::Set(Some(flag_frames))
+                        } else {
+                            RespFrame::Array(Some(flag_frames))
+                        };
                         RespFrame::Array(Some(vec![
                             RespFrame::BulkString(Some(argv[2 + key.index].clone())),
-                            RespFrame::Array(Some(
-                                key.flags
-                                    .iter()
-                                    .map(|flag| RespFrame::SimpleString((*flag).to_string()))
-                                    .collect(),
-                            )),
+                            flags_frame,
                         ]))
                     })
                     .collect(),
@@ -56108,6 +56147,94 @@ mod tests {
         assert_eq!(
             frame,
             RespFrame::Error("ERR Invalid number of arguments specified for command".to_string()),
+        );
+    }
+
+    #[test]
+    fn command_getkeysandflags_georadius_store_uses_per_keyspec_flags() {
+        // (frankenredis-georadius-getkeysflags) Upstream geo.c declares two
+        // key specs for GEORADIUS/GEORADIUSBYMEMBER: the source key is
+        // RO/access and the optional STORE/STOREDIST destination is OW/update.
+        // fr previously fell through to the generic write-command flag set,
+        // tagging BOTH keys RW/access/update. Verified byte-exact vs
+        // vendored 7.2.4.
+        let mut store = Store::new();
+        let ro_access = RespFrame::Array(Some(vec![
+            RespFrame::SimpleString("RO".into()),
+            RespFrame::SimpleString("access".into()),
+        ]));
+        let ow_update = RespFrame::Array(Some(vec![
+            RespFrame::SimpleString("OW".into()),
+            RespFrame::SimpleString("update".into()),
+        ]));
+        for verb in [b"GEORADIUS".as_slice(), b"GEORADIUSBYMEMBER"] {
+            // STORE form: src RO/access, dst OW/update.
+            let argv: Vec<Vec<u8>> = [
+                b"COMMAND".as_slice(),
+                b"GETKEYSANDFLAGS",
+                verb,
+                b"src",
+                b"0",
+                b"0",
+                b"1",
+                b"m",
+                b"STORE",
+                b"dst",
+            ]
+            .iter()
+            .map(|a| a.to_vec())
+            .collect();
+            let frame = dispatch_argv(&argv, &mut store, 0).expect("getkeysandflags store");
+            let RespFrame::Array(Some(refs)) = frame else {
+                panic!("expected array, got {frame:?}"); // ubs:ignore — AI triage
+            };
+            assert_eq!(refs.len(), 2, "{verb:?} STORE should report 2 keys");
+            let RespFrame::Array(Some(src)) = &refs[0] else {
+                panic!("src ref shape"); // ubs:ignore — AI triage
+            };
+            assert_eq!(src[1], ro_access, "{verb:?} source must be RO/access");
+            let RespFrame::Array(Some(dst)) = &refs[1] else {
+                panic!("dst ref shape"); // ubs:ignore — AI triage
+            };
+            assert_eq!(dst[1], ow_update, "{verb:?} STORE dst must be OW/update");
+        }
+    }
+
+    #[test]
+    fn command_getkeysandflags_flags_are_set_under_resp3() {
+        // (frankenredis-cmdgkaf-set) Upstream server.c::getKeysCommand wraps
+        // each key's flag list in addReplySetLen — so under RESP3 the per-key
+        // flags are a Set (`~`), and under RESP2 a flat Array.
+        let argv = [b"COMMAND".as_slice(), b"GETKEYSANDFLAGS", b"GET", b"k"]
+            .iter()
+            .map(|a| a.to_vec())
+            .collect::<Vec<_>>();
+
+        let mut store3 = Store::new();
+        store3.dispatch_client_ctx.resp_protocol_version = 3;
+        let frame = dispatch_argv(&argv, &mut store3, 0).expect("resp3");
+        let RespFrame::Array(Some(refs)) = frame else {
+            panic!("expected array"); // ubs:ignore — AI triage
+        };
+        let RespFrame::Array(Some(entry)) = &refs[0] else {
+            panic!("entry shape"); // ubs:ignore — AI triage
+        };
+        assert!(
+            matches!(entry[1], RespFrame::Set(_)),
+            "RESP3 per-key flags must be a Set"
+        );
+
+        let mut store2 = Store::new();
+        let frame = dispatch_argv(&argv, &mut store2, 0).expect("resp2");
+        let RespFrame::Array(Some(refs)) = frame else {
+            panic!("expected array"); // ubs:ignore — AI triage
+        };
+        let RespFrame::Array(Some(entry)) = &refs[0] else {
+            panic!("entry shape"); // ubs:ignore — AI triage
+        };
+        assert!(
+            matches!(entry[1], RespFrame::Array(_)),
+            "RESP2 per-key flags stay an Array"
         );
     }
 
