@@ -7737,16 +7737,15 @@ impl Store {
             let mut added = 0_usize;
             let mut changed = 0_usize;
 
-            let mut deduplicated = Vec::with_capacity(members.len());
-            let mut seen = std::collections::HashSet::new();
-            for (score, member) in members.iter().rev() {
-                if seen.insert(member.as_slice()) {
-                    deduplicated.push((score, member));
-                }
-            }
-            deduplicated.reverse();
-
-            for (score, member) in deduplicated {
+            // (frankenredis-zadddedup) Upstream t_zset.c::zaddGenericCommand
+            // processes each (score, member) pair SEQUENTIALLY against the
+            // current set state, so a member that repeats within one ZADD is
+            // evaluated against the score an earlier pair just set. The prior
+            // dedup-keep-last shortcut corrupted both the final score (e.g.
+            // `ZADD k GT 20 a 10 a` must end at 20, not 10; `ZADD k NX 1 a 2 a`
+            // must keep 1, not 2) and the CH/added counts (each successive
+            // change counts). Iterate the pairs verbatim.
+            for (score, member) in members {
                 match zs.get_score(member) {
                     Some(old_score) => {
                         // Existing member
@@ -21899,6 +21898,82 @@ mod tests {
         );
         assert_eq!(store.scard(b"k", 0), Err(StoreError::WrongType));
         assert_eq!(store.sismember(b"k", b"x", 0), Err(StoreError::WrongType));
+    }
+
+    #[test]
+    fn zadd_repeated_member_processes_pairs_sequentially() {
+        // (frankenredis-u3ifm) A member repeated within one ZADD must be
+        // evaluated sequentially against the score an earlier pair just set —
+        // not deduped to last. Verified byte-exact vs vendored 7.2.4.
+        use super::ZaddOptions;
+        let gt = ZaddOptions {
+            gt: true,
+            ch: true,
+            ..ZaddOptions::default()
+        };
+        let mut store = Store::new();
+        store.zadd(b"z", &[(8.0, b"a".to_vec())], 0).unwrap();
+        // GT CH: a 8->10 (chg), b added, a 10->20 (chg) = 3; final a = 20.
+        let (n, _) = store
+            .zadd_with_options(
+                b"z",
+                &[
+                    (10.0, b"a".to_vec()),
+                    (1.0, b"b".to_vec()),
+                    (20.0, b"a".to_vec()),
+                ],
+                gt,
+                0,
+            )
+            .unwrap();
+        assert_eq!(n, 3, "GT CH counts each sequential change");
+        assert_eq!(store.zscore(b"z", b"a", 0).unwrap(), Some(20.0));
+
+        // GT with descending repeats must keep the HIGHER score (20), not last.
+        let gt2 = ZaddOptions {
+            gt: true,
+            ..ZaddOptions::default()
+        };
+        store.zadd(b"z2", &[(8.0, b"a".to_vec())], 0).unwrap();
+        store
+            .zadd_with_options(
+                b"z2",
+                &[(20.0, b"a".to_vec()), (10.0, b"a".to_vec())],
+                gt2,
+                0,
+            )
+            .unwrap();
+        assert_eq!(store.zscore(b"z2", b"a", 0).unwrap(), Some(20.0));
+
+        // NX keeps the FIRST score for a repeated member.
+        let nx = ZaddOptions {
+            nx: true,
+            ..ZaddOptions::default()
+        };
+        store
+            .zadd_with_options(b"z3", &[(1.0, b"a".to_vec()), (2.0, b"a".to_vec())], nx, 0)
+            .unwrap();
+        assert_eq!(store.zscore(b"z3", b"a", 0).unwrap(), Some(1.0));
+
+        // Plain CH counts each successive update of the same member.
+        let ch = ZaddOptions {
+            ch: true,
+            ..ZaddOptions::default()
+        };
+        let (n, _) = store
+            .zadd_with_options(
+                b"z4",
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"a".to_vec()),
+                    (3.0, b"a".to_vec()),
+                ],
+                ch,
+                0,
+            )
+            .unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(store.zscore(b"z4", b"a", 0).unwrap(), Some(3.0));
     }
 
     #[test]
