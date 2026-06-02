@@ -87,6 +87,32 @@ fn push_usize(out: &mut Vec<u8>, n: usize) {
     out.extend_from_slice(&buf[pos..]);
 }
 
+fn decimal_u64_len(mut n: u64) -> usize {
+    let mut len = 1;
+    while n >= 10 {
+        n /= 10;
+        len += 1;
+    }
+    len
+}
+
+fn decimal_usize_len(mut n: usize) -> usize {
+    let mut len = 1;
+    while n >= 10 {
+        n /= 10;
+        len += 1;
+    }
+    len
+}
+
+fn decimal_i64_len(n: i64) -> usize {
+    if n < 0 {
+        1 + decimal_u64_len((n as i128).unsigned_abs() as u64)
+    } else {
+        decimal_u64_len(n as u64)
+    }
+}
+
 fn push_inline_sanitized(out: &mut Vec<u8>, body: &[u8]) {
     let needs_sanitize = body.iter().any(|&b| b == b'\r' || b == b'\n');
     if !needs_sanitize {
@@ -106,9 +132,70 @@ fn push_inline_sanitized(out: &mut Vec<u8>, body: &[u8]) {
 impl RespFrame {
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(self.encoded_len_hint().unwrap_or(0));
         self.encode_into(&mut out);
         out
+    }
+
+    fn encoded_len_hint(&self) -> Option<usize> {
+        match self {
+            Self::SimpleString(s) | Self::Error(s) | Self::Double(s) => {
+                1usize.checked_add(s.len())?.checked_add(2)
+            }
+            Self::Integer(n) => 1usize.checked_add(decimal_i64_len(*n))?.checked_add(2),
+            Self::BulkString(None) => Some(5),
+            Self::BulkString(Some(bytes)) => 1usize
+                .checked_add(decimal_usize_len(bytes.len()))?
+                .checked_add(2)?
+                .checked_add(bytes.len())?
+                .checked_add(2),
+            Self::Array(None) => Some(5),
+            Self::Array(Some(frames)) | Self::Set(Some(frames)) => {
+                let mut len = 1usize
+                    .checked_add(decimal_usize_len(frames.len()))?
+                    .checked_add(2)?;
+                for frame in frames {
+                    len = len.checked_add(frame.encoded_len_hint()?)?;
+                }
+                Some(len)
+            }
+            Self::Map(None) => Some(5),
+            Self::Map(Some(entries)) => {
+                let mut len = 1usize
+                    .checked_add(decimal_usize_len(entries.len()))?
+                    .checked_add(2)?;
+                for (key, value) in entries {
+                    len = len.checked_add(key.encoded_len_hint()?)?;
+                    len = len.checked_add(value.encoded_len_hint()?)?;
+                }
+                Some(len)
+            }
+            Self::Push(frames) => {
+                let mut len = 1usize
+                    .checked_add(decimal_usize_len(frames.len()))?
+                    .checked_add(2)?;
+                for frame in frames {
+                    len = len.checked_add(frame.encoded_len_hint()?)?;
+                }
+                Some(len)
+            }
+            Self::Sequence(frames) => {
+                let mut len = 0usize;
+                for frame in frames {
+                    len = len.checked_add(frame.encoded_len_hint()?)?;
+                }
+                Some(len)
+            }
+            Self::Set(None) => Some(5),
+            Self::Verbatim(s) => {
+                let body_len = s.len().checked_add(4)?;
+                1usize
+                    .checked_add(decimal_usize_len(body_len))?
+                    .checked_add(2)?
+                    .checked_add(body_len)?
+                    .checked_add(2)
+            }
+        }
     }
 
     pub fn encode_into(&self, out: &mut Vec<u8>) {
@@ -1883,6 +1970,42 @@ mod tests {
                 golden,
                 "Binary bulk string encoding changed"
             );
+        }
+
+        #[test]
+        fn to_bytes_capacity_hint_preserves_encode_into_bytes() {
+            let frames = vec![
+                RespFrame::SimpleString("OK\r\nstill-one-frame".to_string()),
+                RespFrame::Error("ERR sample".to_string()),
+                RespFrame::Integer(i64::MIN),
+                RespFrame::BulkString(None),
+                RespFrame::BulkString(Some(vec![0x00, 0xFF, b'\r', b'\n'])),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"field".to_vec())),
+                    RespFrame::BulkString(Some(b"value".to_vec())),
+                ])),
+                RespFrame::Map(Some(vec![(
+                    RespFrame::SimpleString("key".to_string()),
+                    RespFrame::Integer(7),
+                )])),
+                RespFrame::Push(vec![
+                    RespFrame::SimpleString("message".to_string()),
+                    RespFrame::BulkString(Some(b"payload".to_vec())),
+                ]),
+                RespFrame::Sequence(vec![RespFrame::Integer(1), RespFrame::Integer(2)]),
+                RespFrame::Double("-inf".to_string()),
+                RespFrame::Set(None),
+                RespFrame::Set(Some(vec![RespFrame::BulkString(Some(b"member".to_vec()))])),
+                RespFrame::Verbatim("hello world".to_string()),
+            ];
+
+            for frame in frames {
+                let mut encode_into_bytes = Vec::new();
+                frame.encode_into(&mut encode_into_bytes);
+                let to_bytes = frame.to_bytes();
+                assert_eq!(to_bytes, encode_into_bytes);
+                assert_eq!(frame.encoded_len_hint(), Some(to_bytes.len()));
+            }
         }
 
         /// Golden test: null array encoding.
