@@ -17414,6 +17414,20 @@ fn command_docs_entry(
         let mut pairs = Vec::with_capacity(entry.len() / 2);
         let mut iter = entry.into_iter();
         while let (Some(k), Some(v)) = (iter.next(), iter.next()) {
+            // Upstream server.c::commandDocsCommand emits the `history` and
+            // `doc_flags` field values via addReplySetLen, so under RESP3
+            // they are Sets (~), not Arrays. (frankenredis-8lgn3 follow-up)
+            let v = match &k {
+                RespFrame::BulkString(Some(name))
+                    if matches!(name.as_slice(), b"history" | b"doc_flags") =>
+                {
+                    match v {
+                        RespFrame::Array(Some(items)) => RespFrame::Set(Some(items)),
+                        other => other,
+                    }
+                }
+                _ => v,
+            };
             pairs.push((k, v));
         }
         RespFrame::Map(Some(pairs))
@@ -17440,11 +17454,20 @@ fn command_docs_arg_to_resp3(arg: RespFrame) -> RespFrame {
         // Array of sub-args; each sub-arg is itself a Map in RESP3.
         let is_subargs =
             matches!(&key, RespFrame::BulkString(Some(b)) if b.as_slice() == b"arguments");
+        // Upstream server.c::addReplyCommandArgList emits each arg's `flags`
+        // value (optional/multiple/multiple-token) via addReplySetLen, so it
+        // is a Set (~) in RESP3, not an Array. (frankenredis-8lgn3 follow-up)
+        let is_flags = matches!(&key, RespFrame::BulkString(Some(b)) if b.as_slice() == b"flags");
         let value = if is_subargs {
             match value {
                 RespFrame::Array(Some(subargs)) => RespFrame::Array(Some(
                     subargs.into_iter().map(command_docs_arg_to_resp3).collect(),
                 )),
+                other => other,
+            }
+        } else if is_flags {
+            match value {
+                RespFrame::Array(Some(flags)) => RespFrame::Set(Some(flags)),
                 other => other,
             }
         } else {
@@ -55455,6 +55478,60 @@ mod tests {
             inner[0].1,
             RespFrame::BulkString(Some(b"Returns the string value of a key.".to_vec()))
         );
+    }
+
+    #[test]
+    fn command_docs_under_resp3_history_doc_flags_arg_flags_are_sets() {
+        // (frankenredis-mgzbz) Upstream server.c::commandDocsCommand and
+        // addReplyCommandArgList emit the `history`, `doc_flags`, and each
+        // argument's `flags` values via addReplySetLen — so under RESP3 they
+        // are Sets (~), not Arrays. Verified byte-exact vs vendored 7.2.4.
+        fn inner_field(cmd: &[u8], field: &[u8]) -> RespFrame {
+            let mut store = Store::new();
+            store.dispatch_client_ctx.resp_protocol_version = 3;
+            let out = dispatch_argv(
+                &[b"COMMAND".to_vec(), b"DOCS".to_vec(), cmd.to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("docs");
+            let RespFrame::Map(Some(outer)) = out else {
+                panic!("outer map"); // ubs:ignore — AI triage
+            };
+            let RespFrame::Map(Some(inner)) = &outer[0].1 else {
+                panic!("inner map"); // ubs:ignore — AI triage
+            };
+            inner
+                .iter()
+                .find(|(k, _)| *k == RespFrame::BulkString(Some(field.to_vec())))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("missing field {:?}", String::from_utf8_lossy(field)))
+        }
+        // SET has a `history` field.
+        assert!(
+            matches!(inner_field(b"SET", b"history"), RespFrame::Set(_)),
+            "history must be a Set under RESP3"
+        );
+        // SUBSTR is deprecated → has a `doc_flags` field.
+        assert!(
+            matches!(inner_field(b"SUBSTR", b"doc_flags"), RespFrame::Set(_)),
+            "doc_flags must be a Set under RESP3"
+        );
+        // SET's arguments carry per-arg `flags` Sets (e.g. the optional
+        // expiration/condition args).
+        let RespFrame::Array(Some(args)) = inner_field(b"SET", b"arguments") else {
+            panic!("arguments must be an Array of per-arg Maps"); // ubs:ignore — AI triage
+        };
+        let has_flags_set = args.iter().any(|a| {
+            let RespFrame::Map(Some(fields)) = a else {
+                return false;
+            };
+            fields.iter().any(|(k, v)| {
+                *k == RespFrame::BulkString(Some(b"flags".to_vec()))
+                    && matches!(v, RespFrame::Set(_))
+            })
+        });
+        assert!(has_flags_set, "at least one arg's flags must be a Set");
     }
 
     #[test]
