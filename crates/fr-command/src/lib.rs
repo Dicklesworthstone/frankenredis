@@ -18724,12 +18724,15 @@ pub fn client_trackinginfo_frame(
     // Mirror upstream networking.c::trackingInfoCommand which uses
     // addReplyMapLen(c, 3) — RESP3 wire shape is a Map, RESP2 a flat
     // Array of alternating k/v pairs. Same pattern as hgetall.
-    // (frankenredis-i40x2)
+    // The `flags` value is emitted via setDeferredSetLen, so in RESP3
+    // it is a Set (~) — not a plain Array; only `prefixes` stays an
+    // Array. In RESP2 a Set degrades to an Array, matching the legacy
+    // wire shape below. (frankenredis-i40x2)
     if resp_protocol_version == 3 {
         RespFrame::Map(Some(vec![
             (
                 RespFrame::BulkString(Some(b"flags".to_vec())),
-                RespFrame::Array(Some(client_tracking_flags(state))),
+                RespFrame::Set(Some(client_tracking_flags(state))),
             ),
             (
                 RespFrame::BulkString(Some(b"redirect".to_vec())),
@@ -18840,6 +18843,17 @@ pub fn parse_client_tracking_state(argv: &[Vec<u8>]) -> Result<ClientTrackingSta
         return Err(CommandError::Custom(
             CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT.to_string(),
         ));
+    }
+
+    // Upstream tracking.c::enableTracking registers the empty prefix ""
+    // for BCAST clients that pass no explicit PREFIX:
+    //   `if (numprefix == 0) enableBcastTrackingForPrefix(c,"",0);`
+    // The empty prefix is a true match-all (every key starts_with ""),
+    // and it is stored in client_tracking_prefixes so CLIENT TRACKINGINFO
+    // reports `prefixes` as a one-element array holding "". Mirror that
+    // here so the stored state — and its info reply — match byte-for-byte.
+    if bcast && prefixes.is_empty() {
+        prefixes.insert(Vec::new());
     }
 
     Ok(ClientTrackingState {
@@ -67871,7 +67885,14 @@ mod tests {
         impl ValidTrackingCase {
             fn expected_state(&self) -> ClientTrackingState {
                 let prefixes = if matches!(self.flavor, TrackingFlavor::Bcast) {
-                    self.prefixes.iter().cloned().collect::<BTreeSet<Vec<u8>>>()
+                    let mut set = self.prefixes.iter().cloned().collect::<BTreeSet<Vec<u8>>>();
+                    // BCAST with no explicit PREFIX gains the implicit empty
+                    // prefix "" (tracking.c::enableTracking), so the model must
+                    // carry it too or the round-trip parse will not match.
+                    if set.is_empty() {
+                        set.insert(Vec::new());
+                    }
+                    set
                 } else {
                     BTreeSet::new()
                 };
