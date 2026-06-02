@@ -451,6 +451,110 @@ fn mr_latency_histogram_resp3_map_outer_matches_resp2_flat_alternating() {
     }
 }
 
+/// Recursively assert that every COMMAND DOCS argument entry reachable
+/// from `frame` is a RESP3 Map (not a flat Array), descending through
+/// the nested `arguments` sub-array of oneof/block args. Returns the
+/// number of argument-Maps inspected so the caller can assert the walk
+/// actually visited the nested levels.
+fn assert_args_are_maps(args_array: &RespFrame) -> usize {
+    let RespFrame::Array(Some(args)) = args_array else {
+        panic!("RESP3 'arguments' value must be an Array of per-arg Maps, got {args_array:?}"); // ubs:ignore — AI triage
+    };
+    let mut count = 0;
+    for arg in args {
+        let RespFrame::Map(Some(pairs)) = arg else {
+            panic!("each RESP3 argument must be a Map, got {arg:?}"); // ubs:ignore — AI triage
+        };
+        count += 1;
+        // Descend into oneof/block subargs, which upstream also emits as
+        // a Map per arg under a nested 'arguments' field.
+        for (k, v) in pairs {
+            if matches!(k, RespFrame::BulkString(Some(b)) if b.as_slice() == b"arguments") {
+                count += assert_args_are_maps(v);
+            }
+        }
+    }
+    count
+}
+
+#[test]
+fn mr_command_docs_arguments_resp3_map_per_arg_matches_resp2_flat() {
+    // (frankenredis-8lgn3) Upstream server.c::addReplyCommandArgList
+    // wraps each per-argument entry in addReplyMapLen — under RESP3 the
+    // 'arguments' field is an Array of per-arg Maps (recursively for
+    // oneof/block subargs); under RESP2 each arg stays a flat 2N
+    // alternating-element Array. SET carries nested oneof (condition,
+    // expiration) + block subargs, so it exercises the recursion; GET is
+    // the flat single-arg baseline.
+    for cmd in [&b"SET"[..], &b"GET"[..]] {
+        let (resp2, resp3) = run_both_protocols(&[b"COMMAND".to_vec(), b"DOCS".to_vec(), cmd.to_vec()]);
+
+        // Outer COMMAND DOCS reply: RESP3 Map of {name -> doc map},
+        // RESP2 flat Array. Pull the single command's doc body.
+        let RespFrame::Map(Some(outer3)) = &resp3 else {
+            panic!("{cmd:?}: RESP3 COMMAND DOCS must be a Map, got {resp3:?}"); // ubs:ignore — AI triage
+        };
+        assert_eq!(outer3.len(), 1, "{cmd:?}: one command requested");
+        let doc3 = &outer3[0].1;
+        let RespFrame::Map(Some(doc_pairs)) = doc3 else {
+            panic!("{cmd:?}: RESP3 per-command doc must be a Map, got {doc3:?}"); // ubs:ignore — AI triage
+        };
+        let args3 = doc_pairs
+            .iter()
+            .find(|(k, _)| matches!(k, RespFrame::BulkString(Some(b)) if b.as_slice() == b"arguments"))
+            .map(|(_, v)| v)
+            .unwrap_or_else(|| panic!("{cmd:?}: RESP3 doc must carry an 'arguments' field")); // ubs:ignore — AI triage
+
+        // Every arg (and nested subarg) under RESP3 must be a Map.
+        let inspected = assert_args_are_maps(args3);
+        assert!(
+            inspected > 0,
+            "{cmd:?}: expected at least one argument Map to inspect"
+        );
+
+        // Full structural equivalence: canonicalizing the RESP3 tree
+        // (Map -> flat Array, recursively) must reproduce the RESP2 tree
+        // byte-for-byte. This proves the Map conversion changed only the
+        // wire shape, not field order or values.
+        assert_eq!(
+            canonicalize_to_resp2_shape(&resp3),
+            resp2,
+            "{cmd:?}: canonicalized RESP3 COMMAND DOCS must equal RESP2 form"
+        );
+    }
+
+    // SET specifically must surface nested subargs (recursion depth > 1).
+    let (_resp2, resp3) =
+        run_both_protocols(&[b"COMMAND".to_vec(), b"DOCS".to_vec(), b"SET".to_vec()]);
+    let RespFrame::Map(Some(outer3)) = &resp3 else {
+        unreachable!("guarded above"); // ubs:ignore — AI triage
+    };
+    let RespFrame::Map(Some(doc_pairs)) = &outer3[0].1 else {
+        unreachable!("guarded above"); // ubs:ignore — AI triage
+    };
+    let args3 = doc_pairs
+        .iter()
+        .find(|(k, _)| matches!(k, RespFrame::BulkString(Some(b)) if b.as_slice() == b"arguments"))
+        .map(|(_, v)| v)
+        .unwrap();
+    let RespFrame::Array(Some(top_args)) = args3 else {
+        unreachable!("guarded by assert_args_are_maps"); // ubs:ignore — AI triage
+    };
+    let has_nested = top_args.iter().any(|arg| {
+        let RespFrame::Map(Some(pairs)) = arg else {
+            return false;
+        };
+        pairs.iter().any(|(k, v)| {
+            matches!(k, RespFrame::BulkString(Some(b)) if b.as_slice() == b"arguments")
+                && matches!(v, RespFrame::Array(Some(sub)) if !sub.is_empty())
+        })
+    });
+    assert!(
+        has_nested,
+        "SET COMMAND DOCS must carry at least one oneof/block arg with nested subargs"
+    );
+}
+
 #[test]
 fn mr_protocol_switch_does_not_alter_data() {
     // The wire shape must change with protocol but the underlying

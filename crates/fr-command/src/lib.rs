@@ -17090,7 +17090,23 @@ fn command_docs_entry(
     let arguments = command_docs_arguments(name, arity, first_key, last_key, step);
     if !arguments.is_empty() {
         entry.push(hello_bulk("arguments"));
-        entry.push(RespFrame::Array(Some(arguments)));
+        // (frankenredis-8lgn3) Upstream server.c::addReplyCommandArgList
+        // wraps each per-argument entry in addReplyMapLen — the RESP3 wire
+        // shape is an Array of per-arg Maps; RESP2 stays the flat 2N
+        // alternating-element Array per arg. The builders (command_docs_arg
+        // / json_arg_to_resp / arity fallback) always emit the RESP2 flat
+        // shape; convert each arg (recursing into oneof/block subargs) to a
+        // Map when RESP3 is negotiated.
+        if resp_protocol_version == 3 {
+            entry.push(RespFrame::Array(Some(
+                arguments
+                    .into_iter()
+                    .map(command_docs_arg_to_resp3)
+                    .collect(),
+            )));
+        } else {
+            entry.push(RespFrame::Array(Some(arguments)));
+        }
     }
     // (frankenredis-bpf4q) Containers emit a "subcommands" field after
     // arguments. RESP2 wire: flat 2N alternating array of (name, docs);
@@ -17134,6 +17150,39 @@ fn command_docs_entry(
     } else {
         RespFrame::Array(Some(entry))
     }
+}
+
+/// (frankenredis-8lgn3) Convert one COMMAND DOCS argument from its RESP2
+/// flat-array shape (alternating k/v) into the RESP3 Map shape that
+/// upstream server.c::addReplyCommandArgList emits via addReplyMapLen.
+/// Recurses into the nested `arguments` sub-array (oneof/block subargs)
+/// so every level of the tree becomes a Map. Non-array inputs and
+/// odd-length entries are passed through untouched.
+fn command_docs_arg_to_resp3(arg: RespFrame) -> RespFrame {
+    let entry = match arg {
+        RespFrame::Array(Some(v)) if v.len().is_multiple_of(2) => v,
+        other => return other,
+    };
+    let mut pairs = Vec::with_capacity(entry.len() / 2);
+    let mut iter = entry.into_iter();
+    while let (Some(key), Some(value)) = (iter.next(), iter.next()) {
+        // The `arguments` field of a oneof/block arg carries a nested
+        // Array of sub-args; each sub-arg is itself a Map in RESP3.
+        let is_subargs =
+            matches!(&key, RespFrame::BulkString(Some(b)) if b.as_slice() == b"arguments");
+        let value = if is_subargs {
+            match value {
+                RespFrame::Array(Some(subargs)) => RespFrame::Array(Some(
+                    subargs.into_iter().map(command_docs_arg_to_resp3).collect(),
+                )),
+                other => other,
+            }
+        } else {
+            value
+        };
+        pairs.push((key, value));
+    }
+    RespFrame::Map(Some(pairs))
 }
 
 fn command_docs_arguments(
