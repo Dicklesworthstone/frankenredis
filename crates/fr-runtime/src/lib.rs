@@ -5702,9 +5702,12 @@ impl Runtime {
             || cmd.eq_ignore_ascii_case(b"MSETNX")
             || cmd.eq_ignore_ascii_case(b"SETNX")
             || cmd.eq_ignore_ascii_case(b"GETSET")
-            || cmd.eq_ignore_ascii_case(b"SETRANGE")
         {
             "set"
+        } else if cmd.eq_ignore_ascii_case(b"SETRANGE") {
+            // Upstream t_string.c::setrangeCommand fires NOTIFY_STRING
+            // "setrange", not "set". (frankenredis-ylu1p)
+            "setrange"
         } else if cmd.eq_ignore_ascii_case(b"DEL") || cmd.eq_ignore_ascii_case(b"UNLINK") {
             "del"
         } else if cmd.eq_ignore_ascii_case(b"APPEND") {
@@ -5765,7 +5768,9 @@ impl Runtime {
         } else if cmd.eq_ignore_ascii_case(b"ZREM") {
             "zrem"
         } else if cmd.eq_ignore_ascii_case(b"ZINCRBY") {
-            "zincrby"
+            // Upstream t_zset.c::zincrbyCommand fires NOTIFY_ZSET "zincr",
+            // not "zincrby". (frankenredis-ylu1p)
+            "zincr"
         } else if cmd.eq_ignore_ascii_case(b"ZPOPMIN") {
             "zpopmin"
         } else if cmd.eq_ignore_ascii_case(b"ZPOPMAX") {
@@ -5777,7 +5782,9 @@ impl Runtime {
         } else if cmd.eq_ignore_ascii_case(b"XTRIM") {
             "xtrim"
         } else if cmd.eq_ignore_ascii_case(b"GETDEL") {
-            "getdel"
+            // Upstream t_string.c::getdelCommand deletes the key and fires
+            // NOTIFY_GENERIC "del", not "getdel". (frankenredis-ylu1p)
+            "del"
         } else if cmd.eq_ignore_ascii_case(b"COPY") {
             "copy_to"
         } else if cmd.eq_ignore_ascii_case(b"RESTORE") {
@@ -5785,7 +5792,19 @@ impl Runtime {
         } else if cmd.eq_ignore_ascii_case(b"SETBIT") {
             "setbit"
         } else if cmd.eq_ignore_ascii_case(b"GETEX") {
-            "getex"
+            // Upstream t_string.c::getexCommand fires "persist" when the
+            // PERSIST option clears a TTL, otherwise "expire" when it sets
+            // one (EX/PX/EXAT/PXAT). A no-option GETEX makes no change and
+            // never reaches this dirty-gated path. (frankenredis-ylu1p)
+            if argv
+                .iter()
+                .skip(2)
+                .any(|a| a.eq_ignore_ascii_case(b"PERSIST"))
+            {
+                "persist"
+            } else {
+                "expire"
+            }
         } else if cmd.eq_ignore_ascii_case(b"BITOP") {
             // Upstream bitops.c::bitopCommand fires NOTIFY_STRING "set"
             // (or "del" if the result is empty + erased); we approximate
@@ -26273,6 +26292,25 @@ mod tests {
             ),
             RespFrame::SimpleString("OK".to_string())
         );
+    }
+
+    #[test]
+    fn command_to_keyspace_event_names_match_upstream() {
+        // (frankenredis-ylu1p) Several commands fire a keyspace event whose
+        // name differs from the command verb. Verified vs vendored 7.2.4.
+        let ev = |parts: &[&[u8]]| {
+            let argv: Vec<Vec<u8>> = parts.iter().map(|p| p.to_vec()).collect();
+            Runtime::command_to_keyspace_event(&argv)
+        };
+        assert_eq!(ev(&[b"SETRANGE", b"k", b"0", b"x"]), "setrange");
+        assert_eq!(ev(&[b"ZINCRBY", b"z", b"1", b"m"]), "zincr");
+        assert_eq!(ev(&[b"GETDEL", b"k"]), "del");
+        assert_eq!(ev(&[b"GETEX", b"k", b"EX", b"100"]), "expire");
+        assert_eq!(ev(&[b"GETEX", b"k", b"PERSIST"]), "persist");
+        // Regression guard: the plain SET family stays "set".
+        assert_eq!(ev(&[b"SET", b"k", b"v"]), "set");
+        assert_eq!(ev(&[b"GETSET", b"k", b"v"]), "set");
+        assert_eq!(ev(&[b"SETNX", b"k", b"v"]), "set");
     }
 
     #[test]
