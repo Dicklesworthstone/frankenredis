@@ -11341,7 +11341,15 @@ impl Store {
         // key when the result length is 0, rather than storing an
         // empty string. (br-frankenredis-bitopempty)
         if len == 0 {
+            // (frankenredis-5wz6g) Mirror upstream: an empty result only
+            // bumps dirty / signals a change when the destination key
+            // actually EXISTED (dbDelete returns non-zero). Deleting a
+            // non-existent dest is a no-op — no dirty, no keyspace "del".
+            let existed = self.entries.contains_key(dest);
             self.internal_entries_remove(dest);
+            if existed {
+                self.dirty = self.dirty.saturating_add(1);
+            }
         } else {
             // Upstream creates the destination via dbAdd which uses
             // raw encoding regardless of length.
@@ -11349,8 +11357,8 @@ impl Store {
             let mut entry = Entry::new(Value::String(result), None, now_ms);
             entry.force_raw_encoding = true;
             self.internal_entries_insert(dest.to_vec(), entry);
+            self.dirty = self.dirty.saturating_add(1);
         }
-        self.dirty = self.dirty.saturating_add(1);
         Ok(len)
     }
 
@@ -20612,6 +20620,28 @@ mod tests {
             other => return Err(format!("RPOP COUNT LFU mismatch: {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn bitop_empty_result_on_absent_dest_does_not_dirty() {
+        // (frankenredis-jx15l) Upstream bitops.c only bumps dirty (and fires
+        // "del") for an empty BITOP result when the destination actually
+        // existed — deleting a non-existent dest is a no-op.
+        let mut store = Store::new();
+        let before = store.dirty;
+        // AND with a non-existent source → empty result, dest "d" absent.
+        let len = store.bitop(b"AND", b"d", &[b"missing"], 0).expect("bitop");
+        assert_eq!(len, 0);
+        assert_eq!(store.dirty, before, "no-op BITOP must not bump dirty");
+        assert!(!store.key_is_present(b"d"));
+
+        // When the dest exists, the empty result deletes it and DOES dirty.
+        store.set(b"d".to_vec(), b"old".to_vec(), None, 0);
+        let before = store.dirty;
+        let len = store.bitop(b"AND", b"d", &[b"missing"], 0).expect("bitop2");
+        assert_eq!(len, 0);
+        assert_eq!(store.dirty, before + 1, "deleting an existing dest dirties");
+        assert!(!store.key_is_present(b"d"));
     }
 
     #[test]

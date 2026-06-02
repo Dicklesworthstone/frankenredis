@@ -5648,8 +5648,20 @@ impl Runtime {
                             let is_smove = argv
                                 .first()
                                 .is_some_and(|c| c.eq_ignore_ascii_case(b"SMOVE"));
-                            if is_smove {
-                                // Events already queued by Store::smove.
+                            // (frankenredis-5wz6g) EXPIRE/PEXPIRE/EXPIREAT/
+                            // PEXPIREAT already emit a precise "expire" event
+                            // from Store::expire_*_milliseconds (which fires
+                            // only when the TTL is actually applied, with the
+                            // correct db). The generic path must NOT fire a
+                            // second "expire".
+                            let is_expire_family = argv.first().is_some_and(|c| {
+                                c.eq_ignore_ascii_case(b"EXPIRE")
+                                    || c.eq_ignore_ascii_case(b"PEXPIRE")
+                                    || c.eq_ignore_ascii_case(b"EXPIREAT")
+                                    || c.eq_ignore_ascii_case(b"PEXPIREAT")
+                            });
+                            if is_smove || is_expire_family {
+                                // Events already queued by the Store method.
                             } else if is_list_move && cmd_keys.len() >= 2 {
                                 let (pop_ev, push_ev) = Self::list_move_events(&argv);
                                 self.server.store.notify_keyspace_event(
@@ -5720,6 +5732,33 @@ impl Runtime {
                                         "del",
                                         dest,
                                         db,
+                                    );
+                                }
+                            } else if argv
+                                .first()
+                                .is_some_and(|c| c.eq_ignore_ascii_case(b"MOVE"))
+                                && !cmd_keys.is_empty()
+                            {
+                                // (frankenredis-5wz6g) MOVE fires "move_from" on
+                                // the key in the SOURCE db and "move_to" on the
+                                // key in the DESTINATION db (argv[2]). Only a
+                                // successful move reaches this dirty-gated path.
+                                self.server.store.notify_keyspace_event(
+                                    fr_store::NOTIFY_GENERIC,
+                                    "move_from",
+                                    &cmd_keys[0],
+                                    db,
+                                );
+                                if let Some(target_db) = argv
+                                    .get(2)
+                                    .and_then(|a| std::str::from_utf8(a).ok())
+                                    .and_then(|s| s.parse::<usize>().ok())
+                                {
+                                    self.server.store.notify_keyspace_event(
+                                        fr_store::NOTIFY_GENERIC,
+                                        "move_to",
+                                        &cmd_keys[0],
+                                        target_db,
                                     );
                                 }
                             } else {
@@ -6074,6 +6113,11 @@ impl Runtime {
             || cmd.eq_ignore_ascii_case(b"ZDIFFSTORE")
             || cmd.eq_ignore_ascii_case(b"ZRANGESTORE")
             || cmd.eq_ignore_ascii_case(b"GEOSEARCHSTORE")
+            // BITOP <op> dest src... fires "set" on the dest (or "del" when
+            // the result is empty); PFMERGE dest src... fires "pfadd" on the
+            // dest. Both put dest first. (frankenredis-5wz6g)
+            || cmd.eq_ignore_ascii_case(b"BITOP")
+            || cmd.eq_ignore_ascii_case(b"PFMERGE")
     }
 
     /// For the *STORE family, whether the destination key is the LAST key in
@@ -26579,6 +26623,8 @@ mod tests {
             b"SORT",
             b"GEORADIUS",
             b"GEORADIUSBYMEMBER",
+            b"BITOP",
+            b"PFMERGE",
         ] {
             assert!(Runtime::is_store_command(c), "{c:?} is a *STORE command");
         }
