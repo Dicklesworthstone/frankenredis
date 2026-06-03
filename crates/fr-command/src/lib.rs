@@ -169,17 +169,163 @@ pub fn xadd_id_arg_index(argv: &[Vec<u8>]) -> Option<usize> {
     (idx < argv.len()).then_some(idx)
 }
 
+/// Rewrite a non-deterministic write command into the deterministic form used
+/// for AOF/replication propagation, given the command's reply. This is the
+/// canonical implementation shared by the Lua/script EFFECT-capture path (so a
+/// script's `redis.call('XADD', k, '*')` / SPOP / INCRBYFLOAT don't propagate
+/// verbatim and diverge on a replica/AOF replay). `store` is read only for
+/// SPOP's DEL-vs-SREM decision (uses the current dispatch db). Returns `None`
+/// to propagate the command verbatim. (frankenredis-x1225)
+///
+/// Mirrors the runtime direct-dispatch rewrites (1uiql / f9byo / ybaw7):
+/// INCRBYFLOAT→SET, HINCRBYFLOAT→HSET, XADD `*`→concrete id, SPOP→SREM/DEL,
+/// BLPOP/BRPOP→LPOP/RPOP, BZPOP*→ZPOP*, BRPOPLPUSH→RPOPLPUSH, BLMOVE→LMOVE,
+/// (B)LMPOP→LPOP/RPOP key count, (B)ZMPOP→ZPOPMIN/MAX key count, GETDEL→DEL.
+pub fn rewrite_effect_command_for_propagation(
+    argv: &[Vec<u8>],
+    reply: &fr_protocol::RespFrame,
+    store: &Store,
+) -> Option<Vec<Vec<u8>>> {
+    use fr_protocol::RespFrame;
+    let cmd = argv.first()?;
+    let bulk = |f: &RespFrame| match f {
+        RespFrame::BulkString(Some(v)) => Some(v.clone()),
+        _ => None,
+    };
+    let items = |f: &RespFrame| match f {
+        RespFrame::Array(Some(v)) | RespFrame::Set(Some(v)) => Some(v.clone()),
+        _ => None,
+    };
+
+    if eq_ascii_command(cmd, b"INCRBYFLOAT") && argv.len() == 3 {
+        return Some(vec![b"SET".to_vec(), argv[1].clone(), bulk(reply)?]);
+    }
+    if eq_ascii_command(cmd, b"HINCRBYFLOAT") && argv.len() == 4 {
+        return Some(vec![
+            b"HSET".to_vec(),
+            argv[1].clone(),
+            argv[2].clone(),
+            bulk(reply)?,
+        ]);
+    }
+    if eq_ascii_command(cmd, b"XADD") {
+        let id_idx = xadd_id_arg_index(argv)?;
+        if !argv.get(id_idx)?.contains(&b'*') {
+            return None;
+        }
+        let mut out = argv.to_vec();
+        out[id_idx] = bulk(reply)?;
+        return Some(out);
+    }
+    if eq_ascii_command(cmd, b"GETDEL") && argv.len() == 2 {
+        return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
+    }
+    if eq_ascii_command(cmd, b"BRPOPLPUSH") && argv.len() == 4 {
+        return Some(vec![
+            b"RPOPLPUSH".to_vec(),
+            argv[1].clone(),
+            argv[2].clone(),
+        ]);
+    }
+    if eq_ascii_command(cmd, b"BLMOVE") && argv.len() == 6 {
+        return Some(vec![
+            b"LMOVE".to_vec(),
+            argv[1].clone(),
+            argv[2].clone(),
+            argv[3].clone(),
+            argv[4].clone(),
+        ]);
+    }
+    if eq_ascii_command(cmd, b"BLPOP") || eq_ascii_command(cmd, b"BRPOP") {
+        let key = bulk(items(reply)?.first()?)?;
+        let op = if eq_ascii_command(cmd, b"BLPOP") {
+            b"LPOP"
+        } else {
+            b"RPOP"
+        };
+        return Some(vec![op.to_vec(), key]);
+    }
+    if eq_ascii_command(cmd, b"BZPOPMIN") || eq_ascii_command(cmd, b"BZPOPMAX") {
+        let key = bulk(items(reply)?.first()?)?;
+        let op = if eq_ascii_command(cmd, b"BZPOPMIN") {
+            b"ZPOPMIN"
+        } else {
+            b"ZPOPMAX"
+        };
+        return Some(vec![op.to_vec(), key]);
+    }
+    if eq_ascii_command(cmd, b"SPOP") {
+        let key = argv.get(1)?;
+        let members: Vec<Vec<u8>> = match reply {
+            RespFrame::BulkString(Some(m)) => vec![m.clone()],
+            RespFrame::Array(Some(v)) | RespFrame::Set(Some(v)) => {
+                let mut out = Vec::with_capacity(v.len());
+                for it in v {
+                    out.push(bulk(it)?);
+                }
+                out
+            }
+            _ => return None,
+        };
+        if members.is_empty() {
+            return None;
+        }
+        let encoded = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, key);
+        return if store.key_is_present(&encoded) {
+            let mut out = Vec::with_capacity(2 + members.len());
+            out.push(b"SREM".to_vec());
+            out.push(key.clone());
+            out.extend(members);
+            Some(out)
+        } else {
+            Some(vec![b"DEL".to_vec(), key.clone()])
+        };
+    }
+    // (B)LMPOP / (B)ZMPOP -> LPOP/RPOP/ZPOPMIN/ZPOPMAX <served-key> <count>.
+    let (is_list, numkeys_idx) = if eq_ascii_command(cmd, b"LMPOP") {
+        (true, 1usize)
+    } else if eq_ascii_command(cmd, b"ZMPOP") {
+        (false, 1)
+    } else if eq_ascii_command(cmd, b"BLMPOP") {
+        (true, 2)
+    } else if eq_ascii_command(cmd, b"BZMPOP") {
+        (false, 2)
+    } else {
+        return None;
+    };
+    let numkeys: usize = std::str::from_utf8(argv.get(numkeys_idx)?)
+        .ok()?
+        .parse()
+        .ok()?;
+    let dir = argv.get(numkeys_idx + 1 + numkeys)?;
+    let top = items(reply)?;
+    let served_key = bulk(top.first()?)?;
+    let count = items(top.get(1)?)?.len();
+    let op: &[u8] = if is_list {
+        if eq_ascii_command(dir, b"LEFT") {
+            b"LPOP"
+        } else {
+            b"RPOP"
+        }
+    } else if eq_ascii_command(dir, b"MIN") {
+        b"ZPOPMIN"
+    } else {
+        b"ZPOPMAX"
+    };
+    Some(vec![
+        op.to_vec(),
+        served_key,
+        count.to_string().into_bytes(),
+    ])
+}
+
 /// Return the argv indexes that correspond to keys for the command.
 pub fn command_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
     let Some(raw_cmd) = argv.first() else {
         return Vec::new();
     };
     if is_hget_command(raw_cmd) {
-        return if argv.len() == HGET_ARITY {
-            vec![1]
-        } else {
-            Vec::new()
-        };
+        return if argv.len() > 1 { vec![1] } else { Vec::new() };
     }
     let cmd_name = match std::str::from_utf8(raw_cmd) {
         Ok(s) => s,
@@ -49283,6 +49429,73 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_effect_command_for_propagation_resolves_nondeterministic_effects() {
+        // (frankenredis-x1225) The Lua/script effect-capture path must record the
+        // deterministic form so a script's XADD `*` / INCRBYFLOAT / SPOP doesn't
+        // propagate verbatim and diverge on a replica/AOF replay.
+        use fr_protocol::RespFrame;
+        let b = |s: &[u8]| RespFrame::BulkString(Some(s.to_vec()));
+        let v = |s: &[u8]| s.to_vec();
+        let mut store = Store::new();
+
+        // XADD `*` -> concrete id from the reply.
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"XADD"), v(b"st"), v(b"*"), v(b"f"), v(b"x")],
+                &b(b"5-0"),
+                &store,
+            ),
+            Some(vec![v(b"XADD"), v(b"st"), v(b"5-0"), v(b"f"), v(b"x")])
+        );
+        // INCRBYFLOAT -> SET <value>.
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"INCRBYFLOAT"), v(b"kf"), v(b"2.5")],
+                &b(b"12.5"),
+                &store,
+            ),
+            Some(vec![v(b"SET"), v(b"kf"), v(b"12.5")])
+        );
+        // GETDEL -> DEL.
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(&[v(b"GETDEL"), v(b"k")], &b(b"x"), &store),
+            Some(vec![v(b"DEL"), v(b"k")])
+        );
+        // SPOP with the set still present -> SREM <members>.
+        store
+            .sadd(
+                &fr_store::encode_db_key(0, b"s"),
+                &[b"a".to_vec(), b"b".to_vec()],
+                0,
+            )
+            .expect("sadd");
+        let spop_reply = RespFrame::Array(Some(vec![b(b"a")]));
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"SPOP"), v(b"s"), v(b"1")],
+                &spop_reply,
+                &store,
+            ),
+            Some(vec![v(b"SREM"), v(b"s"), v(b"a")])
+        );
+        // SPOP of an absent key (drained) -> DEL.
+        let drain_reply = RespFrame::Array(Some(vec![b(b"x")]));
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"SPOP"), v(b"gone"), v(b"1")],
+                &drain_reply,
+                &store,
+            ),
+            Some(vec![v(b"DEL"), v(b"gone")])
+        );
+        // Non-targeted command -> verbatim (None).
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(&[v(b"SET"), v(b"k"), v(b"x")], &b(b"OK"), &store),
+            None
+        );
+    }
+
+    #[test]
     fn move_out_of_range_uses_upstream_wording() {
         // Upstream emits "ERR DB index is out of range" — not the
         // generic "ERR out of range" the prior stub used.
@@ -56834,6 +57047,7 @@ mod tests {
         assert_eq!(command_key_indexes(&upper), vec![1]);
         assert_eq!(command_key_indexes(&lower), vec![1]);
 
+        let bare = vec![b"HGET".to_vec()];
         let missing_field = vec![b"HGET".to_vec(), b"hash".to_vec()];
         let extra_arg = vec![
             b"hget".to_vec(),
@@ -56841,9 +57055,10 @@ mod tests {
             b"field".to_vec(),
             b"extra".to_vec(),
         ];
+        assert!(command_key_indexes(&bare).is_empty());
         for argv in [&missing_field, &extra_arg] {
             assert_eq!(check_command_arity(&argv[0], argv.len()), Err("hget"));
-            assert!(command_key_indexes(argv).is_empty());
+            assert_eq!(command_key_indexes(argv), vec![1]);
         }
     }
 

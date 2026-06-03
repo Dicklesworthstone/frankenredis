@@ -8105,7 +8105,14 @@ impl<'a> LuaState<'a> {
             Ok(frame) => {
                 let dirty_after = self.store.dirty;
                 if dirty_after > dirty_before || command_may_propagate_from_script(&argv) {
-                    self.store.record_script_propagation(&argv);
+                    // (frankenredis-x1225) Record the DETERMINISTIC effect form so
+                    // a script's XADD `*` / SPOP / INCRBYFLOAT (etc.) propagates a
+                    // concrete command, not the non-deterministic one — otherwise
+                    // replicas/AOF replay regenerate ids/randomness and diverge.
+                    let effect =
+                        crate::rewrite_effect_command_for_propagation(&argv, &frame, self.store)
+                            .unwrap_or_else(|| argv.clone());
+                    self.store.record_script_propagation(&effect);
                 }
                 Ok(vec![resp_to_lua_command_result(&argv, &frame)])
             }
