@@ -1379,6 +1379,10 @@ pub struct DispatchAclPermissions {
     pub all_keys: bool,
     pub channel_patterns: Vec<Vec<u8>>,
     pub all_channels: bool,
+    /// (frankenredis-d919b) ACL selector permission sets. A request is allowed
+    /// when the root set OR any selector grants the command with its keys and
+    /// channels. Inner selectors carry no nested selectors.
+    pub selectors: Vec<DispatchAclPermissions>,
 }
 
 // Match upstream server.h: PROPAGATE_AOF=1, PROPAGATE_REPL=2.

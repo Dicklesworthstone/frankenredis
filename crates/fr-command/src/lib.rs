@@ -16297,6 +16297,7 @@ fn dispatch_acl_permission_error_for_argv(
     argv: &[Vec<u8>],
     permissions: &DispatchAclPermissions,
 ) -> Option<DispatchAclPermissionError> {
+    // Fast path: a fully-permissive root set with no selectors grants everything.
     if permissions.all_commands
         && permissions.allowed_commands.is_empty()
         && permissions.denied_commands.is_empty()
@@ -16304,10 +16305,51 @@ fn dispatch_acl_permission_error_for_argv(
         && permissions.denied_categories.is_empty()
         && permissions.all_keys
         && permissions.all_channels
+        && permissions.selectors.is_empty()
     {
         return None;
     }
 
+    // (frankenredis-d919b) Upstream ACLCheckAllPerm: permit when the root set OR
+    // any selector grants the command together with its keys and channels. When
+    // every set denies, report the DEEPEST failure across all sets — a set that
+    // granted the command but failed on a key/channel surfaces as a key/channel
+    // error, not a command error, matching upstream's errpos.
+    let mut best: Option<DispatchAclPermissionError> = None;
+    for set in std::iter::once(permissions).chain(permissions.selectors.iter()) {
+        match dispatch_acl_permission_error_for_set(argv, set) {
+            None => return None,
+            Some(err) => {
+                let take = match &best {
+                    Some(prev) => dispatch_acl_error_depth(&err) > dispatch_acl_error_depth(prev),
+                    None => true,
+                };
+                if take {
+                    best = Some(err);
+                }
+            }
+        }
+    }
+    best
+}
+
+/// How far an ACL check progressed before denying: command (shallowest), then
+/// keys, then channels. Used to report the most informative denial across the
+/// root set and all selectors. (frankenredis-d919b)
+fn dispatch_acl_error_depth(err: &DispatchAclPermissionError) -> u8 {
+    match err {
+        DispatchAclPermissionError::Command => 0,
+        DispatchAclPermissionError::Key(_) => 1,
+        DispatchAclPermissionError::Channel(_) => 2,
+    }
+}
+
+/// Whether a single dispatch permission set (root or one selector) grants
+/// `argv`. (frankenredis-d919b)
+fn dispatch_acl_permission_error_for_set(
+    argv: &[Vec<u8>],
+    permissions: &DispatchAclPermissions,
+) -> Option<DispatchAclPermissionError> {
     let cmd = argv.first()?;
     if !dispatch_acl_is_command_allowed(argv, permissions) {
         return Some(DispatchAclPermissionError::Command);
@@ -25932,6 +25974,7 @@ mod tests {
                 all_keys: false,
                 channel_patterns: vec![],
                 all_channels: false,
+                selectors: vec![],
             }),
             ..Default::default()
         };
@@ -26026,6 +26069,7 @@ mod tests {
                 all_keys: false,
                 channel_patterns: vec![],
                 all_channels: false,
+                selectors: vec![],
             }),
             ..Default::default()
         };

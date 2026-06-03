@@ -139,6 +139,27 @@ fn acl_key_pattern_token(pat: &AclKeyPattern) -> String {
     format!("{prefix}{}", String::from_utf8_lossy(&pat.pattern))
 }
 
+/// True for ACL rules that configure user IDENTITY (auth/state) rather than
+/// permissions. These are NOT allowed inside a selector `( … )` group, which
+/// only carries command/key/channel grants. (frankenredis-d919b)
+fn acl_rule_is_identity(rule: &[u8]) -> bool {
+    let s = match std::str::from_utf8(rule) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    s.eq_ignore_ascii_case("on")
+        || s.eq_ignore_ascii_case("off")
+        || s.eq_ignore_ascii_case("nopass")
+        || s.eq_ignore_ascii_case("resetpass")
+        || s.eq_ignore_ascii_case("reset")
+        || s.eq_ignore_ascii_case("clearselectors")
+        || s.eq_ignore_ascii_case("sanitize-payload")
+        || s.eq_ignore_ascii_case("skip-sanitize-payload")
+        || s.starts_with('>')
+        || s.starts_with('<')
+        || s.starts_with('#')
+}
+
 /// Parse a `%`-prefixed ACL key selector modifier into
 /// `(pattern_bytes, read, write)`.
 ///
@@ -724,6 +745,15 @@ struct AclUser {
     channel_patterns: Vec<Vec<u8>>,
     /// Channel permissions. False means only `channel_patterns` are allowed.
     all_channels: bool,
+    /// (frankenredis-d919b) Redis 7 ACL selectors: additional permission sets
+    /// attached via `(commands keys channels)` groups. Each selector is itself
+    /// a permission-only `AclUser` (its identity fields — passwords/enabled/
+    /// nopass — are unused), so it reuses the exact same rule parser, command/
+    /// key/channel checks, and rendering. A request is permitted when the root
+    /// permission set OR any selector grants the command together with its keys
+    /// and channels (selectors are purely additive — a user with no selectors
+    /// behaves identically to before).
+    selectors: Vec<AclUser>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -762,6 +792,7 @@ impl AclUser {
             all_keys: true,
             channel_patterns: Vec::new(),
             all_channels: true,
+            selectors: Vec::new(),
         }
     }
 
@@ -784,6 +815,7 @@ impl AclUser {
             all_keys: false,
             channel_patterns: Vec::new(),
             all_channels: acl_pubsub_default.grants_all_channels(),
+            selectors: Vec::new(),
         }
     }
 
@@ -1001,7 +1033,10 @@ impl AclUser {
         None
     }
 
-    fn acl_permission_error_for_argv(&self, argv: &[Vec<u8>]) -> Option<AclCommandPermissionError> {
+    /// (frankenredis-d919b) Whether THIS single permission set (root or one
+    /// selector) grants `argv` — the command together with all its keys and
+    /// channels. Returns the first denial, or `None` when fully granted.
+    fn permission_error_for_set(&self, argv: &[Vec<u8>]) -> Option<AclCommandPermissionError> {
         let Some(cmd) = argv.first() else {
             return Some(AclCommandPermissionError::Command);
         };
@@ -1029,6 +1064,35 @@ impl AclUser {
         None
     }
 
+    /// (frankenredis-d919b) Upstream acl.c::ACLCheckAllPerm: a request is
+    /// permitted when the ROOT permission set OR ANY selector grants the command
+    /// together with its keys and channels (selectors are purely additive). When
+    /// every set denies, the root set's denial is reported.
+    fn acl_permission_error_for_argv(&self, argv: &[Vec<u8>]) -> Option<AclCommandPermissionError> {
+        // Permit when the root set OR any selector grants the command with its
+        // keys and channels; otherwise report the DEEPEST denial (a set that
+        // granted the command but failed a key/channel surfaces as a key/channel
+        // error). (frankenredis-d919b)
+        let depth = |e: &AclCommandPermissionError| match e {
+            AclCommandPermissionError::Command => 0u8,
+            AclCommandPermissionError::Key(_) => 1,
+            AclCommandPermissionError::Channel(_) => 2,
+        };
+        let mut best: Option<AclCommandPermissionError> = None;
+        for set in std::iter::once(self).chain(self.selectors.iter()) {
+            match set.permission_error_for_set(argv) {
+                None => return None,
+                Some(err) => {
+                    let take = best.as_ref().is_none_or(|prev| depth(&err) > depth(prev));
+                    if take {
+                        best = Some(err);
+                    }
+                }
+            }
+        }
+        best
+    }
+
     fn to_dispatch_acl_permissions(&self) -> DispatchAclPermissions {
         DispatchAclPermissions {
             all_commands: self.all_commands,
@@ -1040,6 +1104,13 @@ impl AclUser {
             all_keys: self.all_keys,
             channel_patterns: self.channel_patterns.clone(),
             all_channels: self.all_channels,
+            // (frankenredis-d919b) Flatten selectors into the dispatch snapshot
+            // so the per-command dispatch gate honours them too.
+            selectors: self
+                .selectors
+                .iter()
+                .map(AclUser::to_dispatch_acl_permissions)
+                .collect(),
         }
     }
 
@@ -1049,6 +1120,30 @@ impl AclUser {
         } else {
             "skip-sanitize-payload"
         }
+    }
+
+    /// (frankenredis-d919b) Render this permission-only `AclUser` as a selector
+    /// group `(<keys> <channels> <commands>)`, matching upstream
+    /// acl.c::ACLDescribeSelector token order (used inside ACL LIST / ACL SAVE).
+    fn acl_selector_token(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if self.all_keys {
+            parts.push("~*".to_string());
+        } else {
+            parts.extend(self.key_patterns.iter().map(acl_key_pattern_token));
+        }
+        if self.all_channels {
+            parts.push("&*".to_string());
+        } else {
+            parts.push("resetchannels".to_string());
+            parts.extend(
+                self.channel_patterns
+                    .iter()
+                    .map(|pattern| format!("&{}", String::from_utf8_lossy(pattern))),
+            );
+        }
+        parts.extend(self.commands_string().split_whitespace().map(str::to_string));
+        format!("({})", parts.join(" "))
     }
 
     fn acl_list_line(&self, username: &[u8]) -> String {
@@ -1101,6 +1196,8 @@ impl AclUser {
                 .split_whitespace()
                 .map(str::to_string),
         );
+        // (frankenredis-d919b) Selector groups follow the root permission set.
+        parts.extend(self.selectors.iter().map(AclUser::acl_selector_token));
         parts.join(" ")
     }
 
@@ -1154,6 +1251,8 @@ impl AclUser {
                 .split_whitespace()
                 .map(str::to_string),
         );
+        // (frankenredis-d919b) Selector groups follow the root permission set.
+        parts.extend(self.selectors.iter().map(AclUser::acl_selector_token));
         parts.join(" ")
     }
 }
@@ -1299,19 +1398,23 @@ impl AuthState {
         result
     }
 
-    fn apply_setuser_rules(&mut self, username: Vec<u8>, rules: &[&[u8]]) -> Result<(), String> {
-        let is_default = username == DEFAULT_AUTH_USER;
-        let acl_pubsub_default = self.acl_pubsub_default;
-        let user = self.acl_users.entry(username).or_insert_with(|| {
-            if is_default {
-                AclUser::new_default()
-            } else {
-                AclUser::new_restricted(acl_pubsub_default)
-            }
-        });
-        for rule in rules {
+    /// Apply ACL command/key/channel/identity rules to a user in place.
+    /// (frankenredis-d919b) Extracted from apply_setuser_rules so a selector
+    /// `(...)` group can reuse the exact same tested rule parser on a scratch
+    /// AclUser, and so apply_setuser_rules stays a thin map-entry wrapper.
+    fn apply_acl_rules_to_user(
+        user: &mut AclUser,
+        rules: &[&[u8]],
+        acl_pubsub_default: AclPubsubDefault,
+    ) -> Result<(), String> {
+        // (frankenredis-d919b) Merge `( … )` selector groups that span multiple
+        // arguments into single tokens before the per-rule walk.
+        let merged = Self::merge_acl_selector_tokens(rules)?;
+        for rule in &merged {
             let rule_str = std::str::from_utf8(rule).unwrap_or("");
-            if rule_str.eq_ignore_ascii_case("on") {
+            if rule_str.starts_with('(') && rule_str.ends_with(')') {
+                Self::apply_acl_selector_group(user, rule_str, acl_pubsub_default)?;
+            } else if rule_str.eq_ignore_ascii_case("on") {
                 user.enabled = true;
             } else if rule_str.eq_ignore_ascii_case("off") {
                 user.enabled = false;
@@ -1349,11 +1452,9 @@ impl AuthState {
                 user.all_channels = false;
                 user.channel_patterns.clear();
             } else if rule_str.eq_ignore_ascii_case("clearselectors") {
-                // Upstream acl.c::ACLSetUser CLEARSELECTORS clears
-                // any selector blocks attached to the user. fr's
-                // ACL doesn't model selectors as a separate
-                // structure yet — treat as a no-op so clients can
-                // reset without errors. (br-frankenredis-aclclrsel)
+                // Upstream acl.c::ACLSetUser CLEARSELECTORS removes all selector
+                // blocks attached to the user. (frankenredis-d919b)
+                user.selectors.clear();
             } else if rule_str == "-@all" || rule_str.eq_ignore_ascii_case("nocommands") {
                 user.all_commands = false;
                 user.allowed_commands.clear();
@@ -1567,6 +1668,8 @@ impl AuthState {
                 user.key_patterns.clear();
                 user.channel_patterns.clear();
                 user.all_channels = acl_pubsub_default.grants_all_channels();
+                // (frankenredis-d919b) `reset` also drops all selectors.
+                user.selectors.clear();
             } else {
                 // Note: the earlier `resetkeys` arm above already handles the
                 // standalone "resetkeys" modifier. The `reset` arm here is the
@@ -1579,6 +1682,83 @@ impl AuthState {
             }
         }
         Ok(())
+    }
+
+    /// Merge `( … )` selector groups spanning multiple SETUSER arguments into
+    /// one token each, leaving non-selector rules untouched. Mirrors upstream
+    /// acl.c::ACLSetUser, which accumulates from a `(`-leading arg until a
+    /// `)`-trailing one. (frankenredis-d919b)
+    fn merge_acl_selector_tokens(rules: &[&[u8]]) -> Result<Vec<Vec<u8>>, String> {
+        let mut out: Vec<Vec<u8>> = Vec::with_capacity(rules.len());
+        let mut i = 0;
+        while i < rules.len() {
+            let r = rules[i];
+            if r.first() == Some(&b'(') && r.last() != Some(&b')') {
+                let mut acc = r.to_vec();
+                i += 1;
+                let mut closed = false;
+                while i < rules.len() {
+                    acc.push(b' ');
+                    acc.extend_from_slice(rules[i]);
+                    let ends = rules[i].last() == Some(&b')');
+                    i += 1;
+                    if ends {
+                        closed = true;
+                        break;
+                    }
+                }
+                if !closed {
+                    return Err(
+                        "ERR Unmatched parenthesis in selector specification.".to_string()
+                    );
+                }
+                out.push(acc);
+            } else {
+                out.push(r.to_vec());
+                i += 1;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Parse a single `( … )` selector group and attach it to `user`. The inner
+    /// text is a permission-only rule list (commands/keys/channels) — identity
+    /// rules (on/off/nopass/passwords/reset/sanitize/clearselectors) are not
+    /// allowed in a selector. The selector is stored as a permission-only
+    /// `AclUser`, reusing the same rule parser and check/render logic.
+    /// (frankenredis-d919b)
+    fn apply_acl_selector_group(
+        user: &mut AclUser,
+        token: &str,
+        acl_pubsub_default: AclPubsubDefault,
+    ) -> Result<(), String> {
+        let inner = token[1..token.len() - 1].trim();
+        let inner_rules: Vec<&[u8]> = inner.split_whitespace().map(str::as_bytes).collect();
+        for rule in &inner_rules {
+            if acl_rule_is_identity(rule) {
+                let bad = String::from_utf8_lossy(rule);
+                return Err(format!(
+                    "ERR Error in ACL SETUSER modifier '{bad}': Syntax error"
+                ));
+            }
+        }
+        let mut selector = AclUser::new_restricted(acl_pubsub_default);
+        Self::apply_acl_rules_to_user(&mut selector, &inner_rules, acl_pubsub_default)?;
+        user.selectors.push(selector);
+        Ok(())
+    }
+
+    fn apply_setuser_rules(&mut self, username: Vec<u8>, rules: &[&[u8]]) -> Result<(), String> {
+        let is_default = username == DEFAULT_AUTH_USER;
+        let acl_pubsub_default = self.acl_pubsub_default;
+        let user = self.acl_users.entry(username).or_insert_with(|| {
+            if is_default {
+                AclUser::new_default()
+            } else {
+                AclUser::new_restricted(acl_pubsub_default)
+            }
+        });
+        Self::apply_acl_rules_to_user(user, rules, acl_pubsub_default)
     }
 
     fn del_user(&mut self, username: &[u8]) -> bool {
@@ -7756,6 +7936,36 @@ impl Runtime {
         let keys_str = user.keys_string();
         let channels_str = user.channels_string();
 
+        // (frankenredis-d919b) Render each selector as a {commands,keys,channels}
+        // group — a Map under RESP3, an alternating Array under RESP2 — reusing
+        // the selector's own permission-string renderers.
+        let resp3 = self.session.resp_protocol_version == 3;
+        let selector_frames: Vec<RespFrame> = user
+            .selectors
+            .iter()
+            .map(|sel| {
+                let c = RespFrame::BulkString(Some(sel.commands_string().into_bytes()));
+                let k = RespFrame::BulkString(Some(sel.keys_string().into_bytes()));
+                let ch = RespFrame::BulkString(Some(sel.channels_string().into_bytes()));
+                if resp3 {
+                    RespFrame::Map(Some(vec![
+                        (RespFrame::BulkString(Some(b"commands".to_vec())), c),
+                        (RespFrame::BulkString(Some(b"keys".to_vec())), k),
+                        (RespFrame::BulkString(Some(b"channels".to_vec())), ch),
+                    ]))
+                } else {
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"commands".to_vec())),
+                        c,
+                        RespFrame::BulkString(Some(b"keys".to_vec())),
+                        k,
+                        RespFrame::BulkString(Some(b"channels".to_vec())),
+                        ch,
+                    ]))
+                }
+            })
+            .collect();
+
         // Mirror upstream acl.c::aclCommand GETUSER which calls
         // addReplyMapLen(c, 6) — RESP3 wire shape is a Map of 6
         // (key, value) pairs; RESP2 stays the flat Array of
@@ -7788,7 +7998,7 @@ impl Runtime {
                 ),
                 (
                     RespFrame::BulkString(Some(b"selectors".to_vec())),
-                    RespFrame::Array(Some(Vec::new())),
+                    RespFrame::Array(Some(selector_frames)),
                 ),
             ]))
         } else {
@@ -7804,7 +8014,7 @@ impl Runtime {
                 RespFrame::BulkString(Some(b"channels".to_vec())),
                 RespFrame::BulkString(Some(channels_str.as_bytes().to_vec())),
                 RespFrame::BulkString(Some(b"selectors".to_vec())),
-                RespFrame::Array(Some(Vec::new())),
+                RespFrame::Array(Some(selector_frames)),
             ]))
         }
     }
@@ -26945,6 +27155,120 @@ mod tests {
             matches!(&flush_reply, RespFrame::Error(e) if e.contains("NOPERM")),
             "FLUSHDB should be denied, got: {flush_reply:?}"
         );
+    }
+
+    #[test]
+    fn acl_selectors_parse_render_and_enforce_additively() {
+        // Redis 7 ACL selectors (frankenredis-d919b): a user can carry zero or
+        // more `(commands keys channels)` permission groups. A command is
+        // permitted when the root set OR any selector grants it. Here the root
+        // grants nothing; two selectors each grant one command on one keyspace.
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"selu", b"on", b"nopass", b"(+get ~app1:*)",
+                    b"(+set ~app2:*)",
+                ]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // Seed data as the (all-powerful) default user before dropping privs.
+        rt.execute_frame(command(&[b"SET", b"app1:x", b"v1"]), 1);
+        rt.execute_frame(command(&[b"SET", b"app2:y", b"v2"]), 2);
+
+        // ACL LIST renders both selector tokens byte-exactly vs vendored 7.2.4.
+        let list_line = match rt.execute_frame(command(&[b"ACL", b"LIST"]), 3) {
+            RespFrame::Array(Some(items)) => items
+                .iter()
+                .filter_map(|f| match f {
+                    RespFrame::BulkString(Some(b)) => Some(String::from_utf8_lossy(b).into_owned()),
+                    _ => None,
+                })
+                .find(|l| l.starts_with("user selu "))
+                .expect("selu line present"),
+            other => panic!("unexpected ACL LIST reply: {other:?}"),
+        };
+        assert_eq!(
+            list_line,
+            "user selu on nopass sanitize-payload resetchannels -@all \
+             (~app1:* resetchannels -@all +get) (~app2:* resetchannels -@all +set)"
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"selu", b""]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // Selector 1 grants GET on app1:* — allowed.
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"app1:x"]), 5),
+            RespFrame::BulkString(Some(b"v1".to_vec()))
+        );
+        // Selector 2 grants SET on app2:* — allowed.
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"app2:y", b"new"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // GET app2:y: a selector grants GET (key out of range) and another
+        // grants the key (command out of range) — deepest error is the key,
+        // so the reply must be the key-level NOPERM, not the command one.
+        match rt.execute_frame(command(&[b"GET", b"app2:y"]), 7) {
+            RespFrame::Error(e) => assert_eq!(e, "NOPERM No permissions to access a key"),
+            other => panic!("GET app2:y should be key-denied, got {other:?}"),
+        }
+        // SET app1:x: symmetric — SET granted by selector 2 but key out of
+        // range; selector 1 owns the key but not SET. Key-level error.
+        match rt.execute_frame(command(&[b"SET", b"app1:x", b"new"]), 8) {
+            RespFrame::Error(e) => assert_eq!(e, "NOPERM No permissions to access a key"),
+            other => panic!("SET app1:x should be key-denied, got {other:?}"),
+        }
+        // DEL is granted by no selector at all — command-level denial.
+        match rt.execute_frame(command(&[b"DEL", b"app1:x"]), 9) {
+            RespFrame::Error(e) => assert!(
+                e.contains("has no permissions to run the"),
+                "DEL should be command-denied, got {e:?}"
+            ),
+            other => panic!("DEL should be command-denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn acl_clearselectors_and_reset_drop_selector_groups() {
+        // clearselectors removes selector groups but keeps root rules;
+        // reset wipes everything. (frankenredis-d919b)
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(
+            command(&[b"ACL", b"SETUSER", b"selu", b"on", b"nopass", b"(+get ~app1:*)"]),
+            0,
+        );
+        let has_selector = |rt: &mut Runtime| -> bool {
+            match rt.execute_frame(command(&[b"ACL", b"LIST"]), 99) {
+                RespFrame::Array(Some(items)) => items.iter().any(|f| matches!(
+                    f,
+                    RespFrame::BulkString(Some(b))
+                        if String::from_utf8_lossy(b).starts_with("user selu ")
+                            && String::from_utf8_lossy(b).contains('(')
+                )),
+                _ => false,
+            }
+        };
+        assert!(has_selector(&mut rt), "selector present after SETUSER");
+
+        rt.execute_frame(command(&[b"ACL", b"SETUSER", b"selu", b"clearselectors"]), 1);
+        assert!(!has_selector(&mut rt), "clearselectors drops the selector");
+
+        // Re-add then reset.
+        rt.execute_frame(
+            command(&[b"ACL", b"SETUSER", b"selu", b"(+get ~app1:*)"]),
+            2,
+        );
+        assert!(has_selector(&mut rt), "selector re-added");
+        rt.execute_frame(command(&[b"ACL", b"SETUSER", b"selu", b"reset"]), 3);
+        assert!(!has_selector(&mut rt), "reset drops selectors too");
     }
 
     #[test]
