@@ -5680,7 +5680,16 @@ impl Runtime {
                                     || c.eq_ignore_ascii_case(b"EXPIREAT")
                                     || c.eq_ignore_ascii_case(b"PEXPIREAT")
                             });
-                            if is_smove || is_expire_family {
+                            // (frankenredis-cx98g) GETEX emits its own keyspace
+                            // event from Store::getex — "del" when an EXAT/PXAT
+                            // deadline is already in the past, "expire" for a
+                            // future deadline, "persist" only when a TTL was
+                            // actually removed. The generic path must not fire a
+                            // second (and, for the past case, wrong) "expire".
+                            let is_getex = argv
+                                .first()
+                                .is_some_and(|c| c.eq_ignore_ascii_case(b"GETEX"));
+                            if is_smove || is_expire_family || is_getex {
                                 // Events already queued by the Store method.
                             } else if is_list_move && cmd_keys.len() >= 2 {
                                 let (pop_ev, push_ev) = Self::list_move_events(&argv);

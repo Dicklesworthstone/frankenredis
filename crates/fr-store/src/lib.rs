@@ -11309,47 +11309,83 @@ impl Store {
         } else {
             0
         };
-        match self.entries.get_mut(key) {
+        // Read the value (one LFU bump = the GETEX access) and capture the
+        // current TTL state under a scoped borrow, then apply the expiry change
+        // with disjoint &mut self helpers below.
+        let value = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
-                    Value::String(v) => {
-                        let result = v.clone();
-                        if let Some(exp) = new_expires_at_ms {
-                            let was_exp = entry.expires_at_ms.is_some();
-                            let is_exp = exp.is_some();
-                            if was_exp != is_exp {
-                                let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
-                                if is_exp {
-                                    self.expires_count = self.expires_count.saturating_add(1);
-                                    if db < self.database_count {
-                                        self.db_expires_counts[db] =
-                                            self.db_expires_counts[db].saturating_add(1);
-                                    }
-                                } else {
-                                    self.expires_count = self.expires_count.saturating_sub(1);
-                                    if db < self.database_count {
-                                        self.db_expires_counts[db] =
-                                            self.db_expires_counts[db].saturating_sub(1);
-                                    }
-                                }
-                            }
-                            entry.expires_at_ms = exp;
-                            Self::mark_digest_stale_fields(
-                                &mut self.digest_stale,
-                                &mut self.digest_mutations,
-                            );
-                            self.dirty = self.dirty.saturating_add(1);
-                        }
-                        Ok(Some(result))
-                    }
-                    _ => Err(StoreError::WrongType),
+                    Value::String(v) => v.clone(),
+                    _ => return Err(StoreError::WrongType),
                 }
             }
-            None => Ok(None),
+            None => return Ok(None),
+        };
+
+        // (frankenredis-cx98g) GETEX emits its own keyspace event from the store
+        // (mirroring upstream t_string.c::getexCommand), so GETEX is excluded
+        // from the runtime's generic keyevent path:
+        //   * EXAT/PXAT whose deadline is already in the past delete the key and
+        //     fire NOTIFY_GENERIC "del" (NOT "expire" + lazy "expired"). EX/PX
+        //     <= 0 are rejected before reaching the store, so a past deadline
+        //     can only come from an absolute EXAT/PXAT timestamp.
+        //   * A future deadline sets the TTL and fires "expire".
+        //   * PERSIST fires "persist" and dirties ONLY when a TTL was actually
+        //     removed; on a key with no TTL it is a pure read (no event, no
+        //     dirty), matching removeExpire()'s return-value gate upstream.
+        if let Some(exp) = new_expires_at_ms {
+            let (db, logical_key) = match decode_db_key(key) {
+                Some((db, lk)) => (db, lk.to_vec()),
+                None => (0, key.to_vec()),
+            };
+            match exp {
+                Some(deadline) if deadline <= now_ms => {
+                    self.notify_keyspace_event(NOTIFY_GENERIC, "del", &logical_key, db);
+                    self.internal_entries_remove(key);
+                    self.stream_groups.remove(key);
+                    self.stream_last_ids.remove(key);
+                    self.dirty = self.dirty.saturating_add(1);
+                }
+                Some(deadline) => {
+                    let mut added_expiry = false;
+                    self.with_mutated_entry(key, |entry| {
+                        added_expiry = entry.expires_at_ms.is_none();
+                        entry.expires_at_ms = Some(deadline);
+                    });
+                    if added_expiry {
+                        self.expires_count = self.expires_count.saturating_add(1);
+                        if db < self.database_count {
+                            self.db_expires_counts[db] =
+                                self.db_expires_counts[db].saturating_add(1);
+                        }
+                    }
+                    self.dirty = self.dirty.saturating_add(1);
+                    self.notify_keyspace_event(NOTIFY_GENERIC, "expire", &logical_key, db);
+                }
+                None => {
+                    let had_expiry = self
+                        .entries
+                        .get(key)
+                        .is_some_and(|entry| entry.expires_at_ms.is_some());
+                    if had_expiry {
+                        self.with_mutated_entry(key, |entry| {
+                            entry.expires_at_ms = None;
+                        });
+                        self.expires_count = self.expires_count.saturating_sub(1);
+                        if db < self.database_count {
+                            self.db_expires_counts[db] =
+                                self.db_expires_counts[db].saturating_sub(1);
+                        }
+                        self.dirty = self.dirty.saturating_add(1);
+                        self.notify_keyspace_event(NOTIFY_GENERIC, "persist", &logical_key, db);
+                    }
+                }
+            }
         }
+        Ok(Some(value))
     }
 
     /// BITOP: perform bitwise operation between strings.
@@ -21356,6 +21392,72 @@ mod tests {
             other => return Err(format!("GETEX LFU mismatch: {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn getex_keyspace_events_and_dirty_match_upstream() {
+        // (frankenredis-cx98g) GETEX emits its own keyspace events from the
+        // store, mirroring upstream getexCommand. Verify each branch.
+        let ev = |store: &mut Store| store.drain_keyspace_notifications();
+
+        // EXAT/PXAT past deadline -> delete + "del", returns the old value.
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_GENERIC;
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 1_000);
+        let before = store.dirty;
+        assert_eq!(
+            store.getex(b"k", Some(Some(500)), 1_000).unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert!(!store.key_is_present(b"k"));
+        assert_eq!(store.dirty, before + 1);
+        assert_eq!(
+            ev(&mut store),
+            vec![(b"__keyevent@0__:del".to_vec(), b"k".to_vec())]
+        );
+
+        // Future deadline -> set TTL + "expire".
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_GENERIC;
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 1_000);
+        let before = store.dirty;
+        assert_eq!(
+            store.getex(b"k", Some(Some(5_000)), 1_000).unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert!(store.key_is_present(b"k"));
+        assert_eq!(store.dirty, before + 1);
+        assert_eq!(
+            ev(&mut store),
+            vec![(b"__keyevent@0__:expire".to_vec(), b"k".to_vec())]
+        );
+
+        // PERSIST with a TTL -> remove TTL + "persist".
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_GENERIC;
+        store.set(b"k".to_vec(), b"v".to_vec(), Some(10_000), 1_000);
+        let before = store.dirty;
+        assert_eq!(
+            store.getex(b"k", Some(None), 1_000).unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert_eq!(store.dirty, before + 1);
+        assert_eq!(
+            ev(&mut store),
+            vec![(b"__keyevent@0__:persist".to_vec(), b"k".to_vec())]
+        );
+
+        // PERSIST with NO TTL -> pure read: no event, no dirty.
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_GENERIC;
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 1_000);
+        let before = store.dirty;
+        assert_eq!(
+            store.getex(b"k", Some(None), 1_000).unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert_eq!(store.dirty, before);
+        assert!(ev(&mut store).is_empty());
     }
 
     #[test]
