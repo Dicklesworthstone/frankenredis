@@ -5834,6 +5834,26 @@ impl Runtime {
                                     );
                                 }
                             }
+                            // (frankenredis-f7xy7) XADD with an inline MAXLEN/MINID
+                            // trim that actually removed entries fires a secondary
+                            // NOTIFY_STREAM "xtrim" event AFTER "xadd", matching
+                            // upstream xaddCommand. The command handler set
+                            // last_xadd_trimmed during dispatch; consume it here so
+                            // the ordering (xadd then xtrim) is preserved.
+                            if argv
+                                .first()
+                                .is_some_and(|c| c.eq_ignore_ascii_case(b"XADD"))
+                                && self.server.store.last_xadd_trimmed
+                            {
+                                for key in &cmd_keys {
+                                    self.server.store.notify_keyspace_event(
+                                        fr_store::NOTIFY_STREAM,
+                                        "xtrim",
+                                        key,
+                                        db,
+                                    );
+                                }
+                            }
                             // (frankenredis-g0crt) An element-removal command that
                             // empties an aggregate causes upstream to dbDelete the
                             // key and fire a secondary NOTIFY_GENERIC "del" after

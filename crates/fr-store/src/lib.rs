@@ -1525,6 +1525,13 @@ pub struct Store {
     /// via the pub/sub system after command execution.
     pub keyspace_notifications: Vec<(Vec<u8>, Vec<u8>)>,
 
+    /// (frankenredis-f7xy7) Transient signal set by the XADD command handler
+    /// when its inline MAXLEN/MINID trim actually removed entries. Upstream
+    /// xaddCommand fires a secondary "xtrim" keyspace event (after "xadd") in
+    /// that case; the runtime reads this flag post-dispatch to emit it in the
+    /// correct order. Overwritten by every XADD, only read for XADD.
+    pub last_xadd_trimmed: bool,
+
     // ── Server-wide metadata and stats (updated by runtime, read by INFO) ──
     /// Unique 40-character hex run ID generated at startup.
     pub server_run_id: String,
@@ -1874,6 +1881,7 @@ impl Default for Store {
             cached_memory_usage_dirty: std::cell::Cell::new(0),
             notify_keyspace_events: 0,
             keyspace_notifications: Vec::new(),
+            last_xadd_trimmed: false,
             server_run_id: generate_run_id(),
             cluster_shard_id: generate_run_id(),
             server_pid: std::process::id(),

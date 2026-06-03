@@ -6663,6 +6663,9 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     // happen; only the dirty contribution is dropped). The secondary "xtrim"
     // keyspace notification on inline trim is tracked separately.
     let dirty_after_add = store.dirty;
+    // (frankenredis-f7xy7) Total entries removed by the inline trim, used to
+    // decide whether to fire the secondary "xtrim" keyspace event.
+    let mut trimmed_entries: usize = 0;
 
     // Apply inline trimming after the add. Approximate trimming
     // (~) without LIMIT is best-effort: upstream lazily skips trimming
@@ -6701,7 +6704,10 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             max_len
         };
         let pass_limit = if trim_approx { None } else { trim_limit_usize };
-        let _ = store.xtrim(&argv[1], effective_max_len, pass_limit, now_ms);
+        let removed = store
+            .xtrim(&argv[1], effective_max_len, pass_limit, now_ms)
+            .unwrap_or(0);
+        trimmed_entries = trimmed_entries.saturating_add(removed);
     }
     if let Some(min_id) = trim_minid
         && should_run_inline_trim
@@ -6710,11 +6716,18 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         // pre-existing behavior; pass through with the LIMIT cap
         // unchanged. (frankenredis-hpz8a leaves MINID
         // node-boundary modeling for follow-up.)
-        let _ = store.xtrim_minid(&argv[1], min_id, trim_limit_usize, now_ms);
+        let removed = store
+            .xtrim_minid(&argv[1], min_id, trim_limit_usize, now_ms)
+            .unwrap_or(0);
+        trimmed_entries = trimmed_entries.saturating_add(removed);
     }
     // (frankenredis-xaddtrimdirty) Drop any dirty units the inline trim added;
     // the XADD itself already accounted for exactly one.
     store.dirty = dirty_after_add;
+    // (frankenredis-f7xy7) Signal the runtime to emit the secondary "xtrim"
+    // keyspace event (after "xadd") iff the inline trim actually removed
+    // entries — matching upstream xaddCommand. Overwritten by every XADD.
+    store.last_xadd_trimmed = trimmed_entries > 0;
 
     Ok(RespFrame::BulkString(Some(format_stream_id(id))))
 }
@@ -49116,6 +49129,48 @@ mod tests {
         )
         .expect("xadd minid");
         assert_eq!(store.dirty, before + 1, "XADD MINID trim must net +1 dirty");
+    }
+
+    #[test]
+    fn xadd_sets_last_xadd_trimmed_only_when_trim_removed_entries() {
+        // (frankenredis-f7xy7) The XADD handler records whether its inline trim
+        // actually removed entries so the runtime can emit the secondary "xtrim"
+        // keyspace event (after "xadd") in the trimmed case only.
+        let mut store = Store::new();
+        for i in 0..3u64 {
+            dispatch_argv(
+                &[b"XADD".to_vec(), b"s".to_vec(), format!("{}-1", i + 1).into_bytes(), b"f".to_vec(), b"v".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("seed");
+        }
+        // Plain XADD (no trim clause) → flag false.
+        dispatch_argv(
+            &[b"XADD".to_vec(), b"s".to_vec(), b"*".to_vec(), b"f".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("plain xadd");
+        assert!(!store.last_xadd_trimmed, "plain XADD must not flag a trim");
+
+        // MAXLEN above current length → no removal → flag false.
+        dispatch_argv(
+            &[b"XADD".to_vec(), b"s".to_vec(), b"MAXLEN".to_vec(), b"1000".to_vec(), b"*".to_vec(), b"f".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("xadd maxlen noop");
+        assert!(!store.last_xadd_trimmed, "MAXLEN above length must not flag a trim");
+
+        // MAXLEN below current length → removal → flag true.
+        dispatch_argv(
+            &[b"XADD".to_vec(), b"s".to_vec(), b"MAXLEN".to_vec(), b"1".to_vec(), b"*".to_vec(), b"f".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("xadd maxlen trim");
+        assert!(store.last_xadd_trimmed, "MAXLEN below length must flag the trim");
     }
 
     #[test]
