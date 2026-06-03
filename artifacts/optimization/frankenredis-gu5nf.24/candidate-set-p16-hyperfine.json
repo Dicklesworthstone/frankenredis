@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "target-icywolf-gu5nf24-candidate-rch/release-perf/fr-bench --host 127.0.0.1 --port 20326 --clients 50 --requests 100000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out artifacts/optimization/frankenredis-gu5nf.24/candidate-set-p16-hf-last.json --key-prefix icywolf-gu5nf24-hf",
+      "mean": 0.39165529878,
+      "stddev": 0.11721742404161162,
+      "median": 0.36079366588000006,
+      "user": 0.08245662,
+      "system": 0.17921482000000002,
+      "min": 0.32351855888000003,
+      "max": 0.71813376488,
+      "times": [
+        0.40611959088000005,
+        0.33663747188000004,
+        0.71813376488,
+        0.32351855888000003,
+        0.36827775588000006,
+        0.35684674088,
+        0.32958468588,
+        0.36474059088000005,
+        0.34286233888,
+        0.36983148888000006
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

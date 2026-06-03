@@ -1,0 +1,6 @@
+74a1e54b5c45543eac806b89f60ddb2c8e1719ee46e3ff75d8cd26c250494b2e  artifacts/optimization/icywolf-perf-20260603-pass21-current-profile/set-p16-direct.json
+5c08546dbfb8e129593a587247ab98b1ccd8bdc0a3892a6b8a2b03714b212a18  artifacts/optimization/icywolf-perf-20260603-pass21-current-profile/set-p16-hyperfine.json
+35e60e28536e7322f8935980f2108e8321b1caee29c28fef97c7f7a2c347e439  artifacts/optimization/icywolf-perf-20260603-pass21-current-profile/set-p16-strace.txt
+cc4ffe2cd94a54ddaa948a03b004253119827d61a9b0283b245a3d5efc27f53e  artifacts/optimization/icywolf-perf-20260603-pass21-current-profile/gdb-server-samples.txt
+008113e3e62598b26006f336bb58d33091fd1253d788f650f7a8fa6bee566e47  artifacts/optimization/frankenredis-gu5nf.24/candidate-set-p16-direct.json
+bb303d0b65efb4cc479d4ce01b108cdaee9b0cb07bf2a04657335c18b25aec54  artifacts/optimization/frankenredis-gu5nf.24/candidate-set-p16-hyperfine.json

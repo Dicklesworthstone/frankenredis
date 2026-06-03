@@ -1,0 +1,727 @@
+server_pid=343983
+
+=== sample 01 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000057e712cf2f0f in write_str () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:3347
+3347	    /// ```
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  0x000057e712cf2f0f in write_str () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:3347
+#1  0x000057e712ad3818 in core::fmt::write () at library/core/src/fmt/mod.rs:1665
+#2  0x000057e712adaf3b in core::fmt::Formatter::write_fmt () at library/core/src/fmt/mod.rs:2132
+#3  core::net::ip_addr::{impl#8}::fmt () at library/core/src/macros/mod.rs:604
+#4  0x000057e712ad390a in core::fmt::rt::Argument::fmt () at library/core/src/fmt/rt.rs:152
+#5  0x000057e712ad390a in core::fmt::write ()
+#6  0x000057e712adae08 in core::fmt::Formatter::write_fmt () at library/core/src/fmt/mod.rs:2132
+#7  core::net::socket_addr::{impl#8}::fmt () at library/core/src/macros/mod.rs:604
+#8  0x000057e712c8a59b in core::net::socket_addr::{impl#6}::fmt () at /rustc/82bee965077a631d6fbdee4014f2ec535535aaa3/library/core/src/net/socket_addr.rs:632
+#9  spec_to_string<core::net::socket_addr::SocketAddr> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:2915
+#10 to_string<core::net::socket_addr::SocketAddr> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:2894
+#11 {closure#0} () at crates/fr-runtime/src/lib.rs:11925
+#12 map<core::net::socket_addr::SocketAddr, alloc::vec::Vec<u8, alloc::alloc::Global>, fr_runtime::{impl#16}::record_slowlog::{closure_env#0}> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs:1162
+#13 record_slowlog () at crates/fr-runtime/src/lib.rs:11925
+#14 0x000057e712cca008 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5905
+#15 0x000057e712ce8ab2 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#16 with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#17 execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+[Inferior 1 (process 343983) detached]
+
+=== sample 02 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000057e712c49236 in branch<(fr_protocol::RespFrame, usize), fr_protocol::RespParseError> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:2174
+2174	    }
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  0x000057e712c49236 in branch<(fr_protocol::RespFrame, usize), fr_protocol::RespParseError> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:2174
+#1  parse_command_frame () at crates/fr-protocol/src/lib.rs:562
+#2  0x000057e712deaf3e in process_buffered_frames () at crates/fr-server/src/main.rs:1403
+#3  0x000057e712df6999 in handle_readable () at crates/fr-server/src/main.rs:1255
+#4  main () at crates/fr-server/src/main.rs:865
+#5  0x000057e712de7713 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#6  __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#7  0x000057e712de7a79 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#8  0x000057e712e3e11e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#9  std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#10 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#11 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#12 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#13 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#14 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#15 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#16 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#17 0x000057e712e050ec in main ()
+[Inferior 1 (process 343983) detached]
+
+=== sample 03 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+dealloc () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mimalloc-0.1.49/src/lib.rs:61
+
+warning: 61	/tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mimalloc-0.1.49/src/lib.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  dealloc () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mimalloc-0.1.49/src/lib.rs:61
+#1  __rust_dealloc () at crates/fr-server/src/main.rs:18
+#2  dealloc_nonnull () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:128
+#3  deallocate_impl_runtime () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:229
+#4  deallocate_impl () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:344
+#5  deallocate () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:462
+#6  deallocate<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:876
+#7  drop<usize, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:424
+#8  drop_glue<alloc::raw_vec::RawVec<usize, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:825
+#9  dealloc_only<usize, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/into_iter.rs:203
+#10 drop<usize, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/into_iter.rs:548
+#11 drop_glue<alloc::vec::into_iter::{impl#16}::drop::DropGuard<usize, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:825
+#12 drop<usize, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/into_iter.rs:559
+#13 drop_glue<alloc::vec::into_iter::IntoIter<usize, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:825
+#14 drop_glue<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<usize, alloc::alloc::Global>, fr_command::command_keys::{closure_env#0}>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:825
+#15 extend_desugared<alloc::vec::Vec<u8, alloc::alloc::Global>, alloc::alloc::Global, core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<usize, alloc::alloc::Global>, fr_command::command_keys::{closure_env#0}>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4023
+#16 spec_extend<alloc::vec::Vec<u8, alloc::alloc::Global>, core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<usize, alloc::alloc::Global>, fr_command::command_keys::{closure_env#0}>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:18
+#17 from_iter<alloc::vec::Vec<u8, alloc::alloc::Global>, core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<usize, alloc::alloc::Global>, fr_command::command_keys::{closure_env#0}>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:41
+[Inferior 1 (process 343983) detached]
+
+=== sample 04 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000057e712c4925d in parse_command_frame () at crates/fr-protocol/src/lib.rs:564
+564	        if matches!(item, RespFrame::BulkString(None)) {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  0x000057e712c4925d in parse_command_frame () at crates/fr-protocol/src/lib.rs:564
+#1  0x000057e712deaf3e in process_buffered_frames () at crates/fr-server/src/main.rs:1403
+#2  0x000057e712df6999 in handle_readable () at crates/fr-server/src/main.rs:1255
+#3  main () at crates/fr-server/src/main.rs:865
+#4  0x000057e712de7713 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#5  __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#6  0x000057e712de7a79 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#7  0x000057e712e3e11e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#8  std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#9  std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#10 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#11 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#12 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#13 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#14 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#15 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#16 0x000057e712e050ec in main ()
+[Inferior 1 (process 343983) detached]
+
+=== sample 05 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000057e712b7628a in eq_ignore_ascii_case () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:61
+61	        if self.len() != other.len() {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  0x000057e712b7628a in eq_ignore_ascii_case () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:61
+#1  eq_ignore_ascii_case () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2841
+#2  command_uses_custom_key_specs () at crates/fr-command/src/lib.rs:847
+#3  0x000057e712b6496b in command_has_keys () at crates/fr-command/src/lib.rs:964
+#4  command_key_references () at crates/fr-command/src/lib.rs:1121
+#5  0x000057e712b604d0 in command_acl_key_access () at crates/fr-command/src/lib.rs:1211
+#6  0x000057e712c7c3b8 in permission_error_for_set () at crates/fr-runtime/src/lib.rs:1052
+#7  acl_permission_error_for_argv () at crates/fr-runtime/src/lib.rs:1083
+#8  0x000057e712cc864c in acl_permission_error () at crates/fr-runtime/src/lib.rs:4906
+#9  execute_frame_internal () at crates/fr-runtime/src/lib.rs:5553
+#10 0x000057e712ce8ab2 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#11 with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#12 execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#13 0x000057e712deb90f in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#14 process_buffered_frames () at crates/fr-server/src/main.rs:1456
+#15 0x000057e712df6999 in handle_readable () at crates/fr-server/src/main.rs:1255
+#16 main () at crates/fr-server/src/main.rs:865
+#17 0x000057e712de7713 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+[Inferior 1 (process 343983) detached]
+
+=== sample 06 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+wrapping_add () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:2582
+2582	        #[inline(always)]
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  wrapping_add () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:2582
+#1  d_rounds () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/sip.rs:86
+#2  finish<core::hash::sip::Sip13Rounds> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/sip.rs:321
+#3  finish () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/sip.rs:243
+#4  finish () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/hash/random.rs:141
+#5  hash_one<std::hash::random::RandomState, &alloc::vec::Vec<u8, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/mod.rs:701
+#6  0x000057e712d953ac in make_hash<alloc::vec::Vec<u8, alloc::alloc::Global>, std::hash::random::RandomState> () at /rust/deps/hashbrown-0.17.0/src/map.rs:241
+#7  insert<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global> () at /rust/deps/hashbrown-0.17.0/src/map.rs:1807
+#8  insert<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:1329
+#9  internal_entries_insert () at crates/fr-store/src/lib.rs:4300
+#10 0x000057e712d9fbe3 in set () at crates/fr-store/src/lib.rs:2712
+#11 0x000057e712b8ee12 in set () at crates/fr-command/src/lib.rs:3515
+#12 0x000057e712b366a5 in dispatch_argv () at crates/fr-command/src/lib.rs:2195
+#13 0x000057e712ce10a6 in dispatch_with_client_context () at crates/fr-runtime/src/lib.rs:7350
+#14 0x000057e712cdc62d in execute_db_scoped_command () at crates/fr-runtime/src/lib.rs:7433
+#15 0x000057e712cc9fa2 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5892
+#16 0x000057e712ce8ab2 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#17 with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+[Inferior 1 (process 343983) detached]
+
+=== sample 07 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x00007b8bc0f3822e in __GI_epoll_ctl () at ../sysdeps/unix/syscall-template.S:120
+
+warning: 120	../sysdeps/unix/syscall-template.S: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  0x00007b8bc0f3822e in __GI_epoll_ctl () at ../sysdeps/unix/syscall-template.S:120
+#1  0x000057e712dde750 in reregister () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/mod.rs:8
+#2  reregister () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:43
+#3  reregister<std::net::tcp::TcpStream> () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:137
+#4  reregister () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:343
+#5  reregister<mio::net::tcp::stream::TcpStream> () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/poll.rs:649
+#6  0x000057e712df6c66 in handle_readable () at /rust/deps/hashbrown-0.17.0/src/set.rs:1075
+#7  main () at crates/fr-server/src/main.rs:865
+#8  0x000057e712de7713 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#10 0x000057e712de7a79 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#11 0x000057e712e3e11e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#12 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#13 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#14 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#15 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#16 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+[Inferior 1 (process 343983) detached]
+
+=== sample 08 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=52, a2=2199025555840, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  __internal_syscall_cancel (a1=52, a2=2199025555840, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=52, a2=2199025555840, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x00007b8bc0f3900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000057e712e003e0 in std::sys::net::connection::socket::TcpStream::write () at /rustc/82bee965077a631d6fbdee4014f2ec535535aaa3/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/82bee965077a631d6fbdee4014f2ec535535aaa3/library/std/src/net/tcp.rs:740
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+#10 0x000057e712df6be5 in handle_readable () at crates/fr-server/src/main.rs:1302
+#11 main () at crates/fr-server/src/main.rs:865
+#12 0x000057e712de7713 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#14 0x000057e712de7a79 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#15 0x000057e712e3e11e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#16 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+[Inferior 1 (process 343983) detached]
+
+=== sample 09 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000057e712c86757 in capture_aof_record () at crates/fr-runtime/src/lib.rs:3112
+3112	    }
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  0x000057e712c86757 in capture_aof_record () at crates/fr-runtime/src/lib.rs:3112
+#1  0x000057e712c9f514 in capture_aof_record () at crates/fr-runtime/src/lib.rs:6955
+#2  0x000057e712ccbee8 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5987
+#3  0x000057e712ce8ab2 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#4  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#5  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#6  0x000057e712deb90f in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#7  process_buffered_frames () at crates/fr-server/src/main.rs:1456
+#8  0x000057e712df6999 in handle_readable () at crates/fr-server/src/main.rs:1255
+#9  main () at crates/fr-server/src/main.rs:865
+#10 0x000057e712de7713 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#11 __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#12 0x000057e712de7a79 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#13 0x000057e712e3e11e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#14 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#15 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#16 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#17 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+[Inferior 1 (process 343983) detached]
+
+=== sample 10 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000057e712b65886 in command_key_references () at crates/fr-command/src/lib.rs:1145
+1145	    if let Some(exact_refs) = command_key_references_with_exact_flags(table_name, argv)? {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  0x000057e712b65886 in command_key_references () at crates/fr-command/src/lib.rs:1145
+#1  0x000057e712b604d0 in command_acl_key_access () at crates/fr-command/src/lib.rs:1211
+#2  0x000057e712c7c3b8 in permission_error_for_set () at crates/fr-runtime/src/lib.rs:1052
+#3  acl_permission_error_for_argv () at crates/fr-runtime/src/lib.rs:1083
+#4  0x000057e712cc864c in acl_permission_error () at crates/fr-runtime/src/lib.rs:4906
+#5  execute_frame_internal () at crates/fr-runtime/src/lib.rs:5553
+#6  0x000057e712ce8ab2 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#7  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#8  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#9  0x000057e712deb90f in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#10 process_buffered_frames () at crates/fr-server/src/main.rs:1456
+#11 0x000057e712df6999 in handle_readable () at crates/fr-server/src/main.rs:1255
+#12 main () at crates/fr-server/src/main.rs:865
+#13 0x000057e712de7713 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#14 __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#15 0x000057e712de7a79 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#16 0x000057e712e3e11e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#17 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+[Inferior 1 (process 343983) detached]
+
+=== sample 11 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000057e712ddbabb in write<core::hash::sip::Sip13Rounds> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/sip.rs:282
+282	        while i < len - left {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  0x000057e712ddbabb in write<core::hash::sip::Sip13Rounds> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/sip.rs:282
+#1  0x000057e712d3f24b in write () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/sip.rs:233
+#2  write () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/hash/random.rs:131
+#3  write_usize<std::hash::random::DefaultHasher> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/mod.rs:393
+#4  write_length_prefix<std::hash::random::DefaultHasher> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/mod.rs:484
+#5  hash<u8, std::hash::random::DefaultHasher> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/mod.rs:934
+#6  hash<u8, alloc::alloc::Global, std::hash::random::DefaultHasher> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3832
+#7  hash<alloc::vec::Vec<u8, alloc::alloc::Global>, std::hash::random::DefaultHasher> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/mod.rs:943
+#8  hash_one<std::hash::random::RandomState, &alloc::vec::Vec<u8, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/mod.rs:700
+#9  0x000057e712d95d80 in make_hash<alloc::vec::Vec<u8, alloc::alloc::Global>, std::hash::random::RandomState> () at /rust/deps/hashbrown-0.17.0/src/map.rs:241
+#10 get<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, alloc::vec::Vec<u8, alloc::alloc::Global>> () at /rust/deps/hashbrown-0.17.0/src/map.rs:1287
+#11 get<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, alloc::vec::Vec<u8, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:1035
+#12 internal_entries_insert () at crates/fr-store/src/lib.rs:4315
+#13 0x000057e712d9fbe3 in set () at crates/fr-store/src/lib.rs:2712
+#14 0x000057e712b8ee12 in set () at crates/fr-command/src/lib.rs:3515
+#15 0x000057e712b366a5 in dispatch_argv () at crates/fr-command/src/lib.rs:2195
+#16 0x000057e712ce10a6 in dispatch_with_client_context () at crates/fr-runtime/src/lib.rs:7350
+#17 0x000057e712cdc62d in execute_db_scoped_command () at crates/fr-runtime/src/lib.rs:7433
+[Inferior 1 (process 343983) detached]
+
+=== sample 12 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000057e712cdc6ad in execute_db_scoped_command () at crates/fr-runtime/src/lib.rs:7433
+7433	        let mut reply = self.dispatch_with_client_context(&namespaced, now_ms)?;
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  0x000057e712cdc6ad in execute_db_scoped_command () at crates/fr-runtime/src/lib.rs:7433
+#1  0x000057e712cc9fa2 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5892
+#2  0x000057e712ce8ab2 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#3  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#4  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#5  0x000057e712deb90f in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#6  process_buffered_frames () at crates/fr-server/src/main.rs:1456
+#7  0x000057e712df6999 in handle_readable () at crates/fr-server/src/main.rs:1255
+#8  main () at crates/fr-server/src/main.rs:865
+#9  0x000057e712de7713 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#10 __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#11 0x000057e712de7a79 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#12 0x000057e712e3e11e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#13 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#14 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#15 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#16 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#17 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+[Inferior 1 (process 343983) detached]
+
+=== sample 13 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000057e712d75aa1 in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:21
+21	        if len == other.len() {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  0x000057e712d75aa1 in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:21
+#1  eq<[u8], [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2122
+#2  equivalent<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>> () at /rust/deps/hashbrown-0.17.0/src/lib.rs:157
+#3  {closure#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry> () at /rust/deps/hashbrown-0.17.0/src/map.rs:221
+#4  {closure#0}<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1202
+#5  find_inner () at /rust/deps/hashbrown-0.17.0/src/raw.rs:2034
+#6  find<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1202
+#7  get<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1217
+#8  get<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /rust/deps/hashbrown-0.17.0/src/map.rs:1288
+#9  get<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:1035
+#10 drop_if_expired () at crates/fr-store/src/lib.rs:11129
+#11 0x000057e712d93cbc in record_keyspace_lookup () at crates/fr-store/src/lib.rs:2285
+#12 0x000057e712b8e689 in exists_no_touch () at crates/fr-store/src/lib.rs:2809
+#13 set () at crates/fr-command/src/lib.rs:3500
+#14 0x000057e712b366a5 in dispatch_argv () at crates/fr-command/src/lib.rs:2195
+#15 0x000057e712ce10a6 in dispatch_with_client_context () at crates/fr-runtime/src/lib.rs:7350
+#16 0x000057e712cdc62d in execute_db_scoped_command () at crates/fr-runtime/src/lib.rs:7433
+#17 0x000057e712cc9fa2 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5892
+[Inferior 1 (process 343983) detached]
+
+=== sample 14 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=53, a2=2199025555968, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  __internal_syscall_cancel (a1=53, a2=2199025555968, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=53, a2=2199025555968, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x00007b8bc0f3900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000057e712e003e0 in std::sys::net::connection::socket::TcpStream::write () at /rustc/82bee965077a631d6fbdee4014f2ec535535aaa3/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/82bee965077a631d6fbdee4014f2ec535535aaa3/library/std/src/net/tcp.rs:740
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+#10 0x000057e712df6be5 in handle_readable () at crates/fr-server/src/main.rs:1302
+#11 main () at crates/fr-server/src/main.rs:865
+#12 0x000057e712de7713 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#14 0x000057e712de7a79 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#15 0x000057e712e3e11e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#16 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+[Inferior 1 (process 343983) detached]
+
+=== sample 15 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000057e712d75aa1 in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:21
+21	        if len == other.len() {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  0x000057e712d75aa1 in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:21
+#1  eq<[u8], [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2122
+#2  equivalent<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>> () at /rust/deps/hashbrown-0.17.0/src/lib.rs:157
+#3  {closure#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry> () at /rust/deps/hashbrown-0.17.0/src/map.rs:221
+#4  {closure#0}<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1202
+#5  find_inner () at /rust/deps/hashbrown-0.17.0/src/raw.rs:2034
+#6  find<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1202
+#7  get<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1217
+#8  get<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /rust/deps/hashbrown-0.17.0/src/map.rs:1288
+#9  get<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:1035
+#10 drop_if_expired () at crates/fr-store/src/lib.rs:11129
+#11 0x000057e712d93cbc in record_keyspace_lookup () at crates/fr-store/src/lib.rs:2285
+#12 0x000057e712b8e689 in exists_no_touch () at crates/fr-store/src/lib.rs:2809
+#13 set () at crates/fr-command/src/lib.rs:3500
+#14 0x000057e712b366a5 in dispatch_argv () at crates/fr-command/src/lib.rs:2195
+#15 0x000057e712ce10a6 in dispatch_with_client_context () at crates/fr-runtime/src/lib.rs:7350
+#16 0x000057e712cdc62d in execute_db_scoped_command () at crates/fr-runtime/src/lib.rs:7433
+#17 0x000057e712cc9fa2 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5892
+[Inferior 1 (process 343983) detached]
+
+=== sample 16 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+first<alloc::vec::Vec<u8, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:156
+156	        if let [first, ..] = self { Some(first) } else { None }
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  first<alloc::vec::Vec<u8, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:156
+#1  execute_frame_internal () at crates/fr-runtime/src/lib.rs:5941
+#2  0x000057e712ce8ab2 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#3  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#4  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#5  0x000057e712deb90f in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#6  process_buffered_frames () at crates/fr-server/src/main.rs:1456
+#7  0x000057e712df6999 in handle_readable () at crates/fr-server/src/main.rs:1255
+#8  main () at crates/fr-server/src/main.rs:865
+#9  0x000057e712de7713 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#10 __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#11 0x000057e712de7a79 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#12 0x000057e712e3e11e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#13 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#14 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#15 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#16 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#17 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+[Inferior 1 (process 343983) detached]
+
+=== sample 17 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x00007b8bc1206986 in ?? ()
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  0x00007b8bc1206986 in ?? ()
+#1  0x00007b8bc0ef628d in __GI___clock_gettime (clock_id=<optimized out>, tp=<optimized out>) at ../sysdeps/unix/sysv/linux/clock_gettime.c:42
+#2  0x000057e712e2f263 in std::sys::pal::unix::time::Timespec::now () at library/std/src/sys/pal/unix/time.rs:107
+#3  0x000057e712cc8f1b in std::sys::time::unix::Instant::now () at /rustc/82bee965077a631d6fbdee4014f2ec535535aaa3/library/std/src/sys/time/unix.rs:74
+#4  std::time::Instant::now () at /rustc/82bee965077a631d6fbdee4014f2ec535535aaa3/library/std/src/time.rs:288
+#5  execute_frame_internal () at crates/fr-runtime/src/lib.rs:5885
+#6  0x000057e712ce8ab2 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#7  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#8  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#9  0x000057e712deb90f in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#10 process_buffered_frames () at crates/fr-server/src/main.rs:1456
+#11 0x000057e712df6999 in handle_readable () at crates/fr-server/src/main.rs:1255
+#12 main () at crates/fr-server/src/main.rs:865
+#13 0x000057e712de7713 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#14 __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#15 0x000057e712de7a79 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#16 0x000057e712e3e11e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#17 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+[Inferior 1 (process 343983) detached]
+
+=== sample 18 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=28, a2=2199025553408, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  __internal_syscall_cancel (a1=28, a2=2199025553408, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=28, a2=2199025553408, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x00007b8bc0f3900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000057e712e003e0 in std::sys::net::connection::socket::TcpStream::write () at /rustc/82bee965077a631d6fbdee4014f2ec535535aaa3/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/82bee965077a631d6fbdee4014f2ec535535aaa3/library/std/src/net/tcp.rs:740
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+#10 0x000057e712df6be5 in handle_readable () at crates/fr-server/src/main.rs:1302
+#11 main () at crates/fr-server/src/main.rs:865
+#12 0x000057e712de7713 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#14 0x000057e712de7a79 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#15 0x000057e712e3e11e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#16 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+[Inferior 1 (process 343983) detached]
+
+=== sample 19 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000057e712ced632 in dying_next<alloc::vec::Vec<u8, alloc::alloc::Global>, alloc::collections::btree::set_val::SetValZST, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1914
+1914	                    // SAFETY: we consume the dying handle immediately.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  0x000057e712ced632 in dying_next<alloc::vec::Vec<u8, alloc::alloc::Global>, alloc::collections::btree::set_val::SetValZST, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1914
+#1  0x000057e712cf3a3b in drop<alloc::vec::Vec<u8, alloc::alloc::Global>, alloc::collections::btree::set_val::SetValZST, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1899
+#2  drop_glue<alloc::collections::btree::map::IntoIter<alloc::vec::Vec<u8, alloc::alloc::Global>, alloc::collections::btree::set_val::SetValZST, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:825
+#3  drop<alloc::collections::btree::map::IntoIter<alloc::vec::Vec<u8, alloc::alloc::Global>, alloc::collections::btree::set_val::SetValZST, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/mod.rs:1004
+#4  drop<alloc::vec::Vec<u8, alloc::alloc::Global>, alloc::collections::btree::set_val::SetValZST, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:208
+#5  drop_glue<alloc::collections::btree::map::BTreeMap<alloc::vec::Vec<u8, alloc::alloc::Global>, alloc::collections::btree::set_val::SetValZST, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:825
+#6  drop_glue<alloc::collections::btree::set::BTreeSet<alloc::vec::Vec<u8, alloc::alloc::Global>, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:825
+#7  drop_glue<fr_store::ClientTrackingState> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:825
+#8  clone_from<fr_store::ClientTrackingState> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/clone.rs:249
+#9  0x000057e712ce1401 in sync_dispatch_client_context_to_session () at crates/fr-runtime/src/lib.rs:7336
+#10 dispatch_with_client_context () at crates/fr-runtime/src/lib.rs:7351
+#11 0x000057e712cdc62d in execute_db_scoped_command () at crates/fr-runtime/src/lib.rs:7433
+#12 0x000057e712cc9fa2 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5892
+#13 0x000057e712ce8ab2 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#14 with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#15 execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#16 0x000057e712deb90f in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#17 process_buffered_frames () at crates/fr-server/src/main.rs:1456
+[Inferior 1 (process 343983) detached]
+
+=== sample 20 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=17, a2=2199025552000, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  __internal_syscall_cancel (a1=17, a2=2199025552000, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=17, a2=2199025552000, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x00007b8bc0f3900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000057e712e003e0 in std::sys::net::connection::socket::TcpStream::write () at /rustc/82bee965077a631d6fbdee4014f2ec535535aaa3/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/82bee965077a631d6fbdee4014f2ec535535aaa3/library/std/src/net/tcp.rs:740
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+#10 0x000057e712df6be5 in handle_readable () at crates/fr-server/src/main.rs:1302
+#11 main () at crates/fr-server/src/main.rs:865
+#12 0x000057e712de7713 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#14 0x000057e712de7a79 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#15 0x000057e712e3e11e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#16 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+[Inferior 1 (process 343983) detached]
+
+=== sample 21 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000057e712b6058f in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:21
+21	        if len == other.len() {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  0x000057e712b6058f in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:21
+#1  eq<[u8], [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2122
+#2  eq () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/traits.rs:30
+#3  eq<str, str> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2122
+#4  {closure#0}<&str> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:390
+#5  any<&str, core::slice::cmp::{impl#17}::slice_contains::{closure_env#0}<&str>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:332
+#6  slice_contains<&str> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:390
+#7  contains<&str> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:2594
+#8  acl_access_from_key_flags () at crates/fr-command/src/lib.rs:1184
+#9  {closure#0} () at crates/fr-command/src/lib.rs:1215
+#10 __iterator_get_unchecked<fr_command::AclKeyAccess, alloc::vec::into_iter::IntoIter<fr_command::CommandKeyReference, alloc::alloc::Global>, fr_command::command_acl_key_access::{closure_env#0}> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:138
+#11 collect_in_place<fr_command::AclKeyAccess, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fr_command::CommandKeyReference, alloc::alloc::Global>, fr_command::command_acl_key_access::{closure_env#0}>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/in_place_collect.rs:399
+#12 from_iter_in_place<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fr_command::CommandKeyReference, alloc::alloc::Global>, fr_command::command_acl_key_access::{closure_env#0}>, fr_command::AclKeyAccess> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/in_place_collect.rs:269
+#13 from_iter<fr_command::AclKeyAccess, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fr_command::CommandKeyReference, alloc::alloc::Global>, fr_command::command_acl_key_access::{closure_env#0}>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/in_place_collect.rs:245
+#14 from_iter<fr_command::AclKeyAccess, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fr_command::CommandKeyReference, alloc::alloc::Global>, fr_command::command_acl_key_access::{closure_env#0}>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3905
+#15 collect<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<fr_command::CommandKeyReference, alloc::alloc::Global>, fr_command::command_acl_key_access::{closure_env#0}>, alloc::vec::Vec<fr_command::AclKeyAccess, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2090
+#16 command_acl_key_access () at crates/fr-command/src/lib.rs:1222
+#17 0x000057e712c7c3b8 in permission_error_for_set () at crates/fr-runtime/src/lib.rs:1052
+[Inferior 1 (process 343983) detached]
+
+=== sample 22 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+clone_from<alloc::string::String> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs:2284
+2284	    #[inline]
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  clone_from<alloc::string::String> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs:2284
+#1  refresh_current_dispatch_client_context () at crates/fr-runtime/src/lib.rs:7058
+#2  dispatch_with_client_context () at crates/fr-runtime/src/lib.rs:7349
+#3  0x000057e712cdc62d in execute_db_scoped_command () at crates/fr-runtime/src/lib.rs:7433
+#4  0x000057e712cc9fa2 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5892
+#5  0x000057e712ce8ab2 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#6  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#7  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#8  0x000057e712deb90f in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#9  process_buffered_frames () at crates/fr-server/src/main.rs:1456
+#10 0x000057e712df6999 in handle_readable () at crates/fr-server/src/main.rs:1255
+#11 main () at crates/fr-server/src/main.rs:865
+#12 0x000057e712de7713 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#14 0x000057e712de7a79 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#15 0x000057e712e3e11e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#16 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+[Inferior 1 (process 343983) detached]
+
+=== sample 23 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=17, a2=2199025552000, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  __internal_syscall_cancel (a1=17, a2=2199025552000, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=17, a2=2199025552000, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x00007b8bc0f3900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000057e712e003e0 in std::sys::net::connection::socket::TcpStream::write () at /rustc/82bee965077a631d6fbdee4014f2ec535535aaa3/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/82bee965077a631d6fbdee4014f2ec535535aaa3/library/std/src/net/tcp.rs:740
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+#10 0x000057e712df6be5 in handle_readable () at crates/fr-server/src/main.rs:1302
+#11 main () at crates/fr-server/src/main.rs:865
+#12 0x000057e712de7713 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#14 0x000057e712de7a79 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#15 0x000057e712e3e11e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#16 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+[Inferior 1 (process 343983) detached]
+
+=== sample 24 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=21, a2=2199025552512, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass21-current-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7b8bc10b2c40 (LWP 343983) "frankenredis"):
+#0  __internal_syscall_cancel (a1=21, a2=2199025552512, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=21, a2=2199025552512, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x00007b8bc0f3900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000057e712e003e0 in std::sys::net::connection::socket::TcpStream::write () at /rustc/82bee965077a631d6fbdee4014f2ec535535aaa3/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/82bee965077a631d6fbdee4014f2ec535535aaa3/library/std/src/net/tcp.rs:740
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1227854-194893-1780504442413410386/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+#10 0x000057e712df6be5 in handle_readable () at crates/fr-server/src/main.rs:1302
+#11 main () at crates/fr-server/src/main.rs:865
+#12 0x000057e712de7713 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#14 0x000057e712de7a79 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#15 0x000057e712e3e11e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#16 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+[Inferior 1 (process 343983) detached]
