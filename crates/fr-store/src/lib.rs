@@ -9851,6 +9851,14 @@ impl Store {
             // Consumer group state was mutated — mark dirty for AOF persistence
             self.dirty = self.dirty.saturating_add(1);
         }
+        if let StreamGroupReadCursor::Id(_) = cursor {
+            // (frankenredis-mlpy4) Upstream xreadCommand serves a consumer-group
+            // history read (explicit start ID, not '>') synchronously and does
+            // `if (groups) server.dirty++` regardless of how many pending entries
+            // are returned — even zero. Match it so rdb_changes_since_last_save
+            // agrees. ('>' reads only reach the bump above when new entries exist.)
+            self.dirty = self.dirty.saturating_add(1);
+        }
         // Note: when reading pending entries (cursor is Id), Redis does NOT
         // increment delivery count - it's a non-destructive replay.
 
@@ -24249,6 +24257,74 @@ mod tests {
             .unwrap()
             .expect("group exists");
         assert_eq!(store.dirty, before + 1, "existing consumer + 1 claimed = 1");
+    }
+
+    #[test]
+    fn xreadgroup_history_read_dirties_once_per_synchronous_serve() {
+        // (frankenredis-mlpy4) Upstream xreadCommand does `if (groups)
+        // server.dirty++` for every synchronous group serve. For an explicit-ID
+        // (history) read that is unconditional — even when zero pending entries
+        // are returned. A '>' read only bumps when new entries are delivered.
+        let mut store = Store::new();
+        for i in 0..3u64 {
+            store
+                .xadd(b"s", (1000, i), &[(b"f".to_vec(), b"v".to_vec())], 0)
+                .unwrap();
+        }
+        assert!(store.xgroup_create(b"s", b"g", (0, 0), false, 0).unwrap());
+        // Seed c1 with 3 pending via a '>' read.
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(3)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+
+        // History read returning pending entries → +1.
+        let before = store.dirty;
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::Id((0, 0)), false, Some(3)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(store.dirty, before + 1, "history read with results dirties +1");
+
+        // History read returning ZERO entries (start past the last pending) → still +1.
+        let before = store.dirty;
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::Id((9999, 0)), false, Some(3)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(store.dirty, before + 1, "empty history read still dirties +1");
+
+        // '>' read with no new entries → no bump.
+        let before = store.dirty;
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(3)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(store.dirty, before, "'>' read with no new entries must not dirty");
     }
 
     #[test]
