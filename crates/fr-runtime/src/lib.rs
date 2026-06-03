@@ -5652,6 +5652,15 @@ impl Runtime {
                             // replay use the SAME stream id instead of generating
                             // a divergent one from their own clock.
                             self.capture_aof_record(&rewritten);
+                        } else if let Some(rewritten) =
+                            Self::rewrite_blocking_or_mpop_for_propagation(&argv, &reply)
+                        {
+                            // (frankenredis-ybaw7) Blocking pops / *MPOP / GETDEL
+                            // propagate as the concrete deterministic command
+                            // (LPOP/RPOP/ZPOPMIN/ZPOPMAX/LMOVE/RPOPLPUSH/DEL) so the
+                            // stream matches upstream and a replica never applies a
+                            // blocking command.
+                            self.capture_aof_record(&rewritten);
                         } else {
                             self.capture_aof_record(&argv);
                         }
@@ -6749,6 +6758,97 @@ impl Runtime {
         let mut out = argv.to_vec();
         out[id_idx] = generated;
         Some(out)
+    }
+
+    /// Rewrite blocking pops, *MPOP, and GETDEL into the concrete deterministic
+    /// command upstream propagates, so the AOF/replication stream matches and a
+    /// replica never applies a blocking command. The served key and popped
+    /// count come from the command reply. Mirrors upstream:
+    ///   BLPOP/BRPOP key.. t        -> LPOP/RPOP <served-key>
+    ///   BZPOPMIN/BZPOPMAX key.. t  -> ZPOPMIN/ZPOPMAX <served-key>
+    ///   BRPOPLPUSH src dst t       -> RPOPLPUSH src dst
+    ///   BLMOVE src dst f t to      -> LMOVE src dst f t
+    ///   LMPOP/BLMPOP ... L|R [C n] -> LPOP/RPOP <served-key> <count>
+    ///   ZMPOP/BZMPOP ... MIN|MAX   -> ZPOPMIN/ZPOPMAX <served-key> <count>
+    ///   GETDEL key                 -> DEL key
+    /// Returns `None` to propagate verbatim. (frankenredis-ybaw7)
+    fn rewrite_blocking_or_mpop_for_propagation(
+        argv: &[Vec<u8>],
+        reply: &RespFrame,
+    ) -> Option<Vec<Vec<u8>>> {
+        let cmd = argv.first()?;
+        let array_items = |f: &RespFrame| -> Option<Vec<RespFrame>> {
+            match f {
+                RespFrame::Array(Some(v)) | RespFrame::Set(Some(v)) => Some(v.clone()),
+                _ => None,
+            }
+        };
+        let bulk_bytes = |f: &RespFrame| -> Option<Vec<u8>> {
+            match f {
+                RespFrame::BulkString(Some(v)) => Some(v.clone()),
+                _ => None,
+            }
+        };
+
+        if eq_ascii_token(cmd, b"GETDEL") && argv.len() == 2 {
+            return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
+        }
+        if eq_ascii_token(cmd, b"BRPOPLPUSH") && argv.len() == 4 {
+            return Some(vec![b"RPOPLPUSH".to_vec(), argv[1].clone(), argv[2].clone()]);
+        }
+        if eq_ascii_token(cmd, b"BLMOVE") && argv.len() == 6 {
+            return Some(vec![
+                b"LMOVE".to_vec(),
+                argv[1].clone(),
+                argv[2].clone(),
+                argv[3].clone(),
+                argv[4].clone(),
+            ]);
+        }
+        // BLPOP/BRPOP reply = [served-key, value]; BZPOP* = [served-key, member, score].
+        if eq_ascii_token(cmd, b"BLPOP") || eq_ascii_token(cmd, b"BRPOP") {
+            let key = bulk_bytes(array_items(reply)?.first()?)?;
+            let op = if eq_ascii_token(cmd, b"BLPOP") { b"LPOP" } else { b"RPOP" };
+            return Some(vec![op.to_vec(), key]);
+        }
+        if eq_ascii_token(cmd, b"BZPOPMIN") || eq_ascii_token(cmd, b"BZPOPMAX") {
+            let key = bulk_bytes(array_items(reply)?.first()?)?;
+            let op = if eq_ascii_token(cmd, b"BZPOPMIN") { b"ZPOPMIN" } else { b"ZPOPMAX" };
+            return Some(vec![op.to_vec(), key]);
+        }
+        // (B)LMPOP / (B)ZMPOP reply = [served-key, [popped...]]; the direction
+        // token sits right after the key list.
+        let (is_list, numkeys_idx) = if eq_ascii_token(cmd, b"LMPOP") {
+            (true, 1usize)
+        } else if eq_ascii_token(cmd, b"ZMPOP") {
+            (false, 1)
+        } else if eq_ascii_token(cmd, b"BLMPOP") {
+            (true, 2)
+        } else if eq_ascii_token(cmd, b"BZMPOP") {
+            (false, 2)
+        } else {
+            return None;
+        };
+        let numkeys: usize = std::str::from_utf8(argv.get(numkeys_idx)?)
+            .ok()?
+            .parse()
+            .ok()?;
+        let dir = argv.get(numkeys_idx + 1 + numkeys)?;
+        let items = array_items(reply)?;
+        let served_key = bulk_bytes(items.first()?)?;
+        let count = array_items(items.get(1)?)?.len();
+        let op: &[u8] = if is_list {
+            if eq_ascii_token(dir, b"LEFT") {
+                b"LPOP"
+            } else {
+                b"RPOP"
+            }
+        } else if eq_ascii_token(dir, b"MIN") {
+            b"ZPOPMIN"
+        } else {
+            b"ZPOPMAX"
+        };
+        Some(vec![op.to_vec(), served_key, count.to_string().into_bytes()])
     }
 
     fn rewrite_relative_expire_for_propagation(
@@ -18175,6 +18275,76 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn blocking_and_mpop_and_getdel_rewritten_for_propagation() {
+        // (frankenredis-ybaw7) Blocking pops / *MPOP / GETDEL must propagate as
+        // the concrete deterministic command (verified byte-exact vs the oracle
+        // replication stream).
+        let rw = |argv: &[&[u8]], reply: RespFrame| {
+            Runtime::rewrite_blocking_or_mpop_for_propagation(
+                &argv.iter().map(|a| a.to_vec()).collect::<Vec<_>>(),
+                &reply,
+            )
+        };
+        let b = |s: &[u8]| RespFrame::BulkString(Some(s.to_vec()));
+        let arr = |items: Vec<RespFrame>| RespFrame::Array(Some(items));
+        let vv = |items: &[&[u8]]| items.iter().map(|i| i.to_vec()).collect::<Vec<_>>();
+
+        // BLPOP/BRPOP -> LPOP/RPOP <served-key> (key from reply [key, value]).
+        assert_eq!(
+            rw(&[b"BLPOP", b"a", b"l", b"0"], arr(vec![b(b"l"), b(b"v")])),
+            Some(vv(&[b"LPOP", b"l"]))
+        );
+        assert_eq!(
+            rw(&[b"BRPOP", b"l", b"0"], arr(vec![b(b"l"), b(b"v")])),
+            Some(vv(&[b"RPOP", b"l"]))
+        );
+        // BZPOPMIN/MAX -> ZPOPMIN/MAX <served-key> (reply [key, member, score]).
+        assert_eq!(
+            rw(&[b"BZPOPMIN", b"z", b"0"], arr(vec![b(b"z"), b(b"m"), b(b"1")])),
+            Some(vv(&[b"ZPOPMIN", b"z"]))
+        );
+        // BRPOPLPUSH / BLMOVE -> non-blocking move (no reply needed).
+        assert_eq!(
+            rw(&[b"BRPOPLPUSH", b"s", b"d", b"0"], b(b"x")),
+            Some(vv(&[b"RPOPLPUSH", b"s", b"d"]))
+        );
+        assert_eq!(
+            rw(&[b"BLMOVE", b"s", b"d", b"LEFT", b"RIGHT", b"0"], b(b"x")),
+            Some(vv(&[b"LMOVE", b"s", b"d", b"LEFT", b"RIGHT"]))
+        );
+        // LMPOP/ZMPOP -> LPOP/ZPOPMIN <served-key> <count> (count = popped len).
+        assert_eq!(
+            rw(
+                &[b"LMPOP", b"2", b"x", b"l", b"LEFT", b"COUNT", b"2"],
+                arr(vec![b(b"l"), arr(vec![b(b"a"), b(b"b")])])
+            ),
+            Some(vv(&[b"LPOP", b"l", b"2"]))
+        );
+        assert_eq!(
+            rw(
+                &[b"ZMPOP", b"1", b"z", b"MIN", b"COUNT", b"2"],
+                arr(vec![
+                    b(b"z"),
+                    arr(vec![arr(vec![b(b"a"), b(b"1")]), arr(vec![b(b"b"), b(b"2")])])
+                ])
+            ),
+            Some(vv(&[b"ZPOPMIN", b"z", b"2"]))
+        );
+        // BLMPOP timeout numkeys ... RIGHT -> RPOP <served-key> <count>.
+        assert_eq!(
+            rw(
+                &[b"BLMPOP", b"0", b"1", b"l", b"RIGHT"],
+                arr(vec![b(b"l"), arr(vec![b(b"a")])])
+            ),
+            Some(vv(&[b"RPOP", b"l", b"1"]))
+        );
+        // GETDEL -> DEL.
+        assert_eq!(rw(&[b"GETDEL", b"k"], b(b"v")), Some(vv(&[b"DEL", b"k"])));
+        // Unrelated command -> verbatim.
+        assert_eq!(rw(&[b"LPOP", b"l"], b(b"a")), None);
     }
 
     #[test]
