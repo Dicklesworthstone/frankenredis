@@ -809,6 +809,8 @@ pub const UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2: u8 = 19;
 pub const UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3: u8 = 21;
 const RDB_CHECKSUM_LEN: usize = 8;
 const CRC64_REDIS_POLY: u64 = 0xAD93_D235_94C9_35A9;
+const CRC64_REDIS_REFLECTED_POLY: u64 = reflect_u64(CRC64_REDIS_POLY);
+const CRC64_REDIS_TABLE: [u64; 256] = build_crc64_redis_table();
 
 /// A key-value entry for RDB serialization.
 #[derive(Debug, Clone, PartialEq)]
@@ -968,33 +970,48 @@ fn rdb_encode_string(buf: &mut Vec<u8>, data: &[u8]) {
     buf.extend_from_slice(data);
 }
 
-pub fn crc64_redis(data: &[u8]) -> u64 {
-    fn reflect(mut data: u64, bit_len: usize) -> u64 {
-        let mut reflected = data & 1;
-        for _ in 1..bit_len {
-            data >>= 1;
-            reflected = (reflected << 1) | (data & 1);
-        }
-        reflected
+const fn reflect_u64(mut data: u64) -> u64 {
+    let mut reflected = data & 1;
+    let mut bit = 1;
+    while bit < 64 {
+        data >>= 1;
+        reflected = (reflected << 1) | (data & 1);
+        bit += 1;
     }
+    reflected
+}
 
+const fn crc64_redis_table_entry(index: u8) -> u64 {
+    let mut crc = index as u64;
+    let mut bit = 0;
+    while bit < 8 {
+        if (crc & 1) != 0 {
+            crc = (crc >> 1) ^ CRC64_REDIS_REFLECTED_POLY;
+        } else {
+            crc >>= 1;
+        }
+        bit += 1;
+    }
+    crc
+}
+
+const fn build_crc64_redis_table() -> [u64; 256] {
+    let mut table = [0_u64; 256];
+    let mut index = 0;
+    while index < 256 {
+        table[index] = crc64_redis_table_entry(index as u8);
+        index += 1;
+    }
+    table
+}
+
+pub fn crc64_redis(data: &[u8]) -> u64 {
     let mut crc = 0_u64;
     for &byte in data {
-        let mut mask = 0x01_u8;
-        while mask != 0 {
-            let mut bit_set = (crc & 0x8000_0000_0000_0000) != 0;
-            if (byte & mask) != 0 {
-                bit_set = !bit_set;
-            }
-            crc <<= 1;
-            if bit_set {
-                crc ^= CRC64_REDIS_POLY;
-            }
-            mask = mask.wrapping_shl(1);
-        }
-        crc &= u64::MAX;
+        let index = ((crc as u8) ^ byte) as usize;
+        crc = (crc >> 8) ^ CRC64_REDIS_TABLE[index];
     }
-    reflect(crc, 64)
+    crc
 }
 
 fn sync_parent_dir(path: &Path) -> Result<(), PersistError> {
@@ -5930,10 +5947,10 @@ mod tests {
             let encoded = encode_rdb(&entries, &[]);
             let headers: Vec<[u8; 5]> = encoded
                 .windows(5)
-                .filter_map(|window| {
-                    (window[0] == RDB_OPCODE_SELECTDB && window[2] == RDB_OPCODE_RESIZEDB)
-                        .then(|| [window[0], window[1], window[2], window[3], window[4]])
+                .filter(|window| {
+                    window[0] == RDB_OPCODE_SELECTDB && window[2] == RDB_OPCODE_RESIZEDB
                 })
+                .map(|window| [window[0], window[1], window[2], window[3], window[4]])
                 .collect();
 
             assert_eq!(
