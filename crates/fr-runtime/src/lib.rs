@@ -40,9 +40,8 @@ use fr_repl::{
 use fr_store::{
     AclKeyPattern, ClientReplyState, ClientTrackingState, CommandHistogram, CommandRecordKind,
     DispatchAclLogContext, DispatchAclPermissionReason, DispatchAclPermissions,
-    DispatchClientContext, EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus,
-    EvictionSafetyGateState, MaxmemoryPolicy, PendingAclLogEvent, Store, decode_db_key,
-    encode_db_key, glob_match,
+    EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus, EvictionSafetyGateState,
+    MaxmemoryPolicy, PendingAclLogEvent, Store, decode_db_key, encode_db_key, glob_match,
 };
 use sha2::{Digest, Sha256};
 
@@ -6664,80 +6663,85 @@ impl Runtime {
         rewritten
     }
 
-    fn current_dispatch_client_context(&self, now_ms: u64) -> DispatchClientContext {
-        self.dispatch_client_context_for_session(&self.session, now_ms)
-    }
-
-    fn dispatch_client_context_for_session(
-        &self,
-        session: &ClientSession,
-        now_ms: u64,
-    ) -> DispatchClientContext {
+    fn refresh_current_dispatch_client_context(&mut self, now_ms: u64) {
+        let session = &self.session;
         let client_id = session.client_id;
-        let is_pubsub = self.is_pubsub_client(client_id);
+        let channel_subscriptions = self
+            .server
+            .pubsub_client_channels
+            .get(&client_id)
+            .map_or(0, HashSet::len);
+        let pattern_subscriptions = self
+            .server
+            .pubsub_client_patterns
+            .get(&client_id)
+            .map_or(0, HashSet::len);
+        let shard_subscriptions = self
+            .server
+            .pubsub_client_shard_channels
+            .get(&client_id)
+            .map_or(0, HashSet::len);
+        let is_pubsub =
+            channel_subscriptions > 0 || pattern_subscriptions > 0 || shard_subscriptions > 0;
         let age_seconds = now_ms.saturating_sub(session.connected_at_ms) / 1000;
         let idle_seconds = now_ms.saturating_sub(session.last_interaction_ms) / 1000;
-        DispatchClientContext {
-            client_id,
-            client_name: session.client_name.clone(),
-            client_lib_name: session.client_lib_name.clone(),
-            client_lib_ver: session.client_lib_ver.clone(),
-            age_seconds,
-            idle_seconds,
-            db_index: session.selected_db,
-            flags: if session.transaction_state.in_transaction {
-                "x".to_string()
+        let multi_count = if session.transaction_state.in_transaction {
+            session.transaction_state.command_queue.len() as i64
+        } else {
+            -1
+        };
+        let acl_permissions = self
+            .server
+            .auth_state
+            .get_user(session.current_user_name())
+            .map(AclUser::to_dispatch_acl_permissions);
+
+        let ctx = &mut self.server.store.dispatch_client_ctx;
+        ctx.client_id = client_id;
+        ctx.client_name.clone_from(&session.client_name);
+        ctx.client_lib_name.clone_from(&session.client_lib_name);
+        ctx.client_lib_ver.clone_from(&session.client_lib_ver);
+        ctx.age_seconds = age_seconds;
+        ctx.idle_seconds = idle_seconds;
+        ctx.db_index = session.selected_db;
+        ctx.flags.clear();
+        ctx.flags
+            .push_str(if session.transaction_state.in_transaction {
+                "x"
             } else {
-                "N".to_string()
-            },
-            peer_addr: session
-                .peer_addr
-                .map(|addr| addr.to_string())
-                .unwrap_or_else(|| "127.0.0.1:0".to_string()),
-            // (frankenredis-lxccd) Mirror the real socket fd into the
-            // dispatch context so CLIENT INFO / CLIENT LIST emit it
-            // through fr-command's client_info_line wrapper too.
-            socket_fd: session.socket_fd,
-            // (frankenredis-tepuj) Mirror per-client read/write buffer
-            // metrics into the dispatch context so fr-command's
-            // client_info_line emits real qbuf/qbuf-free/obl/tot-mem.
-            qbuf_bytes: session.qbuf_bytes,
-            qbuf_free_bytes: session.qbuf_free_bytes,
-            output_buffer_bytes: session.output_buffer_bytes,
-            authenticated_user: session.current_user_name().to_vec(),
-            resp_protocol_version: session.resp_protocol_version,
-            channel_subscriptions: self
-                .server
-                .pubsub_client_channels
-                .get(&client_id)
-                .map_or(0, HashSet::len),
-            pattern_subscriptions: self
-                .server
-                .pubsub_client_patterns
-                .get(&client_id)
-                .map_or(0, HashSet::len),
-            shard_subscriptions: self
-                .server
-                .pubsub_client_shard_channels
-                .get(&client_id)
-                .map_or(0, HashSet::len),
-            multi_count: if session.transaction_state.in_transaction {
-                session.transaction_state.command_queue.len() as i64
-            } else {
-                -1
-            },
-            watch_count: session.transaction_state.watched_keys.len(),
-            is_pubsub,
-            client_tracking: session.client_tracking.clone(),
-            client_reply: session.client_reply.clone(),
-            client_no_evict: session.client_no_evict,
-            client_no_touch: session.client_no_touch,
-            acl_permissions: self
-                .server
-                .auth_state
-                .get_user(session.current_user_name())
-                .map(AclUser::to_dispatch_acl_permissions),
+                "N"
+            });
+        ctx.peer_addr.clear();
+        if let Some(addr) = session.peer_addr {
+            write!(&mut ctx.peer_addr, "{addr}").expect("writing to String cannot fail");
+        } else {
+            ctx.peer_addr.push_str("127.0.0.1:0");
         }
+        // (frankenredis-lxccd) Mirror the real socket fd into the
+        // dispatch context so CLIENT INFO / CLIENT LIST emit it
+        // through fr-command's client_info_line wrapper too.
+        ctx.socket_fd = session.socket_fd;
+        // (frankenredis-tepuj) Mirror per-client read/write buffer
+        // metrics into the dispatch context so fr-command's
+        // client_info_line emits real qbuf/qbuf-free/obl/tot-mem.
+        ctx.qbuf_bytes = session.qbuf_bytes;
+        ctx.qbuf_free_bytes = session.qbuf_free_bytes;
+        ctx.output_buffer_bytes = session.output_buffer_bytes;
+        ctx.authenticated_user.clear();
+        ctx.authenticated_user
+            .extend_from_slice(session.current_user_name());
+        ctx.resp_protocol_version = session.resp_protocol_version;
+        ctx.channel_subscriptions = channel_subscriptions;
+        ctx.pattern_subscriptions = pattern_subscriptions;
+        ctx.shard_subscriptions = shard_subscriptions;
+        ctx.multi_count = multi_count;
+        ctx.watch_count = session.transaction_state.watched_keys.len();
+        ctx.is_pubsub = is_pubsub;
+        ctx.client_tracking.clone_from(&session.client_tracking);
+        ctx.client_reply.clone_from(&session.client_reply);
+        ctx.client_no_evict = session.client_no_evict;
+        ctx.client_no_touch = session.client_no_touch;
+        ctx.acl_permissions = acl_permissions;
     }
 
     fn apply_existing_client_reply_suppression_to_undispatched_reply(&mut self) {
@@ -6964,21 +6968,21 @@ impl Runtime {
     }
 
     fn sync_dispatch_client_context_to_session(&mut self) {
-        self.session.client_name = self.server.store.dispatch_client_ctx.client_name.clone();
-        self.session.client_lib_name = self
-            .server
-            .store
-            .dispatch_client_ctx
+        self.session
+            .client_name
+            .clone_from(&self.server.store.dispatch_client_ctx.client_name);
+        self.session
             .client_lib_name
-            .clone();
-        self.session.client_lib_ver = self.server.store.dispatch_client_ctx.client_lib_ver.clone();
-        self.session.client_tracking = self
-            .server
-            .store
-            .dispatch_client_ctx
+            .clone_from(&self.server.store.dispatch_client_ctx.client_lib_name);
+        self.session
+            .client_lib_ver
+            .clone_from(&self.server.store.dispatch_client_ctx.client_lib_ver);
+        self.session
             .client_tracking
-            .clone();
-        self.session.client_reply = self.server.store.dispatch_client_ctx.client_reply.clone();
+            .clone_from(&self.server.store.dispatch_client_ctx.client_tracking);
+        self.session
+            .client_reply
+            .clone_from(&self.server.store.dispatch_client_ctx.client_reply);
         self.session.client_no_evict = self.server.store.dispatch_client_ctx.client_no_evict;
         self.session.client_no_touch = self.server.store.dispatch_client_ctx.client_no_touch;
     }
@@ -6988,7 +6992,7 @@ impl Runtime {
         argv: &[Vec<u8>],
         now_ms: u64,
     ) -> Result<RespFrame, CommandError> {
-        self.server.store.dispatch_client_ctx = self.current_dispatch_client_context(now_ms);
+        self.refresh_current_dispatch_client_context(now_ms);
         let mut result = dispatch_argv(argv, &mut self.server.store, now_ms);
         self.sync_dispatch_client_context_to_session();
         if result.is_ok()
