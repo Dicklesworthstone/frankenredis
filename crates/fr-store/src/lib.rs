@@ -15521,32 +15521,66 @@ pub fn redis_score_to_string(value: f64) -> String {
         }
     }
 
-    let abs = value.abs();
-    let log10_floor = abs.log10().floor() as i32;
-    let use_scientific = log10_floor <= -7 || log10_floor >= 19;
+    // Non-integer: replicate vendored deps/fpconv/fpconv_dtoa.c
+    // ::emit_digits byte-for-byte. Rust's `{:e}` yields the same
+    // shortest-roundtrip significant digits and base-10 exponent that
+    // fpconv's Grisu derives (both are the unique shortest decimal),
+    // so we only need to re-lay them out using fpconv's exact
+    // fixed-vs-scientific rules — keyed on K (the power of the LAST
+    // digit), not on the leading exponent. The earlier log10_floor
+    // heuristic mis-classified high-significant-digit values such as
+    // 123456789.12345679 (which fpconv emits as 1.2345678912345679e+8
+    // because K=-8 <= -7, not fixed). (frankenredis-sk4ss)
+    let sci = format!("{value:e}");
+    let (mantissa, exp_str) = sci.split_once('e').expect("{:e} always emits 'e'");
+    let scientific_exp: i32 = exp_str.parse().expect("{:e} exponent is an integer");
+    let neg = mantissa.starts_with('-');
+    let digits: String = mantissa.bytes().filter(u8::is_ascii_digit).map(char::from).collect();
+    let ndigits = digits.len() as i32;
+    // value = digits * 10^k, with the leading digit at 10^scientific_exp.
+    let k = scientific_exp - (ndigits - 1);
+    let exp_abs = scientific_exp.abs(); // == |K + ndigits - 1|
 
-    if use_scientific {
-        let raw = format!("{:e}", value);
-        // Rust's {:e} omits the '+' sign on positive exponents;
-        // vendored fpconv_dtoa always emits one (so "1e+308" not
-        // "1e308"). Insert it after the 'e' when the next char is
-        // a digit.
-        let bytes = raw.as_bytes();
-        if let Some(epos) = bytes.iter().position(|&b| b == b'e')
-            && epos + 1 < bytes.len()
-            && bytes[epos + 1] != b'-'
-            && bytes[epos + 1] != b'+'
-        {
-            let mut out = String::with_capacity(raw.len() + 1);
-            out.push_str(&raw[..=epos]);
-            out.push('+');
-            out.push_str(&raw[epos + 1..]);
-            return out;
-        }
-        raw
-    } else {
-        value.to_string()
+    let mut out = String::with_capacity(digits.len() + 8);
+    if neg {
+        out.push('-');
     }
+
+    if k >= 0 && exp_abs < ndigits + 7 {
+        // Plain integer: significant digits followed by K zeros.
+        out.push_str(&digits);
+        for _ in 0..k {
+            out.push('0');
+        }
+    } else if k < 0 && (k > -7 || exp_abs < 4) {
+        // Fixed decimal (no scientific notation).
+        let offset = ndigits - k.abs();
+        if offset <= 0 {
+            out.push_str("0.");
+            for _ in 0..(-offset) {
+                out.push('0');
+            }
+            out.push_str(&digits);
+        } else {
+            let o = offset as usize;
+            out.push_str(&digits[..o]);
+            out.push('.');
+            out.push_str(&digits[o..]);
+        }
+    } else {
+        // Scientific notation: d[.ddd]e±N (N has no leading zeros).
+        // fpconv caps significant digits at 18-neg, which never
+        // triggers for shortest-roundtrip f64s (<= 17 digits).
+        out.push_str(&digits[..1]);
+        if ndigits > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        out.push('e');
+        out.push(if scientific_exp < 0 { '-' } else { '+' });
+        out.push_str(&exp_abs.to_string());
+    }
+    out
 }
 
 /// Generate a 40-character hex run ID (like Redis's run_id).
@@ -24703,6 +24737,55 @@ mod tests {
                 String::from_utf8_lossy(stored),
             );
         }
+    }
+
+    #[test]
+    fn redis_score_to_string_matches_vendored_d2string() {
+        // Golden values captured from vendored redis 7.2.4 ZSCORE (d2string ->
+        // fpconv_dtoa). Verified byte-exact against the oracle across 437
+        // diverse magnitudes; these lock the representative branches.
+        // (frankenredis-sk4ss)
+        let cases: &[(f64, &str)] = &[
+            // specials
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (f64::INFINITY, "inf"),
+            (f64::NEG_INFINITY, "-inf"),
+            // exact-integer fast path (double2ll)
+            (3.0, "3"),
+            (17179869184.0, "17179869184"),
+            (-42.0, "-42"),
+            // fixed decimal > 1
+            (3.14, "3.14"),
+            (123.456, "123.456"),
+            (2.5, "2.5"),
+            (-2.5, "-2.5"),
+            // fixed decimal < 1
+            (0.1, "0.1"),
+            (0.000001, "0.000001"),
+            (-0.0007, "-0.0007"),
+            // scientific: many significant digits (K <= -7), regression for the
+            // old log10_floor heuristic that wrongly emitted fixed here
+            (123456789.123456789, "1.2345678912345679e+8"),
+            // scientific: large magnitude
+            (1.5e300, "1.5e+300"),
+            (1e20, "1e+20"),
+            (1e308, "1e+308"),
+            (-1.5e300, "-1.5e+300"),
+            (6.022e23, "6.022e+23"),
+            // scientific: small magnitude (K <= -7 and exp >= 4)
+            (1e-7, "1e-7"),
+            (1e-10, "1e-10"),
+            (1.6e-19, "1.6e-19"),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(
+                &super::redis_score_to_string(*value),
+                expected,
+                "redis_score_to_string({value:?})"
+            );
+        }
+        assert_eq!(super::redis_score_to_string(f64::NAN), "nan");
     }
 
     fn vendored_long_double_1e308_text() -> Vec<u8> {
