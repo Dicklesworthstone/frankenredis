@@ -3442,6 +3442,20 @@ fn core_sort_conformance() {
 }
 
 #[test]
+fn core_command_edges_conformance() {
+    // (frankenredis-ol9tz follow-up) Oracle-verified edge cases for
+    // conditional EXPIRE flags (NX/XX/GT/LT + conflicts), ZADD flag
+    // conflicts/GT-CH, bit-range BITCOUNT, GETRANGE/SETRANGE clamping,
+    // COPY REPLACE, SET NX GET, SINTERCARD LIMIT 0/neg, LPOS RANK 0. Every
+    // case was confirmed byte-identical to vendored redis 7.2.4 via the
+    // differential probe harness before being frozen here.
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "core_command_edges.json").expect("command-edges fixture");
+    assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
+    assert!(diff.failed.is_empty());
+}
+
+#[test]
 fn core_scan_conformance() {
     let cfg = HarnessConfig::default_paths();
     let diff = run_fixture(&cfg, "core_scan.json").expect("scan fixture");
@@ -5055,6 +5069,25 @@ fn core_client_setinfo_live_redis_matches_runtime() {
             "live CLIENT LIST after RESET missing {key}={expected}: {live_list_after_reset:?}"
         );
     }
+}
+
+#[test]
+fn core_command_edges_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_diff(&cfg, "core_command_edges.json", &oracle)
+        .expect("command-edges live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
 }
 
 #[test]

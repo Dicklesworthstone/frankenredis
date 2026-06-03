@@ -1,0 +1,63 @@
+{
+  "suite": "core_command_edges",
+  "cases": [
+    { "name": "cexp_set", "now_ms": 1000, "argv": ["SET", "ek", "v"], "expect": { "kind": "simple", "value": "OK" } },
+    { "name": "cexp_expire_100", "now_ms": 1000, "argv": ["EXPIRE", "ek", "100"], "expect": { "kind": "integer", "value": 1 } },
+    { "name": "cexp_nx_on_existing_ttl_noop", "now_ms": 1000, "argv": ["EXPIRE", "ek", "200", "NX"], "expect": { "kind": "integer", "value": 0 } },
+    { "name": "cexp_ttl_unchanged_after_nx", "now_ms": 1000, "argv": ["TTL", "ek"], "expect": { "kind": "integer", "value": 100 } },
+    { "name": "cexp_gt_smaller_noop", "now_ms": 1000, "argv": ["EXPIRE", "ek", "50", "GT"], "expect": { "kind": "integer", "value": 0 } },
+    { "name": "cexp_gt_larger_applies", "now_ms": 1000, "argv": ["EXPIRE", "ek", "200", "GT"], "expect": { "kind": "integer", "value": 1 } },
+    { "name": "cexp_ttl_after_gt", "now_ms": 1000, "argv": ["TTL", "ek"], "expect": { "kind": "integer", "value": 200 } },
+    { "name": "cexp_lt_smaller_applies", "now_ms": 1000, "argv": ["EXPIRE", "ek", "50", "LT"], "expect": { "kind": "integer", "value": 1 } },
+    { "name": "cexp_ttl_after_lt", "now_ms": 1000, "argv": ["TTL", "ek"], "expect": { "kind": "integer", "value": 50 } },
+    { "name": "cexp_nx_gt_conflict", "now_ms": 1000, "argv": ["EXPIRE", "ek", "100", "NX", "GT"], "expect": { "kind": "error", "value": "ERR NX and XX, GT or LT options at the same time are not compatible" } },
+    { "name": "cexp_gt_lt_conflict", "now_ms": 1000, "argv": ["EXPIRE", "ek", "100", "GT", "LT"], "expect": { "kind": "error", "value": "ERR GT and LT options at the same time are not compatible" } },
+
+    { "name": "pexp_set", "now_ms": 1000, "argv": ["SET", "pk", "v"], "expect": { "kind": "simple", "value": "OK" } },
+    { "name": "pexp_xx_no_ttl_noop", "now_ms": 1000, "argv": ["EXPIRE", "pk", "100", "XX"], "expect": { "kind": "integer", "value": 0 } },
+    { "name": "pexp_ttl_still_persistent", "now_ms": 1000, "argv": ["TTL", "pk"], "expect": { "kind": "integer", "value": -1 } },
+    { "name": "pexp_gt_no_ttl_treated_infinite_noop", "now_ms": 1000, "argv": ["EXPIRE", "pk", "100", "GT"], "expect": { "kind": "integer", "value": 0 } },
+    { "name": "pexp_lt_no_ttl_applies", "now_ms": 1000, "argv": ["EXPIRE", "pk", "100", "LT"], "expect": { "kind": "integer", "value": 1 } },
+    { "name": "pexp_ttl_after_lt", "now_ms": 1000, "argv": ["TTL", "pk"], "expect": { "kind": "integer", "value": 100 } },
+
+    { "name": "zadd_gt_lt_conflict", "now_ms": 2000, "argv": ["ZADD", "z", "GT", "LT", "1", "m"], "expect": { "kind": "error", "value": "ERR GT, LT, and/or NX options at the same time are not compatible" } },
+    { "name": "zadd_nx_xx_conflict", "now_ms": 2000, "argv": ["ZADD", "z", "NX", "XX", "1", "m"], "expect": { "kind": "error", "value": "ERR XX and NX options at the same time are not compatible" } },
+    { "name": "zadd_nan", "now_ms": 2000, "argv": ["ZADD", "z", "nan", "m"], "expect": { "kind": "error", "value": "ERR value is not a valid float" } },
+    { "name": "zadd_incr_multi_pair", "now_ms": 2000, "argv": ["ZADD", "z", "INCR", "1", "a", "2", "b"], "expect": { "kind": "error", "value": "ERR INCR option supports a single increment-element pair" } },
+    { "name": "zadd_seed", "now_ms": 2000, "argv": ["ZADD", "z", "5", "m"], "expect": { "kind": "integer", "value": 1 } },
+    { "name": "zadd_gt_lower_noop", "now_ms": 2000, "argv": ["ZADD", "z", "GT", "3", "m"], "expect": { "kind": "integer", "value": 0 } },
+    { "name": "zadd_gt_lower_score_unchanged", "now_ms": 2000, "argv": ["ZSCORE", "z", "m"], "expect": { "kind": "bulk", "value": "5" } },
+    { "name": "zadd_gt_higher_ch", "now_ms": 2000, "argv": ["ZADD", "z", "GT", "CH", "8", "m"], "expect": { "kind": "integer", "value": 1 } },
+    { "name": "zadd_gt_higher_score_applied", "now_ms": 2000, "argv": ["ZSCORE", "z", "m"], "expect": { "kind": "bulk", "value": "8" } },
+
+    { "name": "bit_set", "now_ms": 3000, "argv": ["SET", "bk", "foobar"], "expect": { "kind": "simple", "value": "OK" } },
+    { "name": "bitcount_bit_range", "now_ms": 3000, "argv": ["BITCOUNT", "bk", "5", "30", "BIT"], "expect": { "kind": "integer", "value": 17 } },
+    { "name": "bitcount_byte_neg", "now_ms": 3000, "argv": ["BITCOUNT", "bk", "-2", "-1"], "expect": { "kind": "integer", "value": 7 } },
+    { "name": "gr_set", "now_ms": 3000, "argv": ["SET", "gk", "This is a string"], "expect": { "kind": "simple", "value": "OK" } },
+    { "name": "getrange_neg_both", "now_ms": 3000, "argv": ["GETRANGE", "gk", "-3", "-1"], "expect": { "kind": "bulk", "value": "ing" } },
+    { "name": "getrange_clamped", "now_ms": 3000, "argv": ["GETRANGE", "gk", "10", "20"], "expect": { "kind": "bulk", "value": "string" } },
+    { "name": "setrange_past_end_len", "now_ms": 3000, "argv": ["SETRANGE", "sr", "5", "Hello"], "expect": { "kind": "integer", "value": 10 } },
+    { "name": "setrange_strlen", "now_ms": 3000, "argv": ["STRLEN", "sr"], "expect": { "kind": "integer", "value": 10 } },
+
+    { "name": "setex_zero_ttl_error", "now_ms": 4000, "argv": ["SETEX", "se", "0", "v"], "expect": { "kind": "error", "value": "ERR invalid expire time in 'setex' command" } },
+    { "name": "sintercard_seed", "now_ms": 4000, "argv": ["SADD", "s1", "a", "b"], "expect": { "kind": "integer", "value": 2 } },
+    { "name": "sintercard_limit_neg_error", "now_ms": 4000, "argv": ["SINTERCARD", "1", "s1", "LIMIT", "-1"], "expect": { "kind": "error", "value": "ERR LIMIT can't be negative" } },
+    { "name": "lpos_seed", "now_ms": 4000, "argv": ["RPUSH", "ll", "a", "b", "c"], "expect": { "kind": "integer", "value": 3 } },
+    { "name": "lpos_rank_zero_error", "now_ms": 4000, "argv": ["LPOS", "ll", "a", "RANK", "0"], "expect": { "kind": "error", "value": "ERR RANK can't be zero: use 1 to start from the first match, 2 from the second ... or use negative to start from the end of the list" } },
+    { "name": "wrongtype_seed", "now_ms": 4000, "argv": ["SET", "strk", "v"], "expect": { "kind": "simple", "value": "OK" } },
+    { "name": "wrongtype_lpush_on_string", "now_ms": 4000, "argv": ["LPUSH", "strk", "x"], "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" } },
+
+    { "name": "copy_src", "now_ms": 5000, "argv": ["SET", "csrc", "hello"], "expect": { "kind": "simple", "value": "OK" } },
+    { "name": "copy_dst_seed", "now_ms": 5000, "argv": ["SET", "cdst", "old"], "expect": { "kind": "simple", "value": "OK" } },
+    { "name": "copy_existing_no_replace_fails", "now_ms": 5000, "argv": ["COPY", "csrc", "cdst"], "expect": { "kind": "integer", "value": 0 } },
+    { "name": "copy_replace_succeeds", "now_ms": 5000, "argv": ["COPY", "csrc", "cdst", "REPLACE"], "expect": { "kind": "integer", "value": 1 } },
+    { "name": "copy_replace_value", "now_ms": 5000, "argv": ["GET", "cdst"], "expect": { "kind": "bulk", "value": "hello" } },
+    { "name": "set_nx_get_seed", "now_ms": 5000, "argv": ["SET", "nk", "v"], "expect": { "kind": "simple", "value": "OK" } },
+    { "name": "set_nx_get_returns_existing", "now_ms": 5000, "argv": ["SET", "nk", "w", "NX", "GET"], "expect": { "kind": "bulk", "value": "v" } },
+    { "name": "set_nx_get_value_unchanged", "now_ms": 5000, "argv": ["GET", "nk"], "expect": { "kind": "bulk", "value": "v" } },
+
+    { "name": "sic_seed_a", "now_ms": 6000, "argv": ["SADD", "ia", "x", "y", "z"], "expect": { "kind": "integer", "value": 3 } },
+    { "name": "sic_seed_b", "now_ms": 6000, "argv": ["SADD", "ib", "y", "z", "w"], "expect": { "kind": "integer", "value": 3 } },
+    { "name": "sintercard_limit_zero_unlimited", "now_ms": 6000, "argv": ["SINTERCARD", "2", "ia", "ib", "LIMIT", "0"], "expect": { "kind": "integer", "value": 2 } }
+  ]
+}
