@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780490501496,
+  "host": "127.0.0.1",
+  "port": 16416,
+  "workload": "set",
+  "clients": 50,
+  "requests": 500000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "icywolf-pass15-strace",
+  "total_time_ms": 5604,
+  "ops_per_sec": 89208.03014890001,
+  "bytes_sent": 31394754,
+  "bytes_received": 2500000,
+  "latency_us": {
+    "min": 530,
+    "p50": 8503,
+    "p95": 13231,
+    "p99": 16671,
+    "p999": 23071,
+    "max": 27791,
+    "mean": 8929.748593999991,
+    "samples": 500000
+  }
+}

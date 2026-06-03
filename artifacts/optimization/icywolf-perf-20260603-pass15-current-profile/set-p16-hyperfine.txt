@@ -1,0 +1,4 @@
+Benchmark 1: target-icywolf-pass15-current-profile/release-perf/fr-bench --host 127.0.0.1 --port 16415 --clients 50 --requests 100000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out artifacts/optimization/icywolf-perf-20260603-pass15-current-profile/set-p16-hf-last.json --key-prefix icywolf-pass15-hf
+  Time (mean ± σ):     369.5 ms ±  22.8 ms    [User: 94.7 ms, System: 176.4 ms]
+  Range (min … max):   343.8 ms … 413.0 ms    10 runs
+ 

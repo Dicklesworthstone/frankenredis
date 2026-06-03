@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "target-icywolf-pass15-current-profile/release-perf/fr-bench --host 127.0.0.1 --port 16415 --clients 50 --requests 100000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out artifacts/optimization/icywolf-perf-20260603-pass15-current-profile/set-p16-hf-last.json --key-prefix icywolf-pass15-hf",
+      "mean": 0.3694945525600001,
+      "stddev": 0.022792618769745244,
+      "median": 0.36492429886,
+      "user": 0.09467186,
+      "system": 0.17636994,
+      "min": 0.34381838936000003,
+      "max": 0.41299059036,
+      "times": [
+        0.35889222136000004,
+        0.36595844436,
+        0.34583311836,
+        0.34843843636000005,
+        0.37331714236,
+        0.36389015336,
+        0.34381838936000003,
+        0.38680993636000005,
+        0.39499709336000005,
+        0.41299059036
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
