@@ -1173,11 +1173,15 @@ fn handle_readable(
         return;
     };
 
-    // Read available data into the client's buffer. Blocked clients keep the
-    // historical drain-to-WouldBlock behavior so their kernel buffers do not
-    // grow while commands are deferred; normal clients process after one read
-    // and rely on level-triggered readiness for any remaining bytes.
-    let drain_until_would_block = conn.blocked.is_some();
+    // Read available data into the client's buffer, draining to WouldBlock.
+    // mio registers epoll EDGE-triggered, so a single readiness event must be
+    // fully drained: the kernel only re-notifies on NEW data, never for bytes
+    // left unread. The earlier "process after one read and rely on
+    // level-triggered readiness" optimization (ql59p) was unsound under
+    // edge-triggered readiness — any command/pipeline larger than what one
+    // event delivered (≈ >16KB in practice) stranded its tail bytes and hung
+    // the connection. (frankenredis-apg7r, reverts the read-side no-drain)
+    let drain_until_would_block = true;
     let mut buf = [0u8; 8192];
     loop {
         match conn.stream.read(&mut buf) {
