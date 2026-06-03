@@ -843,6 +843,10 @@ pub struct ActiveExpireCycleResult {
     pub sampled_keys: usize,
     pub evicted_keys: usize,
     pub next_cursor: Option<Vec<u8>>,
+    /// (frankenredis-wqrb6) The db-encoded keys the cycle evicted this pass, so
+    /// the runtime can propagate a `DEL`/`UNLINK` per key to replicas + AOF
+    /// (upstream's active-expire cycle does this; replicas don't self-expire).
+    pub evicted_db_keys: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4601,6 +4605,7 @@ impl Store {
                 sampled_keys: 0,
                 evicted_keys: 0,
                 next_cursor: None,
+                evicted_db_keys: Vec::new(),
             };
         }
 
@@ -4626,6 +4631,7 @@ impl Store {
         };
 
         let mut evicted_keys = 0usize;
+        let mut evicted_db_keys: Vec<Vec<u8>> = Vec::new();
         for key in &keys_to_check {
             let should_evict = evaluate_expiry(
                 now_ms,
@@ -4644,6 +4650,9 @@ impl Store {
                 self.stream_last_ids.remove(key.as_slice());
                 evicted_keys = evicted_keys.saturating_add(1);
                 self.stat_expired_keys = self.stat_expired_keys.saturating_add(1);
+                // (frankenredis-wqrb6) Record the db-encoded key so the runtime
+                // can propagate the expiry deletion to replicas + AOF.
+                evicted_db_keys.push(key.clone());
             }
         }
 
@@ -4662,6 +4671,7 @@ impl Store {
             sampled_keys: keys_to_check.len(),
             evicted_keys,
             next_cursor,
+            evicted_db_keys,
         }
     }
 

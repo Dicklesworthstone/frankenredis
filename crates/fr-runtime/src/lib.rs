@@ -2609,6 +2609,10 @@ impl ServerState {
         );
         self.active_expire_db_cursor = plan.next_db_index;
         self.active_expire_key_cursor = cycle_result.next_cursor;
+        // (frankenredis-wqrb6) Propagate the active-expire deletions to replicas
+        // and the AOF, matching upstream's activeExpireCycle which DEL/UNLINK-
+        // propagates every key it reaps.
+        self.propagate_expired_key_deletions(&cycle_result.evicted_db_keys);
         let elapsed_ms = start.elapsed().as_millis() as u64;
         self.store.stat_expire_cycle_cpu_milliseconds = self
             .store
@@ -2627,6 +2631,51 @@ impl ServerState {
         };
         self.last_active_expire_cycle = Some(stats);
         stats
+    }
+
+    /// (frankenredis-wqrb6) Propagate expiry deletions to replicas + AOF, one
+    /// `DEL <key>` (`UNLINK` when lazyfree-lazy-expire is enabled) per evicted
+    /// key, in the key's own db. Mirrors upstream propagateDeletion. ONLY the
+    /// master generates these — a replica receives the master's DEL over the
+    /// replication stream and must not synthesize its own (it would leak a
+    /// spurious DEL to its sub-replicas).
+    fn propagate_expired_key_deletions(&mut self, evicted_db_keys: &[Vec<u8>]) {
+        if evicted_db_keys.is_empty() {
+            return;
+        }
+        if !matches!(
+            self.replication_runtime_state.role,
+            ReplicationRoleState::Master
+        ) {
+            return;
+        }
+        let op: &[u8] = if self.lazyfree_lazy_expire_enabled() {
+            b"UNLINK"
+        } else {
+            b"DEL"
+        };
+        for key in evicted_db_keys {
+            let (db, logical) = match fr_store::decode_db_key(key) {
+                Some((db, lk)) => (db, lk.to_vec()),
+                None => (0, key.clone()),
+            };
+            // The active-expire cycle is not bound to the session db, so emit an
+            // explicit SELECT for the evicted key's db when it differs from the
+            // last db written to the AOF/replication stream.
+            if self.aof_selected_db != db {
+                self.capture_aof_record(&[b"SELECT".to_vec(), db.to_string().into_bytes()]);
+                self.aof_selected_db = db;
+            }
+            self.capture_aof_record(&[op.to_vec(), logical]);
+        }
+    }
+
+    /// Whether `lazyfree-lazy-expire` is enabled (so expiry propagates UNLINK
+    /// instead of DEL). Defaults to disabled, matching upstream. (frankenredis-wqrb6)
+    fn lazyfree_lazy_expire_enabled(&self) -> bool {
+        self.config_overrides
+            .get("lazyfree-lazy-expire")
+            .is_some_and(|v| v.eq_ignore_ascii_case("yes"))
     }
 
     #[must_use]
@@ -17802,6 +17851,52 @@ mod tests {
                     RespFrame::BulkString(Some(b"v".to_vec())),
                 ])),
             ]))])),
+        );
+    }
+
+    #[test]
+    fn active_expire_cycle_propagates_del_for_reaped_keys() {
+        // (frankenredis-wqrb6) The active-expire cycle must propagate a DEL per
+        // key it reaps so replicas / AOF replay delete the same keys (upstream
+        // activeExpireCycle does this; without it the stream lacks the expiry
+        // delete and an fr master + redis replica diverge).
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(42);
+        // Key set at t=900 with a 100ms TTL -> expires at t=1000.
+        rt.execute_frame(command(&[b"SET", b"ek", b"v", b"PX", b"100"]), 900);
+        let before = rt.aof_records().len();
+
+        // Run the cycle well past the deadline; it reaps `ek`.
+        rt.run_active_expire_cycle(5_000, ActiveExpireCycleKind::Fast);
+
+        let new_argvs: Vec<Vec<Vec<u8>>> = rt.aof_records()[before..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        assert!(
+            new_argvs.iter().any(|argv| argv
+                .first()
+                .is_some_and(|c| c.eq_ignore_ascii_case(b"DEL"))
+                && argv.get(1).is_some_and(|k| k.as_slice() == b"ek")),
+            "active-expire cycle must propagate `DEL ek`, got {new_argvs:?}"
+        );
+
+        // A replica (not a master) must NOT synthesize its own expiry DELs.
+        let mut replica = Runtime::default_strict();
+        replica.server.replication_runtime_state.ensure_replica(7);
+        replica.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6379"]), 900);
+        replica.execute_frame(command(&[b"SET", b"rk", b"v", b"PX", b"100"]), 900);
+        let rbefore = replica.aof_records().len();
+        replica.run_active_expire_cycle(5_000, ActiveExpireCycleKind::Fast);
+        let rnew: Vec<Vec<Vec<u8>>> = replica.aof_records()[rbefore..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        assert!(
+            !rnew.iter().any(|argv| argv
+                .first()
+                .is_some_and(|c| c.eq_ignore_ascii_case(b"DEL"))),
+            "a replica must not generate expiry DELs, got {rnew:?}"
         );
     }
 
