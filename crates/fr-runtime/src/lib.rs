@@ -4327,9 +4327,14 @@ impl Runtime {
                     .map(|owners| (key.clone(), owners))
             })
             .collect();
-        let sessions = self.client_list_sessions();
         let mut invalidations: BTreeMap<u64, Vec<Vec<u8>>> = BTreeMap::new();
-        for (owner_id, session) in &sessions {
+        for (owner_id, session) in self
+            .server
+            .client_sessions
+            .iter()
+            .filter(|(owner_id, _)| **owner_id != self.session.client_id)
+            .chain(std::iter::once((&self.session.client_id, &self.session)))
+        {
             let tracking = &session.client_tracking;
             if !tracking.enabled || !tracking.bcast {
                 continue;
@@ -4339,7 +4344,7 @@ impl Runtime {
             }
 
             let target_id = tracking.redirect.unwrap_or(*owner_id);
-            if !sessions.contains_key(&target_id) {
+            if !self.client_session_exists_including_current(target_id) {
                 continue;
             }
 
@@ -4351,7 +4356,7 @@ impl Runtime {
         }
         for (key, owner_ids) in observed_keys {
             for owner_id in owner_ids {
-                let Some(session) = sessions.get(&owner_id) else {
+                let Some(session) = self.client_session_including_current(owner_id) else {
                     continue;
                 };
                 let tracking = &session.client_tracking;
@@ -4362,7 +4367,7 @@ impl Runtime {
                     continue;
                 }
                 let target_id = tracking.redirect.unwrap_or(owner_id);
-                if sessions.contains_key(&target_id) {
+                if self.client_session_exists_including_current(target_id) {
                     Self::add_tracking_invalidation(&mut invalidations, target_id, &key);
                 }
             }
@@ -4376,6 +4381,18 @@ impl Runtime {
                     .or_default()
                     .push(fr_store::PubSubMessage::Invalidate { keys });
             }
+        }
+    }
+
+    fn client_session_exists_including_current(&self, client_id: u64) -> bool {
+        client_id == self.session.client_id || self.server.client_sessions.contains_key(&client_id)
+    }
+
+    fn client_session_including_current(&self, client_id: u64) -> Option<&ClientSession> {
+        if client_id == self.session.client_id {
+            Some(&self.session)
+        } else {
+            self.server.client_sessions.get(&client_id)
         }
     }
 
@@ -16500,6 +16517,29 @@ mod tests {
         assert!(frame.to_bytes().starts_with(b">2\r\n"));
 
         let _writer = rt.swap_session(previous);
+    }
+
+    #[test]
+    fn client_tracking_bcast_current_session_receives_own_write() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CLIENT", b"TRACKING", b"ON", b"BCAST", b"PREFIX", b"foo"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"foo:1", b"payload"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.drain_pending_pubsub(),
+            vec![fr_store::PubSubMessage::Invalidate {
+                keys: vec![b"foo:1".to_vec()],
+            }]
+        );
     }
 
     #[test]
