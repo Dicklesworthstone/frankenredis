@@ -15891,6 +15891,17 @@ fn dispatch_acl_permission_error_for_argv(
     argv: &[Vec<u8>],
     permissions: &DispatchAclPermissions,
 ) -> Option<DispatchAclPermissionError> {
+    if permissions.all_commands
+        && permissions.allowed_commands.is_empty()
+        && permissions.denied_commands.is_empty()
+        && permissions.allowed_categories.is_empty()
+        && permissions.denied_categories.is_empty()
+        && permissions.all_keys
+        && permissions.all_channels
+    {
+        return None;
+    }
+
     let cmd = argv.first()?;
     if !dispatch_acl_is_command_allowed(argv, permissions) {
         return Some(DispatchAclPermissionError::Command);
