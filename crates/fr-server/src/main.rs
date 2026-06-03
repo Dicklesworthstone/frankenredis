@@ -2466,6 +2466,9 @@ fn waitaof_response_satisfies(argv: &[Vec<u8>], response: &RespFrame) -> bool {
 }
 
 fn waitaof_should_block(frame: &RespFrame, response: &RespFrame) -> bool {
+    if !frame_command_eq_ignore_ascii_case(frame, b"WAITAOF") {
+        return false;
+    }
     let Ok(argv) = fr_command::frame_to_argv(frame) else {
         return false;
     };
@@ -2496,6 +2499,9 @@ fn wait_response_satisfies(argv: &[Vec<u8>], response: &RespFrame) -> bool {
 }
 
 fn wait_should_block(frame: &RespFrame, response: &RespFrame) -> bool {
+    if !frame_command_eq_ignore_ascii_case(frame, b"WAIT") {
+        return false;
+    }
     let Ok(argv) = fr_command::frame_to_argv(frame) else {
         return false;
     };
@@ -2506,6 +2512,20 @@ fn wait_should_block(frame: &RespFrame, response: &RespFrame) -> bool {
         return false;
     }
     !wait_response_satisfies(&argv, response)
+}
+
+fn frame_command_eq_ignore_ascii_case(frame: &RespFrame, expected: &[u8]) -> bool {
+    let RespFrame::Array(Some(items)) = frame else {
+        return false;
+    };
+    let Some(command) = items.first() else {
+        return false;
+    };
+    match command {
+        RespFrame::BulkString(Some(bytes)) => bytes.eq_ignore_ascii_case(expected),
+        RespFrame::SimpleString(text) => text.as_bytes().eq_ignore_ascii_case(expected),
+        _ => false,
+    }
 }
 
 fn blocked_timeout_response(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> RespFrame {
@@ -3326,7 +3346,8 @@ mod tests {
         read_replication_snapshot_from_stream, replica_handshake_frame,
         replica_handshake_read_timeout, replication_follow_up_bytes, resolve_xread_block_argv,
         server_help_text, should_try_inline_parsing, startup_config_from_directives,
-        sync_replica_with_primary, try_build_blocked_state, try_fulfill_blocked,
+        sync_replica_with_primary, try_build_blocked_state, try_fulfill_blocked, wait_should_block,
+        waitaof_should_block,
     };
     use fr_config::RuntimePolicy;
     use fr_protocol::{ParserConfig, RespFrame};
@@ -3388,6 +3409,45 @@ mod tests {
         assert!(!frame_matches_suppressed_replication_reply(&array(vec![
             RespFrame::Integer(0),
         ])));
+    }
+
+    #[test]
+    fn wait_block_matchers_preserve_command_filter_and_satisfaction() {
+        fn bulk(bytes: &[u8]) -> RespFrame {
+            RespFrame::BulkString(Some(bytes.to_vec()))
+        }
+
+        fn array(items: Vec<RespFrame>) -> RespFrame {
+            RespFrame::Array(Some(items))
+        }
+
+        let non_wait = array(vec![bulk(b"HGET"), RespFrame::Array(None)]);
+        assert!(!wait_should_block(&non_wait, &RespFrame::Integer(0)));
+        assert!(!waitaof_should_block(
+            &non_wait,
+            &RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)])),
+        ));
+
+        let wait = array(vec![bulk(b"WAIT"), bulk(b"2"), bulk(b"100")]);
+        assert!(wait_should_block(&wait, &RespFrame::Integer(1)));
+        assert!(!wait_should_block(&wait, &RespFrame::Integer(2)));
+
+        let waitaof = array(vec![bulk(b"WAITAOF"), bulk(b"1"), bulk(b"2"), bulk(b"100")]);
+        assert!(waitaof_should_block(
+            &waitaof,
+            &RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(1)])),
+        ));
+        assert!(!waitaof_should_block(
+            &waitaof,
+            &RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(2)])),
+        ));
+
+        let simple_wait = array(vec![
+            RespFrame::SimpleString("wait".to_string()),
+            bulk(b"1"),
+            bulk(b"0"),
+        ]);
+        assert!(wait_should_block(&simple_wait, &RespFrame::Integer(0)));
     }
 
     #[test]
