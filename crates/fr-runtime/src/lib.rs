@@ -5623,27 +5623,20 @@ impl Runtime {
                                 self.capture_aof_record(&script_argv);
                             }
                         } else if let Some(rewritten) =
-                            Self::rewrite_relative_expire_for_propagation(&argv, now_ms)
-                        {
-                            // (frankenredis-mdrk8) Propagate the absolute
-                            // PEXPIREAT form so a replica's deadline matches the
-                            // master's exactly instead of drifting upward by the
-                            // command's propagation/processing delay.
-                            self.capture_aof_record(&rewritten);
-                        } else if let Some(rewritten) =
                             fr_command::rewrite_effect_command_for_propagation(
                                 &argv,
                                 &reply,
                                 &self.server.store,
+                                now_ms,
                             )
                         {
-                            // (frankenredis-myegu) Single canonical reply-driven
-                            // rewrite shared with the Lua (x1225) and MULTI/EXEC
-                            // (n66hv) paths: INCRBYFLOAT/HINCRBYFLOAT→SET/HSET
-                            // (1uiql), SPOP→SREM/DEL (1uiql), XADD `*`→concrete id
-                            // (f9byo), blocking pops/*MPOP/GETDEL→resolved form
-                            // (ybaw7). Keeps the three propagation entry points from
-                            // drifting (as they did on INCRBYFLOAT's KEEPTTL).
+                            // (frankenredis-myegu / 9snkx) Single canonical rewrite
+                            // shared with the Lua (x1225) and MULTI/EXEC (n66hv)
+                            // paths: relative expire→absolute (mdrk8/dt3v0),
+                            // INCRBYFLOAT/HINCRBYFLOAT→SET/HSET + SPOP→SREM/DEL
+                            // (1uiql), XADD `*`→concrete id (f9byo), blocking pops/
+                            // *MPOP/GETDEL→resolved form (ybaw7). One source of truth
+                            // so the three entry points can't drift.
                             self.capture_aof_record(&rewritten);
                         } else {
                             self.capture_aof_record(&argv);
@@ -6617,156 +6610,6 @@ impl Runtime {
         self.server.capture_aof_record(argv);
     }
 
-    /// (frankenredis-mdrk8) Rewrite a relative-time expire command to the
-    /// absolute `PEXPIREAT key <ms>` form before it is propagated to replicas
-    /// and the replication backlog, mirroring upstream
-    /// `expire.c::expireGenericCommand` which calls
-    /// `rewriteClientCommandVector(c, 2, shared.pexpireat, key, ms)`.
-    ///
-    /// A relative `EXPIRE`/`PEXPIRE` propagated verbatim is re-evaluated by the
-    /// replica at its (strictly later) receive time, so the replica's deadline —
-    /// and therefore its `PTTL` — drifts above the master's by the propagation
-    /// delay. Converting to an absolute deadline computed from the same `now_ms`
-    /// the command itself used keeps the two exactly in lockstep. `EXPIREAT` /
-    /// `PEXPIREAT` are already absolute but are normalised to `PEXPIREAT` (and
-    /// any `NX|XX|GT|LT` conditional flags dropped — the command only reaches
-    /// propagation after the conditional already succeeded). A past deadline is
-    /// preserved as-is, which deletes the key on the replica just as it did on
-    /// the master. Returns `None` for any non-expire command (propagate verbatim).
-    fn rewrite_relative_expire_for_propagation(
-        argv: &[Vec<u8>],
-        now_ms: u64,
-    ) -> Option<Vec<Vec<u8>>> {
-        let cmd = argv.first()?;
-        let now = i64::try_from(now_ms).unwrap_or(i64::MAX);
-
-        // EXPIRE family: argv[2] is the (relative or absolute) time.
-        if eq_ascii_token(cmd, b"EXPIRE")
-            || eq_ascii_token(cmd, b"PEXPIRE")
-            || eq_ascii_token(cmd, b"EXPIREAT")
-            || eq_ascii_token(cmd, b"PEXPIREAT")
-        {
-            if argv.len() < 3 {
-                return None;
-            }
-            let value: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
-            let abs_ms: i64 = if eq_ascii_token(cmd, b"EXPIRE") {
-                now.saturating_add(value.saturating_mul(1000))
-            } else if eq_ascii_token(cmd, b"PEXPIRE") {
-                now.saturating_add(value)
-            } else if eq_ascii_token(cmd, b"EXPIREAT") {
-                value.saturating_mul(1000)
-            } else {
-                value
-            };
-            return Some(vec![
-                b"PEXPIREAT".to_vec(),
-                argv[1].clone(),
-                abs_ms.to_string().into_bytes(),
-            ]);
-        }
-
-        // (frankenredis-dt3v0) SET-with-expire family. Upstream
-        // setGenericCommand rewrites SET/SETEX/PSETEX carrying a relative EX/PX
-        // (or the unit-converted EXAT) to `SET key val PXAT <ms>`
-        // (rewriteClientCommandVector(c, 5, ...)). An absolute PXAT, KEEPTTL, or
-        // no-expire SET carries no new relative deadline -> propagate verbatim.
-        if eq_ascii_token(cmd, b"SETEX") || eq_ascii_token(cmd, b"PSETEX") {
-            if argv.len() != 4 {
-                return None;
-            }
-            let value: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
-            let abs_ms = if eq_ascii_token(cmd, b"SETEX") {
-                now.saturating_add(value.saturating_mul(1000))
-            } else {
-                now.saturating_add(value)
-            };
-            return Some(vec![
-                b"SET".to_vec(),
-                argv[1].clone(),
-                argv[3].clone(),
-                b"PXAT".to_vec(),
-                abs_ms.to_string().into_bytes(),
-            ]);
-        }
-        if eq_ascii_token(cmd, b"SET") {
-            if argv.len() < 3 {
-                return None;
-            }
-            let abs_ms = Self::set_relative_expire_deadline_ms(&argv[3..], now)?;
-            return Some(vec![
-                b"SET".to_vec(),
-                argv[1].clone(),
-                argv[2].clone(),
-                b"PXAT".to_vec(),
-                abs_ms.to_string().into_bytes(),
-            ]);
-        }
-
-        // (frankenredis-dt3v0) GETEX. Upstream getexCommand propagates a future
-        // EX/PX/EXAT/PXAT as PEXPIREAT, a past EXAT/PXAT (delete) as DEL, and
-        // PERSIST as PERSIST. (A no-option GETEX is a pure read and never
-        // reaches propagation.)
-        if eq_ascii_token(cmd, b"GETEX") {
-            if argv.len() < 3 {
-                return None;
-            }
-            let opt = &argv[2];
-            if eq_ascii_token(opt, b"PERSIST") {
-                return Some(vec![b"PERSIST".to_vec(), argv[1].clone()]);
-            }
-            let value: i64 = std::str::from_utf8(argv.get(3)?).ok()?.parse().ok()?;
-            let abs_ms: i64 = if eq_ascii_token(opt, b"EX") {
-                now.saturating_add(value.saturating_mul(1000))
-            } else if eq_ascii_token(opt, b"PX") {
-                now.saturating_add(value)
-            } else if eq_ascii_token(opt, b"EXAT") {
-                value.saturating_mul(1000)
-            } else if eq_ascii_token(opt, b"PXAT") {
-                value
-            } else {
-                return None;
-            };
-            if abs_ms <= now {
-                return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
-            }
-            return Some(vec![
-                b"PEXPIREAT".to_vec(),
-                argv[1].clone(),
-                abs_ms.to_string().into_bytes(),
-            ]);
-        }
-
-        None
-    }
-
-    /// (frankenredis-dt3v0) Scan SET option tokens for a relative expiry
-    /// (`EX`/`PX`/`EXAT`) and return the absolute deadline in ms. Returns `None`
-    /// when the only expiry is an absolute `PXAT`, or there is no expiry at all
-    /// (`KEEPTTL` / plain SET) — those carry no relative drift and propagate
-    /// verbatim.
-    fn set_relative_expire_deadline_ms(opts: &[Vec<u8>], now: i64) -> Option<i64> {
-        let mut i = 0;
-        while i < opts.len() {
-            let opt = &opts[i];
-            if eq_ascii_token(opt, b"EX")
-                || eq_ascii_token(opt, b"PX")
-                || eq_ascii_token(opt, b"EXAT")
-            {
-                let value: i64 = std::str::from_utf8(opts.get(i + 1)?).ok()?.parse().ok()?;
-                return Some(if eq_ascii_token(opt, b"EX") {
-                    now.saturating_add(value.saturating_mul(1000))
-                } else if eq_ascii_token(opt, b"PX") {
-                    now.saturating_add(value)
-                } else {
-                    value.saturating_mul(1000)
-                });
-            }
-            i += 1;
-        }
-        None
-    }
-
     fn take_script_propagation_commands_for_capture(
         &mut self,
         argv: &[Vec<u8>],
@@ -6807,9 +6650,6 @@ impl Runtime {
     }
 
     fn namespace_argv_for_selected_db(&self, argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
-        if self.session.selected_db == 0 {
-            return argv.to_vec();
-        }
         let mut rewritten = argv.to_vec();
         for idx in fr_command::command_key_indexes(argv) {
             if let Some(arg) = rewritten.get_mut(idx) {
@@ -13919,6 +13759,7 @@ replica_announced:1\r\n",
                                 argv,
                                 &reply,
                                 &self.server.store,
+                                now_ms,
                             )
                             .unwrap_or_else(|| argv.clone());
                             transaction_aof.push(effect);
@@ -17015,22 +16856,6 @@ mod tests {
         let _ = rt.swap_session(previous);
     }
 
-    #[test]
-    fn namespace_argv_for_selected_db_skips_db0_key_reencoding() {
-        let mut rt = Runtime::default_strict();
-        let input = argv(&[b"HGET", b"hash", b"field"]);
-
-        assert_eq!(rt.namespace_argv_for_selected_db(&input), input);
-
-        rt.session.selected_db = 1;
-        let namespaced = rt.namespace_argv_for_selected_db(&input);
-        assert_eq!(namespaced[0], b"HGET".to_vec());
-        assert_eq!(namespaced[1], fr_store::encode_db_key(1, b"hash"));
-        assert_eq!(namespaced[2], b"field".to_vec());
-        assert_eq!(input[1], b"hash".to_vec());
-    }
-
-    #[test]
     fn multi_db_select_scopes_keyspace_commands() {
         let mut rt = Runtime::default_strict();
 
@@ -17835,7 +17660,7 @@ mod tests {
         // PEXPIREAT so a replica's deadline matches the master's exactly.
         let now = 1_000_000_u64;
         let rw = |argv: &[&[u8]]| {
-            Runtime::rewrite_relative_expire_for_propagation(
+            fr_command::rewrite_relative_expire_for_propagation(
                 &argv.iter().map(|a| a.to_vec()).collect::<Vec<_>>(),
                 now,
             )

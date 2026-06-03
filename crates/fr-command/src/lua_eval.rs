@@ -8109,9 +8109,13 @@ impl<'a> LuaState<'a> {
                     // a script's XADD `*` / SPOP / INCRBYFLOAT (etc.) propagates a
                     // concrete command, not the non-deterministic one — otherwise
                     // replicas/AOF replay regenerate ids/randomness and diverge.
-                    let effect =
-                        crate::rewrite_effect_command_for_propagation(&argv, &frame, self.store)
-                            .unwrap_or_else(|| argv.clone());
+                    let effect = crate::rewrite_effect_command_for_propagation(
+                        &argv,
+                        &frame,
+                        self.store,
+                        self.now_ms,
+                    )
+                    .unwrap_or_else(|| argv.clone());
                     self.store.record_script_propagation(&effect);
                 }
                 Ok(vec![resp_to_lua_command_result(&argv, &frame)])

@@ -185,9 +185,19 @@ pub fn rewrite_effect_command_for_propagation(
     argv: &[Vec<u8>],
     reply: &fr_protocol::RespFrame,
     store: &Store,
+    now_ms: u64,
 ) -> Option<Vec<Vec<u8>>> {
     use fr_protocol::RespFrame;
     let cmd = argv.first()?;
+
+    // (frankenredis-9snkx) Relative-time -> absolute rewrite (mdrk8/dt3v0) runs
+    // first; it is reply-independent and shares this one entry point so scripts
+    // and MULTI/EXEC get it too (they previously propagated EXPIRE verbatim and
+    // drifted the replica TTL).
+    if let Some(rewritten) = rewrite_relative_expire_for_propagation(argv, now_ms) {
+        return Some(rewritten);
+    }
+
     let bulk = |f: &RespFrame| match f {
         RespFrame::BulkString(Some(v)) => Some(v.clone()),
         _ => None,
@@ -324,6 +334,137 @@ pub fn rewrite_effect_command_for_propagation(
         served_key,
         count.to_string().into_bytes(),
     ])
+}
+
+/// Rewrite a relative-time expire command to its absolute form for AOF/
+/// replication propagation, so a replica/AOF replay does not recompute the
+/// deadline at its later receive time and drift the TTL upward. Mirrors upstream
+/// expire.c/t_string.c `rewriteClientCommandVector(...)`:
+///   EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT -> `PEXPIREAT key <ms>`
+///   SETEX/PSETEX / `SET key val EX|PX|EXAT ...` -> `SET key val PXAT <ms>`
+///   GETEX EX|PX|EXAT|PXAT (future) -> `PEXPIREAT`, past -> `DEL`, PERSIST -> `PERSIST`
+/// Returns `None` for a non-expire command or an absolute/no-expire form (those
+/// carry no relative drift and propagate verbatim). (frankenredis-mdrk8 / dt3v0)
+pub fn rewrite_relative_expire_for_propagation(
+    argv: &[Vec<u8>],
+    now_ms: u64,
+) -> Option<Vec<Vec<u8>>> {
+    let cmd = argv.first()?;
+    let now = i64::try_from(now_ms).unwrap_or(i64::MAX);
+
+    if eq_ascii_command(cmd, b"EXPIRE")
+        || eq_ascii_command(cmd, b"PEXPIRE")
+        || eq_ascii_command(cmd, b"EXPIREAT")
+        || eq_ascii_command(cmd, b"PEXPIREAT")
+    {
+        if argv.len() < 3 {
+            return None;
+        }
+        let value: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
+        let abs_ms: i64 = if eq_ascii_command(cmd, b"EXPIRE") {
+            now.saturating_add(value.saturating_mul(1000))
+        } else if eq_ascii_command(cmd, b"PEXPIRE") {
+            now.saturating_add(value)
+        } else if eq_ascii_command(cmd, b"EXPIREAT") {
+            value.saturating_mul(1000)
+        } else {
+            value
+        };
+        return Some(vec![
+            b"PEXPIREAT".to_vec(),
+            argv[1].clone(),
+            abs_ms.to_string().into_bytes(),
+        ]);
+    }
+
+    if eq_ascii_command(cmd, b"SETEX") || eq_ascii_command(cmd, b"PSETEX") {
+        if argv.len() != 4 {
+            return None;
+        }
+        let value: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
+        let abs_ms = if eq_ascii_command(cmd, b"SETEX") {
+            now.saturating_add(value.saturating_mul(1000))
+        } else {
+            now.saturating_add(value)
+        };
+        return Some(vec![
+            b"SET".to_vec(),
+            argv[1].clone(),
+            argv[3].clone(),
+            b"PXAT".to_vec(),
+            abs_ms.to_string().into_bytes(),
+        ]);
+    }
+    if eq_ascii_command(cmd, b"SET") {
+        if argv.len() < 3 {
+            return None;
+        }
+        let abs_ms = set_relative_expire_deadline_ms(&argv[3..], now)?;
+        return Some(vec![
+            b"SET".to_vec(),
+            argv[1].clone(),
+            argv[2].clone(),
+            b"PXAT".to_vec(),
+            abs_ms.to_string().into_bytes(),
+        ]);
+    }
+
+    if eq_ascii_command(cmd, b"GETEX") {
+        if argv.len() < 3 {
+            return None;
+        }
+        let opt = &argv[2];
+        if eq_ascii_command(opt, b"PERSIST") {
+            return Some(vec![b"PERSIST".to_vec(), argv[1].clone()]);
+        }
+        let value: i64 = std::str::from_utf8(argv.get(3)?).ok()?.parse().ok()?;
+        let abs_ms: i64 = if eq_ascii_command(opt, b"EX") {
+            now.saturating_add(value.saturating_mul(1000))
+        } else if eq_ascii_command(opt, b"PX") {
+            now.saturating_add(value)
+        } else if eq_ascii_command(opt, b"EXAT") {
+            value.saturating_mul(1000)
+        } else if eq_ascii_command(opt, b"PXAT") {
+            value
+        } else {
+            return None;
+        };
+        if abs_ms <= now {
+            return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
+        }
+        return Some(vec![
+            b"PEXPIREAT".to_vec(),
+            argv[1].clone(),
+            abs_ms.to_string().into_bytes(),
+        ]);
+    }
+
+    None
+}
+
+/// Scan SET option tokens for a relative expiry (`EX`/`PX`/`EXAT`) and return the
+/// absolute deadline in ms; `None` when the only expiry is an absolute `PXAT` or
+/// there is no expiry (`KEEPTTL`/plain SET). (frankenredis-dt3v0)
+fn set_relative_expire_deadline_ms(opts: &[Vec<u8>], now: i64) -> Option<i64> {
+    let mut i = 0;
+    while i < opts.len() {
+        let opt = &opts[i];
+        if eq_ascii_command(opt, b"EX")
+            || eq_ascii_command(opt, b"PX")
+            || eq_ascii_command(opt, b"EXAT")
+        {
+            let value: i64 = std::str::from_utf8(opts.get(i + 1)?).ok()?.parse().ok()?;
+            return Some(if eq_ascii_command(opt, b"EX") {
+                now.saturating_add(value.saturating_mul(1000))
+            } else if eq_ascii_command(opt, b"PX") {
+                now.saturating_add(value)
+            } else {
+                value.saturating_mul(1000)
+            });
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Return the argv indexes that correspond to keys for the command.
@@ -49445,12 +49586,35 @@ mod tests {
         let v = |s: &[u8]| s.to_vec();
         let mut store = Store::new();
 
+        // (frankenredis-9snkx) Relative-expire rewrite is folded in (so scripts /
+        // MULTI/EXEC get it): EXPIRE -> PEXPIREAT computed from now_ms.
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"EXPIRE"), v(b"k"), v(b"100")],
+                &b(b"1"),
+                &store,
+                1_000_000,
+            ),
+            Some(vec![v(b"PEXPIREAT"), v(b"k"), v(b"1100000")])
+        );
+        // SETEX -> SET key val PXAT <ms>.
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"SETEX"), v(b"k"), v(b"100"), v(b"val")],
+                &RespFrame::SimpleString("OK".to_string()),
+                &store,
+                1_000_000,
+            ),
+            Some(vec![v(b"SET"), v(b"k"), v(b"val"), v(b"PXAT"), v(b"1100000")])
+        );
+
         // XADD `*` -> concrete id from the reply.
         assert_eq!(
             super::rewrite_effect_command_for_propagation(
                 &[v(b"XADD"), v(b"st"), v(b"*"), v(b"f"), v(b"x")],
                 &b(b"5-0"),
                 &store,
+                0,
             ),
             Some(vec![v(b"XADD"), v(b"st"), v(b"5-0"), v(b"f"), v(b"x")])
         );
@@ -49460,12 +49624,13 @@ mod tests {
                 &[v(b"INCRBYFLOAT"), v(b"kf"), v(b"2.5")],
                 &b(b"12.5"),
                 &store,
+                0,
             ),
             Some(vec![v(b"SET"), v(b"kf"), v(b"12.5"), v(b"KEEPTTL")])
         );
         // GETDEL -> DEL.
         assert_eq!(
-            super::rewrite_effect_command_for_propagation(&[v(b"GETDEL"), v(b"k")], &b(b"x"), &store),
+            super::rewrite_effect_command_for_propagation(&[v(b"GETDEL"), v(b"k")], &b(b"x"), &store, 0),
             Some(vec![v(b"DEL"), v(b"k")])
         );
         // SPOP with the set still present -> SREM <members>.
@@ -49482,6 +49647,7 @@ mod tests {
                 &[v(b"SPOP"), v(b"s"), v(b"1")],
                 &spop_reply,
                 &store,
+                0,
             ),
             Some(vec![v(b"SREM"), v(b"s"), v(b"a")])
         );
@@ -49492,6 +49658,7 @@ mod tests {
                 &[v(b"SPOP"), v(b"gone"), v(b"1")],
                 &drain_reply,
                 &store,
+                0,
             ),
             Some(vec![v(b"DEL"), v(b"gone")])
         );
@@ -49501,6 +49668,7 @@ mod tests {
                 &[v(b"HINCRBYFLOAT"), v(b"h"), v(b"fld"), v(b"3.5")],
                 &b(b"13.5"),
                 &store,
+                0,
             ),
             Some(vec![v(b"HSET"), v(b"h"), v(b"fld"), v(b"13.5")])
         );
@@ -49511,6 +49679,7 @@ mod tests {
                 &[v(b"BLPOP"), v(b"a"), v(b"l"), v(b"0")],
                 &arr(vec![b(b"l"), b(b"x")]),
                 &store,
+                0,
             ),
             Some(vec![v(b"LPOP"), v(b"l")])
         );
@@ -49519,6 +49688,7 @@ mod tests {
                 &[v(b"BRPOP"), v(b"l"), v(b"0")],
                 &arr(vec![b(b"l"), b(b"x")]),
                 &store,
+                0,
             ),
             Some(vec![v(b"RPOP"), v(b"l")])
         );
@@ -49527,6 +49697,7 @@ mod tests {
                 &[v(b"BZPOPMIN"), v(b"z"), v(b"0")],
                 &arr(vec![b(b"z"), b(b"m"), b(b"1")]),
                 &store,
+                0,
             ),
             Some(vec![v(b"ZPOPMIN"), v(b"z")])
         );
@@ -49535,6 +49706,7 @@ mod tests {
                 &[v(b"BRPOPLPUSH"), v(b"s"), v(b"d"), v(b"0")],
                 &b(b"x"),
                 &store,
+                0,
             ),
             Some(vec![v(b"RPOPLPUSH"), v(b"s"), v(b"d")])
         );
@@ -49543,6 +49715,7 @@ mod tests {
                 &[v(b"BLMOVE"), v(b"s"), v(b"d"), v(b"LEFT"), v(b"RIGHT"), v(b"0")],
                 &b(b"x"),
                 &store,
+                0,
             ),
             Some(vec![v(b"LMOVE"), v(b"s"), v(b"d"), v(b"LEFT"), v(b"RIGHT")])
         );
@@ -49552,6 +49725,7 @@ mod tests {
                 &[v(b"LMPOP"), v(b"2"), v(b"x"), v(b"l"), v(b"LEFT"), v(b"COUNT"), v(b"2")],
                 &arr(vec![b(b"l"), arr(vec![b(b"a"), b(b"b")])]),
                 &store,
+                0,
             ),
             Some(vec![v(b"LPOP"), v(b"l"), v(b"2")])
         );
@@ -49563,6 +49737,7 @@ mod tests {
                     arr(vec![arr(vec![b(b"a"), b(b"1")]), arr(vec![b(b"b"), b(b"2")])]),
                 ]),
                 &store,
+                0,
             ),
             Some(vec![v(b"ZPOPMIN"), v(b"z"), v(b"2")])
         );
@@ -49571,12 +49746,13 @@ mod tests {
                 &[v(b"BLMPOP"), v(b"0"), v(b"1"), v(b"l"), v(b"RIGHT")],
                 &arr(vec![b(b"l"), arr(vec![b(b"a")])]),
                 &store,
+                0,
             ),
             Some(vec![v(b"RPOP"), v(b"l"), v(b"1")])
         );
         // Non-targeted command -> verbatim (None).
         assert_eq!(
-            super::rewrite_effect_command_for_propagation(&[v(b"SET"), v(b"k"), v(b"x")], &b(b"OK"), &store),
+            super::rewrite_effect_command_for_propagation(&[v(b"SET"), v(b"k"), v(b"x")], &b(b"OK"), &store, 0),
             None
         );
     }
