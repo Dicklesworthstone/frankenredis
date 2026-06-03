@@ -3559,6 +3559,49 @@ impl Store {
         count
     }
 
+    #[inline]
+    fn bitpos_masked_byte(raw: u8, bit: bool, keep_mask: u8) -> Option<usize> {
+        let masked = if bit {
+            raw & keep_mask
+        } else {
+            raw | !keep_mask
+        };
+        if bit && masked != 0 {
+            return Some(masked.leading_zeros() as usize);
+        }
+        if !bit && masked != 0xFF {
+            return Some((!masked).leading_zeros() as usize);
+        }
+        None
+    }
+
+    #[inline]
+    fn bitpos_full_bytes(bytes: &[u8], bit: bool, base_byte: usize) -> Option<i64> {
+        let mut chunks = bytes.chunks_exact(8);
+        let mut byte_offset = base_byte;
+        for chunk in &mut chunks {
+            let word = u64::from_ne_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ]);
+            let has_candidate = if bit { word != 0 } else { word != u64::MAX };
+            if has_candidate {
+                for (i, &raw) in chunk.iter().enumerate() {
+                    if let Some(bit_in_byte) = Self::bitpos_masked_byte(raw, bit, 0xFF) {
+                        return Some(((byte_offset + i) * 8 + bit_in_byte) as i64);
+                    }
+                }
+            }
+            byte_offset += 8;
+        }
+        for &raw in chunks.remainder() {
+            if let Some(bit_in_byte) = Self::bitpos_masked_byte(raw, bit, 0xFF) {
+                return Some((byte_offset * 8 + bit_in_byte) as i64);
+            }
+            byte_offset += 1;
+        }
+        None
+    }
+
     pub fn bitcount(
         &mut self,
         key: &[u8],
@@ -3757,41 +3800,26 @@ impl Store {
         let first_keep_mask: u8 = 0xFFu8 >> s_bit_in_byte;
         let last_keep_mask: u8 = 0xFFu8 << (7 - e_bit_in_byte);
 
-        for (byte_offset, &raw) in bytes.iter().enumerate().take(e_byte + 1).skip(s_byte) {
-            let first_byte = byte_offset == s_byte;
-            let last_byte = byte_offset == e_byte;
-
-            // Apply masks per direction. Looking for 1: zero the
-            // out-of-range bits so they're skipped (`& keep_mask`).
-            // Looking for 0: set the out-of-range bits to 1 so they
-            // can't trip the search (`| !keep_mask`).
-            let masked = if bit {
-                let mut m = raw;
-                if first_byte {
-                    m &= first_keep_mask;
-                }
-                if last_byte {
-                    m &= last_keep_mask;
-                }
-                m
-            } else {
-                let mut m = raw;
-                if first_byte {
-                    m |= !first_keep_mask;
-                }
-                if last_byte {
-                    m |= !last_keep_mask;
-                }
-                m
-            };
-
-            if bit && masked != 0 {
-                let bit_in_byte = masked.leading_zeros() as usize;
-                return Ok((byte_offset * 8 + bit_in_byte) as i64);
+        if s_byte == e_byte {
+            let keep_mask = first_keep_mask & last_keep_mask;
+            if let Some(bit_in_byte) = Self::bitpos_masked_byte(bytes[s_byte], bit, keep_mask) {
+                return Ok((s_byte * 8 + bit_in_byte) as i64);
             }
-            if !bit && masked != 0xFF {
-                let bit_in_byte = (!masked).leading_zeros() as usize;
-                return Ok((byte_offset * 8 + bit_in_byte) as i64);
+        } else {
+            if let Some(bit_in_byte) = Self::bitpos_masked_byte(bytes[s_byte], bit, first_keep_mask)
+            {
+                return Ok((s_byte * 8 + bit_in_byte) as i64);
+            }
+            let interior_start = s_byte + 1;
+            if interior_start < e_byte
+                && let Some(pos) =
+                    Self::bitpos_full_bytes(&bytes[interior_start..e_byte], bit, interior_start)
+            {
+                return Ok(pos);
+            }
+            if let Some(bit_in_byte) = Self::bitpos_masked_byte(bytes[e_byte], bit, last_keep_mask)
+            {
+                return Ok((e_byte * 8 + bit_in_byte) as i64);
             }
         }
 
@@ -25170,6 +25198,75 @@ mod tests {
         let ratio = naive_ns as f64 / swar_ns as f64;
         println!(
             "BITCOUNT popcount A/B over {n} bytes x{reps}: naive={naive_ns}ns swar={swar_ns}ns ratio={ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn bitpos_full_bytes_swar_matches_naive_and_reports_ab_ratio() {
+        let naive = |bytes: &[u8], bit: bool, base_byte: usize| -> Option<i64> {
+            for (i, &raw) in bytes.iter().enumerate() {
+                if bit && raw != 0 {
+                    return Some(((base_byte + i) * 8 + raw.leading_zeros() as usize) as i64);
+                }
+                if !bit && raw != 0xFF {
+                    return Some(((base_byte + i) * 8 + (!raw).leading_zeros() as usize) as i64);
+                }
+            }
+            None
+        };
+        let mut state: u64 = 0xD1B5_4A32_D192_ED03;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        for len in 0..512usize {
+            buf.clear();
+            while buf.len() < len {
+                buf.extend_from_slice(&next().to_ne_bytes());
+            }
+            buf.truncate(len);
+            for bit in [false, true] {
+                assert_eq!(
+                    Store::bitpos_full_bytes(&buf, bit, 13),
+                    naive(&buf, bit, 13),
+                    "len={len} bit={bit}"
+                );
+                for s in 0..len.min(9) {
+                    assert_eq!(
+                        Store::bitpos_full_bytes(&buf[s..], bit, 13 + s),
+                        naive(&buf[s..], bit, 13 + s),
+                        "len={len} s={s} bit={bit}"
+                    );
+                }
+            }
+        }
+
+        let n = 32 * 1024 * 1024;
+        let reps = 3;
+        let all_zero = vec![0u8; n];
+        let all_one = vec![0xFFu8; n];
+        let t0 = std::time::Instant::now();
+        let mut acc = None;
+        for _ in 0..reps {
+            acc = naive(std::hint::black_box(all_zero.as_slice()), true, 0);
+        }
+        let naive_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = None;
+        for _ in 0..reps {
+            acc2 = Store::bitpos_full_bytes(std::hint::black_box(all_zero.as_slice()), true, 0);
+        }
+        let swar_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(Store::bitpos_full_bytes(&all_zero, true, 0), None);
+        assert_eq!(Store::bitpos_full_bytes(&all_one, false, 0), None);
+        let ratio = naive_ns as f64 / swar_ns as f64;
+        println!(
+            "BITPOS word-scan A/B over {n} bytes x{reps}: naive={naive_ns}ns swar={swar_ns}ns ratio={ratio:.2}x"
         );
     }
 
