@@ -3540,6 +3540,25 @@ impl Store {
         Ok(old_value)
     }
 
+    /// Population count (number of set bits) over a byte slice, processed eight
+    /// bytes per iteration as a single 64-bit POPCNT. The result is bit-identical
+    /// to `bytes.iter().map(|b| b.count_ones()).sum()` because popcount is
+    /// order-independent; the word-at-a-time form just amortizes loop overhead
+    /// and per-byte bounds checks for BITCOUNT over large bitmaps.
+    #[inline]
+    fn popcount_bytes(bytes: &[u8]) -> usize {
+        let mut chunks = bytes.chunks_exact(8);
+        let mut count: usize = 0;
+        for chunk in &mut chunks {
+            let word = u64::from_ne_bytes(chunk.try_into().expect("chunk length is 8"));
+            count += word.count_ones() as usize;
+        }
+        for &b in chunks.remainder() {
+            count += b.count_ones() as usize;
+        }
+        count
+    }
+
     pub fn bitcount(
         &mut self,
         key: &[u8],
@@ -3615,20 +3634,15 @@ impl Store {
                                 let end_idx = usize::try_from(range_end)
                                     .expect("non-negative byte range end");
                                 let end_idx_excl = end_idx + 1;
-                                Ok(v[start_idx..end_idx_excl]
-                                    .iter()
-                                    .map(|b| b.count_ones() as usize)
-                                    .sum())
+                                Ok(Self::popcount_bytes(&v[start_idx..end_idx_excl]))
                             }
                             BitRangeUnit::Bit => {
                                 let start_byte = usize::try_from(range_start >> 3)
                                     .expect("non-negative bit range start byte");
                                 let end_byte = usize::try_from(range_end >> 3)
                                     .expect("non-negative bit range end byte");
-                                let mut count: usize = v[start_byte..=end_byte]
-                                    .iter()
-                                    .map(|b| b.count_ones() as usize)
-                                    .sum();
+                                let mut count: usize =
+                                    Self::popcount_bytes(&v[start_byte..=end_byte]);
 
                                 let first_byte_neg_mask =
                                     (!((1_u16 << (8 - ((range_start & 7) as u32))) - 1) & 0xFF)
@@ -25102,6 +25116,61 @@ mod tests {
         let v = store.get(b"bm", 0).unwrap().unwrap();
         assert_eq!(v.len(), 3);
         assert!(store.getbit(b"bm", 20, 0).unwrap());
+    }
+
+    #[test]
+    fn popcount_bytes_swar_matches_naive_and_reports_ab_ratio() {
+        let naive = |b: &[u8]| -> usize { b.iter().map(|x| x.count_ones() as usize).sum() };
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        for len in 0..512usize {
+            buf.clear();
+            while buf.len() < len {
+                buf.extend_from_slice(&next().to_ne_bytes());
+            }
+            buf.truncate(len);
+            assert_eq!(Store::popcount_bytes(&buf), naive(&buf), "len={len}");
+            for s in 0..len.min(9) {
+                assert_eq!(
+                    Store::popcount_bytes(&buf[s..]),
+                    naive(&buf[s..]),
+                    "len={len} s={s}"
+                );
+            }
+        }
+
+        let n = 32 * 1024 * 1024;
+        let mut big = vec![0u8; n];
+        for (i, b) in big.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+        }
+        let expected = naive(&big);
+        let reps = 5;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc.wrapping_add(naive(std::hint::black_box(big.as_slice())));
+        }
+        let naive_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 = acc2.wrapping_add(Store::popcount_bytes(std::hint::black_box(big.as_slice())));
+        }
+        let swar_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(Store::popcount_bytes(&big), expected);
+        let ratio = naive_ns as f64 / swar_ns as f64;
+        println!(
+            "BITCOUNT popcount A/B over {n} bytes x{reps}: naive={naive_ns}ns swar={swar_ns}ns ratio={ratio:.2}x"
+        );
     }
 
     #[test]
