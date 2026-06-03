@@ -5637,6 +5637,13 @@ impl Runtime {
                             // propagate as SET/HSET of the computed value so a
                             // replica or AOF replay reproduces the exact float.
                             self.capture_aof_record(&rewritten);
+                        } else if let Some(rewritten) =
+                            self.rewrite_spop_for_propagation(&argv, &reply)
+                        {
+                            // (frankenredis-1uiql) SPOP propagates as SREM of the
+                            // exact members removed (or DEL when it drained the
+                            // set) so replicas/AOF replay don't re-randomize.
+                            self.capture_aof_record(&rewritten);
                         } else {
                             self.capture_aof_record(&argv);
                         }
@@ -6660,6 +6667,54 @@ impl Runtime {
             ])
         } else {
             None
+        }
+    }
+
+    /// Rewrite `SPOP key [count]` into the deterministic members it actually
+    /// removed for propagation, mirroring upstream t_set.c::spopCommand /
+    /// spopWithCountCommand: `SREM key <members>`, or `DEL key` when the pop
+    /// drained the set. The popped members come from the command reply. Without
+    /// this a replica/AOF replay re-runs SPOP and removes DIFFERENT random
+    /// members. Returns `None` to propagate verbatim. (frankenredis-1uiql)
+    fn rewrite_spop_for_propagation(
+        &self,
+        argv: &[Vec<u8>],
+        reply: &RespFrame,
+    ) -> Option<Vec<Vec<u8>>> {
+        if !eq_ascii_token(argv.first()?, b"SPOP") {
+            return None;
+        }
+        let key = argv.get(1)?;
+        // Collect the popped members from the reply (single member for the
+        // no-count form; an array/set for `SPOP key count`).
+        let members: Vec<Vec<u8>> = match reply {
+            RespFrame::BulkString(Some(m)) => vec![m.clone()],
+            RespFrame::Array(Some(items)) | RespFrame::Set(Some(items)) => {
+                let mut out = Vec::with_capacity(items.len());
+                for it in items {
+                    match it {
+                        RespFrame::BulkString(Some(m)) => out.push(m.clone()),
+                        _ => return None,
+                    }
+                }
+                out
+            }
+            _ => return None,
+        };
+        if members.is_empty() {
+            return None;
+        }
+        // If the pop emptied the set (key removed), upstream propagates DEL;
+        // otherwise SREM of the exact members.
+        let encoded = fr_store::encode_db_key(self.session.selected_db, key);
+        if self.server.store.key_is_present(&encoded) {
+            let mut out = Vec::with_capacity(2 + members.len());
+            out.push(b"SREM".to_vec());
+            out.push(key.clone());
+            out.extend(members);
+            Some(out)
+        } else {
+            Some(vec![b"DEL".to_vec(), key.clone()])
         }
     }
 
@@ -17974,6 +18029,50 @@ mod tests {
         assert_eq!(rw(&[b"INCRBYFLOAT", b"kf"], bulk(b"12.5")), None);
         assert_eq!(
             rw(&[b"HINCRBYFLOAT", b"h", b"fld"], bulk(b"13.5")),
+            None
+        );
+    }
+
+    #[test]
+    fn spop_rewritten_to_srem_or_del_for_propagation() {
+        // (frankenredis-1uiql) SPOP must propagate as SREM of the exact members
+        // removed (from the reply), or DEL when the pop drained the set — so a
+        // replica/AOF replay does not re-randomize.
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SADD", b"s", b"a", b"b", b"c", b"d"]), 0);
+        let v = |s: &[u8]| s.to_vec();
+        let bulk = |s: &[u8]| RespFrame::BulkString(Some(s.to_vec()));
+
+        // Partial pop, key still present → SREM key <members>.
+        let reply = RespFrame::Array(Some(vec![bulk(b"a"), bulk(b"b")]));
+        assert_eq!(
+            rt.rewrite_spop_for_propagation(&[v(b"SPOP"), v(b"s"), v(b"2")], &reply),
+            Some(vec![v(b"SREM"), v(b"s"), v(b"a"), v(b"b")])
+        );
+
+        // No-count form (single bulk reply), key still present → SREM key member.
+        assert_eq!(
+            rt.rewrite_spop_for_propagation(&[v(b"SPOP"), v(b"s")], &bulk(b"c")),
+            Some(vec![v(b"SREM"), v(b"s"), v(b"c")])
+        );
+
+        // A key that is absent (the pop drained it) → DEL key.
+        let reply = RespFrame::Array(Some(vec![bulk(b"x"), bulk(b"y")]));
+        assert_eq!(
+            rt.rewrite_spop_for_propagation(&[v(b"SPOP"), v(b"gone"), v(b"2")], &reply),
+            Some(vec![v(b"DEL"), v(b"gone")])
+        );
+
+        // Non-SPOP / empty reply → verbatim (None).
+        assert_eq!(
+            rt.rewrite_spop_for_propagation(&[v(b"SREM"), v(b"s"), v(b"a")], &bulk(b"a")),
+            None
+        );
+        assert_eq!(
+            rt.rewrite_spop_for_propagation(
+                &[v(b"SPOP"), v(b"s")],
+                &RespFrame::BulkString(None)
+            ),
             None
         );
     }
