@@ -20,6 +20,9 @@ pub enum RespFrame {
     /// RESP3 Verbatim string (`=<len>\r\ntxt:<body>\r\n`). Used for INFO, CLIENT INFO/LIST,
     /// LOLWUT, LATENCY DOCTOR, MEMORY DOCTOR under HELLO 3.
     Verbatim(String),
+    /// RESP3 Big Number (`(value\r\n`). Used by the Lua `{big_number=...}`
+    /// reply hint; downconverts to a bulk string under RESP2. (frankenredis-h2uga)
+    BigNumber(String),
 }
 
 /// Sanitize bytes destined for an inline RESP frame body (`SimpleString`
@@ -139,7 +142,7 @@ impl RespFrame {
 
     fn encoded_len_hint(&self) -> Option<usize> {
         match self {
-            Self::SimpleString(s) | Self::Error(s) | Self::Double(s) => {
+            Self::SimpleString(s) | Self::Error(s) | Self::Double(s) | Self::BigNumber(s) => {
                 1usize.checked_add(s.len())?.checked_add(2)
             }
             Self::Integer(n) => 1usize.checked_add(decimal_i64_len(*n))?.checked_add(2),
@@ -257,6 +260,11 @@ impl RespFrame {
             }
             Self::Double(s) => {
                 out.extend_from_slice(b",");
+                out.extend_from_slice(s.as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+            Self::BigNumber(s) => {
+                out.extend_from_slice(b"(");
                 out.extend_from_slice(s.as_bytes());
                 out.extend_from_slice(b"\r\n");
             }

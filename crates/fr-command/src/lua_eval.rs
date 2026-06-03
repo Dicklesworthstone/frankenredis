@@ -9225,6 +9225,17 @@ fn resp_to_lua(frame: &RespFrame) -> LuaValue {
         }
         // RESP3 Verbatim: treat like string (strip the txt: prefix for Lua)
         RespFrame::Verbatim(s) => LuaValue::Str(s.as_bytes().to_vec()),
+        // RESP3 Big Number: upstream script_lua.c::
+        // redisProtocolToLuaType_BigNumber materializes a
+        // `{big_number = "<digits>"}` table. (frankenredis-h2uga)
+        RespFrame::BigNumber(s) => {
+            let t = LuaTable::new();
+            t.set(
+                LuaValue::Str(b"big_number".to_vec()),
+                LuaValue::Str(s.as_bytes().to_vec()),
+            );
+            LuaValue::Table(t)
+        }
     }
 }
 
@@ -9347,12 +9358,13 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
                 return RespFrame::double_from_f64(n);
             }
 
-            // {big_number = "..."}: emit BulkString of the bignum. RESP3
-            // would prefix `(`, but fr-protocol has no BigNumber variant
-            // and BulkString is the documented RESP2 fallback.
+            // {big_number = "..."}: upstream luaReplyToRedisReply emits a
+            // RESP3 Big Number (`(<digits>\r\n`), downconverted to a bulk
+            // string under RESP2 (handled in downconvert_lua_reply_to_resp2).
+            // (frankenredis-h2uga)
             let bn_field = t.get(&LuaValue::Str(b"big_number".to_vec()));
             if let LuaValue::Str(s) = bn_field {
-                return RespFrame::BulkString(Some(s.clone()));
+                return RespFrame::BigNumber(String::from_utf8_lossy(&s).into_owned());
             }
 
             // {verbatim_string = {format = "<3char>", string = "..."}}:
@@ -11604,6 +11616,9 @@ fn downconvert_lua_reply_to_resp2(frame: RespFrame) -> RespFrame {
         // d2string text as a bulk string. The Double frame already carries
         // that exact text. (frankenredis-aae3d)
         RespFrame::Double(s) => RespFrame::BulkString(Some(s.into_bytes())),
+        // RESP2 has no Big Number type; upstream emits the digits as a bulk
+        // string. (frankenredis-h2uga)
+        RespFrame::BigNumber(s) => RespFrame::BulkString(Some(s.into_bytes())),
         other => other,
     }
 }
@@ -13871,7 +13886,8 @@ mod tests {
             .expect("double hint 1e20 should not error");
         assert_eq!(frame, RespFrame::Double("1e+20".to_string()));
 
-        // {big_number = "12345..."} → BulkString of the bignum.
+        // {big_number = "12345..."} → RESP3 Big Number frame; RESP2 client
+        // downconverts to the equivalent bulk string. (frankenredis-h2uga)
         let frame = eval_script(
             b"return {big_number = '1234567890123456789012345'}",
             &[],
@@ -13880,6 +13896,19 @@ mod tests {
             0,
         )
         .expect("big_number hint should not error");
+        assert_eq!(
+            frame,
+            RespFrame::BigNumber("1234567890123456789012345".to_string())
+        );
+        let mut store_bn_resp2 = Store::new();
+        let frame = eval_script(
+            b"return {big_number = '1234567890123456789012345'}",
+            &[],
+            &[],
+            &mut store_bn_resp2,
+            0,
+        )
+        .expect("big_number hint resp2 should not error");
         assert_eq!(
             frame,
             RespFrame::BulkString(Some(b"1234567890123456789012345".to_vec()))
