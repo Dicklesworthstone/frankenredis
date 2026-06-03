@@ -10705,7 +10705,12 @@ impl Store {
             None => (vec![0u8; HLL_REGISTERS], HllEncoding::Sparse, false),
         };
 
-        let mut modified = false;
+        // (frankenredis-pfadddirty) Upstream pfaddCommand counts a dirty unit
+        // per element that actually advances a register (hllAdd == 1), plus one
+        // for creating the key, and does `server.dirty += updated`. fr only
+        // bumped dirty by 1, so rdb_changes_since_last_save / the auto-save
+        // threshold diverged for multi-element PFADD.
+        let mut register_updates: u64 = 0;
         for element in elements {
             let hash = hll_hash(element);
             let index = (hash as usize) & (HLL_REGISTERS - 1);
@@ -10713,11 +10718,12 @@ impl Store {
             let count = hll_rho(w);
             if count > registers[index] {
                 registers[index] = count;
-                modified = true;
+                register_updates += 1;
             }
         }
 
         let created = !existed;
+        let modified = register_updates > 0;
         if created || modified {
             let expires_at = self.entries.get(key).and_then(|e| e.expires_at_ms);
             let encoding = match encoding {
@@ -10739,7 +10745,8 @@ impl Store {
             entry.force_raw_encoding = true;
             entry.touch_write(now_ms);
             self.internal_entries_insert(key.to_vec(), entry);
-            self.dirty = self.dirty.saturating_add(1);
+            let updated = u64::from(created).saturating_add(register_updates);
+            self.dirty = self.dirty.saturating_add(updated);
         }
         Ok(created || modified)
     }
@@ -12343,11 +12350,17 @@ impl Store {
     pub fn store_as_list(&mut self, key: Vec<u8>, elements: Vec<Vec<u8>>) {
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
+        // (frankenredis-sortstoredirty) Upstream sortCommand's STORE arm does
+        // `server.dirty += outputlen` (one unit per stored element), not a
+        // single increment — only the empty-result delete path is +1 (handled
+        // by the caller via store.del). The sole caller (SORT ... STORE) always
+        // passes a non-empty list here.
+        let stored = elements.len() as u64;
         self.internal_entries_insert(
             key,
             Entry::new(Value::List(elements.into_iter().collect()), None, 0),
         );
-        self.dirty = self.dirty.saturating_add(1);
+        self.dirty = self.dirty.saturating_add(stored.max(1));
     }
 
     /// Compute a fingerprint for a single key's current state.
@@ -25038,6 +25051,50 @@ mod tests {
                 .pfadd(b"hll", &[b"a".to_vec(), b"b".to_vec()], 0)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn pfadd_dirty_counts_key_creation_plus_register_updates() {
+        // (frankenredis-pfadddirty) Upstream `server.dirty += updated` where
+        // updated = (1 for key creation) + (one per element advancing a
+        // register). Duplicates within a call only count once.
+        let mut store = Store::new();
+        let before = store.dirty;
+        store
+            .pfadd(b"h", &[b"a".to_vec(), b"b".to_vec()], 0)
+            .unwrap();
+        assert_eq!(store.dirty, before + 3); // create(1) + a + b
+
+        // Adding one new element to an existing HLL: dirty += 1 (no creation).
+        let before = store.dirty;
+        store.pfadd(b"h", &[b"c".to_vec()], 0).unwrap();
+        assert_eq!(store.dirty, before + 1);
+
+        // A pure no-op (already-present element) does not dirty at all.
+        let before = store.dirty;
+        store.pfadd(b"h", &[b"a".to_vec()], 0).unwrap();
+        assert_eq!(store.dirty, before);
+
+        // Duplicate within one call counts the register update once + creation.
+        let mut store = Store::new();
+        let before = store.dirty;
+        store
+            .pfadd(b"d", &[b"x".to_vec(), b"x".to_vec()], 0)
+            .unwrap();
+        assert_eq!(store.dirty, before + 2); // create(1) + x(1)
+    }
+
+    #[test]
+    fn store_as_list_dirty_counts_each_stored_element() {
+        // (frankenredis-sortstoredirty) SORT ... STORE does
+        // `server.dirty += outputlen` (one unit per stored element).
+        let mut store = Store::new();
+        let before = store.dirty;
+        store.store_as_list(
+            b"d".to_vec(),
+            vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()],
+        );
+        assert_eq!(store.dirty, before + 3);
     }
 
     #[test]
