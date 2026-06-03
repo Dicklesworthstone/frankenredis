@@ -5623,6 +5623,14 @@ impl Runtime {
                             for script_argv in script_commands {
                                 self.capture_aof_record(&script_argv);
                             }
+                        } else if let Some(rewritten) =
+                            Self::rewrite_relative_expire_for_propagation(&argv, now_ms)
+                        {
+                            // (frankenredis-mdrk8) Propagate the absolute
+                            // PEXPIREAT form so a replica's deadline matches the
+                            // master's exactly instead of drifting upward by the
+                            // command's propagation/processing delay.
+                            self.capture_aof_record(&rewritten);
                         } else {
                             self.capture_aof_record(&argv);
                         }
@@ -6561,6 +6569,50 @@ impl Runtime {
             self.server.aof_selected_db = self.session.selected_db;
         }
         self.server.capture_aof_record(argv);
+    }
+
+    /// (frankenredis-mdrk8) Rewrite a relative-time expire command to the
+    /// absolute `PEXPIREAT key <ms>` form before it is propagated to replicas
+    /// and the replication backlog, mirroring upstream
+    /// `expire.c::expireGenericCommand` which calls
+    /// `rewriteClientCommandVector(c, 2, shared.pexpireat, key, ms)`.
+    ///
+    /// A relative `EXPIRE`/`PEXPIRE` propagated verbatim is re-evaluated by the
+    /// replica at its (strictly later) receive time, so the replica's deadline —
+    /// and therefore its `PTTL` — drifts above the master's by the propagation
+    /// delay. Converting to an absolute deadline computed from the same `now_ms`
+    /// the command itself used keeps the two exactly in lockstep. `EXPIREAT` /
+    /// `PEXPIREAT` are already absolute but are normalised to `PEXPIREAT` (and
+    /// any `NX|XX|GT|LT` conditional flags dropped — the command only reaches
+    /// propagation after the conditional already succeeded). A past deadline is
+    /// preserved as-is, which deletes the key on the replica just as it did on
+    /// the master. Returns `None` for any non-expire command (propagate verbatim).
+    fn rewrite_relative_expire_for_propagation(
+        argv: &[Vec<u8>],
+        now_ms: u64,
+    ) -> Option<Vec<Vec<u8>>> {
+        let cmd = argv.first()?;
+        if argv.len() < 3 {
+            return None;
+        }
+        let value: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
+        let now = i64::try_from(now_ms).unwrap_or(i64::MAX);
+        let abs_ms: i64 = if eq_ascii_token(cmd, b"EXPIRE") {
+            now.saturating_add(value.saturating_mul(1000))
+        } else if eq_ascii_token(cmd, b"PEXPIRE") {
+            now.saturating_add(value)
+        } else if eq_ascii_token(cmd, b"EXPIREAT") {
+            value.saturating_mul(1000)
+        } else if eq_ascii_token(cmd, b"PEXPIREAT") {
+            value
+        } else {
+            return None;
+        };
+        Some(vec![
+            b"PEXPIREAT".to_vec(),
+            argv[1].clone(),
+            abs_ms.to_string().into_bytes(),
+        ])
     }
 
     fn take_script_propagation_commands_for_capture(
@@ -17581,6 +17633,48 @@ mod tests {
                 .collect(),
             other => unreachable!("expected array frame, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn relative_expire_rewritten_to_absolute_pexpireat_for_propagation() {
+        // (frankenredis-mdrk8) The propagation form must be the absolute
+        // PEXPIREAT so a replica's deadline matches the master's exactly.
+        let now = 1_000_000_u64;
+        let rw = |argv: &[&[u8]]| {
+            Runtime::rewrite_relative_expire_for_propagation(
+                &argv.iter().map(|a| a.to_vec()).collect::<Vec<_>>(),
+                now,
+            )
+        };
+        let pexpireat = |key: &[u8], ms: i64| {
+            Some(vec![
+                b"PEXPIREAT".to_vec(),
+                key.to_vec(),
+                ms.to_string().into_bytes(),
+            ])
+        };
+        // EXPIRE sec -> now + sec*1000
+        assert_eq!(rw(&[b"EXPIRE", b"k", b"100"]), pexpireat(b"k", 1_100_000));
+        // PEXPIRE ms -> now + ms
+        assert_eq!(rw(&[b"PEXPIRE", b"k", b"500"]), pexpireat(b"k", 1_000_500));
+        // EXPIREAT sec -> sec*1000 (absolute, unit-converted)
+        assert_eq!(rw(&[b"EXPIREAT", b"k", b"50"]), pexpireat(b"k", 50_000));
+        // PEXPIREAT ms -> passthrough as PEXPIREAT
+        assert_eq!(
+            rw(&[b"PEXPIREAT", b"k", b"123456"]),
+            pexpireat(b"k", 123_456)
+        );
+        // Conditional flags are dropped (success already happened).
+        assert_eq!(
+            rw(&[b"EXPIRE", b"k", b"100", b"GT"]),
+            pexpireat(b"k", 1_100_000)
+        );
+        // A past deadline is preserved (deletes the key on the replica too).
+        assert_eq!(rw(&[b"EXPIRE", b"k", b"-1"]), pexpireat(b"k", 999_000));
+        // Non-expire commands and malformed values are propagated verbatim.
+        assert_eq!(rw(&[b"SET", b"k", b"v"]), None);
+        assert_eq!(rw(&[b"EXPIRE", b"k", b"notanint"]), None);
+        assert_eq!(rw(&[b"PERSIST", b"k"]), None);
     }
 
     #[test]
