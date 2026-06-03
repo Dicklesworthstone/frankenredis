@@ -1005,11 +1005,51 @@ const fn build_crc64_redis_table() -> [u64; 256] {
     table
 }
 
+/// Slice-by-8 acceleration tables for `crc64_redis`. `table[0]` is the standard
+/// byte table; `table[k][n]` folds `table[0][n]` through `k` additional byte
+/// steps. This is the const-built equivalent of Redis `crcspeed`'s little-endian
+/// table init, letting the main loop consume 8 input bytes per iteration via a
+/// single little-endian word load + eight table lookups. (frankenredis-3qhkr)
+const fn build_crc64_redis_slice() -> [[u64; 256]; 8] {
+    let mut tables = [[0_u64; 256]; 8];
+    tables[0] = CRC64_REDIS_TABLE;
+    let mut n = 0;
+    while n < 256 {
+        let mut crc = tables[0][n];
+        let mut k = 1;
+        while k < 8 {
+            crc = tables[0][(crc & 0xff) as usize] ^ (crc >> 8);
+            tables[k][n] = crc;
+            k += 1;
+        }
+        n += 1;
+    }
+    tables
+}
+
+const CRC64_REDIS_SLICE: [[u64; 256]; 8] = build_crc64_redis_slice();
+
+/// Redis CRC-64 (Jones reflected polynomial), slice-by-8. Folds 8 input bytes
+/// per iteration through `CRC64_REDIS_SLICE`, with a byte-wise remainder tail
+/// identical to the classic single-table form. Bit-identical to the byte-at-a-
+/// time CRC (the slice tables are derived from the same byte table), so DUMP /
+/// RESTORE / RDB checksums are unchanged. (frankenredis-3qhkr)
 pub fn crc64_redis(data: &[u8]) -> u64 {
     let mut crc = 0_u64;
-    for &byte in data {
-        let index = ((crc as u8) ^ byte) as usize;
-        crc = (crc >> 8) ^ CRC64_REDIS_TABLE[index];
+    let mut chunks = data.chunks_exact(8);
+    for chunk in chunks.by_ref() {
+        crc ^= u64::from_le_bytes(chunk.try_into().unwrap());
+        crc = CRC64_REDIS_SLICE[7][(crc & 0xff) as usize]
+            ^ CRC64_REDIS_SLICE[6][((crc >> 8) & 0xff) as usize]
+            ^ CRC64_REDIS_SLICE[5][((crc >> 16) & 0xff) as usize]
+            ^ CRC64_REDIS_SLICE[4][((crc >> 24) & 0xff) as usize]
+            ^ CRC64_REDIS_SLICE[3][((crc >> 32) & 0xff) as usize]
+            ^ CRC64_REDIS_SLICE[2][((crc >> 40) & 0xff) as usize]
+            ^ CRC64_REDIS_SLICE[1][((crc >> 48) & 0xff) as usize]
+            ^ CRC64_REDIS_SLICE[0][((crc >> 56) & 0xff) as usize];
+    }
+    for &byte in chunks.remainder() {
+        crc = (crc >> 8) ^ CRC64_REDIS_SLICE[0][((crc as u8) ^ byte) as usize];
     }
     crc
 }
@@ -3911,6 +3951,65 @@ mod tests {
     #[test]
     fn crc64_matches_redis_reference_vector() {
         assert_eq!(crc64_redis(b"123456789"), 0xe9c6_d914_c4b8_d9ca);
+    }
+
+    #[test]
+    fn crc64_slice_by_8_matches_bytewise_and_reports_ab_ratio() {
+        // Reference byte-at-a-time CRC (the pre-slice-by-8 form; table[0] is the
+        // same single byte table). Isomorphism guard: slice-by-8 must be
+        // bit-identical for every length class, including all chunks_exact(8)
+        // remainder sizes 0..8. (frankenredis-3qhkr)
+        fn bytewise(data: &[u8]) -> u64 {
+            let mut crc = 0u64;
+            for &b in data {
+                crc = (crc >> 8) ^ super::CRC64_REDIS_SLICE[0][((crc as u8) ^ b) as usize];
+            }
+            crc
+        }
+        let mut state: u64 = 0x0123_4567_89AB_CDEF;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        for len in 0..600usize {
+            buf.clear();
+            while buf.len() < len {
+                buf.extend_from_slice(&next().to_ne_bytes());
+            }
+            buf.truncate(len);
+            assert_eq!(crc64_redis(&buf), bytewise(&buf), "len={len}");
+        }
+
+        // A/B over a large buffer (run with `--release -- --nocapture`).
+        let n = 32 * 1024 * 1024;
+        let mut big = vec![0u8; n];
+        for (i, b) in big.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(37).wrapping_add(11);
+        }
+        let expected = bytewise(&big);
+        let reps = 5;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0u64;
+        for _ in 0..reps {
+            acc ^= bytewise(std::hint::black_box(&big));
+        }
+        let bytewise_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0u64;
+        for _ in 0..reps {
+            acc2 ^= crc64_redis(std::hint::black_box(&big));
+        }
+        let slice_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(crc64_redis(&big), expected);
+        let ratio = bytewise_ns as f64 / slice_ns as f64;
+        println!(
+            "CRC64 A/B over {n} bytes x{reps}: bytewise={bytewise_ns}ns slice8={slice_ns}ns ratio={ratio:.2}x"
+        );
     }
 
     // ── LZF encoder tests (br-frankenredis-1uin) ───────────────────────
