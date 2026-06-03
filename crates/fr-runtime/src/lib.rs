@@ -6591,27 +6591,133 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<Vec<Vec<u8>>> {
         let cmd = argv.first()?;
-        if argv.len() < 3 {
-            return None;
-        }
-        let value: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
         let now = i64::try_from(now_ms).unwrap_or(i64::MAX);
-        let abs_ms: i64 = if eq_ascii_token(cmd, b"EXPIRE") {
-            now.saturating_add(value.saturating_mul(1000))
-        } else if eq_ascii_token(cmd, b"PEXPIRE") {
-            now.saturating_add(value)
-        } else if eq_ascii_token(cmd, b"EXPIREAT") {
-            value.saturating_mul(1000)
-        } else if eq_ascii_token(cmd, b"PEXPIREAT") {
-            value
-        } else {
-            return None;
-        };
-        Some(vec![
-            b"PEXPIREAT".to_vec(),
-            argv[1].clone(),
-            abs_ms.to_string().into_bytes(),
-        ])
+
+        // EXPIRE family: argv[2] is the (relative or absolute) time.
+        if eq_ascii_token(cmd, b"EXPIRE")
+            || eq_ascii_token(cmd, b"PEXPIRE")
+            || eq_ascii_token(cmd, b"EXPIREAT")
+            || eq_ascii_token(cmd, b"PEXPIREAT")
+        {
+            if argv.len() < 3 {
+                return None;
+            }
+            let value: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
+            let abs_ms: i64 = if eq_ascii_token(cmd, b"EXPIRE") {
+                now.saturating_add(value.saturating_mul(1000))
+            } else if eq_ascii_token(cmd, b"PEXPIRE") {
+                now.saturating_add(value)
+            } else if eq_ascii_token(cmd, b"EXPIREAT") {
+                value.saturating_mul(1000)
+            } else {
+                value
+            };
+            return Some(vec![
+                b"PEXPIREAT".to_vec(),
+                argv[1].clone(),
+                abs_ms.to_string().into_bytes(),
+            ]);
+        }
+
+        // (frankenredis-dt3v0) SET-with-expire family. Upstream
+        // setGenericCommand rewrites SET/SETEX/PSETEX carrying a relative EX/PX
+        // (or the unit-converted EXAT) to `SET key val PXAT <ms>`
+        // (rewriteClientCommandVector(c, 5, ...)). An absolute PXAT, KEEPTTL, or
+        // no-expire SET carries no new relative deadline -> propagate verbatim.
+        if eq_ascii_token(cmd, b"SETEX") || eq_ascii_token(cmd, b"PSETEX") {
+            if argv.len() != 4 {
+                return None;
+            }
+            let value: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
+            let abs_ms = if eq_ascii_token(cmd, b"SETEX") {
+                now.saturating_add(value.saturating_mul(1000))
+            } else {
+                now.saturating_add(value)
+            };
+            return Some(vec![
+                b"SET".to_vec(),
+                argv[1].clone(),
+                argv[3].clone(),
+                b"PXAT".to_vec(),
+                abs_ms.to_string().into_bytes(),
+            ]);
+        }
+        if eq_ascii_token(cmd, b"SET") {
+            if argv.len() < 3 {
+                return None;
+            }
+            let abs_ms = Self::set_relative_expire_deadline_ms(&argv[3..], now)?;
+            return Some(vec![
+                b"SET".to_vec(),
+                argv[1].clone(),
+                argv[2].clone(),
+                b"PXAT".to_vec(),
+                abs_ms.to_string().into_bytes(),
+            ]);
+        }
+
+        // (frankenredis-dt3v0) GETEX. Upstream getexCommand propagates a future
+        // EX/PX/EXAT/PXAT as PEXPIREAT, a past EXAT/PXAT (delete) as DEL, and
+        // PERSIST as PERSIST. (A no-option GETEX is a pure read and never
+        // reaches propagation.)
+        if eq_ascii_token(cmd, b"GETEX") {
+            if argv.len() < 3 {
+                return None;
+            }
+            let opt = &argv[2];
+            if eq_ascii_token(opt, b"PERSIST") {
+                return Some(vec![b"PERSIST".to_vec(), argv[1].clone()]);
+            }
+            let value: i64 = std::str::from_utf8(argv.get(3)?).ok()?.parse().ok()?;
+            let abs_ms: i64 = if eq_ascii_token(opt, b"EX") {
+                now.saturating_add(value.saturating_mul(1000))
+            } else if eq_ascii_token(opt, b"PX") {
+                now.saturating_add(value)
+            } else if eq_ascii_token(opt, b"EXAT") {
+                value.saturating_mul(1000)
+            } else if eq_ascii_token(opt, b"PXAT") {
+                value
+            } else {
+                return None;
+            };
+            if abs_ms <= now {
+                return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
+            }
+            return Some(vec![
+                b"PEXPIREAT".to_vec(),
+                argv[1].clone(),
+                abs_ms.to_string().into_bytes(),
+            ]);
+        }
+
+        None
+    }
+
+    /// (frankenredis-dt3v0) Scan SET option tokens for a relative expiry
+    /// (`EX`/`PX`/`EXAT`) and return the absolute deadline in ms. Returns `None`
+    /// when the only expiry is an absolute `PXAT`, or there is no expiry at all
+    /// (`KEEPTTL` / plain SET) — those carry no relative drift and propagate
+    /// verbatim.
+    fn set_relative_expire_deadline_ms(opts: &[Vec<u8>], now: i64) -> Option<i64> {
+        let mut i = 0;
+        while i < opts.len() {
+            let opt = &opts[i];
+            if eq_ascii_token(opt, b"EX")
+                || eq_ascii_token(opt, b"PX")
+                || eq_ascii_token(opt, b"EXAT")
+            {
+                let value: i64 = std::str::from_utf8(opts.get(i + 1)?).ok()?.parse().ok()?;
+                return Some(if eq_ascii_token(opt, b"EX") {
+                    now.saturating_add(value.saturating_mul(1000))
+                } else if eq_ascii_token(opt, b"PX") {
+                    now.saturating_add(value)
+                } else {
+                    value.saturating_mul(1000)
+                });
+            }
+            i += 1;
+        }
+        None
     }
 
     fn take_script_propagation_commands_for_capture(
@@ -17676,9 +17782,68 @@ mod tests {
         // A past deadline is preserved (deletes the key on the replica too).
         assert_eq!(rw(&[b"EXPIRE", b"k", b"-1"]), pexpireat(b"k", 999_000));
         // Non-expire commands and malformed values are propagated verbatim.
-        assert_eq!(rw(&[b"SET", b"k", b"v"]), None);
         assert_eq!(rw(&[b"EXPIRE", b"k", b"notanint"]), None);
         assert_eq!(rw(&[b"PERSIST", b"k"]), None);
+
+        // (frankenredis-dt3v0) SET-with-expire family -> SET key val PXAT <ms>.
+        let setpxat = |key: &[u8], val: &[u8], ms: i64| {
+            Some(vec![
+                b"SET".to_vec(),
+                key.to_vec(),
+                val.to_vec(),
+                b"PXAT".to_vec(),
+                ms.to_string().into_bytes(),
+            ])
+        };
+        assert_eq!(
+            rw(&[b"SETEX", b"k", b"100", b"v"]),
+            setpxat(b"k", b"v", 1_100_000)
+        );
+        assert_eq!(
+            rw(&[b"PSETEX", b"k", b"500", b"v"]),
+            setpxat(b"k", b"v", 1_000_500)
+        );
+        assert_eq!(
+            rw(&[b"SET", b"k", b"v", b"EX", b"100"]),
+            setpxat(b"k", b"v", 1_100_000)
+        );
+        assert_eq!(
+            rw(&[b"SET", b"k", b"v", b"PX", b"500"]),
+            setpxat(b"k", b"v", 1_000_500)
+        );
+        assert_eq!(
+            rw(&[b"SET", b"k", b"v", b"EXAT", b"50"]),
+            setpxat(b"k", b"v", 50_000)
+        );
+        // Conditional/return options around the expire are dropped.
+        assert_eq!(
+            rw(&[b"SET", b"k", b"v", b"NX", b"EX", b"100", b"GET"]),
+            setpxat(b"k", b"v", 1_100_000)
+        );
+        // Absolute PXAT, KEEPTTL, and plain SET carry no relative drift -> verbatim.
+        assert_eq!(rw(&[b"SET", b"k", b"v", b"PXAT", b"123456"]), None);
+        assert_eq!(rw(&[b"SET", b"k", b"v", b"KEEPTTL"]), None);
+        assert_eq!(rw(&[b"SET", b"k", b"v"]), None);
+
+        // (frankenredis-dt3v0) GETEX -> PEXPIREAT (future) / PERSIST / DEL (past).
+        assert_eq!(
+            rw(&[b"GETEX", b"k", b"EX", b"100"]),
+            pexpireat(b"k", 1_100_000)
+        );
+        assert_eq!(
+            rw(&[b"GETEX", b"k", b"PXAT", b"2000000"]),
+            pexpireat(b"k", 2_000_000)
+        );
+        assert_eq!(
+            rw(&[b"GETEX", b"k", b"PERSIST"]),
+            Some(vec![b"PERSIST".to_vec(), b"k".to_vec()])
+        );
+        // GETEX with a past absolute deadline deletes the key.
+        assert_eq!(
+            rw(&[b"GETEX", b"k", b"EXAT", b"1"]),
+            Some(vec![b"DEL".to_vec(), b"k".to_vec()])
+        );
+        assert_eq!(rw(&[b"GETEX", b"k"]), None);
     }
 
     #[test]
