@@ -1550,6 +1550,11 @@ impl AuthState {
                 user.all_channels = false;
             } else if rule_str.eq_ignore_ascii_case("reset") {
                 // Reset user to default state (no passwords, disabled, no commands).
+                // (frankenredis-3b1jc) Upstream acl.c::ACLResetUser sets
+                // USER_FLAG_DISABLED — the user must end up `off`. fr cleared
+                // every other field but left `enabled` at its prior value, so a
+                // previously-`on` user stayed enabled after `reset`.
+                user.enabled = false;
                 user.passwords.clear();
                 user.nopass = false;
                 user.sanitize_payload = true;
@@ -28380,6 +28385,26 @@ mod tests {
         assert!(
             matches!(&reply, RespFrame::BulkString(Some(b)) if std::str::from_utf8(b).map(|s| s.contains("no permissions")).unwrap_or(false)),
             "GET should be denied after reset, got: {reply:?}"
+        );
+        // (frankenredis-3b1jc) reset must also disable the user — GETUSER flags
+        // must report `off`, matching upstream ACLResetUser.
+        let getuser = rt.execute_frame(command(&[b"ACL", b"GETUSER", b"reset_user"]), 3);
+        let RespFrame::Array(Some(items)) = &getuser else {
+            panic!("ACL GETUSER should return an array, got: {getuser:?}");
+        };
+        // The flags value is the inner array immediately after the "flags" key.
+        let flags_pos = items
+            .iter()
+            .position(|f| matches!(f, RespFrame::BulkString(Some(b)) if b == b"flags"))
+            .expect("GETUSER must contain a flags field");
+        let flags_off = matches!(
+            items.get(flags_pos + 1),
+            Some(RespFrame::Array(Some(inner)))
+                if inner.iter().any(|x| matches!(x, RespFrame::BulkString(Some(b)) if b == b"off"))
+        );
+        assert!(
+            flags_off,
+            "user must be `off` after reset, GETUSER: {getuser:?}"
         );
     }
 
