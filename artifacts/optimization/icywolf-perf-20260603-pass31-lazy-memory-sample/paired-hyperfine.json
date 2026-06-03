@@ -1,0 +1,64 @@
+{
+  "results": [
+    {
+      "command": "target-icywolf-pass30-baseline-rch/release-perf/fr-bench --host 127.0.0.1 --port 20672 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --key-prefix icywolf-pass31-lazy-base-hf2 >/dev/null",
+      "mean": 1.6362528752550003,
+      "stddev": 0.06362825959500784,
+      "median": 1.61968361788,
+      "user": 0.376826175,
+      "system": 0.7365670799999999,
+      "min": 1.59781981138,
+      "max": 1.7889876453800002,
+      "times": [
+        1.7889876453800002,
+        1.64344584938,
+        1.6195175483800002,
+        1.61984968738,
+        1.59817123938,
+        1.62160436038,
+        1.59781981138,
+        1.60062686038
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "target-icywolf-pass31-lazy-candidate-rch/release-perf/fr-bench --host 127.0.0.1 --port 20673 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --key-prefix icywolf-pass31-lazy-cand-hf >/dev/null",
+      "mean": 1.5945549442550002,
+      "stddev": 0.04595223223157057,
+      "median": 1.5833965118800002,
+      "user": 0.37532667499999994,
+      "system": 0.7160133299999999,
+      "min": 1.54177861838,
+      "max": 1.69132021038,
+      "times": [
+        1.62171773138,
+        1.57482914538,
+        1.5645352303800002,
+        1.59964858238,
+        1.5706461573800001,
+        1.54177861838,
+        1.69132021038,
+        1.59196387838
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

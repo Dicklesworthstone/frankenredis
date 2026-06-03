@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "target-icywolf-pass30-baseline-rch/release-perf/fr-bench --port 20682 --clients 50 --requests 2000000 --pipeline 16 --workload set --key-prefix pass31_baseline_2m",
+      "mean": 6.884457249608572,
+      "stddev": 0.2631271481388693,
+      "median": 7.00608484618,
+      "user": 1.5200937457142858,
+      "system": 2.913075557142857,
+      "min": 6.50761203718,
+      "max": 7.13939507418,
+      "times": [
+        6.50761203718,
+        6.5181659851800005,
+        7.00608484618,
+        6.9086865071800005,
+        7.13939507418,
+        7.0442002211800006,
+        7.06705607618
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "target-icywolf-pass31-lazy-candidate-rch/release-perf/fr-bench --port 20683 --clients 50 --requests 2000000 --pipeline 16 --workload set --key-prefix pass31_candidate_2m",
+      "mean": 7.033500548751428,
+      "stddev": 0.09489755034069457,
+      "median": 7.01787507618,
+      "user": 1.5407483171428569,
+      "system": 2.892844842857142,
+      "min": 6.932634147180001,
+      "max": 7.1665159351800005,
+      "times": [
+        6.932634147180001,
+        6.963168732180001,
+        7.1665159351800005,
+        7.06793680118,
+        7.01787507618,
+        6.9441867441800005,
+        7.14218640518
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

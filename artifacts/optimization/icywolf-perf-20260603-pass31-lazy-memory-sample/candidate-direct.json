@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780517570710,
+  "host": "127.0.0.1",
+  "port": 20673,
+  "workload": "set",
+  "clients": 50,
+  "requests": 500000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "icywolf-pass31-lazy-cand-direct",
+  "total_time_ms": 1891,
+  "ops_per_sec": 264329.9389728465,
+  "bytes_sent": 36394455,
+  "bytes_received": 2500000,
+  "latency_us": {
+    "min": 71,
+    "p50": 2867,
+    "p95": 4061,
+    "p99": 4967,
+    "p999": 5775,
+    "max": 6323,
+    "mean": 3001.2642220000043,
+    "samples": 500000
+  }
+}
