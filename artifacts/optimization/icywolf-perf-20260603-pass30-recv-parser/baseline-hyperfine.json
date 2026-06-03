@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "command": "target-icywolf-pass30-baseline-rch/release-perf/fr-bench --host 127.0.0.1 --port 20660 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --key-prefix icywolf-pass30-recv-base-hf >/dev/null",
+      "mean": 1.6122013585799997,
+      "stddev": 0.03801421929344362,
+      "median": 1.61246844408,
+      "user": 0.37760917,
+      "system": 0.733158015,
+      "min": 1.56775418958,
+      "max": 1.67126856358,
+      "times": [
+        1.6122478575799999,
+        1.56775418958,
+        1.5726328615799998,
+        1.6324621825799999,
+        1.5777674905799999,
+        1.61268903058,
+        1.67126856358,
+        1.65078869258
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

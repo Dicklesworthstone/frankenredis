@@ -1,0 +1,974 @@
+
+=== sample 1 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4dde33420 in write_str () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:3347
+3347	    /// ```
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4dde33420 in write_str () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:3347
+#1  0x000064e4ddc1849f in core::fmt::num::imp::{impl#0}::fmt () at library/core/src/fmt/num.rs:143
+#2  0x000064e4ddc1294a in core::fmt::rt::Argument::fmt () at library/core/src/fmt/rt.rs:152
+#3  0x000064e4ddc1294a in core::fmt::write ()
+#4  0x000064e4ddc19f7b in core::fmt::Formatter::write_fmt () at library/core/src/fmt/mod.rs:2132
+#5  core::net::ip_addr::{impl#8}::fmt () at library/core/src/macros/mod.rs:604
+#6  0x000064e4ddc1294a in core::fmt::rt::Argument::fmt () at library/core/src/fmt/rt.rs:152
+#7  0x000064e4ddc1294a in core::fmt::write ()
+#8  0x000064e4ddc19e48 in core::fmt::Formatter::write_fmt () at library/core/src/fmt/mod.rs:2132
+#9  core::net::socket_addr::{impl#8}::fmt () at library/core/src/macros/mod.rs:604
+#10 0x000064e4ddc1294a in core::fmt::rt::Argument::fmt () at library/core/src/fmt/rt.rs:152
+#11 0x000064e4ddc1294a in core::fmt::write ()
+[Inferior 1 (process 3315020) detached]
+
+=== sample 2 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=19, a2=2199025556224, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  __internal_syscall_cancel (a1=19, a2=2199025556224, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=19, a2=2199025556224, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x00007ad69133900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000064e4ddf40450 in std::sys::net::connection::socket::TcpStream::write () at /rustc/64a965e9013a9d14e83c4d370af26f6be6bf96fb/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/64a965e9013a9d14e83c4d370af26f6be6bf96fb/library/std/src/net/tcp.rs:740
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+#10 0x000064e4ddf36c67 in handle_readable () at crates/fr-server/src/main.rs:1306
+#11 main () at crates/fr-server/src/main.rs:865
+[Inferior 1 (process 3315020) detached]
+
+=== sample 3 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4ddeb60a1 in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:21
+21	        if len == other.len() {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4ddeb60a1 in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:21
+#1  eq<[u8], [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2122
+#2  equivalent<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>> () at /rust/deps/hashbrown-0.17.0/src/lib.rs:157
+#3  {closure#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry> () at /rust/deps/hashbrown-0.17.0/src/map.rs:221
+#4  {closure#0}<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1202
+#5  find_inner () at /rust/deps/hashbrown-0.17.0/src/raw.rs:2034
+#6  find<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1202
+#7  get<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1217
+#8  get<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /rust/deps/hashbrown-0.17.0/src/map.rs:1288
+#9  get<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:1035
+#10 drop_if_expired () at crates/fr-store/src/lib.rs:11119
+#11 0x000064e4dded42bc in record_keyspace_lookup () at crates/fr-store/src/lib.rs:2288
+[Inferior 1 (process 3315020) detached]
+
+=== sample 4 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x00007ad691748986 in ?? ()
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x00007ad691748986 in ?? ()
+#1  0x00007ad6912f628d in __GI___clock_gettime (clock_id=<optimized out>, tp=<optimized out>) at ../sysdeps/unix/sysv/linux/clock_gettime.c:42
+#2  0x000064e4ddf6f353 in std::sys::pal::unix::time::Timespec::now () at library/std/src/sys/pal/unix/time.rs:107
+#3  0x000064e4dddc79b0 in std::sys::time::unix::Instant::now () at /rustc/64a965e9013a9d14e83c4d370af26f6be6bf96fb/library/std/src/sys/time/unix.rs:74
+#4  std::time::Instant::now () at /rustc/64a965e9013a9d14e83c4d370af26f6be6bf96fb/library/std/src/time.rs:288
+#5  std::time::Instant::elapsed () at /rustc/64a965e9013a9d14e83c4d370af26f6be6bf96fb/library/std/src/time.rs:391
+#6  run_active_expire_cycle () at crates/fr-runtime/src/lib.rs:2835
+#7  0x000064e4dde12df0 in <fr_runtime::Runtime>::run_active_expire_cycle () at crates/fr-runtime/src/lib.rs:3655
+#8  0x000064e4dde093a5 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5883
+#9  0x000064e4dde28f52 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#10 with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#11 execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+[Inferior 1 (process 3315020) detached]
+
+=== sample 5 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+eq_ignore_ascii_case_simple () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:91
+91	            if first_a.eq_ignore_ascii_case(&first_b) {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  eq_ignore_ascii_case_simple () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:91
+#1  eq_ignore_ascii_case () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:77
+#2  eq_ignore_ascii_case () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2841
+#3  {closure#0} () at crates/fr-command/src/lib.rs:15831
+#4  find<(&str, i64, &str, i64, i64, i64), fr_command::check_command_arity::{closure_env#0}> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:349
+#5  check_command_arity () at crates/fr-command/src/lib.rs:15831
+#6  0x000064e4dde08c6b in {closure#1} () at crates/fr-runtime/src/lib.rs:5639
+#7  is_some_and<&alloc::vec::Vec<u8, alloc::alloc::Global>, fr_runtime::{impl#16}::execute_frame_internal::{closure_env#1}> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs:661
+#8  execute_frame_internal () at crates/fr-runtime/src/lib.rs:5639
+#9  0x000064e4dde28f52 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#10 with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#11 execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+[Inferior 1 (process 3315020) detached]
+
+=== sample 6 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4dde29564 in execute_frame_with_optional_unix_time_us () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:91
+91	            if first_a.eq_ignore_ascii_case(&first_b) {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4dde29564 in execute_frame_with_optional_unix_time_us () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:91
+#1  0x000064e4ddf2b9ff in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#2  process_buffered_frames () at crates/fr-server/src/main.rs:1460
+#3  0x000064e4ddf36a2e in handle_readable () at crates/fr-server/src/main.rs:1260
+#4  main () at crates/fr-server/src/main.rs:865
+#5  0x000064e4ddf27803 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#6  __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#7  0x000064e4ddf27b69 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#8  0x000064e4ddf7e20e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#9  std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#10 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#11 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+[Inferior 1 (process 3315020) detached]
+
+=== sample 7 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4ddc0c811 in alloc::string::String::from_utf8_lossy () at library/alloc/src/string.rs:645
+
+warning: 645	library/alloc/src/string.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4ddc0c811 in alloc::string::String::from_utf8_lossy () at library/alloc/src/string.rs:645
+#1  0x000064e4dddb83eb in canonical_command_fullname () at crates/fr-runtime/src/lib.rs:327
+#2  0x000064e4dddc85fc in record_command_histogram_outcome () at crates/fr-runtime/src/lib.rs:3030
+#3  0x000064e4dde0a4fc in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5915
+#4  0x000064e4dde28f52 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#5  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#6  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#7  0x000064e4ddf2b9ff in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#8  process_buffered_frames () at crates/fr-server/src/main.rs:1460
+#9  0x000064e4ddf36a2e in handle_readable () at crates/fr-server/src/main.rs:1260
+#10 main () at crates/fr-server/src/main.rs:865
+#11 0x000064e4ddf27803 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+[Inferior 1 (process 3315020) detached]
+
+=== sample 8 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+wrapping_add () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:2582
+2582	        #[inline(always)]
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  wrapping_add () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:2582
+#1  d_rounds () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/sip.rs:86
+#2  finish<core::hash::sip::Sip13Rounds> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/sip.rs:321
+#3  finish () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/sip.rs:243
+#4  finish () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/hash/random.rs:141
+#5  hash_one<std::hash::random::RandomState, &alloc::vec::Vec<u8, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/mod.rs:701
+#6  0x000064e4dded53c2 in make_hash<alloc::vec::Vec<u8, alloc::alloc::Global>, std::hash::random::RandomState> () at /rust/deps/hashbrown-0.17.0/src/map.rs:241
+#7  contains_key<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, alloc::vec::Vec<u8, alloc::alloc::Global>> () at /rust/deps/hashbrown-0.17.0/src/map.rs:1389
+#8  contains_key<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, alloc::vec::Vec<u8, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:1269
+#9  internal_entries_insert () at crates/fr-store/src/lib.rs:4283
+#10 0x000064e4ddedfcd3 in set () at crates/fr-store/src/lib.rs:2715
+#11 0x000064e4ddccec12 in set () at crates/fr-command/src/lib.rs:3606
+[Inferior 1 (process 3315020) detached]
+
+=== sample 9 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4ddf9ed10 in mi_page_malloc_zero (theap=0x64e4ddfc68c0 <theap_main>, page=0x2000002f830, size=48, zero=false, usable=0x0) at c_src/mimalloc/v3/src/alloc.c:50
+
+warning: 50	c_src/mimalloc/v3/src/alloc.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4ddf9ed10 in mi_page_malloc_zero (theap=0x64e4ddfc68c0 <theap_main>, page=0x2000002f830, size=48, zero=false, usable=0x0) at c_src/mimalloc/v3/src/alloc.c:50
+#1  _mi_page_malloc_zero (theap=0x64e4ddfc68c0 <theap_main>, page=0x2000002f830, size=48, zero=false) at c_src/mimalloc/v3/src/alloc.c:120
+#2  0x000064e4ddcb9121 in alloc () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mimalloc-0.1.49/src/lib.rs:51
+#3  __rust_alloc () at crates/fr-server/src/main.rs:18
+#4  alloc () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:101
+#5  alloc_impl_runtime () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:210
+#6  alloc_impl () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:332
+#7  allocate () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:449
+#8  try_allocate_in<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:465
+#9  with_capacity_in<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:434
+#10 with_capacity_in<alloc::string::String, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:177
+#11 with_capacity_in<alloc::string::String, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:977
+[Inferior 1 (process 3315020) detached]
+
+=== sample 10 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+rotate_left<u64> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs:2032
+2032	    unsafe { unchecked_funnel_shl(x, x, shift % (mem::size_of::<T>() as u32 * 8)) }
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  rotate_left<u64> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs:2032
+#1  rotate_left () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:473
+#2  c_rounds () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/sip.rs:84
+#3  write<core::hash::sip::Sip13Rounds> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/sip.rs:289
+#4  0x000064e4dde7fa89 in write () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/sip.rs:233
+#5  write () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/hash/random.rs:131
+#6  hash_slice<std::hash::random::DefaultHasher> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/mod.rs:824
+#7  hash<u8, std::hash::random::DefaultHasher> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/mod.rs:935
+#8  hash<[u8], std::hash::random::DefaultHasher> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/mod.rs:943
+#9  hash_one<std::hash::random::RandomState, &[u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/mod.rs:700
+#10 0x000064e4dde52629 in make_hash<[u8], std::hash::random::RandomState> () at /rust/deps/hashbrown-0.17.0/src/map.rs:241
+#11 remove_entry<alloc::vec::Vec<u8, alloc::alloc::Global>, (u64, u64), std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /rust/deps/hashbrown-0.17.0/src/map.rs:1996
+[Inferior 1 (process 3315020) detached]
+
+=== sample 11 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4ddeb60a1 in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:21
+21	        if len == other.len() {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4ddeb60a1 in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:21
+#1  eq<[u8], [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2122
+#2  equivalent<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>> () at /rust/deps/hashbrown-0.17.0/src/lib.rs:157
+#3  {closure#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry> () at /rust/deps/hashbrown-0.17.0/src/map.rs:221
+#4  {closure#0}<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1202
+#5  find_inner () at /rust/deps/hashbrown-0.17.0/src/raw.rs:2034
+#6  find<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1202
+#7  get<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1217
+#8  get<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /rust/deps/hashbrown-0.17.0/src/map.rs:1288
+#9  get<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:1035
+#10 drop_if_expired () at crates/fr-store/src/lib.rs:11119
+#11 0x000064e4dded42bc in record_keyspace_lookup () at crates/fr-store/src/lib.rs:2288
+[Inferior 1 (process 3315020) detached]
+
+=== sample 12 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4dde26cf3 in queue_client_tracking_invalidations () at crates/fr-runtime/src/lib.rs:4616
+4616	            if !tracking.enabled || !tracking.bcast {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4dde26cf3 in queue_client_tracking_invalidations () at crates/fr-runtime/src/lib.rs:4616
+#1  0x000064e4dde0c408 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5997
+#2  0x000064e4dde28f52 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#3  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#4  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#5  0x000064e4ddf2b9ff in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#6  process_buffered_frames () at crates/fr-server/src/main.rs:1460
+#7  0x000064e4ddf36a2e in handle_readable () at crates/fr-server/src/main.rs:1260
+#8  main () at crates/fr-server/src/main.rs:865
+#9  0x000064e4ddf27803 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#10 __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#11 0x000064e4ddf27b69 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+[Inferior 1 (process 3315020) detached]
+
+=== sample 13 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+try_allocate_in<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:469
+469	        let ptr = match result {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  try_allocate_in<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:469
+#1  with_capacity_in<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:434
+#2  with_capacity_in<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:177
+#3  with_capacity_in<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:977
+#4  with_capacity<u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:524
+#5  with_capacity () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:485
+#6  spec_to_string () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:2961
+#7  0x000064e4dde8bf6d in to_string<i64> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:2894
+#8  is_int_encoded_string () at crates/fr-store/src/lib.rs:15692
+#9  estimate_string_value_memory_usage_bytes () at crates/fr-store/src/lib.rs:15672
+#10 estimate_value_memory_usage_bytes () at crates/fr-store/src/lib.rs:15662
+#11 estimate_entry_memory_usage_bytes () at crates/fr-store/src/lib.rs:15645
+[Inferior 1 (process 3315020) detached]
+
+=== sample 14 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4ddc8fcb5 in is_ascii_uppercase () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:816
+816	    #[stable(feature = "ascii_ctype_on_intrinsics", since = "1.24.0")]
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4ddc8fcb5 in is_ascii_uppercase () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:816
+#1  to_ascii_lowercase () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:669
+#2  eq_ignore_ascii_case () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:694
+#3  eq_ignore_ascii_case_simple () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:91
+#4  eq_ignore_ascii_case () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:77
+#5  eq_ignore_ascii_case () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2841
+#6  {closure#0} () at crates/fr-command/src/lib.rs:15859
+#7  find<(&str, i64, &str, i64, i64, i64), fr_command::get_command_flags::{closure_env#0}> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:349
+#8  get_command_flags () at crates/fr-command/src/lib.rs:15859
+#9  0x000064e4dde290a6 in processed_command_counts () at crates/fr-runtime/src/lib.rs:228
+#10 {closure#0} () at crates/fr-runtime/src/lib.rs:5184
+#11 map<&alloc::vec::Vec<alloc::vec::Vec<u8, alloc::alloc::Global>, alloc::alloc::Global>, (u64, u64), fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#0}> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs:1162
+[Inferior 1 (process 3315020) detached]
+
+=== sample 15 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+reserve<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:673
+673	        if self.needs_to_grow(len, additional, elem_layout) {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  reserve<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:673
+#1  reserve<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:341
+#2  reserve<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1471
+#3  append_elements<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:2911
+#4  spec_extend<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:56
+#5  extend_from_slice<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3536
+#6  encode_into () at crates/fr-protocol/src/lib.rs:207
+#7  0x000064e4ddf2c29a in encode_client_reply () at crates/fr-server/src/main.rs:3302
+#8  process_buffered_frames () at crates/fr-server/src/main.rs:1510
+#9  0x000064e4ddf36a2e in handle_readable () at crates/fr-server/src/main.rs:1260
+#10 main () at crates/fr-server/src/main.rs:865
+#11 0x000064e4ddf27803 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+[Inferior 1 (process 3315020) detached]
+
+=== sample 16 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+{closure#0} () at crates/fr-store/src/lib.rs:12640
+12640	            .map(|(key, entry)| estimate_entry_memory_usage_bytes(key, entry))
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  {closure#0} () at crates/fr-store/src/lib.rs:12640
+#1  {closure#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+#2  {closure#0}<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>> () at /rust/deps/hashbrown-0.17.0/src/map.rs:3167
+#3  fold_impl<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), hashbrown::map::{impl#44}::fold::{closure_env#0}<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>>, usize> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:3709
+#4  fold<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), usize, hashbrown::map::{impl#44}::fold::{closure_env#0}<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:3879
+#5  fold<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>> () at /rust/deps/hashbrown-0.17.0/src/map.rs:3165
+#6  fold<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:2127
+#7  fold<usize, std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, usize, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#8  sum<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/accum.rs:52
+#9  sum<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>, usize> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:3674
+#10 estimate_memory_usage_bytes () at crates/fr-store/src/lib.rs:12641
+#11 record_ops_sec_sample () at crates/fr-store/src/lib.rs:2185
+[Inferior 1 (process 3315020) detached]
+
+=== sample 17 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4ddf9ed10 in mi_page_malloc_zero (theap=0x64e4ddfc68c0 <theap_main>, page=0x2000002f830, size=35, zero=false, usable=0x0) at c_src/mimalloc/v3/src/alloc.c:50
+
+warning: 50	c_src/mimalloc/v3/src/alloc.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4ddf9ed10 in mi_page_malloc_zero (theap=0x64e4ddfc68c0 <theap_main>, page=0x2000002f830, size=35, zero=false, usable=0x0) at c_src/mimalloc/v3/src/alloc.c:50
+#1  _mi_page_malloc_zero (theap=0x64e4ddfc68c0 <theap_main>, page=0x2000002f830, size=35, zero=false) at c_src/mimalloc/v3/src/alloc.c:120
+#2  0x000064e4dde2426f in alloc () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mimalloc-0.1.49/src/lib.rs:51
+#3  __rust_alloc () at crates/fr-server/src/main.rs:18
+#4  alloc () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:101
+#5  alloc_impl_runtime () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:210
+#6  alloc_impl () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:332
+#7  allocate () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:449
+#8  try_allocate_in<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:465
+#9  with_capacity_in<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:434
+#10 with_capacity_in<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:177
+#11 with_capacity_in<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:977
+[Inferior 1 (process 3315020) detached]
+
+=== sample 18 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:332
+
+warning: 332	../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  __memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:332
+#1  0x000064e4ddf1b7bd in copy_nonoverlapping<u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:551
+#2  append_elements<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:2915
+#3  spec_extend<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:56
+#4  extend_from_slice<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3536
+#5  push_str () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:1102
+#6  spec_to_string () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:2965
+#7  0x000064e4dde8bf6d in to_string<i64> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:2894
+#8  is_int_encoded_string () at crates/fr-store/src/lib.rs:15692
+#9  estimate_string_value_memory_usage_bytes () at crates/fr-store/src/lib.rs:15672
+#10 estimate_value_memory_usage_bytes () at crates/fr-store/src/lib.rs:15662
+#11 estimate_entry_memory_usage_bytes () at crates/fr-store/src/lib.rs:15645
+[Inferior 1 (process 3315020) detached]
+
+=== sample 19 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4ddf9eda7 in mi_theap_malloc_zero_aligned_at (usable=0x0, theap=0x64e4ddfc68c0 <theap_main>, size=19, alignment=1, offset=0, zero=false) at c_src/mimalloc/v3/src/alloc-aligned.c:212
+
+warning: 212	c_src/mimalloc/v3/src/alloc-aligned.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4ddf9eda7 in mi_theap_malloc_zero_aligned_at (usable=0x0, theap=0x64e4ddfc68c0 <theap_main>, size=19, alignment=1, offset=0, zero=false) at c_src/mimalloc/v3/src/alloc-aligned.c:212
+#1  mi_theap_malloc_aligned_at (theap=0x64e4ddfc68c0 <theap_main>, size=19, alignment=1, offset=0) at c_src/mimalloc/v3/src/alloc-aligned.c:237
+#2  mi_theap_malloc_aligned (theap=0x64e4ddfc68c0 <theap_main>, size=19, alignment=1) at c_src/mimalloc/v3/src/alloc-aligned.c:241
+#3  0x000064e4ddf1b70e in alloc () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mimalloc-0.1.49/src/lib.rs:51
+#4  __rust_alloc () at crates/fr-server/src/main.rs:18
+#5  alloc () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:101
+#6  alloc_impl_runtime () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:210
+#7  alloc_impl () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:332
+#8  allocate () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:449
+#9  try_allocate_in<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:465
+#10 with_capacity_in<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:434
+#11 with_capacity_in<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:177
+[Inferior 1 (process 3315020) detached]
+
+=== sample 20 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=21, a2=2199025554176, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  __internal_syscall_cancel (a1=21, a2=2199025554176, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=21, a2=2199025554176, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x00007ad69133900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000064e4ddf40450 in std::sys::net::connection::socket::TcpStream::write () at /rustc/64a965e9013a9d14e83c4d370af26f6be6bf96fb/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/64a965e9013a9d14e83c4d370af26f6be6bf96fb/library/std/src/net/tcp.rs:740
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+#10 0x000064e4ddf36c67 in handle_readable () at crates/fr-server/src/main.rs:1306
+#11 main () at crates/fr-server/src/main.rs:865
+[Inferior 1 (process 3315020) detached]
+
+=== sample 21 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4ddeb60a1 in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:21
+21	        if len == other.len() {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4ddeb60a1 in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:21
+#1  eq<[u8], [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2122
+#2  equivalent<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>> () at /rust/deps/hashbrown-0.17.0/src/lib.rs:157
+#3  {closure#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry> () at /rust/deps/hashbrown-0.17.0/src/map.rs:221
+#4  {closure#0}<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1202
+#5  find_inner () at /rust/deps/hashbrown-0.17.0/src/raw.rs:2034
+#6  find<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1202
+#7  get<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1217
+#8  get<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /rust/deps/hashbrown-0.17.0/src/map.rs:1288
+#9  get<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:1035
+#10 drop_if_expired () at crates/fr-store/src/lib.rs:11119
+#11 0x000064e4dded42bc in record_keyspace_lookup () at crates/fr-store/src/lib.rs:2288
+[Inferior 1 (process 3315020) detached]
+
+=== sample 22 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4ddc8b92a in fr_command::is_write_command () at crates/fr-command/src/lib.rs:2536
+2536	    matches!(
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4ddc8b92a in fr_command::is_write_command () at crates/fr-command/src/lib.rs:2536
+#1  0x000064e4ddddf87e in capture_aof_record () at crates/fr-runtime/src/lib.rs:6944
+#2  0x000064e4dde0c388 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5987
+#3  0x000064e4dde28f52 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#4  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#5  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#6  0x000064e4ddf2b9ff in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#7  process_buffered_frames () at crates/fr-server/src/main.rs:1460
+#8  0x000064e4ddf36a2e in handle_readable () at crates/fr-server/src/main.rs:1260
+#9  main () at crates/fr-server/src/main.rs:865
+#10 0x000064e4ddf27803 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#11 __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+[Inferior 1 (process 3315020) detached]
+
+=== sample 23 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+wrapping_add () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:2582
+2582	        #[inline(always)]
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  wrapping_add () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:2582
+#1  c_rounds () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/sip.rs:78
+#2  write<core::hash::sip::Sip13Rounds> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/sip.rs:289
+#3  0x000064e4dde7fa89 in write () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/sip.rs:233
+#4  write () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/hash/random.rs:131
+#5  hash_slice<std::hash::random::DefaultHasher> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/mod.rs:824
+#6  hash<u8, std::hash::random::DefaultHasher> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/mod.rs:935
+#7  hash<[u8], std::hash::random::DefaultHasher> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/mod.rs:943
+#8  hash_one<std::hash::random::RandomState, &[u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hash/mod.rs:700
+#9  0x000064e4dde52629 in make_hash<[u8], std::hash::random::RandomState> () at /rust/deps/hashbrown-0.17.0/src/map.rs:241
+#10 remove_entry<alloc::vec::Vec<u8, alloc::alloc::Global>, (u64, u64), std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /rust/deps/hashbrown-0.17.0/src/map.rs:1996
+#11 remove<alloc::vec::Vec<u8, alloc::alloc::Global>, (u64, u64), std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /rust/deps/hashbrown-0.17.0/src/map.rs:1961
+[Inferior 1 (process 3315020) detached]
+
+=== sample 24 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4dde93746 in finish_grow<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:563
+563	        match memory {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4dde93746 in finish_grow<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:563
+#1  0x000064e4dde930ca in grow_amortized<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:528
+#2  grow_one<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:492
+#3  grow_one<usize, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:188
+#4  0x000064e4ddc96e0f in push_mut<usize, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1041
+#5  push<usize, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1004
+#6  command_key_indexes () at crates/fr-command/src/lib.rs:809
+#7  0x000064e4dde2414e in namespace_argv_for_selected_db () at crates/fr-runtime/src/lib.rs:6999
+#8  0x000064e4dde1caad in execute_db_scoped_command () at crates/fr-runtime/src/lib.rs:7432
+#9  0x000064e4dde0a442 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5892
+#10 0x000064e4dde28f52 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#11 with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+[Inferior 1 (process 3315020) detached]
+
+=== sample 25 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4dded42bc in record_keyspace_lookup () at crates/fr-store/src/lib.rs:2288
+2288	        self.drop_if_expired(key, now_ms);
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4dded42bc in record_keyspace_lookup () at crates/fr-store/src/lib.rs:2288
+#1  0x000064e4ddcce489 in exists_no_touch () at crates/fr-store/src/lib.rs:2812
+#2  set () at crates/fr-command/src/lib.rs:3591
+#3  0x000064e4ddc756d5 in dispatch_argv () at crates/fr-command/src/lib.rs:2286
+#4  0x000064e4dde21546 in dispatch_with_client_context () at crates/fr-runtime/src/lib.rs:7350
+#5  0x000064e4dde1cacd in execute_db_scoped_command () at crates/fr-runtime/src/lib.rs:7433
+#6  0x000064e4dde0a442 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5892
+#7  0x000064e4dde28f52 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#8  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#9  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#10 0x000064e4ddf2b9ff in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#11 process_buffered_frames () at crates/fr-server/src/main.rs:1460
+[Inferior 1 (process 3315020) detached]
+
+=== sample 26 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=31, a2=140729309668352, a3=8192, a4=0, a5=0, a6=0, nr=45) at ./nptl/cancellation.c:40
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  __internal_syscall_cancel (a1=31, a2=140729309668352, a3=8192, a4=0, a5=0, a6=0, nr=45) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=31, a2=140729309668352, a3=8192, a4=0, a5=a5@entry=0, a6=a6@entry=0, nr=45) at ./nptl/cancellation.c:75
+#2  0x00007ad691338f5f in __libc_recv (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/recv.c:28
+#3  0x000064e4ddf4a51d in std::sys::net::connection::socket::unix::Socket::recv_with_flags () at /rustc/64a965e9013a9d14e83c4d370af26f6be6bf96fb/library/std/src/sys/net/connection/socket/unix.rs:289
+#4  std::sys::net::connection::socket::unix::Socket::read () at /rustc/64a965e9013a9d14e83c4d370af26f6be6bf96fb/library/std/src/sys/net/connection/socket/unix.rs:304
+#5  std::sys::net::connection::socket::TcpStream::read () at /rustc/64a965e9013a9d14e83c4d370af26f6be6bf96fb/library/std/src/sys/net/connection/socket/mod.rs:414
+#6  std::net::tcp::{impl#3}::read () at /rustc/64a965e9013a9d14e83c4d370af26f6be6bf96fb/library/std/src/net/tcp.rs:721
+#7  {closure#0} () at src/net/tcp/stream.rs:281
+#8  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#1}::read::{closure_env#0}, usize> () at src/sys/unix/selector/stateless_io_source.rs:21
+#9  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#1}::read::{closure_env#0}, usize> () at src/io_source.rs:69
+#10 read () at src/net/tcp/stream.rs:281
+#11 0x000064e4ddf3620c in handle_readable () at crates/fr-server/src/main.rs:1187
+[Inferior 1 (process 3315020) detached]
+
+=== sample 27 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4dde287db in refresh_store_runtime_info_context () at crates/fr-runtime/src/lib.rs:4845
+4845	                total_prefixes += session.client_tracking.prefixes.len();
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4dde287db in refresh_store_runtime_info_context () at crates/fr-runtime/src/lib.rs:4845
+#1  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5167
+#2  0x000064e4ddf2b9ff in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#3  process_buffered_frames () at crates/fr-server/src/main.rs:1460
+#4  0x000064e4ddf36a2e in handle_readable () at crates/fr-server/src/main.rs:1260
+#5  main () at crates/fr-server/src/main.rs:865
+#6  0x000064e4ddf27803 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#7  __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#8  0x000064e4ddf27b69 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#9  0x000064e4ddf7e20e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#10 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#11 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+[Inferior 1 (process 3315020) detached]
+
+=== sample 28 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+right_kv<alloc::collections::btree::node::marker::Immut, u64, fr_runtime::ClientSession, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:896
+896	        if self.idx < self.node.len() {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  right_kv<alloc::collections::btree::node::marker::Immut, u64, fr_runtime::ClientSession, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:896
+#1  next_kv<alloc::collections::btree::node::marker::Immut, u64, fr_runtime::ClientSession> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/navigate.rs:388
+#2  {closure#0}<u64, fr_runtime::ClientSession> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/navigate.rs:534
+#3  replace<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u64, fr_runtime::ClientSession, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>, (&u64, &fr_runtime::ClientSession), alloc::collections::btree::navigate::{impl#22}::next_unchecked::{closure_env#0}<u64, fr_runtime::ClientSession>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/mem.rs:27
+#4  next_unchecked<u64, fr_runtime::ClientSession> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/navigate.rs:533
+#5  next_unchecked<u64, fr_runtime::ClientSession> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/navigate.rs:161
+#6  next<u64, fr_runtime::ClientSession> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1719
+#7  try_fold<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, (), core::iter::traits::iterator::Iterator::find::check::{closure_env#0}<(&u64, &fr_runtime::ClientSession), &mut fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>, core::ops::control_flow::ControlFlow<(&u64, &fr_runtime::ClientSession), ()>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2493
+#8  find<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, &mut fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2971
+#9  next<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/filter.rs:98
+#10 call_once<fn(&mut core::iter::adapters::filter::Filter<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>) -> core::option::Option<(&u64, &fr_runtime::ClientSession)>, (&mut core::iter::adapters::filter::Filter<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>)> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#11 and_then_or_clear<core::iter::adapters::filter::Filter<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>, (&u64, &fr_runtime::ClientSession), fn(&mut core::iter::adapters::filter::Filter<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>) -> core::option::Option<(&u64, &fr_runtime::ClientSession)>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/chain.rs:332
+[Inferior 1 (process 3315020) detached]
+
+=== sample 29 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__memcmp_avx2_movbe () at ../sysdeps/x86_64/multiarch/memcmp-avx2-movbe.S:420
+
+warning: 420	../sysdeps/x86_64/multiarch/memcmp-avx2-movbe.S: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  __memcmp_avx2_movbe () at ../sysdeps/x86_64/multiarch/memcmp-avx2-movbe.S:420
+#1  0x000064e4dde8bf85 in equal_same_length<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:157
+#2  eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:24
+#3  eq<[u8], [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2122
+#4  eq () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/traits.rs:30
+#5  eq () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:2667
+#6  is_int_encoded_string () at crates/fr-store/src/lib.rs:15692
+#7  estimate_string_value_memory_usage_bytes () at crates/fr-store/src/lib.rs:15672
+#8  estimate_value_memory_usage_bytes () at crates/fr-store/src/lib.rs:15662
+#9  estimate_entry_memory_usage_bytes () at crates/fr-store/src/lib.rs:15645
+#10 0x000064e4dded304a in {closure#0} () at crates/fr-store/src/lib.rs:12640
+#11 {closure#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+[Inferior 1 (process 3315020) detached]
+
+=== sample 30 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:332
+
+warning: 332	../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  __memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:332
+#1  0x000064e4ddf1b7bd in copy_nonoverlapping<u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:551
+#2  append_elements<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:2915
+#3  spec_extend<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:56
+#4  extend_from_slice<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3536
+#5  push_str () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:1102
+#6  spec_to_string () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:2965
+#7  0x000064e4dde8bf6d in to_string<i64> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:2894
+#8  is_int_encoded_string () at crates/fr-store/src/lib.rs:15692
+#9  estimate_string_value_memory_usage_bytes () at crates/fr-store/src/lib.rs:15672
+#10 estimate_value_memory_usage_bytes () at crates/fr-store/src/lib.rs:15662
+#11 estimate_entry_memory_usage_bytes () at crates/fr-store/src/lib.rs:15645
+[Inferior 1 (process 3315020) detached]
+
+=== sample 31 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+{closure#0} () at crates/fr-store/src/lib.rs:12640
+12640	            .map(|(key, entry)| estimate_entry_memory_usage_bytes(key, entry))
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  {closure#0} () at crates/fr-store/src/lib.rs:12640
+#1  {closure#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+#2  {closure#0}<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>> () at /rust/deps/hashbrown-0.17.0/src/map.rs:3167
+#3  fold_impl<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), hashbrown::map::{impl#44}::fold::{closure_env#0}<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>>, usize> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:3709
+#4  fold<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), usize, hashbrown::map::{impl#44}::fold::{closure_env#0}<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:3879
+#5  fold<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>> () at /rust/deps/hashbrown-0.17.0/src/map.rs:3165
+#6  fold<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:2127
+#7  fold<usize, std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, usize, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#8  sum<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/accum.rs:52
+#9  sum<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>, usize> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:3674
+#10 estimate_memory_usage_bytes () at crates/fr-store/src/lib.rs:12641
+#11 record_ops_sec_sample () at crates/fr-store/src/lib.rs:2185
+[Inferior 1 (process 3315020) detached]
+
+=== sample 32 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+core::str::validations::run_utf8_validation () at library/core/src/str/validations.rs:165
+
+warning: 165	library/core/src/str/validations.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  core::str::validations::run_utf8_validation () at library/core/src/str/validations.rs:165
+#1  core::str::converts::from_utf8 () at library/core/src/str/converts.rs:91
+#2  0x000064e4dde8aa73 in is_int_encoded_string () at crates/fr-store/src/lib.rs:15686
+#3  estimate_string_value_memory_usage_bytes () at crates/fr-store/src/lib.rs:15672
+#4  estimate_value_memory_usage_bytes () at crates/fr-store/src/lib.rs:15662
+#5  estimate_entry_memory_usage_bytes () at crates/fr-store/src/lib.rs:15645
+#6  0x000064e4dded304a in {closure#0} () at crates/fr-store/src/lib.rs:12640
+#7  {closure#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+#8  {closure#0}<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>> () at /rust/deps/hashbrown-0.17.0/src/map.rs:3167
+#9  fold_impl<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), hashbrown::map::{impl#44}::fold::{closure_env#0}<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>>, usize> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:3709
+#10 fold<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), usize, hashbrown::map::{impl#44}::fold::{closure_env#0}<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:3879
+#11 fold<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>> () at /rust/deps/hashbrown-0.17.0/src/map.rs:3165
+[Inferior 1 (process 3315020) detached]
+
+=== sample 33 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+mi_free_block_local (was_guarded=false, track_stats=true, page=0x2000002f128, block=0x20000939fb0, check_full=false) at c_src/mimalloc/v3/src/free.c:42
+
+warning: 42	c_src/mimalloc/v3/src/free.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  mi_free_block_local (was_guarded=false, track_stats=true, page=0x2000002f128, block=0x20000939fb0, check_full=false) at c_src/mimalloc/v3/src/free.c:42
+#1  mi_free_ex (p=0x20000939fb0, usable=0x0, page=0x2000002f128) at c_src/mimalloc/v3/src/free.c:189
+#2  mi_free (p=0x20000939fb0) at c_src/mimalloc/v3/src/free.c:209
+#3  0x000064e4ddedfcea in drop_glue<fr_store::Entry> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:825
+#4  drop_glue<core::option::Option<fr_store::Entry>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:825
+#5  set () at crates/fr-store/src/lib.rs:2715
+#6  0x000064e4ddccec12 in set () at crates/fr-command/src/lib.rs:3606
+#7  0x000064e4ddc756d5 in dispatch_argv () at crates/fr-command/src/lib.rs:2286
+#8  0x000064e4dde21546 in dispatch_with_client_context () at crates/fr-runtime/src/lib.rs:7350
+#9  0x000064e4dde1cacd in execute_db_scoped_command () at crates/fr-runtime/src/lib.rs:7433
+#10 0x000064e4dde0a442 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5892
+#11 0x000064e4dde28f52 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+[Inferior 1 (process 3315020) detached]
+
+=== sample 34 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4dded604f in internal_entries_insert () at crates/fr-store/src/lib.rs:4313
+4313	            Some(old)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4dded604f in internal_entries_insert () at crates/fr-store/src/lib.rs:4313
+#1  0x000064e4ddedfcd3 in set () at crates/fr-store/src/lib.rs:2715
+#2  0x000064e4ddccec12 in set () at crates/fr-command/src/lib.rs:3606
+#3  0x000064e4ddc756d5 in dispatch_argv () at crates/fr-command/src/lib.rs:2286
+#4  0x000064e4dde21546 in dispatch_with_client_context () at crates/fr-runtime/src/lib.rs:7350
+#5  0x000064e4dde1cacd in execute_db_scoped_command () at crates/fr-runtime/src/lib.rs:7433
+#6  0x000064e4dde0a442 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5892
+#7  0x000064e4dde28f52 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#8  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#9  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#10 0x000064e4ddf2b9ff in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#11 process_buffered_frames () at crates/fr-server/src/main.rs:1460
+[Inferior 1 (process 3315020) detached]
+
+=== sample 35 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4dded4370 in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:21
+21	        if len == other.len() {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4dded4370 in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:21
+#1  eq<[u8], [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2122
+#2  equivalent<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>> () at /rust/deps/hashbrown-0.17.0/src/lib.rs:157
+#3  {closure#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry> () at /rust/deps/hashbrown-0.17.0/src/map.rs:221
+#4  {closure#0}<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1202
+#5  find_inner () at /rust/deps/hashbrown-0.17.0/src/raw.rs:2034
+#6  find<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1202
+#7  get<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:1217
+#8  contains_key<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /rust/deps/hashbrown-0.17.0/src/map.rs:1390
+#9  contains_key<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:1269
+#10 record_keyspace_lookup () at crates/fr-store/src/lib.rs:2289
+#11 0x000064e4ddcce489 in exists_no_touch () at crates/fr-store/src/lib.rs:2812
+[Inferior 1 (process 3315020) detached]
+
+=== sample 36 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=10, a2=2199025556480, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  __internal_syscall_cancel (a1=10, a2=2199025556480, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=10, a2=2199025556480, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x00007ad69133900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000064e4ddf40450 in std::sys::net::connection::socket::TcpStream::write () at /rustc/64a965e9013a9d14e83c4d370af26f6be6bf96fb/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/64a965e9013a9d14e83c4d370af26f6be6bf96fb/library/std/src/net/tcp.rs:740
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+#10 0x000064e4ddf36c67 in handle_readable () at crates/fr-server/src/main.rs:1306
+#11 main () at crates/fr-server/src/main.rs:865
+[Inferior 1 (process 3315020) detached]
+
+=== sample 37 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4dde25ce6 in enforce_maxmemory_before_dispatch () at crates/fr-runtime/src/lib.rs:6867
+6867	            self.server.last_eviction_loop = None;
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4dde25ce6 in enforce_maxmemory_before_dispatch () at crates/fr-runtime/src/lib.rs:6867
+#1  0x000064e4dde09382 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5876
+#2  0x000064e4dde28f52 in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#3  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#4  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#5  0x000064e4ddf2b9ff in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#6  process_buffered_frames () at crates/fr-server/src/main.rs:1460
+#7  0x000064e4ddf36a2e in handle_readable () at crates/fr-server/src/main.rs:1260
+#8  main () at crates/fr-server/src/main.rs:865
+#9  0x000064e4ddf27803 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#10 __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#11 0x000064e4ddf27b69 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+[Inferior 1 (process 3315020) detached]
+
+=== sample 38 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4ddc13672 in core::str::converts::from_utf8 () at library/core/src/str/converts.rs:89
+
+warning: 89	library/core/src/str/converts.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4ddc13672 in core::str::converts::from_utf8 () at library/core/src/str/converts.rs:89
+#1  0x000064e4dde8aa73 in is_int_encoded_string () at crates/fr-store/src/lib.rs:15686
+#2  estimate_string_value_memory_usage_bytes () at crates/fr-store/src/lib.rs:15672
+#3  estimate_value_memory_usage_bytes () at crates/fr-store/src/lib.rs:15662
+#4  estimate_entry_memory_usage_bytes () at crates/fr-store/src/lib.rs:15645
+#5  0x000064e4dded304a in {closure#0} () at crates/fr-store/src/lib.rs:12640
+#6  {closure#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+#7  {closure#0}<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>> () at /rust/deps/hashbrown-0.17.0/src/map.rs:3167
+#8  fold_impl<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), hashbrown::map::{impl#44}::fold::{closure_env#0}<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>>, usize> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:3709
+#9  fold<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), usize, hashbrown::map::{impl#44}::fold::{closure_env#0}<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>>> () at /rust/deps/hashbrown-0.17.0/src/raw.rs:3879
+#10 fold<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>> () at /rust/deps/hashbrown-0.17.0/src/map.rs:3165
+#11 fold<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, usize, core::iter::adapters::map::map_fold::{closure_env#0}<(&alloc::vec::Vec<u8, alloc::alloc::Global>, &fr_store::Entry), usize, usize, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}, core::iter::traits::accum::{impl#48}::sum::{closure_env#0}<core::iter::adapters::map::Map<std::collections::hash::map::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>, fr_store::{impl#19}::estimate_memory_usage_bytes::{closure_env#0}>>>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:2127
+[Inferior 1 (process 3315020) detached]
+
+=== sample 39 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064e4dde289a4 in refresh_store_runtime_info_context () at crates/fr-runtime/src/lib.rs:4843
+4843	            if session.client_tracking.enabled {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  0x000064e4dde289a4 in refresh_store_runtime_info_context () at crates/fr-runtime/src/lib.rs:4843
+#1  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5167
+#2  0x000064e4ddf2b9ff in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#3  process_buffered_frames () at crates/fr-server/src/main.rs:1460
+#4  0x000064e4ddf36a2e in handle_readable () at crates/fr-server/src/main.rs:1260
+#5  main () at crates/fr-server/src/main.rs:865
+#6  0x000064e4ddf27803 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#7  __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#8  0x000064e4ddf27b69 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#9  0x000064e4ddf7e20e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#10 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#11 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+[Inferior 1 (process 3315020) detached]
+
+=== sample 40 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=44, a2=2199025557504, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis/target-icywolf-pass30-baseline-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7ad6915f4c40 (LWP 3315020) "frankenredis"):
+#0  __internal_syscall_cancel (a1=44, a2=2199025557504, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=44, a2=2199025557504, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x00007ad69133900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000064e4ddf40450 in std::sys::net::connection::socket::TcpStream::write () at /rustc/64a965e9013a9d14e83c4d370af26f6be6bf96fb/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/64a965e9013a9d14e83c4d370af26f6be6bf96fb/library/std/src/net/tcp.rs:740
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1153651-3290568-1780515880644885088/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+#10 0x000064e4ddf36c67 in handle_readable () at crates/fr-server/src/main.rs:1306
+#11 main () at crates/fr-server/src/main.rs:865
+[Inferior 1 (process 3315020) detached]

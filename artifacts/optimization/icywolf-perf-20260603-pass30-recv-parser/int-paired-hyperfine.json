@@ -1,0 +1,64 @@
+{
+  "results": [
+    {
+      "command": "target-icywolf-pass30-baseline-rch/release-perf/fr-bench --host 127.0.0.1 --port 20662 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --key-prefix icywolf-pass30-int-base-hf >/dev/null",
+      "mean": 1.590291303995,
+      "stddev": 0.02768398382175858,
+      "median": 1.58326577612,
+      "user": 0.37920267999999996,
+      "system": 0.72873719,
+      "min": 1.55087961362,
+      "max": 1.64129233862,
+      "times": [
+        1.6120504396200002,
+        1.57633148362,
+        1.60077905862,
+        1.57682581362,
+        1.57446594562,
+        1.58970573862,
+        1.55087961362,
+        1.64129233862
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "target-icywolf-pass30-int-candidate-rch/release-perf/fr-bench --host 127.0.0.1 --port 20663 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --key-prefix icywolf-pass30-int-cand-hf >/dev/null",
+      "mean": 1.63520983787,
+      "stddev": 0.03215366624061923,
+      "median": 1.63679142162,
+      "user": 0.38809717999999993,
+      "system": 0.731458565,
+      "min": 1.57553838062,
+      "max": 1.67853826462,
+      "times": [
+        1.57553838062,
+        1.6597635166200002,
+        1.6363627086199999,
+        1.67853826462,
+        1.65669241362,
+        1.62851423062,
+        1.60904905362,
+        1.63722013462
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
