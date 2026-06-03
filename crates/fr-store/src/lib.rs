@@ -2394,6 +2394,17 @@ impl Store {
         if entries_added == 0 {
             return Some(0);
         }
+        // (frankenredis-h3vkq) Upstream t_stream.c::streamEstimateDistanceFromFirstEverEntry
+        // can only compute the distance when `id` is at or after the last
+        // tombstone: if `id < max_deleted_entry_id` there may be deleted
+        // entries below `id`, so the count is unreliable and the function
+        // returns SCG_INVALID (→ XINFO entries-read / lag become nil). Without
+        // this guard the `id == last_id` / first-id shortcuts below returned a
+        // concrete value (e.g. after `XSETID … MAXDELETEDID` past the live
+        // entries), diverging from redis.
+        if max_deleted_id != (0, 0) && id < max_deleted_id {
+            return None;
+        }
         if stream_len == 0 && last_id.is_some_and(|last_id| id <= last_id) {
             return Some(entries_added);
         }
@@ -24097,6 +24108,30 @@ mod tests {
         assert_eq!(groups, vec![(b"g1".to_vec(), 0, 0, (1000, 0), None)]);
 
         assert!(!store.xgroup_setid(b"s", b"missing", (1000, 0), 0).unwrap());
+    }
+
+    #[test]
+    fn estimate_stream_entries_read_invalid_below_max_deleted_id() {
+        // (frankenredis-h3vkq) When `id` is below max_deleted_id there may be
+        // tombstones beneath it, so the distance is unknowable -> None
+        // (upstream SCG_INVALID). This holds even when id == last_id, which
+        // previously short-circuited to Some(entries_added).
+        assert_eq!(
+            Store::estimate_stream_entries_read(50, 3, Some((3, 0)), Some((5, 0)), (10, 0), (5, 0)),
+            None,
+            "id below max_deleted_id must be invalid"
+        );
+        // With the tombstone at-or-below `id`, the count is computable again.
+        assert_eq!(
+            Store::estimate_stream_entries_read(50, 3, Some((3, 0)), Some((5, 0)), (4, 0), (5, 0)),
+            Some(50),
+            "id at/above max_deleted_id stays computable"
+        );
+        // No tombstones at all -> unaffected.
+        assert_eq!(
+            Store::estimate_stream_entries_read(50, 3, Some((3, 0)), Some((5, 0)), (0, 0), (5, 0)),
+            Some(50)
+        );
     }
 
     #[test]

@@ -7594,6 +7594,18 @@ fn stream_full_group_lag_frame(
         let read = i64::try_from(entries_read).unwrap_or(i64::MAX);
         return RespFrame::Integer(len.saturating_sub(read));
     }
+    // (frankenredis-h3vkq) If the group's position sits within the tombstone
+    // range, the lag can't be determined — upstream streamCGLag returns nil
+    // (the same condition that invalidates entries-read). The structural
+    // fallback below must not fabricate a concrete lag here.
+    if stream_lag_range_has_tombstones(
+        stream_len,
+        first_id,
+        max_deleted_id,
+        last_delivered_id,
+    ) {
+        return RespFrame::BulkString(None);
+    }
     let Some(first_id) = first_id else {
         return RespFrame::Integer(0);
     };
