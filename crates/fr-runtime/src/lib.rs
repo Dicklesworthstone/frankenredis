@@ -5631,35 +5631,19 @@ impl Runtime {
                             // command's propagation/processing delay.
                             self.capture_aof_record(&rewritten);
                         } else if let Some(rewritten) =
-                            Self::rewrite_nondeterministic_for_propagation(&argv, &reply)
+                            fr_command::rewrite_effect_command_for_propagation(
+                                &argv,
+                                &reply,
+                                &self.server.store,
+                            )
                         {
-                            // (frankenredis-1uiql) INCRBYFLOAT/HINCRBYFLOAT
-                            // propagate as SET/HSET of the computed value so a
-                            // replica or AOF replay reproduces the exact float.
-                            self.capture_aof_record(&rewritten);
-                        } else if let Some(rewritten) =
-                            self.rewrite_spop_for_propagation(&argv, &reply)
-                        {
-                            // (frankenredis-1uiql) SPOP propagates as SREM of the
-                            // exact members removed (or DEL when it drained the
-                            // set) so replicas/AOF replay don't re-randomize.
-                            self.capture_aof_record(&rewritten);
-                        } else if let Some(rewritten) =
-                            Self::rewrite_xadd_autoid_for_propagation(&argv, &reply)
-                        {
-                            // (frankenredis-f9byo) XADD's auto id is rewritten to
-                            // the concrete id the master assigned so replicas/AOF
-                            // replay use the SAME stream id instead of generating
-                            // a divergent one from their own clock.
-                            self.capture_aof_record(&rewritten);
-                        } else if let Some(rewritten) =
-                            Self::rewrite_blocking_or_mpop_for_propagation(&argv, &reply)
-                        {
-                            // (frankenredis-ybaw7) Blocking pops / *MPOP / GETDEL
-                            // propagate as the concrete deterministic command
-                            // (LPOP/RPOP/ZPOPMIN/ZPOPMAX/LMOVE/RPOPLPUSH/DEL) so the
-                            // stream matches upstream and a replica never applies a
-                            // blocking command.
+                            // (frankenredis-myegu) Single canonical reply-driven
+                            // rewrite shared with the Lua (x1225) and MULTI/EXEC
+                            // (n66hv) paths: INCRBYFLOAT/HINCRBYFLOAT→SET/HSET
+                            // (1uiql), SPOP→SREM/DEL (1uiql), XADD `*`→concrete id
+                            // (f9byo), blocking pops/*MPOP/GETDEL→resolved form
+                            // (ybaw7). Keeps the three propagation entry points from
+                            // drifting (as they did on INCRBYFLOAT's KEEPTTL).
                             self.capture_aof_record(&rewritten);
                         } else {
                             self.capture_aof_record(&argv);
@@ -6649,216 +6633,6 @@ impl Runtime {
     /// propagation after the conditional already succeeded). A past deadline is
     /// preserved as-is, which deletes the key on the replica just as it did on
     /// the master. Returns `None` for any non-expire command (propagate verbatim).
-    /// Rewrite a non-deterministic write command into a deterministic
-    /// equivalent for AOF/replication propagation, mirroring upstream so a
-    /// replica or AOF replay reproduces the exact value regardless of float
-    /// formatting/precision differences. (frankenredis-1uiql)
-    ///
-    /// - `INCRBYFLOAT key incr`  -> `SET key <result>`     (t_string.c)
-    /// - `HINCRBYFLOAT key f incr` -> `HSET key f <result>` (t_hash.c)
-    ///
-    /// `<result>` is taken from the command's own reply (both handlers reply
-    /// with the new value as a bulk string — the canonical stored form).
-    /// Returns `None` to propagate the command verbatim.
-    fn rewrite_nondeterministic_for_propagation(
-        argv: &[Vec<u8>],
-        reply: &RespFrame,
-    ) -> Option<Vec<Vec<u8>>> {
-        let cmd = argv.first()?;
-        let value = match reply {
-            RespFrame::BulkString(Some(v)) => v.clone(),
-            _ => return None,
-        };
-        if eq_ascii_token(cmd, b"INCRBYFLOAT") && argv.len() == 3 {
-            // (frankenredis-n66hv) Upstream appends KEEPTTL so the rewritten SET
-            // preserves the key's TTL (a plain SET would clear it on the replica).
-            Some(vec![
-                b"SET".to_vec(),
-                argv[1].clone(),
-                value,
-                b"KEEPTTL".to_vec(),
-            ])
-        } else if eq_ascii_token(cmd, b"HINCRBYFLOAT") && argv.len() == 4 {
-            // HSET preserves the hash key's TTL on its own, so no KEEPTTL needed.
-            Some(vec![
-                b"HSET".to_vec(),
-                argv[1].clone(),
-                argv[2].clone(),
-                value,
-            ])
-        } else {
-            None
-        }
-    }
-
-    /// Rewrite `SPOP key [count]` into the deterministic members it actually
-    /// removed for propagation, mirroring upstream t_set.c::spopCommand /
-    /// spopWithCountCommand: `SREM key <members>`, or `DEL key` when the pop
-    /// drained the set. The popped members come from the command reply. Without
-    /// this a replica/AOF replay re-runs SPOP and removes DIFFERENT random
-    /// members. Returns `None` to propagate verbatim. (frankenredis-1uiql)
-    fn rewrite_spop_for_propagation(
-        &self,
-        argv: &[Vec<u8>],
-        reply: &RespFrame,
-    ) -> Option<Vec<Vec<u8>>> {
-        if !eq_ascii_token(argv.first()?, b"SPOP") {
-            return None;
-        }
-        let key = argv.get(1)?;
-        // Collect the popped members from the reply (single member for the
-        // no-count form; an array/set for `SPOP key count`).
-        let members: Vec<Vec<u8>> = match reply {
-            RespFrame::BulkString(Some(m)) => vec![m.clone()],
-            RespFrame::Array(Some(items)) | RespFrame::Set(Some(items)) => {
-                let mut out = Vec::with_capacity(items.len());
-                for it in items {
-                    match it {
-                        RespFrame::BulkString(Some(m)) => out.push(m.clone()),
-                        _ => return None,
-                    }
-                }
-                out
-            }
-            _ => return None,
-        };
-        if members.is_empty() {
-            return None;
-        }
-        // If the pop emptied the set (key removed), upstream propagates DEL;
-        // otherwise SREM of the exact members.
-        let encoded = fr_store::encode_db_key(self.session.selected_db, key);
-        if self.server.store.key_is_present(&encoded) {
-            let mut out = Vec::with_capacity(2 + members.len());
-            out.push(b"SREM".to_vec());
-            out.push(key.clone());
-            out.extend(members);
-            Some(out)
-        } else {
-            Some(vec![b"DEL".to_vec(), key.clone()])
-        }
-    }
-
-    /// Rewrite `XADD key [opts] * field value...` so the auto-generated id is
-    /// replaced with the concrete id the master assigned (taken from the XADD
-    /// reply). Without this a replica or AOF replay generates a DIFFERENT id
-    /// from its own clock and the streams diverge. Mirrors upstream
-    /// t_stream.c::xaddCommand rewriting the id argument before propagation.
-    /// Returns `None` for a fully-explicit id (propagate verbatim) or any
-    /// non-XADD command. (frankenredis-f9byo)
-    fn rewrite_xadd_autoid_for_propagation(
-        argv: &[Vec<u8>],
-        reply: &RespFrame,
-    ) -> Option<Vec<Vec<u8>>> {
-        if !eq_ascii_token(argv.first()?, b"XADD") {
-            return None;
-        }
-        let id_idx = fr_command::xadd_id_arg_index(argv)?;
-        // Only an auto id (`*` or partial `<ms>-*`) needs rewriting.
-        if !argv.get(id_idx)?.contains(&b'*') {
-            return None;
-        }
-        // The reply is the concrete assigned id as a bulk string.
-        let generated = match reply {
-            RespFrame::BulkString(Some(v)) => v.clone(),
-            _ => return None,
-        };
-        let mut out = argv.to_vec();
-        out[id_idx] = generated;
-        Some(out)
-    }
-
-    /// Rewrite blocking pops, *MPOP, and GETDEL into the concrete deterministic
-    /// command upstream propagates, so the AOF/replication stream matches and a
-    /// replica never applies a blocking command. The served key and popped
-    /// count come from the command reply. Mirrors upstream:
-    ///   BLPOP/BRPOP key.. t        -> LPOP/RPOP <served-key>
-    ///   BZPOPMIN/BZPOPMAX key.. t  -> ZPOPMIN/ZPOPMAX <served-key>
-    ///   BRPOPLPUSH src dst t       -> RPOPLPUSH src dst
-    ///   BLMOVE src dst f t to      -> LMOVE src dst f t
-    ///   LMPOP/BLMPOP ... L|R [C n] -> LPOP/RPOP <served-key> <count>
-    ///   ZMPOP/BZMPOP ... MIN|MAX   -> ZPOPMIN/ZPOPMAX <served-key> <count>
-    ///   GETDEL key                 -> DEL key
-    /// Returns `None` to propagate verbatim. (frankenredis-ybaw7)
-    fn rewrite_blocking_or_mpop_for_propagation(
-        argv: &[Vec<u8>],
-        reply: &RespFrame,
-    ) -> Option<Vec<Vec<u8>>> {
-        let cmd = argv.first()?;
-        let array_items = |f: &RespFrame| -> Option<Vec<RespFrame>> {
-            match f {
-                RespFrame::Array(Some(v)) | RespFrame::Set(Some(v)) => Some(v.clone()),
-                _ => None,
-            }
-        };
-        let bulk_bytes = |f: &RespFrame| -> Option<Vec<u8>> {
-            match f {
-                RespFrame::BulkString(Some(v)) => Some(v.clone()),
-                _ => None,
-            }
-        };
-
-        if eq_ascii_token(cmd, b"GETDEL") && argv.len() == 2 {
-            return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
-        }
-        if eq_ascii_token(cmd, b"BRPOPLPUSH") && argv.len() == 4 {
-            return Some(vec![b"RPOPLPUSH".to_vec(), argv[1].clone(), argv[2].clone()]);
-        }
-        if eq_ascii_token(cmd, b"BLMOVE") && argv.len() == 6 {
-            return Some(vec![
-                b"LMOVE".to_vec(),
-                argv[1].clone(),
-                argv[2].clone(),
-                argv[3].clone(),
-                argv[4].clone(),
-            ]);
-        }
-        // BLPOP/BRPOP reply = [served-key, value]; BZPOP* = [served-key, member, score].
-        if eq_ascii_token(cmd, b"BLPOP") || eq_ascii_token(cmd, b"BRPOP") {
-            let key = bulk_bytes(array_items(reply)?.first()?)?;
-            let op = if eq_ascii_token(cmd, b"BLPOP") { b"LPOP" } else { b"RPOP" };
-            return Some(vec![op.to_vec(), key]);
-        }
-        if eq_ascii_token(cmd, b"BZPOPMIN") || eq_ascii_token(cmd, b"BZPOPMAX") {
-            let key = bulk_bytes(array_items(reply)?.first()?)?;
-            let op = if eq_ascii_token(cmd, b"BZPOPMIN") { b"ZPOPMIN" } else { b"ZPOPMAX" };
-            return Some(vec![op.to_vec(), key]);
-        }
-        // (B)LMPOP / (B)ZMPOP reply = [served-key, [popped...]]; the direction
-        // token sits right after the key list.
-        let (is_list, numkeys_idx) = if eq_ascii_token(cmd, b"LMPOP") {
-            (true, 1usize)
-        } else if eq_ascii_token(cmd, b"ZMPOP") {
-            (false, 1)
-        } else if eq_ascii_token(cmd, b"BLMPOP") {
-            (true, 2)
-        } else if eq_ascii_token(cmd, b"BZMPOP") {
-            (false, 2)
-        } else {
-            return None;
-        };
-        let numkeys: usize = std::str::from_utf8(argv.get(numkeys_idx)?)
-            .ok()?
-            .parse()
-            .ok()?;
-        let dir = argv.get(numkeys_idx + 1 + numkeys)?;
-        let items = array_items(reply)?;
-        let served_key = bulk_bytes(items.first()?)?;
-        let count = array_items(items.get(1)?)?.len();
-        let op: &[u8] = if is_list {
-            if eq_ascii_token(dir, b"LEFT") {
-                b"LPOP"
-            } else {
-                b"RPOP"
-            }
-        } else if eq_ascii_token(dir, b"MIN") {
-            b"ZPOPMIN"
-        } else {
-            b"ZPOPMAX"
-        };
-        Some(vec![op.to_vec(), served_key, count.to_string().into_bytes()])
-    }
-
     fn rewrite_relative_expire_for_propagation(
         argv: &[Vec<u8>],
         now_ms: u64,
@@ -7033,6 +6807,9 @@ impl Runtime {
     }
 
     fn namespace_argv_for_selected_db(&self, argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        if self.session.selected_db == 0 {
+            return argv.to_vec();
+        }
         let mut rewritten = argv.to_vec();
         for idx in fr_command::command_key_indexes(argv) {
             if let Some(arg) = rewritten.get_mut(idx) {
@@ -17239,6 +17016,21 @@ mod tests {
     }
 
     #[test]
+    fn namespace_argv_for_selected_db_skips_db0_key_reencoding() {
+        let mut rt = Runtime::default_strict();
+        let input = argv(&[b"HGET", b"hash", b"field"]);
+
+        assert_eq!(rt.namespace_argv_for_selected_db(&input), input);
+
+        rt.session.selected_db = 1;
+        let namespaced = rt.namespace_argv_for_selected_db(&input);
+        assert_eq!(namespaced[0], b"HGET".to_vec());
+        assert_eq!(namespaced[1], fr_store::encode_db_key(1, b"hash"));
+        assert_eq!(namespaced[2], b"field".to_vec());
+        assert_eq!(input[1], b"hash".to_vec());
+    }
+
+    #[test]
     fn multi_db_select_scopes_keyspace_commands() {
         let mut rt = Runtime::default_strict();
 
@@ -18136,236 +17928,6 @@ mod tests {
             Some(vec![b"DEL".to_vec(), b"k".to_vec()])
         );
         assert_eq!(rw(&[b"GETEX", b"k"]), None);
-    }
-
-    #[test]
-    fn incrbyfloat_family_rewritten_to_deterministic_set_for_propagation() {
-        // (frankenredis-1uiql) INCRBYFLOAT/HINCRBYFLOAT must propagate as a
-        // SET/HSET of the computed value (from the reply), matching upstream so
-        // a replica or AOF replay reproduces the exact float.
-        let rw = |argv: &[&[u8]], reply: RespFrame| {
-            Runtime::rewrite_nondeterministic_for_propagation(
-                &argv.iter().map(|a| a.to_vec()).collect::<Vec<_>>(),
-                &reply,
-            )
-        };
-        let bulk = |s: &[u8]| RespFrame::BulkString(Some(s.to_vec()));
-
-        // INCRBYFLOAT key incr -> SET key <result>
-        assert_eq!(
-            rw(&[b"INCRBYFLOAT", b"kf", b"2.5"], bulk(b"12.5")),
-            Some(vec![b"SET".to_vec(), b"kf".to_vec(), b"12.5".to_vec(), b"KEEPTTL".to_vec()])
-        );
-        // Case-insensitive command token.
-        assert_eq!(
-            rw(&[b"incrbyfloat", b"kf", b"2.5"], bulk(b"12.5")),
-            Some(vec![b"SET".to_vec(), b"kf".to_vec(), b"12.5".to_vec(), b"KEEPTTL".to_vec()])
-        );
-        // HINCRBYFLOAT key field incr -> HSET key field <result>
-        assert_eq!(
-            rw(&[b"HINCRBYFLOAT", b"h", b"fld", b"3.5"], bulk(b"13.5")),
-            Some(vec![
-                b"HSET".to_vec(),
-                b"h".to_vec(),
-                b"fld".to_vec(),
-                b"13.5".to_vec()
-            ])
-        );
-
-        // Non-targeted commands and non-bulk replies propagate verbatim (None).
-        assert_eq!(rw(&[b"INCR", b"k"], bulk(b"5")), None);
-        assert_eq!(rw(&[b"SET", b"k", b"v"], bulk(b"OK")), None);
-        assert_eq!(
-            rw(&[b"INCRBYFLOAT", b"kf", b"2.5"], RespFrame::Integer(12)),
-            None
-        );
-        // Wrong arity → verbatim.
-        assert_eq!(rw(&[b"INCRBYFLOAT", b"kf"], bulk(b"12.5")), None);
-        assert_eq!(rw(&[b"HINCRBYFLOAT", b"h", b"fld"], bulk(b"13.5")), None);
-    }
-
-    #[test]
-    fn spop_rewritten_to_srem_or_del_for_propagation() {
-        // (frankenredis-1uiql) SPOP must propagate as SREM of the exact members
-        // removed (from the reply), or DEL when the pop drained the set — so a
-        // replica/AOF replay does not re-randomize.
-        let mut rt = Runtime::default_strict();
-        rt.execute_frame(command(&[b"SADD", b"s", b"a", b"b", b"c", b"d"]), 0);
-        let v = |s: &[u8]| s.to_vec();
-        let bulk = |s: &[u8]| RespFrame::BulkString(Some(s.to_vec()));
-
-        // Partial pop, key still present → SREM key <members>.
-        let reply = RespFrame::Array(Some(vec![bulk(b"a"), bulk(b"b")]));
-        assert_eq!(
-            rt.rewrite_spop_for_propagation(&[v(b"SPOP"), v(b"s"), v(b"2")], &reply),
-            Some(vec![v(b"SREM"), v(b"s"), v(b"a"), v(b"b")])
-        );
-
-        // No-count form (single bulk reply), key still present → SREM key member.
-        assert_eq!(
-            rt.rewrite_spop_for_propagation(&[v(b"SPOP"), v(b"s")], &bulk(b"c")),
-            Some(vec![v(b"SREM"), v(b"s"), v(b"c")])
-        );
-
-        // A key that is absent (the pop drained it) → DEL key.
-        let reply = RespFrame::Array(Some(vec![bulk(b"x"), bulk(b"y")]));
-        assert_eq!(
-            rt.rewrite_spop_for_propagation(&[v(b"SPOP"), v(b"gone"), v(b"2")], &reply),
-            Some(vec![v(b"DEL"), v(b"gone")])
-        );
-
-        // Non-SPOP / empty reply → verbatim (None).
-        assert_eq!(
-            rt.rewrite_spop_for_propagation(&[v(b"SREM"), v(b"s"), v(b"a")], &bulk(b"a")),
-            None
-        );
-        assert_eq!(
-            rt.rewrite_spop_for_propagation(&[v(b"SPOP"), v(b"s")], &RespFrame::BulkString(None)),
-            None
-        );
-    }
-
-    #[test]
-    fn xadd_autoid_rewritten_to_concrete_id_for_propagation() {
-        // (frankenredis-f9byo) XADD's auto id must be replaced with the id the
-        // master assigned (from the reply) so replicas/AOF replay don't generate
-        // a divergent id from their own clock. Explicit ids propagate verbatim.
-        let rw = |argv: &[&[u8]], reply: RespFrame| {
-            Runtime::rewrite_xadd_autoid_for_propagation(
-                &argv.iter().map(|a| a.to_vec()).collect::<Vec<_>>(),
-                &reply,
-            )
-        };
-        let id = |s: &[u8]| RespFrame::BulkString(Some(s.to_vec()));
-        let vv = |items: &[&[u8]]| items.iter().map(|i| i.to_vec()).collect::<Vec<_>>();
-
-        // Plain `XADD key * f v` -> id replaced.
-        assert_eq!(
-            rw(&[b"XADD", b"s", b"*", b"f", b"v"], id(b"10-0")),
-            Some(vv(&[b"XADD", b"s", b"10-0", b"f", b"v"]))
-        );
-        // Trim args preserved, id (after MAXLEN ~ n LIMIT n) rewritten.
-        assert_eq!(
-            rw(
-                &[
-                    b"XADD", b"s", b"MAXLEN", b"~", b"5", b"LIMIT", b"10", b"*", b"f", b"v"
-                ],
-                id(b"11-0")
-            ),
-            Some(vv(&[
-                b"XADD", b"s", b"MAXLEN", b"~", b"5", b"LIMIT", b"10", b"11-0", b"f", b"v"
-            ]))
-        );
-        // NOMKSTREAM + MINID, partial `<ms>-*` resolved.
-        assert_eq!(
-            rw(
-                &[
-                    b"XADD",
-                    b"s",
-                    b"NOMKSTREAM",
-                    b"MINID",
-                    b"3",
-                    b"5-*",
-                    b"f",
-                    b"v"
-                ],
-                id(b"5-0")
-            ),
-            Some(vv(&[
-                b"XADD",
-                b"s",
-                b"NOMKSTREAM",
-                b"MINID",
-                b"3",
-                b"5-0",
-                b"f",
-                b"v"
-            ]))
-        );
-        // Fully-explicit id → verbatim (None).
-        assert_eq!(
-            rw(&[b"XADD", b"s", b"100-1", b"f", b"v"], id(b"100-1")),
-            None
-        );
-        // Non-XADD / non-bulk reply → None.
-        assert_eq!(rw(&[b"SET", b"k", b"v"], id(b"x")), None);
-        assert_eq!(
-            rw(
-                &[b"XADD", b"s", b"*", b"f", b"v"],
-                RespFrame::BulkString(None)
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn blocking_and_mpop_and_getdel_rewritten_for_propagation() {
-        // (frankenredis-ybaw7) Blocking pops / *MPOP / GETDEL must propagate as
-        // the concrete deterministic command (verified byte-exact vs the oracle
-        // replication stream).
-        let rw = |argv: &[&[u8]], reply: RespFrame| {
-            Runtime::rewrite_blocking_or_mpop_for_propagation(
-                &argv.iter().map(|a| a.to_vec()).collect::<Vec<_>>(),
-                &reply,
-            )
-        };
-        let b = |s: &[u8]| RespFrame::BulkString(Some(s.to_vec()));
-        let arr = |items: Vec<RespFrame>| RespFrame::Array(Some(items));
-        let vv = |items: &[&[u8]]| items.iter().map(|i| i.to_vec()).collect::<Vec<_>>();
-
-        // BLPOP/BRPOP -> LPOP/RPOP <served-key> (key from reply [key, value]).
-        assert_eq!(
-            rw(&[b"BLPOP", b"a", b"l", b"0"], arr(vec![b(b"l"), b(b"v")])),
-            Some(vv(&[b"LPOP", b"l"]))
-        );
-        assert_eq!(
-            rw(&[b"BRPOP", b"l", b"0"], arr(vec![b(b"l"), b(b"v")])),
-            Some(vv(&[b"RPOP", b"l"]))
-        );
-        // BZPOPMIN/MAX -> ZPOPMIN/MAX <served-key> (reply [key, member, score]).
-        assert_eq!(
-            rw(&[b"BZPOPMIN", b"z", b"0"], arr(vec![b(b"z"), b(b"m"), b(b"1")])),
-            Some(vv(&[b"ZPOPMIN", b"z"]))
-        );
-        // BRPOPLPUSH / BLMOVE -> non-blocking move (no reply needed).
-        assert_eq!(
-            rw(&[b"BRPOPLPUSH", b"s", b"d", b"0"], b(b"x")),
-            Some(vv(&[b"RPOPLPUSH", b"s", b"d"]))
-        );
-        assert_eq!(
-            rw(&[b"BLMOVE", b"s", b"d", b"LEFT", b"RIGHT", b"0"], b(b"x")),
-            Some(vv(&[b"LMOVE", b"s", b"d", b"LEFT", b"RIGHT"]))
-        );
-        // LMPOP/ZMPOP -> LPOP/ZPOPMIN <served-key> <count> (count = popped len).
-        assert_eq!(
-            rw(
-                &[b"LMPOP", b"2", b"x", b"l", b"LEFT", b"COUNT", b"2"],
-                arr(vec![b(b"l"), arr(vec![b(b"a"), b(b"b")])])
-            ),
-            Some(vv(&[b"LPOP", b"l", b"2"]))
-        );
-        assert_eq!(
-            rw(
-                &[b"ZMPOP", b"1", b"z", b"MIN", b"COUNT", b"2"],
-                arr(vec![
-                    b(b"z"),
-                    arr(vec![arr(vec![b(b"a"), b(b"1")]), arr(vec![b(b"b"), b(b"2")])])
-                ])
-            ),
-            Some(vv(&[b"ZPOPMIN", b"z", b"2"]))
-        );
-        // BLMPOP timeout numkeys ... RIGHT -> RPOP <served-key> <count>.
-        assert_eq!(
-            rw(
-                &[b"BLMPOP", b"0", b"1", b"l", b"RIGHT"],
-                arr(vec![b(b"l"), arr(vec![b(b"a")])])
-            ),
-            Some(vv(&[b"RPOP", b"l", b"1"]))
-        );
-        // GETDEL -> DEL.
-        assert_eq!(rw(&[b"GETDEL", b"k"], b(b"v")), Some(vv(&[b"DEL", b"k"])));
-        // Unrelated command -> verbatim.
-        assert_eq!(rw(&[b"LPOP", b"l"], b(b"a")), None);
     }
 
     #[test]

@@ -49495,6 +49495,85 @@ mod tests {
             ),
             Some(vec![v(b"DEL"), v(b"gone")])
         );
+        // HINCRBYFLOAT -> HSET <value> (no KEEPTTL; HSET preserves the key TTL).
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"HINCRBYFLOAT"), v(b"h"), v(b"fld"), v(b"3.5")],
+                &b(b"13.5"),
+                &store,
+            ),
+            Some(vec![v(b"HSET"), v(b"h"), v(b"fld"), v(b"13.5")])
+        );
+        // Blocking pops -> resolved non-blocking form (served key from reply).
+        let arr = |items: Vec<RespFrame>| RespFrame::Array(Some(items));
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"BLPOP"), v(b"a"), v(b"l"), v(b"0")],
+                &arr(vec![b(b"l"), b(b"x")]),
+                &store,
+            ),
+            Some(vec![v(b"LPOP"), v(b"l")])
+        );
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"BRPOP"), v(b"l"), v(b"0")],
+                &arr(vec![b(b"l"), b(b"x")]),
+                &store,
+            ),
+            Some(vec![v(b"RPOP"), v(b"l")])
+        );
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"BZPOPMIN"), v(b"z"), v(b"0")],
+                &arr(vec![b(b"z"), b(b"m"), b(b"1")]),
+                &store,
+            ),
+            Some(vec![v(b"ZPOPMIN"), v(b"z")])
+        );
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"BRPOPLPUSH"), v(b"s"), v(b"d"), v(b"0")],
+                &b(b"x"),
+                &store,
+            ),
+            Some(vec![v(b"RPOPLPUSH"), v(b"s"), v(b"d")])
+        );
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"BLMOVE"), v(b"s"), v(b"d"), v(b"LEFT"), v(b"RIGHT"), v(b"0")],
+                &b(b"x"),
+                &store,
+            ),
+            Some(vec![v(b"LMOVE"), v(b"s"), v(b"d"), v(b"LEFT"), v(b"RIGHT")])
+        );
+        // (B)LMPOP / (B)ZMPOP -> LPOP/RPOP/ZPOPMIN/ZPOPMAX <served-key> <count>.
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"LMPOP"), v(b"2"), v(b"x"), v(b"l"), v(b"LEFT"), v(b"COUNT"), v(b"2")],
+                &arr(vec![b(b"l"), arr(vec![b(b"a"), b(b"b")])]),
+                &store,
+            ),
+            Some(vec![v(b"LPOP"), v(b"l"), v(b"2")])
+        );
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"ZMPOP"), v(b"1"), v(b"z"), v(b"MIN"), v(b"COUNT"), v(b"2")],
+                &arr(vec![
+                    b(b"z"),
+                    arr(vec![arr(vec![b(b"a"), b(b"1")]), arr(vec![b(b"b"), b(b"2")])]),
+                ]),
+                &store,
+            ),
+            Some(vec![v(b"ZPOPMIN"), v(b"z"), v(b"2")])
+        );
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"BLMPOP"), v(b"0"), v(b"1"), v(b"l"), v(b"RIGHT")],
+                &arr(vec![b(b"l"), arr(vec![b(b"a")])]),
+                &store,
+            ),
+            Some(vec![v(b"RPOP"), v(b"l"), v(b"1")])
+        );
         // Non-targeted command -> verbatim (None).
         assert_eq!(
             super::rewrite_effect_command_for_propagation(&[v(b"SET"), v(b"k"), v(b"x")], &b(b"OK"), &store),
