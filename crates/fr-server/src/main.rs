@@ -3241,23 +3241,40 @@ fn suppress_client_network_reply(
     if matches!(response, RespFrame::Error(_)) {
         return false;
     }
-    let Ok(argv) = fr_command::frame_to_argv(frame) else {
+    frame_matches_suppressed_replication_reply(frame)
+}
+
+fn frame_arg_bytes(frame: &RespFrame) -> Option<&[u8]> {
+    match frame {
+        RespFrame::BulkString(Some(bytes)) => Some(bytes.as_slice()),
+        RespFrame::SimpleString(text) => Some(text.as_bytes()),
+        _ => None,
+    }
+}
+
+fn frame_matches_suppressed_replication_reply(frame: &RespFrame) -> bool {
+    let RespFrame::Array(Some(items)) = frame else {
         return false;
     };
-    match argv.as_slice() {
-        [command, subcommand, _]
-            if command.eq_ignore_ascii_case(b"REPLCONF")
-                && subcommand.eq_ignore_ascii_case(b"ACK") =>
-        {
-            true
+    match items.as_slice() {
+        [command, subcommand, argument] => {
+            let Some(command) = frame_arg_bytes(command) else {
+                return false;
+            };
+            if !command.eq_ignore_ascii_case(b"REPLCONF") {
+                return false;
+            }
+            let Some(subcommand) = frame_arg_bytes(subcommand) else {
+                return false;
+            };
+            if subcommand.eq_ignore_ascii_case(b"ACK") {
+                return true;
+            }
+            subcommand.eq_ignore_ascii_case(b"GETACK")
+                && frame_arg_bytes(argument).is_some_and(|argument| argument == b"*")
         }
-        [command] if command.eq_ignore_ascii_case(b"SYNC") => true,
-        [command, subcommand, argument]
-            if command.eq_ignore_ascii_case(b"REPLCONF")
-                && subcommand.eq_ignore_ascii_case(b"GETACK")
-                && argument.as_slice() == b"*" =>
-        {
-            true
+        [command] => {
+            frame_arg_bytes(command).is_some_and(|command| command.eq_ignore_ascii_case(b"SYNC"))
         }
         _ => false,
     }
@@ -3304,8 +3321,9 @@ mod tests {
         ReplicaSyncState, StartupConfig, apply_pending_client_unblocks, check_blocked_clients,
         consume_complete_replication_prefix, drain_replica_stream, drive_replica_sync,
         encode_eof_marked_replication_snapshot, encode_replication_snapshot, find_crlf,
-        parse_blocking_deadline, parse_xread_block_deadline_argv, process_buffered_frames,
-        read_frame_from_stream, read_replication_snapshot_from_stream, replica_handshake_frame,
+        frame_matches_suppressed_replication_reply, parse_blocking_deadline,
+        parse_xread_block_deadline_argv, process_buffered_frames, read_frame_from_stream,
+        read_replication_snapshot_from_stream, replica_handshake_frame,
         replica_handshake_read_timeout, replication_follow_up_bytes, resolve_xread_block_argv,
         server_help_text, should_try_inline_parsing, startup_config_from_directives,
         sync_replica_with_primary, try_build_blocked_state, try_fulfill_blocked,
@@ -3321,6 +3339,55 @@ mod tests {
     fn server_bootstrap_creates_runtime() {
         let _strict = Runtime::new(RuntimePolicy::default());
         let _hardened = Runtime::new(RuntimePolicy::hardened());
+    }
+
+    #[test]
+    fn frame_suppression_matcher_preserves_replication_control_cases() {
+        fn bulk(bytes: &[u8]) -> RespFrame {
+            RespFrame::BulkString(Some(bytes.to_vec()))
+        }
+
+        fn array(items: Vec<RespFrame>) -> RespFrame {
+            RespFrame::Array(Some(items))
+        }
+
+        assert!(frame_matches_suppressed_replication_reply(&array(vec![
+            bulk(b"REPLCONF"),
+            bulk(b"ACK"),
+            bulk(b"123"),
+        ])));
+        assert!(frame_matches_suppressed_replication_reply(&array(vec![
+            bulk(b"replconf"),
+            bulk(b"getack"),
+            RespFrame::SimpleString("*".to_string()),
+        ])));
+        assert!(frame_matches_suppressed_replication_reply(&array(vec![
+            RespFrame::SimpleString("sync".to_string()),
+        ])));
+
+        assert!(!frame_matches_suppressed_replication_reply(&array(vec![
+            bulk(b"HGET"),
+            bulk(b"hash"),
+            bulk(b"field"),
+        ])));
+        assert!(!frame_matches_suppressed_replication_reply(&array(vec![
+            bulk(b"REPLCONF"),
+            bulk(b"GETACK"),
+            bulk(b"1"),
+        ])));
+        assert!(!frame_matches_suppressed_replication_reply(&array(vec![
+            bulk(b"REPLCONF"),
+            bulk(b"ACK"),
+        ])));
+        assert!(!frame_matches_suppressed_replication_reply(&array(vec![
+            bulk(b"REPLCONF"),
+            bulk(b"ACK"),
+            bulk(b"1"),
+            bulk(b"extra"),
+        ])));
+        assert!(!frame_matches_suppressed_replication_reply(&array(vec![
+            RespFrame::Integer(0),
+        ])));
     }
 
     #[test]
