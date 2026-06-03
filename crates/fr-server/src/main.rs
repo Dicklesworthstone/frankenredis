@@ -969,6 +969,12 @@ fn main() -> ExitCode {
         // Deliver pending replication writes to connected replicas.
         propagate_writes_to_replicas(&mut clients, &mut runtime, &mut poll, &mut write_tokens);
 
+        // (frankenredis-ol9tz) Incrementally append this tick's captured AOF
+        // records to the on-disk AOF file and fsync per appendfsync policy.
+        // Without this, writes between full rewrites (SAVE/BGREWRITEAOF) were
+        // never persisted and were lost on restart.
+        runtime.flush_aof_to_disk(ts);
+
         // Deliver pending Pub/Sub messages to subscribed clients.
         deliver_pubsub_messages(
             &mut clients,

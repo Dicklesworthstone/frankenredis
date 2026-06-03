@@ -2236,6 +2236,16 @@ pub struct ServerState {
     /// For a primary this is 0. For a replica after FULLRESYNC, this is the
     /// primary's offset at sync time.
     aof_base_offset: u64,
+    /// Count of `aof_records` already appended to the on-disk AOF file. The
+    /// incremental AOF flush (frankenredis-ol9tz) appends records beyond this
+    /// cursor once per event-loop iteration so writes made between full
+    /// rewrites are durable on restart. Reset to `aof_records.len()` after any
+    /// full rewrite/load that re-materializes the file from scratch, and to 0
+    /// whenever `aof_records` is cleared.
+    aof_disk_flushed_records: usize,
+    /// Wall-clock ms of the last AOF fsync, used to rate-limit the `everysec`
+    /// fsync policy to at most once per second.
+    aof_last_fsync_ms: u64,
     aof_selected_db: usize,
     replication_runtime_state: ReplicationRuntimeState,
     evidence: EvidenceLedger,
@@ -2391,6 +2401,8 @@ impl Default for ServerState {
             store,
             aof_records: Vec::new(),
             aof_base_offset: 0,
+            aof_disk_flushed_records: 0,
+            aof_last_fsync_ms: 0,
             aof_selected_db: 0,
             evidence: EvidenceLedger::default(),
             auth_state: AuthState::default(),
@@ -2570,6 +2582,8 @@ impl ServerState {
         preserve_store_load_context(&mut replayed_store, &self.store);
         self.store = replayed_store;
         self.aof_records = records;
+        // (frankenredis-ol9tz) Replayed records mirror the on-disk file.
+        self.aof_disk_flushed_records = self.aof_records.len();
         Ok(count)
     }
 
@@ -3263,6 +3277,9 @@ impl Runtime {
         }
 
         self.server.aof_records = records;
+        // (frankenredis-ol9tz) The replayed records are exactly the on-disk
+        // file contents, so the incremental flush starts from the tail.
+        self.server.aof_disk_flushed_records = self.server.aof_records.len();
         self.server.aof_selected_db = self.session.selected_db;
         self.session.selected_db = original_db;
         // Preserve server context that the boot path established on
@@ -3294,7 +3311,7 @@ impl Runtime {
     }
 
     fn handle_debug_reload_requested(&mut self, now_ms: u64) -> RespFrame {
-        if let Err(reply) = self.persist_snapshot_to_disk(now_ms, false) {
+        if let Err(reply) = self.persist_snapshot_to_disk(now_ms, false, true) {
             return reply;
         }
 
@@ -3618,6 +3635,9 @@ impl Runtime {
                     u64::try_from(counts.loaded).unwrap_or(u64::MAX);
                 self.server.store = store;
                 self.server.aof_records.clear();
+                // (frankenredis-ol9tz) Buffer reset to empty; AOF flush cursor
+                // must follow so it doesn't index past the cleared buffer.
+                self.server.aof_disk_flushed_records = 0;
                 // Track the base offset where the local AOF buffer starts.
                 // New records will be indexed from 0, but they correspond to
                 // absolute offset starting at this value.
@@ -11644,7 +11664,7 @@ impl Runtime {
         if argv.len() != 1 {
             return CommandError::WrongArity("SAVE").to_resp();
         }
-        if let Err(reply) = self.persist_snapshot_to_disk(now_ms, true) {
+        if let Err(reply) = self.persist_snapshot_to_disk(now_ms, true, true) {
             return reply;
         }
         self.server.store.record_save(now_ms, false);
@@ -11678,7 +11698,9 @@ impl Runtime {
                     RespFrame::Error("ERR Can't bgsave: fork error".to_string())
                 }
                 0 => {
-                    let result = self.persist_snapshot_to_disk(now_ms, true);
+                    // Forked child: RDB only — see persist_snapshot_to_disk's
+                    // write_aof note (frankenredis-ol9tz).
+                    let result = self.persist_snapshot_to_disk(now_ms, true, false);
                     std::process::exit(if result.is_ok() { 0 } else { 1 });
                 }
                 pid => {
@@ -11693,7 +11715,7 @@ impl Runtime {
         }
         #[cfg(not(unix))]
         {
-            if let Err(reply) = self.persist_snapshot_to_disk(now_ms, true) {
+            if let Err(reply) = self.persist_snapshot_to_disk(now_ms, true, true) {
                 self.server.store.record_bgsave_status(false);
                 return reply;
             }
@@ -11708,8 +11730,15 @@ impl Runtime {
         &mut self,
         now_ms: u64,
         record_aof_write_status: bool,
+        write_aof: bool,
     ) -> Result<(), RespFrame> {
-        if let Some(path) = &self.server.aof_path {
+        // (frankenredis-ol9tz) `write_aof` is false only for the forked BGSAVE
+        // child, which must rewrite the RDB alone: it cannot advance the
+        // parent's `aof_disk_flushed_records` cursor, so letting it rename a
+        // fresh AOF base out from under the parent would make the parent's
+        // incremental tail duplicate the base on the next flush. The AOF stays
+        // current via the per-iteration incremental flush + BGREWRITEAOF.
+        if write_aof && let Some(path) = &self.server.aof_path {
             let commands = self.server.store.to_aof_commands(now_ms);
             let records = argv_to_aof_records(commands);
             if write_aof_file(path, &records).is_err() {
@@ -11720,6 +11749,10 @@ impl Runtime {
                     "ERR error saving dataset to disk".to_string(),
                 ));
             }
+            // The file now fully represents current state; the incremental
+            // flush must resume appending only records captured after this
+            // rewrite, so anchor the cursor at the current buffer length.
+            self.server.aof_disk_flushed_records = self.server.aof_records.len();
             if record_aof_write_status {
                 self.server.store.record_aof_write_status(true);
             }
@@ -11739,6 +11772,77 @@ impl Runtime {
         }
 
         Ok(())
+    }
+
+    /// Append AOF records captured since the last flush to the on-disk AOF
+    /// file and fsync per the configured `appendfsync` policy. Called once per
+    /// event-loop iteration (the `beforeSleep`/`flushAppendOnlyFile` analog).
+    /// (frankenredis-ol9tz)
+    ///
+    /// fr's AOF is a single command-log file that, before this, was only ever
+    /// rewritten wholesale from store state by SAVE/BGSAVE/BGREWRITEAOF — so
+    /// every write made between those snapshots was lost on restart (the file
+    /// was often never even created). This incremental tail makes ordinary
+    /// writes durable. Records beyond `aof_disk_flushed_records` are appended;
+    /// the snapshot rewriters anchor that cursor at `aof_records.len()` so a
+    /// freshly written base is never duplicated.
+    ///
+    /// The file is opened fresh each flush rather than held open: `write_aof_file`
+    /// replaces the path via atomic rename, so a long-lived handle would point
+    /// at the stale, unlinked inode after any rewrite. (A persistent fd guarded
+    /// against rewrite is a possible future perf lever.)
+    pub fn flush_aof_to_disk(&mut self, now_ms: u64) {
+        let path = match &self.server.aof_path {
+            Some(path) => path.clone(),
+            None => return,
+        };
+        // Respect a runtime `CONFIG SET appendonly no`: stop appending, but
+        // leave the file and cursor intact for a later re-enable/rewrite.
+        if !self.server.store.aof_enabled {
+            return;
+        }
+        let flushed = self
+            .server
+            .aof_disk_flushed_records
+            .min(self.server.aof_records.len());
+        let pending = &self.server.aof_records[flushed..];
+        let want_fsync = match self.server.appendfsync_mode {
+            AppendFsyncMode::Always => !pending.is_empty(),
+            AppendFsyncMode::Everysec => {
+                now_ms.saturating_sub(self.server.aof_last_fsync_ms) >= 1000
+            }
+            AppendFsyncMode::No => false,
+        };
+        if pending.is_empty() && !want_fsync {
+            return;
+        }
+        let mut file = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(_) => {
+                self.server.store.record_aof_write_status(false);
+                return;
+            }
+        };
+        if !pending.is_empty() {
+            let bytes = encode_aof_stream(pending);
+            if std::io::Write::write_all(&mut file, &bytes).is_err() {
+                self.server.store.record_aof_write_status(false);
+                return;
+            }
+            self.server.aof_disk_flushed_records = self.server.aof_records.len();
+            self.server.store.record_aof_write_status(true);
+        }
+        if want_fsync {
+            if file.sync_data().is_err() {
+                self.server.store.record_aof_write_status(false);
+                return;
+            }
+            self.server.aof_last_fsync_ms = now_ms;
+        }
     }
 
     fn handle_lastsave_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -11779,6 +11883,9 @@ impl Runtime {
             self.server.store.record_aof_bgrewrite_status(false);
             return RespFrame::Error("ERR error rewriting AOF file".to_string());
         }
+        // (frankenredis-ol9tz) The file now holds a fresh full base; the
+        // incremental flush must append only post-rewrite records.
+        self.server.aof_disk_flushed_records = self.server.aof_records.len();
         self.server.aof_rewrite_scheduled = false;
         self.server.replication_ack_state.local_fsync_offset =
             self.server.replication_ack_state.primary_offset;
@@ -18667,6 +18774,117 @@ mod tests {
             rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"50"]), 4),
             RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
         );
+    }
+
+    #[test]
+    fn incremental_aof_flush_persists_writes_between_rewrites() {
+        // (frankenredis-ol9tz) Writes made between full rewrites must be
+        // appended to the on-disk AOF by flush_aof_to_disk; before this fix
+        // the file was only ever rewritten wholesale on SAVE/BGREWRITEAOF, so
+        // ordinary writes were silently lost on restart.
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_incremental_aof_flush_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("appendonly.aof");
+        let _ = std::fs::remove_file(&path);
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(path.clone());
+
+        // No rewrite has run; the file should not exist yet.
+        assert!(!path.exists(), "AOF file must not exist before any flush");
+
+        // First batch of writes, then an incremental flush.
+        rt.execute_frame(command(&[b"SET", b"k1", b"v1"]), 1);
+        rt.execute_frame(command(&[b"SET", b"k2", b"v2"]), 2);
+        rt.flush_aof_to_disk(3);
+
+        let bytes = std::fs::read(&path).expect("AOF file created by flush");
+        let records = decode_aof_stream(&bytes).expect("decode flushed AOF");
+        let argvs: Vec<Vec<Vec<u8>>> = records.iter().map(|r| r.argv.clone()).collect();
+        assert!(
+            argvs
+                .iter()
+                .any(|a| a.first().is_some_and(|c| c.eq_ignore_ascii_case(b"SET"))
+                    && a.get(1).is_some_and(|k| k.as_slice() == b"k1")),
+            "flushed AOF must contain `SET k1`, got {argvs:?}"
+        );
+
+        // A second batch flushes only the new records (append, not rewrite).
+        rt.execute_frame(command(&[b"SET", b"k3", b"v3"]), 4);
+        rt.flush_aof_to_disk(5);
+
+        // Replay the whole file into a fresh runtime and confirm every key
+        // survives — this is the restart path.
+        let bytes = std::fs::read(&path).expect("read AOF after second flush");
+        let records = decode_aof_stream(&bytes).expect("decode AOF after second flush");
+        let mut reloaded = Runtime::default_strict();
+        reloaded.replay_aof_records(&records, 9_000);
+        for (k, v) in [(b"k1", b"v1"), (b"k2", b"v2"), (b"k3", b"v3")] {
+            assert_eq!(
+                reloaded.execute_frame(command(&[b"GET", k]), 9_001),
+                RespFrame::BulkString(Some(v.to_vec())),
+                "key {} must survive an AOF reload",
+                String::from_utf8_lossy(k)
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn incremental_aof_flush_after_bgrewriteaof_appends_not_duplicates() {
+        // (frankenredis-ol9tz) Writes made AFTER a BGREWRITEAOF must be
+        // appended past the freshly written base, and the base must not be
+        // duplicated by the next incremental flush (the cursor is anchored at
+        // rewrite time).
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_aof_flush_post_rewrite_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("appendonly.aof");
+        let _ = std::fs::remove_file(&path);
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(path.clone());
+        rt.execute_frame(command(&[b"SET", b"base", b"1"]), 1);
+        rt.execute_frame(command(&[b"BGREWRITEAOF"]), 2);
+        rt.execute_frame(command(&[b"SET", b"after", b"2"]), 3);
+        rt.flush_aof_to_disk(4);
+
+        let bytes = std::fs::read(&path).expect("read AOF");
+        let records = decode_aof_stream(&bytes).expect("decode AOF");
+        let mut reloaded = Runtime::default_strict();
+        reloaded.replay_aof_records(&records, 9_000);
+        assert_eq!(
+            reloaded.execute_frame(command(&[b"GET", b"base"]), 9_001),
+            RespFrame::BulkString(Some(b"1".to_vec())),
+            "pre-rewrite key must survive"
+        );
+        assert_eq!(
+            reloaded.execute_frame(command(&[b"GET", b"after"]), 9_002),
+            RespFrame::BulkString(Some(b"2".to_vec())),
+            "post-rewrite key must survive (the original ol9tz bug)"
+        );
+        // `base` was SET exactly once; replay must not have applied it twice in
+        // a way that corrupts a counter. Use a numeric witness instead: the
+        // base snapshot for a string is a single SET, so the decoded stream
+        // must contain exactly one SET for `base`.
+        let base_sets = records
+            .iter()
+            .filter(|r| {
+                r.argv
+                    .first()
+                    .is_some_and(|c| c.eq_ignore_ascii_case(b"SET"))
+                    && r.argv.get(1).is_some_and(|k| k.as_slice() == b"base")
+            })
+            .count();
+        assert_eq!(base_sets, 1, "base must appear once, not duplicated");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
