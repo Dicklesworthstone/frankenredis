@@ -17207,17 +17207,25 @@ fn hll_encode(registers: &[u8], encoding: HllEncoding) -> Vec<u8> {
     data
 }
 
+// HLL dense registers are 6-bit LSB-first fields. Exactly 4 registers occupy
+// 24 bits = 3 bytes, and both HLL_REGISTERS (16384 = 4096·4) and the dense
+// payload (12288 = 4096·3) are exact multiples, so the codec runs in 4096
+// remainder-free groups: one 24-bit word per group instead of per-register
+// bit/8, bit%8, and masked-OR byte loads/stores. (frankenredis-kgsni)
 fn hll_encode_dense_registers(registers: &[u8]) -> Vec<u8> {
     let mut payload = vec![0u8; HLL_REDIS_DENSE_REGISTER_BYTES];
-    for (index, &register) in registers.iter().take(HLL_REGISTERS).enumerate() {
-        let bit = index * 6;
-        let byte = bit / 8;
-        let shift = bit % 8;
-        let value = u16::from(register & 0x3f);
-        payload[byte] |= (value << shift) as u8;
-        if shift > 2 {
-            payload[byte + 1] |= (value >> (8 - shift)) as u8;
-        }
+    for (regs, bytes) in registers
+        .chunks_exact(4)
+        .zip(payload.chunks_exact_mut(3))
+        .take(HLL_REGISTERS / 4)
+    {
+        let w = (u32::from(regs[0] & 0x3f))
+            | (u32::from(regs[1] & 0x3f) << 6)
+            | (u32::from(regs[2] & 0x3f) << 12)
+            | (u32::from(regs[3] & 0x3f) << 18);
+        bytes[0] = w as u8;
+        bytes[1] = (w >> 8) as u8;
+        bytes[2] = (w >> 16) as u8;
     }
     payload
 }
@@ -17227,13 +17235,16 @@ fn hll_decode_dense_registers(payload: &[u8]) -> Result<Vec<u8>, StoreError> {
         return Err(StoreError::InvalidHllValue);
     }
     let mut registers = vec![0u8; HLL_REGISTERS];
-    for (index, register) in registers.iter_mut().enumerate() {
-        let bit = index * 6;
-        let byte = bit / 8;
-        let shift = bit % 8;
-        let raw =
-            u16::from(payload[byte]) | u16::from(payload.get(byte + 1).copied().unwrap_or(0)) << 8;
-        *register = ((raw >> shift) & 0x3f) as u8;
+    for (regs, bytes) in registers
+        .chunks_exact_mut(4)
+        .zip(payload.chunks_exact(3))
+    {
+        let w =
+            u32::from(bytes[0]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[2]) << 16);
+        regs[0] = (w & 0x3f) as u8;
+        regs[1] = ((w >> 6) & 0x3f) as u8;
+        regs[2] = ((w >> 12) & 0x3f) as u8;
+        regs[3] = ((w >> 18) & 0x3f) as u8;
     }
     Ok(registers)
 }
@@ -26135,6 +26146,78 @@ mod tests {
     fn hll_selftest_passes() {
         let store = Store::new();
         store.hll_selftest().unwrap();
+    }
+
+    #[test]
+    fn hll_dense_codec_batched_matches_per_register_and_reports_ab_ratio() {
+        use super::{HLL_REDIS_DENSE_REGISTER_BYTES, HLL_REGISTERS};
+        // Per-register reference codec (the prior form). (frankenredis-kgsni)
+        fn ref_encode(registers: &[u8]) -> Vec<u8> {
+            let mut payload = vec![0u8; HLL_REDIS_DENSE_REGISTER_BYTES];
+            for (index, &register) in registers.iter().take(HLL_REGISTERS).enumerate() {
+                let bit = index * 6;
+                let byte = bit / 8;
+                let shift = bit % 8;
+                let value = u16::from(register & 0x3f);
+                payload[byte] |= (value << shift) as u8;
+                if shift > 2 {
+                    payload[byte + 1] |= (value >> (8 - shift)) as u8;
+                }
+            }
+            payload
+        }
+        fn ref_decode(payload: &[u8]) -> Vec<u8> {
+            let mut registers = vec![0u8; HLL_REGISTERS];
+            for (index, register) in registers.iter_mut().enumerate() {
+                let bit = index * 6;
+                let byte = bit / 8;
+                let shift = bit % 8;
+                let raw = u16::from(payload[byte])
+                    | u16::from(payload.get(byte + 1).copied().unwrap_or(0)) << 8;
+                *register = ((raw >> shift) & 0x3f) as u8;
+            }
+            registers
+        }
+
+        let mut state: u64 = 0x5151_2323_9696_ABAB;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Equivalence + round-trip on random full register arrays (values 0..=63).
+        for _ in 0..50 {
+            let regs: Vec<u8> = (0..HLL_REGISTERS).map(|_| (next() & 0x3f) as u8).collect();
+            let enc = super::hll_encode_dense_registers(&regs);
+            assert_eq!(enc, ref_encode(&regs), "encode mismatch");
+            let dec = super::hll_decode_dense_registers(&enc).expect("decode");
+            assert_eq!(dec, ref_decode(&enc), "decode mismatch");
+            assert_eq!(dec, regs, "round-trip mismatch");
+        }
+
+        // A/B: batched codec vs per-register reference (encode+decode), release.
+        let regs: Vec<u8> = (0..HLL_REGISTERS).map(|_| (next() % 52) as u8).collect();
+        let payload = super::hll_encode_dense_registers(&regs);
+        let reps = 2000;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(ref_encode(std::hint::black_box(&regs)));
+            std::hint::black_box(ref_decode(std::hint::black_box(&payload)));
+        }
+        let ref_ns = t0.elapsed().as_nanos().max(1);
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(super::hll_encode_dense_registers(std::hint::black_box(&regs)));
+            std::hint::black_box(
+                super::hll_decode_dense_registers(std::hint::black_box(&payload)).unwrap(),
+            );
+        }
+        let batched_ns = t1.elapsed().as_nanos().max(1);
+        let ratio = ref_ns as f64 / batched_ns as f64;
+        println!(
+            "HLL dense codec A/B (enc+dec) x{reps}: per-register={ref_ns}ns batched={batched_ns}ns ratio={ratio:.2}x"
+        );
     }
 
     #[test]
