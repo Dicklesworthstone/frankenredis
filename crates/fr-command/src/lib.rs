@@ -1973,6 +1973,97 @@ fn command_key_references_with_exact_flags(
         ));
     }
 
+    // Stream consumer-group / introspection commands carry per-subcommand
+    // key_specs that the generic write/readonly fallback mis-derives as a
+    // bare `access` flag. Mirror vendored commands/{xgroup,xinfo,xack,
+    // xclaim,xautoclaim,memory-usage,migrate}.json exactly so COMMAND
+    // GETKEYSANDFLAGS reports the real RW/RO + insert/update/delete flags.
+    // (frankenredis-agx04)
+    if cmd_name.eq_ignore_ascii_case("XGROUP") {
+        if argv.len() < 3 {
+            return Ok(None);
+        }
+        let flags = if argv[1].eq_ignore_ascii_case(b"CREATE")
+            || argv[1].eq_ignore_ascii_case(b"CREATECONSUMER")
+        {
+            KEY_FLAGS_RW_INSERT
+        } else if argv[1].eq_ignore_ascii_case(b"DELCONSUMER")
+            || argv[1].eq_ignore_ascii_case(b"DESTROY")
+        {
+            KEY_FLAGS_RW_DELETE
+        } else if argv[1].eq_ignore_ascii_case(b"SETID") {
+            KEY_FLAGS_RW_UPDATE
+        } else {
+            return Ok(None);
+        };
+        return Ok(Some(vec![CommandKeyReference { index: 2, flags }]));
+    }
+
+    if cmd_name.eq_ignore_ascii_case("XINFO") {
+        if argv.len() < 3 {
+            return Ok(None);
+        }
+        if argv[1].eq_ignore_ascii_case(b"STREAM")
+            || argv[1].eq_ignore_ascii_case(b"GROUPS")
+            || argv[1].eq_ignore_ascii_case(b"CONSUMERS")
+        {
+            return Ok(Some(vec![CommandKeyReference {
+                index: 2,
+                flags: KEY_FLAGS_RO_ACCESS,
+            }]));
+        }
+        return Ok(None);
+    }
+
+    if cmd_name.eq_ignore_ascii_case("XACK") || cmd_name.eq_ignore_ascii_case("XCLAIM") {
+        if argv.len() < 2 {
+            return Ok(None);
+        }
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_RW_UPDATE,
+        }]));
+    }
+
+    if cmd_name.eq_ignore_ascii_case("XAUTOCLAIM") {
+        if argv.len() < 2 {
+            return Ok(None);
+        }
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_RW_DELETE,
+        }]));
+    }
+
+    if cmd_name.eq_ignore_ascii_case("MEMORY") {
+        if argv.len() >= 3 && argv[1].eq_ignore_ascii_case(b"USAGE") {
+            return Ok(Some(vec![CommandKeyReference {
+                index: 2,
+                flags: KEY_FLAGS_RO,
+            }]));
+        }
+        return Ok(None);
+    }
+
+    // MIGRATE: every migrated key is RW/access/delete (the source key is
+    // removed on a successful migration). Reuse command_key_indexes, which
+    // is already byte-exact for both the positional and KEYS-tail forms.
+    if cmd_name.eq_ignore_ascii_case("MIGRATE") {
+        let indexes = command_key_indexes(argv);
+        if indexes.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(
+            indexes
+                .into_iter()
+                .map(|index| CommandKeyReference {
+                    index,
+                    flags: KEY_FLAGS_RW_ACCESS_DELETE,
+                })
+                .collect(),
+        ));
+    }
+
     Ok(None)
 }
 
