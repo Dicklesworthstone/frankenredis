@@ -9795,7 +9795,14 @@ impl Store {
             return Ok(None);
         };
         let consumer = consumer.to_vec();
-        group_state.consumers.insert(consumer.clone());
+        let consumer_created = group_state.consumers.insert(consumer.clone());
+        if consumer_created {
+            // (frankenredis-6zb4d) Upstream t_stream.c xreadCommand creates a
+            // missing consumer via streamCreateConsumer(SCC_DEFAULT), which does
+            // server.dirty++ independent of the per-serve bump below. Implicit
+            // creation must dirty even when the read delivers no new entries.
+            self.dirty = self.dirty.saturating_add(1);
+        }
         // (frankenredis-p4dpj) XREADGROUP is the canonical "active"
         // path: stamp both seen_time and active_time to now_ms.
         let meta = group_state
@@ -9993,7 +10000,14 @@ impl Store {
         // destination consumer. fr was deferring this insertion to the
         // bottom of the function and gating it on a non-empty
         // claimed_ids — empty claims left the consumer absent.
-        group_state.consumers.insert(consumer_vec.clone());
+        let consumer_created = group_state.consumers.insert(consumer_vec.clone());
+        if consumer_created {
+            // (frankenredis-6zb4d) Upstream xclaimCommand creates the
+            // destination consumer via streamCreateConsumer(SCC_DEFAULT) before
+            // the claim loop, doing server.dirty++ even when zero entries are
+            // claimed (the per-entry bump below is in addition to this).
+            self.dirty = self.dirty.saturating_add(1);
+        }
         let meta = group_state
             .consumer_metadata
             .entry(consumer_vec.clone())
@@ -10167,7 +10181,14 @@ impl Store {
         // bumps its seen_time. fr was gating the insertion on a
         // non-empty claimed_ids, so XINFO CONSUMERS showed nothing for
         // the cursor-driven first call.
-        group_state.consumers.insert(consumer_vec.clone());
+        let consumer_created = group_state.consumers.insert(consumer_vec.clone());
+        if consumer_created {
+            // (frankenredis-6zb4d) Upstream xautoclaimCommand creates the
+            // destination consumer via streamCreateConsumer(SCC_DEFAULT) before
+            // the claim loop, doing server.dirty++ even when zero entries are
+            // claimed (the per-entry bump below is in addition to this).
+            self.dirty = self.dirty.saturating_add(1);
+        }
         let meta = group_state
             .consumer_metadata
             .entry(consumer_vec.clone())
@@ -24102,6 +24123,98 @@ mod tests {
             Some(0)
         );
         assert_eq!(store.dirty, before, "no-op DELCONSUMER must not dirty");
+    }
+
+    #[test]
+    fn implicit_consumer_creation_dirties_once_per_new_consumer() {
+        // (frankenredis-6zb4d) Upstream t_stream.c creates a missing consumer
+        // via streamCreateConsumer(SCC_DEFAULT) inside XREADGROUP / XCLAIM /
+        // XAUTOCLAIM, doing server.dirty++ on first use. fr's store inserted the
+        // consumer without dirtying, so rdb_changes_since_last_save undercounted
+        // by 1 every time a new consumer was named. Re-using an existing
+        // consumer must NOT add the create dirty again.
+        let mut store = Store::new();
+        for i in 0..6u64 {
+            store
+                .xadd(b"s", (1000, i), &[(b"f".to_vec(), b"v".to_vec())], 0)
+                .unwrap();
+        }
+        assert!(store.xgroup_create(b"s", b"g", (0, 0), false, 0).unwrap());
+
+        // XREADGROUP with a brand-new consumer: +1 for create, +1 for the
+        // synchronous new-entry serve = 2.
+        let before = store.dirty;
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(2)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(store.dirty, before + 2, "new consumer create + serve = 2");
+
+        // Re-using c1 delivers 2 more new entries: serve only, no create dirty.
+        let before = store.dirty;
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(2)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(store.dirty, before + 1, "existing consumer serve = 1");
+
+        // XCLAIM to a brand-new consumer claiming 2 entries: +1 create + 2.
+        let before = store.dirty;
+        store
+            .xclaim(
+                b"s",
+                b"g",
+                b"c2",
+                &[(1000, 0), (1000, 1)],
+                StreamClaimOptions {
+                    min_idle_time_ms: 0,
+                    idle_ms: None,
+                    time_ms: None,
+                    retry_count: None,
+                    force: false,
+                    justid: false,
+                    last_id: None,
+                },
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(store.dirty, before + 3, "new consumer create + 2 claimed = 3");
+
+        // XCLAIM re-using c2 for one more entry: per-entry only.
+        let before = store.dirty;
+        store
+            .xclaim(
+                b"s",
+                b"g",
+                b"c2",
+                &[(1000, 2)],
+                StreamClaimOptions {
+                    min_idle_time_ms: 0,
+                    idle_ms: None,
+                    time_ms: None,
+                    retry_count: None,
+                    force: false,
+                    justid: false,
+                    last_id: None,
+                },
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(store.dirty, before + 1, "existing consumer + 1 claimed = 1");
     }
 
     #[test]
