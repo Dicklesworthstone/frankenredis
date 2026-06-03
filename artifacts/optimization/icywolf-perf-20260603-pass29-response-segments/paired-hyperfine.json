@@ -1,0 +1,64 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/frankenredis_icywolf_pass28_profile_20260603T1902Z/target-icywolf-pass28-profile-rch/release-perf/fr-bench --host 127.0.0.1 --port 20650 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --key-prefix icywolf-pass29-segments-base-hf2 >/dev/null",
+      "mean": 1.660479753295,
+      "stddev": 0.02790546662807286,
+      "median": 1.66102322492,
+      "user": 0.3749115999999999,
+      "system": 0.7441590950000001,
+      "min": 1.6183669544200001,
+      "max": 1.70376185642,
+      "times": [
+        1.68632243442,
+        1.65361660542,
+        1.63007071542,
+        1.66733912842,
+        1.65470732142,
+        1.70376185642,
+        1.66965301042,
+        1.6183669544200001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/frankenredis_icywolf_pass29_segments_candidate_20260603T1929Z/target-icywolf-pass29-segments-candidate-rch/release-perf/fr-bench --host 127.0.0.1 --port 20651 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --key-prefix icywolf-pass29-segments-cand-hf >/dev/null",
+      "mean": 1.7719938316700001,
+      "stddev": 0.04924875027094333,
+      "median": 1.7696402739200001,
+      "user": 0.39646622499999995,
+      "system": 0.7625705949999999,
+      "min": 1.6970941454200001,
+      "max": 1.85053804742,
+      "times": [
+        1.8132123854200002,
+        1.85053804742,
+        1.72994593442,
+        1.6970941454200001,
+        1.7776563434200001,
+        1.74473925342,
+        1.80114033942,
+        1.7616242044200001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

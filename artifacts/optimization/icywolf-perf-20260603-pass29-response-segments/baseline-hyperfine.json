@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/frankenredis_icywolf_pass28_profile_20260603T1902Z/target-icywolf-pass28-profile-rch/release-perf/fr-bench --host 127.0.0.1 --port 20640 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --key-prefix icywolf-pass29-segments-base-hf >/dev/null",
+      "mean": 1.688761019335,
+      "stddev": 0.05070152832398036,
+      "median": 1.67428160896,
+      "user": 0.40193227,
+      "system": 0.7754377499999999,
+      "min": 1.64096553896,
+      "max": 1.7718785519600002,
+      "times": [
+        1.71718575696,
+        1.6489212939600002,
+        1.64178355396,
+        1.65111714896,
+        1.74079024096,
+        1.7718785519600002,
+        1.64096553896,
+        1.69744606896
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

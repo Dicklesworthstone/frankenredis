@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780515522701,
+  "host": "127.0.0.1",
+  "port": 20652,
+  "workload": "set",
+  "clients": 1,
+  "requests": 10,
+  "pipeline": 1,
+  "keyspace": 10,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "icywolf-pass29-golden-base-smoke",
+  "total_time_ms": 1,
+  "ops_per_sec": 8253.038149668848,
+  "bytes_sent": 700,
+  "bytes_received": 50,
+  "latency_us": {
+    "min": 40,
+    "p50": 45,
+    "p95": 262,
+    "p99": 262,
+    "p999": 262,
+    "max": 262,
+    "mean": 67.1,
+    "samples": 10
+  }
+}

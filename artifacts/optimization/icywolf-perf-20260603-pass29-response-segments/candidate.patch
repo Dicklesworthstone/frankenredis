@@ -1,0 +1,430 @@
+diff --git a/crates/fr-server/src/main.rs b/crates/fr-server/src/main.rs
+index ab767c5da..11d7a35d7 100644
+--- a/crates/fr-server/src/main.rs
++++ b/crates/fr-server/src/main.rs
+@@ -18,7 +18,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+ 
+ use std::collections::{HashMap, HashSet};
+-use std::io::{self, ErrorKind, Read, Write};
++use std::io::{self, ErrorKind, IoSlice, Read, Write};
+ use std::net::{SocketAddr, TcpStream as StdTcpStream};
+ #[cfg(unix)]
+ use std::os::fd::AsRawFd;
+@@ -46,6 +46,8 @@ const LISTENER: Token = Token(0); // ubs:ignore
+ const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
+ const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
+ const MAX_FRAMES_PER_CLIENT_TICK: usize = 4096;
++const RESP_OK_BYTES: &[u8] = b"+OK\r\n";
++const MAX_STATIC_OK_IO_SLICES: usize = 64;
+ 
+ /// Describes a blocked-on-list operation.
+ #[derive(Debug, Clone)]
+@@ -128,6 +130,8 @@ struct ClientConnection {
+     session: ClientSession,
+     read_buf: Vec<u8>,
+     write_buf: Vec<u8>,
++    static_ok_segments: usize,
++    static_ok_offset: usize,
+     /// True if the client sent QUIT or must be disconnected.
+     closing: bool,
+     /// If set, the client is blocked waiting for data.
+@@ -183,17 +187,110 @@ impl ClientConnection {
+             session,
+             read_buf: Vec::with_capacity(4096),
+             write_buf: Vec::new(),
++            static_ok_segments: 0,
++            static_ok_offset: 0,
+             closing: false,
+             blocked: None,
+             replication_sent_offset: None,
+         }
+     }
+ 
++    fn pending_output_len(&self) -> usize {
++        self.write_buf.len().saturating_add(
++            self.static_ok_segments
++                .saturating_mul(RESP_OK_BYTES.len())
++                .saturating_sub(self.static_ok_offset),
++        )
++    }
++
++    fn has_pending_output(&self) -> bool {
++        self.pending_output_len() > 0
++    }
++
++    fn materialize_static_ok_segments(&mut self) {
++        if self.static_ok_segments == 0 {
++            return;
++        }
++        let pending_len = self
++            .static_ok_segments
++            .saturating_mul(RESP_OK_BYTES.len())
++            .saturating_sub(self.static_ok_offset);
++        self.write_buf.reserve(pending_len);
++        if self.static_ok_offset > 0 {
++            self.write_buf
++                .extend_from_slice(&RESP_OK_BYTES[self.static_ok_offset..]);
++            self.static_ok_segments = self.static_ok_segments.saturating_sub(1);
++            self.static_ok_offset = 0;
++        }
++        for _ in 0..self.static_ok_segments {
++            self.write_buf.extend_from_slice(RESP_OK_BYTES);
++        }
++        self.static_ok_segments = 0;
++    }
++
++    fn queue_frame(&mut self, frame: &RespFrame, resp3: bool) {
++        if !resp3
++            && self.write_buf.is_empty()
++            && matches!(frame, RespFrame::SimpleString(value) if value == "OK")
++        {
++            self.static_ok_segments = self.static_ok_segments.saturating_add(1);
++            return;
++        }
++        self.materialize_static_ok_segments();
++        encode_client_reply(frame, resp3, &mut self.write_buf);
++    }
++
++    fn append_bytes(&mut self, bytes: &[u8]) {
++        self.materialize_static_ok_segments();
++        self.write_buf.extend_from_slice(bytes);
++    }
++
++    fn consume_static_ok_bytes(&mut self, mut written: usize) {
++        while self.static_ok_segments > 0 && written > 0 {
++            let remaining = RESP_OK_BYTES.len() - self.static_ok_offset;
++            if written < remaining {
++                self.static_ok_offset += written;
++                return;
++            }
++            written -= remaining;
++            self.static_ok_segments -= 1;
++            self.static_ok_offset = 0;
++        }
++    }
++
++    fn try_flush_static_ok_segments(&mut self) -> io::Result<Option<bool>> {
++        if self.static_ok_segments == 0 || !self.write_buf.is_empty() {
++            return Ok(None);
++        }
++
++        while self.static_ok_segments > 0 {
++            let slice_count = self.static_ok_segments.min(MAX_STATIC_OK_IO_SLICES);
++            let mut slices: [IoSlice<'_>; MAX_STATIC_OK_IO_SLICES] =
++                std::array::from_fn(|_| IoSlice::new(&[]));
++            slices[0] = IoSlice::new(&RESP_OK_BYTES[self.static_ok_offset..]);
++            for slot in slices.iter_mut().take(slice_count).skip(1) {
++                *slot = IoSlice::new(RESP_OK_BYTES);
++            }
++            match self.stream.write_vectored(&slices[..slice_count]) {
++                Ok(0) => return Err(io::Error::new(ErrorKind::WriteZero, "write zero")),
++                Ok(n) => self.consume_static_ok_bytes(n),
++                Err(ref e) if e.kind() == ErrorKind::WouldBlock => return Ok(Some(false)),
++                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
++                Err(e) => return Err(e),
++            }
++        }
++
++        Ok(Some(!self.has_pending_output()))
++    }
++
+     /// Try to flush the write buffer. Returns true if the buffer is fully
+     /// drained (or was already empty).
+     fn try_flush(&mut self) -> io::Result<bool> {
+         let mut total_written = 0;
+         let mut result = Ok(true);
++        if let Some(done) = self.try_flush_static_ok_segments()? {
++            return Ok(done);
++        }
+         while total_written < self.write_buf.len() {
+             match self.stream.write(&self.write_buf[total_written..]) {
+                 Ok(0) => {
+@@ -215,7 +312,11 @@ impl ClientConnection {
+             }
+         }
+         if total_written > 0 {
+-            self.write_buf.drain(..total_written);
++            if total_written == self.write_buf.len() {
++                self.write_buf.clear();
++            } else {
++                self.write_buf.drain(..total_written);
++            }
+         }
+         result
+     }
+@@ -1001,7 +1102,7 @@ fn main() -> ExitCode {
+             .filter(|&t| {
+                 clients
+                     .get(t)
+-                    .map(|c| c.write_buf.is_empty())
++                    .map(|c| !c.has_pending_output())
+                     .unwrap_or(true)
+             })
+             .copied()
+@@ -1243,19 +1344,19 @@ fn handle_readable(
+     // values that diff cleanly against vendored 7.2.
+     conn.session.qbuf_bytes = conn.read_buf.len();
+     conn.session.qbuf_free_bytes = conn.read_buf.capacity().saturating_sub(conn.read_buf.len());
+-    conn.session.output_buffer_bytes = conn.write_buf.len();
++    conn.session.output_buffer_bytes = conn.pending_output_len();
+     // (frankenredis-jrqgd) Sample the *pre-dispatch* read/write buffer
+     // sizes into the server-wide recent-max accumulators. We must do
+     // this BEFORE the dispatch drains read_buf — by the time we get
+     // to record_client_session below, qbuf_bytes is back to 0 because
+     // the parser consumed every byte.
+-    runtime.observe_client_buffer_sizes(conn.read_buf.len(), conn.write_buf.len());
++    runtime.observe_client_buffer_sizes(conn.read_buf.len(), conn.pending_output_len());
+ 
+     // Swap in this client's session, process frames, swap back.
+     let session = std::mem::take(&mut conn.session);
+     let prev = runtime.swap_session(session);
+ 
+-    let write_buf_before = conn.write_buf.len();
++    let write_buf_before = conn.pending_output_len();
+     let had_write_interest = write_tokens.contains(&token);
+     let budget_exhausted = process_buffered_frames(
+         token,
+@@ -1270,7 +1371,7 @@ fn handle_readable(
+     );
+     record_deferred_buffered_token(token, conn, deferred_tokens, budget_exhausted);
+     // Track output bytes generated by command processing.
+-    let output_delta = conn.write_buf.len().saturating_sub(write_buf_before);
++    let output_delta = conn.pending_output_len().saturating_sub(write_buf_before);
+     runtime.track_net_output_bytes(output_delta as u64);
+ 
+     // Swap session back.
+@@ -1281,20 +1382,20 @@ fn handle_readable(
+     // have consumed bytes off read_buf and appended replies to write_buf.
+     conn.session.qbuf_bytes = conn.read_buf.len();
+     conn.session.qbuf_free_bytes = conn.read_buf.capacity().saturating_sub(conn.read_buf.len());
+-    conn.session.output_buffer_bytes = conn.write_buf.len();
++    conn.session.output_buffer_bytes = conn.pending_output_len();
+     // (frankenredis-jrqgd) Observe the *post-dispatch* write buffer
+     // here as well: handle_writable may drain it before the next
+     // handle_readable runs, so this is the only moment we see the
+     // reply's pre-flush size. We rely on observe_client_buffer_sizes
+     // taking the running max -- passing 0 for qbuf is fine.
+-    runtime.observe_client_buffer_sizes(0, conn.write_buf.len());
++    runtime.observe_client_buffer_sizes(0, conn.pending_output_len());
+     runtime.record_client_session(&conn.session);
+ 
+     // `process_buffered_frames` has already coalesced all currently
+     // readable pipeline replies for this client. Try the nonblocking
+     // flush now and only arm WRITABLE for the rare partial/WouldBlock
+     // case; this avoids an epoll_ctl add/remove pair on the hot path.
+-    if !conn.write_buf.is_empty() {
++    if conn.has_pending_output() {
+         if budget_exhausted {
+             write_tokens.insert(token);
+             let _ = poll.registry().reregister(
+@@ -1325,7 +1426,7 @@ fn handle_readable(
+                     closing_tokens.insert(token);
+                 }
+             }
+-            conn.session.output_buffer_bytes = conn.write_buf.len();
++            conn.session.output_buffer_bytes = conn.pending_output_len();
+         }
+     }
+ }
+@@ -1370,7 +1471,7 @@ fn process_buffered_frames(
+         }
+ 
+         // Check write buffer limit before processing more frames.
+-        if conn.write_buf.len() > runtime.server.output_buffer_limit {
++        if conn.pending_output_len() > runtime.server.output_buffer_limit {
+             eprintln!("warn: client write buffer exceeded limit, disconnecting");
+             conn.closing = true;
+             closing_tokens.insert(token);
+@@ -1393,7 +1494,7 @@ fn process_buffered_frames(
+                 Ok(InlineParseResult::ProtocolError(err_frame, consumed)) => {
+                     // Send the error directly to the client without executing.
+                     processed_frames = processed_frames.saturating_add(1);
+-                    err_frame.encode_into(&mut conn.write_buf);
++                    conn.queue_frame(&err_frame, false);
+                     consumed_total += consumed;
+                     continue;
+                 }
+@@ -1431,7 +1532,7 @@ fn process_buffered_frames(
+                     && runtime.client_session().resp_protocol_version() != 3
+                     && let Some(reject) = check_subscription_mode_gate(&frame, true)
+                 {
+-                    reject.encode_into(&mut conn.write_buf);
++                    conn.queue_frame(&reject, false);
+                     consumed_total += consumed;
+                     continue;
+                 }
+@@ -1467,7 +1568,7 @@ fn process_buffered_frames(
+ 
+                 // Check for QUIT command.
+                 if is_quit_frame(&parsed_frame) {
+-                    encode_client_reply(&response, client_resp3, &mut conn.write_buf);
++                    conn.queue_frame(&response, client_resp3);
+                     write_tokens.insert(token);
+                     conn.closing = true;
+                     closing_tokens.insert(token);
+@@ -1495,7 +1596,7 @@ fn process_buffered_frames(
+                     // try_build_blocked_state only returns Some if it's a blocking command.
+                     if let Some(immediate_response) = try_fulfill_blocked(&blocked.op, runtime, ts)
+                     {
+-                        encode_client_reply(&immediate_response, client_resp3, &mut conn.write_buf);
++                        conn.queue_frame(&immediate_response, client_resp3);
+                     } else {
+                         conn.blocked = Some(blocked);
+                         blocked_tokens.insert(token);
+@@ -1507,12 +1608,12 @@ fn process_buffered_frames(
+                     // Redis treats REPLCONF ACK/GETACK as internal control
+                     // frames and does not send a direct reply on client links.
+                 } else {
+-                    encode_client_reply(&response, client_resp3, &mut conn.write_buf);
++                    conn.queue_frame(&response, client_resp3);
+                 }
+                 if let Some(follow_up) =
+                     replication_follow_up_bytes(runtime, &parsed_frame, &response, ts)
+                 {
+-                    conn.write_buf.extend_from_slice(&follow_up);
++                    conn.append_bytes(&follow_up);
+                     if runtime.is_replica(runtime.client_id()) {
+                         conn.replication_sent_offset = Some(runtime.replication_primary_offset());
+                     }
+@@ -1529,15 +1630,15 @@ fn process_buffered_frames(
+                     // (frankenredis-o90ga) See deliver_pubsub_messages: RESP3
+                     // clients need the RESP3 null inside flush invalidations.
+                     if resp3 {
+-                        frame.encode_into_resp3(&mut conn.write_buf);
++                        conn.queue_frame(&frame, true);
+                     } else {
+-                        frame.encode_into(&mut conn.write_buf);
++                        conn.queue_frame(&frame, false);
+                     }
+                 }
+ 
+                 consumed_total += consumed;
+ 
+-                if conn.write_buf.len() > runtime.server.output_buffer_limit {
++                if conn.pending_output_len() > runtime.server.output_buffer_limit {
+                     eprintln!("warn: client write buffer exceeded limit, disconnecting");
+                     conn.closing = true;
+                     closing_tokens.insert(token);
+@@ -1555,7 +1656,7 @@ fn process_buffered_frames(
+                 // generic "invalid frame" for every parse failure.
+                 // (frankenredis-w7xy8)
+                 let err_reply = RespFrame::Error(format!("ERR Protocol error: {err}"));
+-                err_reply.encode_into(&mut conn.write_buf);
++                conn.queue_frame(&err_reply, false);
+                 conn.closing = true;
+                 closing_tokens.insert(token);
+                 break;
+@@ -1567,7 +1668,7 @@ fn process_buffered_frames(
+         conn.read_buf.drain(..consumed_total);
+     }
+ 
+-    if !conn.write_buf.is_empty() {
++    if conn.has_pending_output() {
+         // Defer flushing to the writable handler to coalesce per poll cycle.
+         write_tokens.insert(token);
+     }
+@@ -2648,11 +2749,7 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
+         // Check timeout first.
+         if ts >= blocked.deadline_ms {
+             let resp3 = conn.session.resp_protocol_version() == 3;
+-            encode_client_reply(
+-                &blocked_timeout_response(&blocked.op, runtime, ts),
+-                resp3,
+-                &mut conn.write_buf,
+-            );
++            conn.queue_frame(&blocked_timeout_response(&blocked.op, runtime, ts), resp3);
+             conn.blocked = None;
+             blocked_tokens.remove(&token);
+             runtime.mark_client_unblocked(conn.session.client_id);
+@@ -2691,7 +2788,7 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
+             // (frankenredis-pgplm) Session is swapped into `runtime` here, so
+             // its negotiated protocol drives the RESP3 null encoding.
+             let resp3 = runtime.client_session().resp_protocol_version() == 3;
+-            encode_client_reply(&response, resp3, &mut conn.write_buf);
++            conn.queue_frame(&response, resp3);
+             conn.blocked = None;
+             blocked_tokens.remove(&token);
+             runtime.mark_client_unblocked(runtime.client_id());
+@@ -2778,7 +2875,7 @@ fn apply_pending_client_unblocks(ctx: PendingClientUnblocksContext<'_>) {
+         };
+ 
+         let resp3 = conn.session.resp_protocol_version() == 3;
+-        encode_client_reply(&response, resp3, &mut conn.write_buf);
++        conn.queue_frame(&response, resp3);
+         conn.blocked = None;
+         blocked_tokens.remove(&token);
+         runtime.mark_client_unblocked(client_id);
+@@ -2851,7 +2948,7 @@ fn process_deferred_buffered_clients(ctx: DeferredBufferedClientsContext<'_>) {
+ 
+         let session = std::mem::take(&mut conn.session);
+         let prev = runtime.swap_session(session);
+-        let write_buf_before = conn.write_buf.len();
++        let write_buf_before = conn.pending_output_len();
+         let budget_exhausted = process_buffered_frames(
+             token,
+             conn,
+@@ -2863,7 +2960,7 @@ fn process_deferred_buffered_clients(ctx: DeferredBufferedClientsContext<'_>) {
+             ts,
+             ts_us,
+         );
+-        let output_delta = conn.write_buf.len().saturating_sub(write_buf_before);
++        let output_delta = conn.pending_output_len().saturating_sub(write_buf_before);
+         runtime.track_net_output_bytes(output_delta as u64);
+         let updated_session = runtime.swap_session(prev);
+         conn.session = updated_session;
+@@ -2880,7 +2977,7 @@ fn arm_write_interest(
+     poll: &mut Poll,
+     write_tokens: &mut HashSet<Token>,
+ ) -> io::Result<()> {
+-    if conn.write_buf.is_empty() {
++    if !conn.has_pending_output() {
+         write_tokens.remove(&token);
+         poll.registry()
+             .reregister(&mut conn.stream, token, Interest::READABLE)?;
+@@ -3098,7 +3195,7 @@ fn propagate_writes_to_replicas(
+             let start = usize::try_from(relative_offset).unwrap_or(usize::MAX);
+             let bytes = stream.get(start..).unwrap_or(&[]);
+             if !bytes.is_empty() {
+-                conn.write_buf.extend_from_slice(bytes);
++                conn.append_bytes(bytes);
+                 write_tokens.insert(token);
+                 let _ = poll.registry().reregister(
+                     &mut conn.stream,
+@@ -3132,8 +3229,8 @@ fn deliver_monitor_output(
+         if conn.closing {
+             continue; // don't buffer output for dying connections
+         }
+-        conn.write_buf.extend_from_slice(&line);
+-        if conn.write_buf.len() > runtime.server.output_buffer_limit {
++        conn.append_bytes(&line);
++        if conn.pending_output_len() > runtime.server.output_buffer_limit {
+             eprintln!(
+                 "warn: client write buffer exceeded limit during monitor delivery, disconnecting"
+             );
+@@ -3190,13 +3287,13 @@ fn deliver_pubsub_messages(
+             // would emit the RESP2 `$-1\r\n`. Null-free messages encode
+             // identically under both, so this is safe for all pubsub frames.
+             if resp3 {
+-                frame.encode_into_resp3(&mut conn.write_buf);
++                conn.queue_frame(&frame, true);
+             } else {
+-                frame.encode_into(&mut conn.write_buf);
++                conn.queue_frame(&frame, false);
+             }
+         }
+ 
+-        if conn.write_buf.len() > runtime.server.output_buffer_limit {
++        if conn.pending_output_len() > runtime.server.output_buffer_limit {
+             eprintln!(
+                 "warn: client write buffer exceeded limit during pubsub delivery, disconnecting"
+             );
+@@ -3383,7 +3480,7 @@ fn handle_writable(
+     // (frankenredis-tepuj) Refresh output buffer accounting on the
+     // session so a CLIENT LIST issued between writable events reflects
+     // the post-flush state rather than the pre-dispatch snapshot.
+-    conn.session.output_buffer_bytes = conn.write_buf.len();
++    conn.session.output_buffer_bytes = conn.pending_output_len();
+ }
+ 
+ #[cfg(test)]
