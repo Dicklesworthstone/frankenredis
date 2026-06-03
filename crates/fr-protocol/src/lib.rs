@@ -422,8 +422,12 @@ impl Display for RespParseError {
             Self::InvalidBulkLength => write!(f, "invalid bulk length"),
             Self::InvalidMultibulkLength => write!(f, "invalid multibulk length"),
             Self::InvalidUtf8 => write!(f, "invalid UTF-8 payload"),
-            Self::BulkLengthTooLarge => write!(f, "bulk length exceeds limit"),
-            Self::MultibulkLengthTooLarge => write!(f, "multibulk length exceeds limit"),
+            // (frankenredis-w7xy8) Upstream networking.c emits the SAME message
+            // for malformed and over-limit lengths ("invalid bulk length" /
+            // "invalid multibulk length"), so a client sees identical wording
+            // whether it sent `$abc` or `$<huge>`.
+            Self::BulkLengthTooLarge => write!(f, "invalid bulk length"),
+            Self::MultibulkLengthTooLarge => write!(f, "invalid multibulk length"),
             Self::RecursionLimitExceeded => write!(f, "nested array depth limit exceeded"),
             Self::LineTooLong => write!(f, "RESP line too long"),
         }

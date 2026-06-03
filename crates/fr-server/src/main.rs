@@ -1404,6 +1404,16 @@ fn process_buffered_frames(
         match parse_result {
             Ok((frame, consumed)) => {
                 processed_frames = processed_frames.saturating_add(1);
+                // (frankenredis-w7xy8) An empty or null multibulk (`*0\r\n` /
+                // `*-1\r\n`) is not a command — upstream networking.c resets and
+                // moves on with no reply. fr previously dispatched it and
+                // answered "ERR Protocol error: invalid command frame".
+                if matches!(&frame, RespFrame::Array(None))
+                    || matches!(&frame, RespFrame::Array(Some(items)) if items.is_empty())
+                {
+                    consumed_total += consumed;
+                    continue;
+                }
                 // Subscription mode gate: reject most commands while subscribed.
                 // (frankenredis-j7nwu) Only RESP2 subscribers are restricted —
                 // upstream server.c::processCommand gates the allow-list on
@@ -1531,9 +1541,13 @@ fn process_buffered_frames(
                 // Need more data.
                 break;
             }
-            Err(_) => {
-                // Protocol error — send error and disconnect.
-                let err_reply = RespFrame::Error("ERR Protocol error: invalid frame".to_string());
+            Err(err) => {
+                // Protocol error — send the specific message and disconnect,
+                // matching upstream networking.c (e.g. "invalid multibulk
+                // length", "invalid bulk length"). fr previously emitted a
+                // generic "invalid frame" for every parse failure.
+                // (frankenredis-w7xy8)
+                let err_reply = RespFrame::Error(format!("ERR Protocol error: {err}"));
                 err_reply.encode_into(&mut conn.write_buf);
                 conn.closing = true;
                 closing_tokens.insert(token);

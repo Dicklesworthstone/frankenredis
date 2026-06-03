@@ -2022,6 +2022,54 @@ fn tcp_resp2_subscriber_remains_restricted() {
 }
 
 #[test]
+fn tcp_protocol_errors_use_upstream_wording() {
+    // (frankenredis-w7xy8) Parse failures must carry upstream's specific
+    // message, not a generic "invalid frame". Each malformed request gets one
+    // error reply, then the server disconnects.
+    let port = reserve_port();
+    let _server = spawn_frankenredis(port, None);
+    let cases: [(&[u8], &[u8]); 4] = [
+        (
+            b"*1\r\n$abc\r\nPING\r\n",
+            b"-ERR Protocol error: invalid bulk length\r\n",
+        ),
+        (b"*xyz\r\n", b"-ERR Protocol error: invalid multibulk length\r\n"),
+        (
+            b"*1000000000000\r\n",
+            b"-ERR Protocol error: invalid multibulk length\r\n",
+        ),
+        (
+            b"*1\r\n$1000000000000\r\n",
+            b"-ERR Protocol error: invalid bulk length\r\n",
+        ),
+    ];
+    for (req, expected) in cases {
+        let mut c = BufferedTcpClient::connect(port);
+        c.write_all(req);
+        assert_eq!(c.read_resp3_response_bytes(), expected, "request {req:?}");
+    }
+    send_shutdown_nosave(port);
+}
+
+#[test]
+fn tcp_empty_and_null_multibulk_are_skipped() {
+    // (frankenredis-w7xy8) `*0\r\n` / `*-1\r\n` are not commands — upstream
+    // networking.c resets and processes the next command with no reply. fr
+    // previously answered "ERR Protocol error: invalid command frame".
+    let port = reserve_port();
+    let _server = spawn_frankenredis(port, None);
+    let mut c = BufferedTcpClient::connect(port);
+
+    c.write_all(b"*0\r\nPING\r\n");
+    assert_eq!(c.read_resp3_response_bytes(), b"+PONG\r\n");
+
+    c.write_all(b"*-1\r\nPING\r\n");
+    assert_eq!(c.read_resp3_response_bytes(), b"+PONG\r\n");
+
+    send_shutdown_nosave(port);
+}
+
+#[test]
 fn tcp_pubsub_pattern_subscribe() {
     let (subscribe, publish_match, message, publish_miss) =
         exercise_pattern_pubsub_cross_client_delivery(|port| spawn_frankenredis(port, None));
