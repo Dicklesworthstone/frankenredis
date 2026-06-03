@@ -3231,10 +3231,14 @@ fn is_client_pause_exempt(argv: &[Vec<u8>]) -> bool {
 }
 
 fn is_quit_frame(frame: &RespFrame) -> bool {
-    fr_command::frame_to_argv(frame)
-        .ok()
-        .and_then(|argv| argv.first().cloned())
-        .is_some_and(|cmd| cmd.eq_ignore_ascii_case(b"QUIT"))
+    let RespFrame::Array(Some(items)) = frame else {
+        return false;
+    };
+    match items.first() {
+        Some(RespFrame::BulkString(Some(command))) => command.eq_ignore_ascii_case(b"QUIT"),
+        Some(RespFrame::SimpleString(command)) => command.as_bytes().eq_ignore_ascii_case(b"QUIT"),
+        _ => false,
+    }
 }
 
 /// Encode a command reply to a client, choosing the RESP3 null encoding
@@ -3341,7 +3345,7 @@ mod tests {
         ReplicaSyncState, StartupConfig, apply_pending_client_unblocks, check_blocked_clients,
         consume_complete_replication_prefix, drain_replica_stream, drive_replica_sync,
         encode_eof_marked_replication_snapshot, encode_replication_snapshot, find_crlf,
-        frame_matches_suppressed_replication_reply, parse_blocking_deadline,
+        frame_matches_suppressed_replication_reply, is_quit_frame, parse_blocking_deadline,
         parse_xread_block_deadline_argv, process_buffered_frames, read_frame_from_stream,
         read_replication_snapshot_from_stream, replica_handshake_frame,
         replica_handshake_read_timeout, replication_follow_up_bytes, resolve_xread_block_argv,
@@ -3409,6 +3413,31 @@ mod tests {
         assert!(!frame_matches_suppressed_replication_reply(&array(vec![
             RespFrame::Integer(0),
         ])));
+    }
+
+    #[test]
+    fn quit_frame_matcher_borrows_first_command_token() {
+        fn bulk(bytes: &[u8]) -> RespFrame {
+            RespFrame::BulkString(Some(bytes.to_vec()))
+        }
+
+        fn array(items: Vec<RespFrame>) -> RespFrame {
+            RespFrame::Array(Some(items))
+        }
+
+        assert!(is_quit_frame(&array(vec![bulk(b"QUIT")])));
+        assert!(is_quit_frame(&array(vec![bulk(b"quit")])));
+        assert!(is_quit_frame(&array(vec![RespFrame::SimpleString(
+            "QuIt".to_string(),
+        )])));
+
+        assert!(!is_quit_frame(&array(vec![bulk(b"HGET")])));
+        assert!(!is_quit_frame(&array(Vec::new())));
+        assert!(!is_quit_frame(&RespFrame::BulkString(Some(
+            b"QUIT".to_vec()
+        ))));
+        assert!(!is_quit_frame(&array(vec![RespFrame::Integer(0)])));
+        assert!(!is_quit_frame(&array(vec![RespFrame::BulkString(None)])));
     }
 
     #[test]
