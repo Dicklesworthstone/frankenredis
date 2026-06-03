@@ -9332,20 +9332,19 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
                 return RespFrame::Array(Some(items));
             }
 
-            // {double = x}: emit BulkString of the double formatted
-            // upstream-style. Lua's `%.17g`-equivalent rendering
-            // matches what Redis surfaces, so use Rust's default
-            // f64 Display which is round-trip safe — EXCEPT for NaN
-            // where Rust emits 'NaN' but C printf '%g' emits 'nan'
-            // lowercase. (frankenredis-s964e)
+            // {double = x}: upstream script_lua.c::luaReplyToRedisReply
+            // emits the value via addReplyDouble — a RESP3 Double (`,`)
+            // frame formatted by d2string, downconverted to a bulk string
+            // under RESP2. fr previously emitted a bulk string in BOTH
+            // modes (so RESP3 saw `$3.14` instead of `,3.14`) and used
+            // Rust Display (so large magnitudes like 1e20 expanded instead
+            // of `1e+20`). double_from_f64 routes through the shared
+            // fr-protocol::format_redis_double; the RESP2 downconvert below
+            // turns the Double frame back into a bulk string.
+            // (frankenredis-aae3d, supersedes frankenredis-s964e)
             let double_field = t.get(&LuaValue::Str(b"double".to_vec()));
             if let LuaValue::Number(n) = double_field {
-                let s = if n.is_nan() {
-                    "nan".to_string()
-                } else {
-                    format!("{n}")
-                };
-                return RespFrame::BulkString(Some(s.into_bytes()));
+                return RespFrame::double_from_f64(n);
             }
 
             // {big_number = "..."}: emit BulkString of the bignum. RESP3
@@ -11601,6 +11600,10 @@ fn downconvert_lua_reply_to_resp2(frame: RespFrame) -> RespFrame {
                 .map(downconvert_lua_reply_to_resp2)
                 .collect(),
         )),
+        // RESP2 has no Double type; upstream addReplyDouble emits the
+        // d2string text as a bulk string. The Double frame already carries
+        // that exact text. (frankenredis-aae3d)
+        RespFrame::Double(s) => RespFrame::BulkString(Some(s.into_bytes())),
         other => other,
     }
 }
@@ -13854,10 +13857,19 @@ mod tests {
             ]))
         );
 
-        // {double = 3.14} → BulkString of the formatted double.
+        // {double = 3.14} → RESP3 Double frame (frankenredis-aae3d); the
+        // RESP2 client downconverts it to the equivalent bulk string.
         let frame = eval_script(b"return {double = 3.14}", &[], &[], &mut store, 0)
             .expect("double hint should not error");
+        assert_eq!(frame, RespFrame::Double("3.14".to_string()));
+        let mut store_dbl_resp2 = Store::new();
+        let frame = eval_script(b"return {double = 3.14}", &[], &[], &mut store_dbl_resp2, 0)
+            .expect("double hint resp2 should not error");
         assert_eq!(frame, RespFrame::BulkString(Some(b"3.14".to_vec())));
+        // Large magnitudes use d2string scientific form, not Rust Display.
+        let frame = eval_script(b"return {double = 1e20}", &[], &[], &mut store, 0)
+            .expect("double hint 1e20 should not error");
+        assert_eq!(frame, RespFrame::Double("1e+20".to_string()));
 
         // {big_number = "12345..."} → BulkString of the bignum.
         let frame = eval_script(
