@@ -15703,10 +15703,25 @@ pub fn is_known_acl_command_selector(command: &str) -> bool {
 /// parents without subcommands accept any sub blindly.
 #[must_use]
 pub fn command_has_acl_subcommands(parent: &str) -> bool {
-    let prefix_lower = format!("{}|", parent.to_ascii_lowercase());
-    SUBCOMMAND_TABLE
-        .iter()
-        .any(|(name, ..)| name.to_ascii_lowercase().starts_with(&prefix_lower))
+    command_acl_parent_has_subcommands(parent)
+}
+
+fn command_acl_parent_has_subcommands(parent: &str) -> bool {
+    parent.eq_ignore_ascii_case("acl")
+        || parent.eq_ignore_ascii_case("client")
+        || parent.eq_ignore_ascii_case("cluster")
+        || parent.eq_ignore_ascii_case("command")
+        || parent.eq_ignore_ascii_case("config")
+        || parent.eq_ignore_ascii_case("function")
+        || parent.eq_ignore_ascii_case("latency")
+        || parent.eq_ignore_ascii_case("memory")
+        || parent.eq_ignore_ascii_case("module")
+        || parent.eq_ignore_ascii_case("object")
+        || parent.eq_ignore_ascii_case("pubsub")
+        || parent.eq_ignore_ascii_case("script")
+        || parent.eq_ignore_ascii_case("slowlog")
+        || parent.eq_ignore_ascii_case("xgroup")
+        || parent.eq_ignore_ascii_case("xinfo")
 }
 
 /// Return ACL selectors for a command invocation, most-specific first.
@@ -15718,7 +15733,9 @@ pub fn acl_command_selectors_for_argv(argv: &[Vec<u8>]) -> Vec<String> {
     let command = String::from_utf8_lossy(raw_command).to_ascii_lowercase();
     let mut selectors = Vec::with_capacity(2);
 
-    if let Some(raw_subcommand) = argv.get(1) {
+    if command_acl_parent_has_subcommands(&command)
+        && let Some(raw_subcommand) = argv.get(1)
+    {
         let subcommand = String::from_utf8_lossy(raw_subcommand).to_ascii_lowercase();
         let subcommand_selector = format!("{command}|{subcommand}");
         if is_known_acl_command_selector(&subcommand_selector) {
@@ -25014,8 +25031,8 @@ mod tests {
         SCRIPT_NOSCRIPT_ERROR, SUBCOMMAND_TABLE, acl_command_selectors_for_argv, classify_command,
         client_wrong_subcommand_arity, cluster_disabled_error, cluster_reset_with_keys_error,
         cluster_wrong_subcommand_arity, command_acl_categories, command_acl_key_access,
-        command_key_indexes, commands_in_acl_category, dispatch_argv, drain_pubsub_messages,
-        eq_ascii_command, eval_script, execute_migrate, format_coord_human,
+        command_has_acl_subcommands, command_key_indexes, commands_in_acl_category, dispatch_argv,
+        drain_pubsub_messages, eq_ascii_command, eval_script, execute_migrate, format_coord_human,
         format_eval_read_only_script_error, frame_to_argv, geo_coord_frame, hello_bulk,
         hello_simple, is_known_acl_command_selector, is_write_command,
         parse_blocking_deadline_milliseconds, parse_migrate_request, pubsub_message_to_frame,
@@ -57118,6 +57135,15 @@ mod tests {
         assert!(is_known_acl_command_selector("client|info"));
         assert!(is_known_acl_command_selector("get"));
         assert!(!is_known_acl_command_selector("client|notreal"));
+        assert!(command_has_acl_subcommands("CLIENT"));
+        assert!(!command_has_acl_subcommands("HGET"));
+        for &(name, ..) in SUBCOMMAND_TABLE {
+            let (parent, _subcommand) = name.split_once('|').expect("subcommand name");
+            assert!(
+                command_has_acl_subcommands(parent),
+                "subcommand parent {parent} must stay in the fast predicate"
+            );
+        }
 
         assert_eq!(
             acl_command_selectors_for_argv(&[b"CLIENT".to_vec(), b"INFO".to_vec()]),
@@ -57126,6 +57152,10 @@ mod tests {
         assert_eq!(
             acl_command_selectors_for_argv(&[b"GET".to_vec(), b"k".to_vec()]),
             vec!["get".to_string()]
+        );
+        assert_eq!(
+            acl_command_selectors_for_argv(&[b"HGET".to_vec(), b"hash".to_vec(), b"INFO".to_vec()]),
+            vec!["hget".to_string()]
         );
     }
 
