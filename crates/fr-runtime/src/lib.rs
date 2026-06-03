@@ -1078,21 +1078,31 @@ impl AclUser {
         } else {
             "off".to_string()
         });
-        // Upstream acl.c::ACLDescribeUser emits
-        // `on nopass|#<hash>… <sanitize-payload>` — nopass / password
-        // hashes appear before the sanitize-payload flag.
-        // (br-frankenredis-faqe)
+        // (frankenredis-fh7hn) Match upstream acl.c::ACLDescribeUser token
+        // order exactly: `<on|off> [nopass] sanitize-payload [#hash…]
+        // [~* | ~pat…] [&* | resetchannels &pat…] <commands>`. `nopass`
+        // precedes the sanitize-payload flag; password hashes follow it.
         if self.nopass {
             parts.push("nopass".to_string());
         }
-        if !self.nopass {
-            parts.extend(self.passwords.iter().map(|_| "#<hidden>".to_string()));
-        }
         parts.push(self.sanitize_payload_flag().to_string());
+        if !self.nopass {
+            // Emit the real SHA-256 hash (already a one-way digest), matching
+            // upstream and fr's own acl_save_line. The prior `#<hidden>`
+            // placeholder broke ACL LIST/SAVE round-trip — a dumped config
+            // could not recreate the user.
+            parts.extend(
+                self.passwords
+                    .iter()
+                    .map(|password| format!("#{}", String::from_utf8_lossy(password))),
+            );
+        }
         if self.all_keys {
             parts.push("~*".to_string());
-        } else if !self.key_patterns.is_empty() {
-            parts.push("resetkeys".to_string());
+        } else {
+            // Upstream ACL LIST does NOT prefix key patterns with `resetkeys`
+            // (unlike channels, which carry `resetchannels`). fr emitted a
+            // spurious `resetkeys` token here.
             parts.extend(self.key_patterns.iter().map(acl_key_pattern_token));
         }
         if self.all_channels {
@@ -28858,7 +28868,7 @@ mod tests {
             .expect("expected alice in ACL LIST");
         assert_eq!(
             alice,
-            "user alice on #<hidden> sanitize-payload resetkeys ~foo:* ~bar:* resetchannels -@all +get +set"
+            "user alice on sanitize-payload #d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1 ~foo:* ~bar:* resetchannels -@all +get +set"
         );
 
         assert_eq!(
@@ -29257,7 +29267,7 @@ mod tests {
             .expect("expected mixed in ACL LIST");
         assert_eq!(
             mixed,
-            "user mixed on nopass sanitize-payload resetkeys ~obj* %R~r* %W~w* ~rw* resetchannels -@all"
+            "user mixed on nopass sanitize-payload ~obj* %R~r* %W~w* ~rw* resetchannels -@all"
         );
     }
 
@@ -29401,7 +29411,7 @@ mod tests {
             .expect("expected alice in ACL LIST");
         assert_eq!(
             alice,
-            "user alice on #<hidden> sanitize-payload ~* resetchannels &foo:1 &bar:* &orders +@all"
+            "user alice on sanitize-payload #d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1 ~* resetchannels &foo:1 &bar:* &orders +@all"
         );
 
         assert_eq!(
@@ -30017,7 +30027,7 @@ mod tests {
             .expect("expected alice in ACL LIST after ACL LOAD");
         assert_eq!(
             alice,
-            "user alice on #<hidden> sanitize-payload ~* &* -@all +get"
+            "user alice on sanitize-payload #d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1 ~* &* -@all +get"
         );
 
         let _ = std::fs::remove_file(&acl_path);
