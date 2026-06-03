@@ -1840,10 +1840,18 @@ fn rdb_decode_length(data: &[u8]) -> Option<(usize, usize)> {
 ///
 /// (br-frankenredis-1uin)
 pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
-    const HLOG: u32 = 14;
-    const HSIZE: usize = 1 << HLOG;
-    const MAX_LIT: usize = 32;
-    const MAX_OFF: usize = 8192;
+    // Faithful port of vendored deps/lzf/lzf_c.c with HLOG=16 and the
+    // VERY_FAST configuration redis builds (lzfP.h: VERY_FAST=1,
+    // ULTRA_FAST=0). Reproducing the rolling `hval`, the liblzf IDX hash,
+    // and the post-match double rehash is required for byte-exact DUMP /
+    // RDB output — the earlier Knuth-hash/HLOG=14 version produced
+    // valid-but-different compressed streams for mixed-byte inputs (the
+    // all-'x' z4tsz test passed only because identical trigrams collide
+    // regardless of hash). (frankenredis-wmh2p, supersedes z4tsz)
+    const HLOG: u32 = 16;
+    const HSIZE: usize = 1 << HLOG; // 65536
+    const MAX_LIT: usize = 1 << 5; // 32
+    const MAX_OFF: usize = 1 << 13; // 8192
     const MAX_REF: usize = (1 << 8) + (1 << 3); // 264
 
     let in_len = input.len();
@@ -1851,101 +1859,126 @@ pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
         return None;
     }
 
-    // Knuth multiplicative hash on the (next 3 bytes) trigram.
-    fn trigram(buf: &[u8], i: usize) -> u32 {
-        ((buf[i] as u32) << 16) | ((buf[i + 1] as u32) << 8) | (buf[i + 2] as u32)
-    }
-    fn hash(v: u32) -> usize {
-        ((v.wrapping_mul(2_654_435_761)) >> (32 - HLOG)) as usize & (HSIZE - 1)
-    }
+    // liblzf VERY_FAST: IDX(h) = ((h >> (24 - HLOG)) - h*5) & (HSIZE-1).
+    let idx = |h: u32| -> usize {
+        (((h >> (24 - HLOG)).wrapping_sub(h.wrapping_mul(5))) & (HSIZE as u32 - 1)) as usize
+    };
 
     let mut out: Vec<u8> = Vec::with_capacity(out_budget);
-    // 0 means "unset" (we store ip+1 so position 0 is representable).
+    // htab stores ip+1 (0 = unset), mirroring the zero-initialised C table.
     let mut htab = vec![0u32; HSIZE];
 
     let mut ip: usize = 0;
+    let mut lit: usize = 0;
     let mut lit_hdr_pos: usize = out.len();
-    out.push(0); // placeholder for literal-run header, filled when run ends
+    out.push(0); // start run: placeholder literal-run header
     if out.len() > out_budget {
         return None;
     }
-    let mut lit: usize = 0;
 
-    while ip + 2 < in_len {
-        let v = trigram(input, ip);
-        let h = hash(v);
+    // `hval` is a rolling 32-bit value: FRST(ip) = (ip[0]<<8)|ip[1] seeds
+    // it; each step NEXTs in ip[2]; it is reseeded with FRST after every
+    // match. It is NOT a fresh per-position trigram.
+    let mut hval: u32 = if in_len >= 2 {
+        ((input[0] as u32) << 8) | (input[1] as u32)
+    } else {
+        0
+    };
+
+    while in_len >= 3 && ip < in_len - 2 {
+        // hval = NEXT(hval, ip) = (hval << 8) | ip[2]
+        hval = (hval << 8) | (input[ip + 2] as u32);
+        let h = idx(hval);
         let stored = htab[h];
-        htab[h] = (ip as u32).wrapping_add(1);
-        let ref_idx = if stored == 0 {
-            None
-        } else {
-            Some((stored - 1) as usize)
-        };
+        htab[h] = (ip as u32) + 1;
 
         let mut emitted_match = false;
-        if let Some(r) = ref_idx {
-            // (frankenredis-z4tsz) Mirror vendored lzf_c.c:164 which
-            // requires `ref > (u8 *)in_data` — the back-reference must
-            // be STRICTLY greater than the input start. Without this,
-            // fr emits a tighter LZF stream than vendored for inputs
-            // whose first trigram repeats at position 1 (e.g. all-'x'
-            // payloads), producing a valid-but-different compressed
-            // wire form and a divergent DEBUG OBJECT serializedlength.
-            // off = ip - ref - 1, must be in 0..MAX_OFF.
-            if r > 0
+        if stored != 0 {
+            let r = (stored - 1) as usize;
+            // ref > in_data (r >= 1); off = ip-ref-1 < MAX_OFF;
+            // ref[0..2] == ip[0..2] (u16 + 3rd byte in C).
+            if r >= 1
                 && r < ip
                 && ip - r - 1 < MAX_OFF
-                && r + 2 < in_len
+                && input[r + 2] == input[ip + 2]
                 && input[r] == input[ip]
                 && input[r + 1] == input[ip + 1]
-                && input[r + 2] == input[ip + 2]
             {
                 let off = ip - r - 1;
-                // (frankenredis-z4tsz) Mirror vendored lzf_c.c:175 which
-                // caps maxlen at `in_end - ip - 2`, leaving 2 trailing
-                // bytes for the closing literal run. Without this, fr
-                // matches all the way to the end, producing a shorter
-                // (but still valid) LZF stream that diverges from
-                // vendored's wire form. `ip + 2 < in_len` guarantees
-                // `in_len - ip - 2 > 0`.
-                let max_len = std::cmp::min(MAX_REF, in_len - ip - 2);
-                let mut match_len = 3;
-                while match_len < max_len && input[r + match_len] == input[ip + match_len] {
-                    match_len += 1;
+                // len starts at 2; maxlen = in_end - ip - 2, capped MAX_REF.
+                let maxlen = std::cmp::min(MAX_REF, in_len - ip - 2);
+                let mut len = 2usize;
+                // C match-length loop: an unrolled fast path (maxlen > 16)
+                // does 16 UNCHECKED len++ before the bounded do-while, so a
+                // run can overshoot maxlen by up to ~16 — this is why
+                // e.g. "a"*21 matches 19 bytes, not 17. The unchecked reads
+                // are in bounds because maxlen > 16 => ip[18] < in_end.
+                'matchloop: loop {
+                    if maxlen > 16 {
+                        for _ in 0..16 {
+                            len += 1;
+                            if input[r + len] != input[ip + len] {
+                                break 'matchloop;
+                            }
+                        }
+                    }
+                    // C: do len++ while (len < maxlen && ref[len] == ip[len]);
+                    loop {
+                        len += 1;
+                        if !(len < maxlen && input[r + len] == input[ip + len]) {
+                            break;
+                        }
+                    }
+                    break;
                 }
-                let len_minus_2 = match_len - 2; // 1..MAX_REF - 2 = 1..262
+                let enc = len - 2; // len -= 2 (octets - 1)
 
-                // Close the open literal run.
+                // Stop the open literal run (op[-lit-1] = lit-1; op -= !lit).
                 if lit > 0 {
                     out[lit_hdr_pos] = (lit - 1) as u8;
                 } else {
-                    // Empty run — drop the placeholder.
                     out.pop();
                 }
 
-                let off_hi = ((off >> 8) & 0x1F) as u8;
-                if len_minus_2 < 7 {
-                    let header = ((len_minus_2 as u8) << 5) | off_hi;
-                    out.push(header);
+                let off_hi = (off >> 8) as u8; // off < 8192 => off>>8 <= 31
+                if enc < 7 {
+                    out.push(off_hi + ((enc as u8) << 5));
                 } else {
-                    out.push((7u8 << 5) | off_hi);
-                    out.push((len_minus_2 - 7) as u8);
+                    out.push(off_hi + (7u8 << 5));
+                    out.push((enc - 7) as u8);
                 }
                 out.push((off & 0xFF) as u8);
                 if out.len() > out_budget {
                     return None;
                 }
 
-                ip += match_len;
-
-                // Open a new literal run.
+                // Start a new literal run.
                 lit = 0;
                 lit_hdr_pos = out.len();
                 out.push(0);
                 if out.len() > out_budget {
                     return None;
                 }
+
+                // ip advances by the full match length (C: ip++; ip += enc+1).
+                ip += len;
                 emitted_match = true;
+
+                if ip >= in_len - 2 {
+                    // C: if (ip >= in_end - 2) break; (skip the rehash)
+                    break;
+                }
+                // VERY_FAST post-match rehash: insert htab entries for the
+                // last two bytes of the matched region. (--ip; --ip; then
+                // two NEXT/store/ip++ steps return ip to ip_m + match.)
+                ip -= 2;
+                hval = ((input[ip] as u32) << 8) | (input[ip + 1] as u32); // FRST(ip)
+                hval = (hval << 8) | (input[ip + 2] as u32); // NEXT
+                htab[idx(hval)] = (ip as u32) + 1;
+                ip += 1;
+                hval = (hval << 8) | (input[ip + 2] as u32); // NEXT
+                htab[idx(hval)] = (ip as u32) + 1;
+                ip += 1;
             }
         }
 
