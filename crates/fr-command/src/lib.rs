@@ -128,6 +128,39 @@ pub fn command_keys(argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// Locate the index of the `<id>` argument in an `XADD` argv, skipping the
+/// optional `NOMKSTREAM` and `MAXLEN|MINID [=|~] <threshold> [LIMIT <n>]`
+/// prefix. Returns `None` when the argv is too short. Used to rewrite an
+/// auto-generated id (`*` / `<ms>-*`) to the concrete id for deterministic
+/// AOF/replication propagation. (frankenredis-f9byo)
+///
+/// This mirrors the option-skipping in `xadd`'s parser; it is intentionally
+/// lenient (it does not re-validate threshold values) because only a
+/// successfully executed XADD — whose options already parsed — is propagated.
+pub fn xadd_id_arg_index(argv: &[Vec<u8>]) -> Option<usize> {
+    // argv[0] = XADD, argv[1] = key, options begin at index 2.
+    let mut idx = 2;
+    while idx < argv.len() {
+        if eq_ascii_command(&argv[idx], b"NOMKSTREAM") {
+            idx += 1;
+        } else if eq_ascii_command(&argv[idx], b"MAXLEN") || eq_ascii_command(&argv[idx], b"MINID")
+        {
+            idx += 1;
+            if idx < argv.len()
+                && (eq_ascii_command(&argv[idx], b"=") || eq_ascii_command(&argv[idx], b"~"))
+            {
+                idx += 1;
+            }
+            idx += 1; // threshold
+        } else if eq_ascii_command(&argv[idx], b"LIMIT") && idx + 1 < argv.len() {
+            idx += 2; // LIMIT <n>
+        } else {
+            break;
+        }
+    }
+    (idx < argv.len()).then_some(idx)
+}
+
 /// Return the argv indexes that correspond to keys for the command.
 pub fn command_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
     let Some(raw_cmd) = argv.first() else {
@@ -49079,7 +49112,13 @@ mod tests {
         let mut store = Store::new();
         for _ in 0..3 {
             dispatch_argv(
-                &[b"XADD".to_vec(), b"s".to_vec(), b"*".to_vec(), b"f".to_vec(), b"v".to_vec()],
+                &[
+                    b"XADD".to_vec(),
+                    b"s".to_vec(),
+                    b"*".to_vec(),
+                    b"f".to_vec(),
+                    b"v".to_vec(),
+                ],
                 &mut store,
                 0,
             )
@@ -49101,13 +49140,23 @@ mod tests {
             0,
         )
         .expect("xadd maxlen");
-        assert_eq!(store.dirty, before + 1, "XADD MAXLEN trim must net +1 dirty");
+        assert_eq!(
+            store.dirty,
+            before + 1,
+            "XADD MAXLEN trim must net +1 dirty"
+        );
         assert_eq!(store.xlen(b"s", 0).expect("xlen"), 1);
 
         // MINID variant: seed back up, trim by id, still exactly +1.
         for id in ["10-1", "11-1", "12-1"] {
             dispatch_argv(
-                &[b"XADD".to_vec(), b"s".to_vec(), id.as_bytes().to_vec(), b"f".to_vec(), b"v".to_vec()],
+                &[
+                    b"XADD".to_vec(),
+                    b"s".to_vec(),
+                    id.as_bytes().to_vec(),
+                    b"f".to_vec(),
+                    b"v".to_vec(),
+                ],
                 &mut store,
                 0,
             )
@@ -49139,7 +49188,13 @@ mod tests {
         let mut store = Store::new();
         for i in 0..3u64 {
             dispatch_argv(
-                &[b"XADD".to_vec(), b"s".to_vec(), format!("{}-1", i + 1).into_bytes(), b"f".to_vec(), b"v".to_vec()],
+                &[
+                    b"XADD".to_vec(),
+                    b"s".to_vec(),
+                    format!("{}-1", i + 1).into_bytes(),
+                    b"f".to_vec(),
+                    b"v".to_vec(),
+                ],
                 &mut store,
                 0,
             )
@@ -49147,7 +49202,13 @@ mod tests {
         }
         // Plain XADD (no trim clause) → flag false.
         dispatch_argv(
-            &[b"XADD".to_vec(), b"s".to_vec(), b"*".to_vec(), b"f".to_vec(), b"v".to_vec()],
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"*".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
             &mut store,
             0,
         )
@@ -49156,21 +49217,43 @@ mod tests {
 
         // MAXLEN above current length → no removal → flag false.
         dispatch_argv(
-            &[b"XADD".to_vec(), b"s".to_vec(), b"MAXLEN".to_vec(), b"1000".to_vec(), b"*".to_vec(), b"f".to_vec(), b"v".to_vec()],
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"1000".to_vec(),
+                b"*".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
             &mut store,
             0,
         )
         .expect("xadd maxlen noop");
-        assert!(!store.last_xadd_trimmed, "MAXLEN above length must not flag a trim");
+        assert!(
+            !store.last_xadd_trimmed,
+            "MAXLEN above length must not flag a trim"
+        );
 
         // MAXLEN below current length → removal → flag true.
         dispatch_argv(
-            &[b"XADD".to_vec(), b"s".to_vec(), b"MAXLEN".to_vec(), b"1".to_vec(), b"*".to_vec(), b"f".to_vec(), b"v".to_vec()],
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"1".to_vec(),
+                b"*".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
             &mut store,
             0,
         )
         .expect("xadd maxlen trim");
-        assert!(store.last_xadd_trimmed, "MAXLEN below length must flag the trim");
+        assert!(
+            store.last_xadd_trimmed,
+            "MAXLEN below length must flag the trim"
+        );
     }
 
     #[test]

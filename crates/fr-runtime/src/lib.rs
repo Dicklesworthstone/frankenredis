@@ -5644,6 +5644,14 @@ impl Runtime {
                             // exact members removed (or DEL when it drained the
                             // set) so replicas/AOF replay don't re-randomize.
                             self.capture_aof_record(&rewritten);
+                        } else if let Some(rewritten) =
+                            Self::rewrite_xadd_autoid_for_propagation(&argv, &reply)
+                        {
+                            // (frankenredis-f9byo) XADD's auto id is rewritten to
+                            // the concrete id the master assigned so replicas/AOF
+                            // replay use the SAME stream id instead of generating
+                            // a divergent one from their own clock.
+                            self.capture_aof_record(&rewritten);
                         } else {
                             self.capture_aof_record(&argv);
                         }
@@ -5722,11 +5730,7 @@ impl Runtime {
                                     || c.eq_ignore_ascii_case(b"XCLAIM")
                                     || c.eq_ignore_ascii_case(b"XAUTOCLAIM")
                             });
-                            if is_smove
-                                || is_expire_family
-                                || is_getex
-                                || is_stream_consumer_cmd
-                            {
+                            if is_smove || is_expire_family || is_getex || is_stream_consumer_cmd {
                                 // Events already queued by the Store method.
                             } else if is_list_move && cmd_keys.len() >= 2 {
                                 let (pop_ev, push_ev) = Self::list_move_events(&argv);
@@ -6716,6 +6720,35 @@ impl Runtime {
         } else {
             Some(vec![b"DEL".to_vec(), key.clone()])
         }
+    }
+
+    /// Rewrite `XADD key [opts] * field value...` so the auto-generated id is
+    /// replaced with the concrete id the master assigned (taken from the XADD
+    /// reply). Without this a replica or AOF replay generates a DIFFERENT id
+    /// from its own clock and the streams diverge. Mirrors upstream
+    /// t_stream.c::xaddCommand rewriting the id argument before propagation.
+    /// Returns `None` for a fully-explicit id (propagate verbatim) or any
+    /// non-XADD command. (frankenredis-f9byo)
+    fn rewrite_xadd_autoid_for_propagation(
+        argv: &[Vec<u8>],
+        reply: &RespFrame,
+    ) -> Option<Vec<Vec<u8>>> {
+        if !eq_ascii_token(argv.first()?, b"XADD") {
+            return None;
+        }
+        let id_idx = fr_command::xadd_id_arg_index(argv)?;
+        // Only an auto id (`*` or partial `<ms>-*`) needs rewriting.
+        if !argv.get(id_idx)?.contains(&b'*') {
+            return None;
+        }
+        // The reply is the concrete assigned id as a bulk string.
+        let generated = match reply {
+            RespFrame::BulkString(Some(v)) => v.clone(),
+            _ => return None,
+        };
+        let mut out = argv.to_vec();
+        out[id_idx] = generated;
+        Some(out)
     }
 
     fn rewrite_relative_expire_for_propagation(
@@ -18027,10 +18060,7 @@ mod tests {
         );
         // Wrong arity → verbatim.
         assert_eq!(rw(&[b"INCRBYFLOAT", b"kf"], bulk(b"12.5")), None);
-        assert_eq!(
-            rw(&[b"HINCRBYFLOAT", b"h", b"fld"], bulk(b"13.5")),
-            None
-        );
+        assert_eq!(rw(&[b"HINCRBYFLOAT", b"h", b"fld"], bulk(b"13.5")), None);
     }
 
     #[test]
@@ -18069,11 +18099,131 @@ mod tests {
             None
         );
         assert_eq!(
-            rt.rewrite_spop_for_propagation(
-                &[v(b"SPOP"), v(b"s")],
-                &RespFrame::BulkString(None)
+            rt.rewrite_spop_for_propagation(&[v(b"SPOP"), v(b"s")], &RespFrame::BulkString(None)),
+            None
+        );
+    }
+
+    #[test]
+    fn xadd_autoid_rewritten_to_concrete_id_for_propagation() {
+        // (frankenredis-f9byo) XADD's auto id must be replaced with the id the
+        // master assigned (from the reply) so replicas/AOF replay don't generate
+        // a divergent id from their own clock. Explicit ids propagate verbatim.
+        let rw = |argv: &[&[u8]], reply: RespFrame| {
+            Runtime::rewrite_xadd_autoid_for_propagation(
+                &argv.iter().map(|a| a.to_vec()).collect::<Vec<_>>(),
+                &reply,
+            )
+        };
+        let id = |s: &[u8]| RespFrame::BulkString(Some(s.to_vec()));
+        let vv = |items: &[&[u8]]| items.iter().map(|i| i.to_vec()).collect::<Vec<_>>();
+
+        // Plain `XADD key * f v` -> id replaced.
+        assert_eq!(
+            rw(&[b"XADD", b"s", b"*", b"f", b"v"], id(b"10-0")),
+            Some(vv(&[b"XADD", b"s", b"10-0", b"f", b"v"]))
+        );
+        // Trim args preserved, id (after MAXLEN ~ n LIMIT n) rewritten.
+        assert_eq!(
+            rw(
+                &[
+                    b"XADD", b"s", b"MAXLEN", b"~", b"5", b"LIMIT", b"10", b"*", b"f", b"v"
+                ],
+                id(b"11-0")
+            ),
+            Some(vv(&[
+                b"XADD", b"s", b"MAXLEN", b"~", b"5", b"LIMIT", b"10", b"11-0", b"f", b"v"
+            ]))
+        );
+        // NOMKSTREAM + MINID, partial `<ms>-*` resolved.
+        assert_eq!(
+            rw(
+                &[
+                    b"XADD",
+                    b"s",
+                    b"NOMKSTREAM",
+                    b"MINID",
+                    b"3",
+                    b"5-*",
+                    b"f",
+                    b"v"
+                ],
+                id(b"5-0")
+            ),
+            Some(vv(&[
+                b"XADD",
+                b"s",
+                b"NOMKSTREAM",
+                b"MINID",
+                b"3",
+                b"5-0",
+                b"f",
+                b"v"
+            ]))
+        );
+        // Fully-explicit id → verbatim (None).
+        assert_eq!(
+            rw(&[b"XADD", b"s", b"100-1", b"f", b"v"], id(b"100-1")),
+            None
+        );
+        // Non-XADD / non-bulk reply → None.
+        assert_eq!(rw(&[b"SET", b"k", b"v"], id(b"x")), None);
+        assert_eq!(
+            rw(
+                &[b"XADD", b"s", b"*", b"f", b"v"],
+                RespFrame::BulkString(None)
             ),
             None
+        );
+    }
+
+    #[test]
+    fn xadd_autoid_aof_capture_and_replay_preserve_master_id() {
+        // (frankenredis-f9byo) Exercise the full capture path, not just the
+        // helper: the emitted AOF/replication argv must carry the master's
+        // concrete id, so replaying later with a different clock keeps the same
+        // stream entry id.
+        let mut source = Runtime::default_strict();
+        source.server.replication_runtime_state.ensure_replica(42);
+
+        let reply = source.execute_frame(command(&[b"XADD", b"s", b"*", b"f", b"v"]), 1_000);
+        assert!(
+            matches!(reply, RespFrame::BulkString(Some(_))),
+            "expected generated XADD id, got {reply:?}"
+        );
+        let RespFrame::BulkString(Some(generated_id)) = reply else {
+            return;
+        };
+        assert_eq!(
+            source.aof_records().last().expect("last aof record").argv,
+            vec![
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                generated_id.clone(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ]
+        );
+
+        let encoded = source.encoded_aof_stream();
+        let decoded = decode_aof_stream(&encoded).expect("decode xadd aof stream");
+        assert_eq!(decoded, source.aof_records());
+
+        let mut target = Runtime::default_strict();
+        target.server.replication_runtime_state.ensure_replica(43);
+        assert_eq!(
+            target.replay_aof_records(&decoded, 9_999),
+            vec![RespFrame::BulkString(Some(generated_id.clone()))]
+        );
+        assert_eq!(
+            target.execute_frame(command(&[b"XRANGE", b"s", b"-", b"+"]), 10_000),
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(generated_id)),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"f".to_vec())),
+                    RespFrame::BulkString(Some(b"v".to_vec())),
+                ])),
+            ]))])),
         );
     }
 
