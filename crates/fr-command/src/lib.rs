@@ -198,7 +198,14 @@ pub fn rewrite_effect_command_for_propagation(
     };
 
     if eq_ascii_command(cmd, b"INCRBYFLOAT") && argv.len() == 3 {
-        return Some(vec![b"SET".to_vec(), argv[1].clone(), bulk(reply)?]);
+        // (frankenredis-n66hv) KEEPTTL so the rewritten SET preserves the key's
+        // TTL (a plain SET would clear it on the replica / AOF replay).
+        return Some(vec![
+            b"SET".to_vec(),
+            argv[1].clone(),
+            bulk(reply)?,
+            b"KEEPTTL".to_vec(),
+        ]);
     }
     if eq_ascii_command(cmd, b"HINCRBYFLOAT") && argv.len() == 4 {
         return Some(vec![
@@ -49454,7 +49461,7 @@ mod tests {
                 &b(b"12.5"),
                 &store,
             ),
-            Some(vec![v(b"SET"), v(b"kf"), v(b"12.5")])
+            Some(vec![v(b"SET"), v(b"kf"), v(b"12.5"), v(b"KEEPTTL")])
         );
         // GETDEL -> DEL.
         assert_eq!(

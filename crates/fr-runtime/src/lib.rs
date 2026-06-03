@@ -6670,8 +6670,16 @@ impl Runtime {
             _ => return None,
         };
         if eq_ascii_token(cmd, b"INCRBYFLOAT") && argv.len() == 3 {
-            Some(vec![b"SET".to_vec(), argv[1].clone(), value])
+            // (frankenredis-n66hv) Upstream appends KEEPTTL so the rewritten SET
+            // preserves the key's TTL (a plain SET would clear it on the replica).
+            Some(vec![
+                b"SET".to_vec(),
+                argv[1].clone(),
+                value,
+                b"KEEPTTL".to_vec(),
+            ])
         } else if eq_ascii_token(cmd, b"HINCRBYFLOAT") && argv.len() == 4 {
+            // HSET preserves the hash key's TTL on its own, so no KEEPTTL needed.
             Some(vec![
                 b"HSET".to_vec(),
                 argv[1].clone(),
@@ -14113,7 +14121,6 @@ replica_announced:1\r\n",
 
             match result {
                 Ok(mut reply) => {
-                    self.strip_db_prefixes_from_frame(&mut reply);
                     if dirty_after > dirty_before {
                         if let Some(script_commands) =
                             self.take_script_propagation_commands_for_capture(argv)
@@ -14124,7 +14131,20 @@ replica_announced:1\r\n",
                             }
                         } else {
                             transaction_dirty = true;
-                            transaction_aof.push(argv.clone());
+                            // (frankenredis-n66hv) Apply the same propagation
+                            // determinism rewrites the non-transactional path uses,
+                            // so XADD `*` / SPOP / INCRBYFLOAT (etc.) inside a
+                            // transaction propagate the concrete deterministic form
+                            // instead of diverging on a replica/AOF replay. The
+                            // sub-command reply (e.g. XADD's generated id) is read
+                            // before stripping db prefixes below.
+                            let effect = fr_command::rewrite_effect_command_for_propagation(
+                                argv,
+                                &reply,
+                                &self.server.store,
+                            )
+                            .unwrap_or_else(|| argv.clone());
+                            transaction_aof.push(effect);
                         }
 
                         // Optimized blocking: track keys modified by write commands
@@ -14145,6 +14165,7 @@ replica_announced:1\r\n",
                             self.deliver_keyspace_notifications();
                         }
                     }
+                    self.strip_db_prefixes_from_frame(&mut reply);
                     results.push(reply);
                 }
                 Err(err) => results.push(err.to_resp()),
@@ -18133,12 +18154,12 @@ mod tests {
         // INCRBYFLOAT key incr -> SET key <result>
         assert_eq!(
             rw(&[b"INCRBYFLOAT", b"kf", b"2.5"], bulk(b"12.5")),
-            Some(vec![b"SET".to_vec(), b"kf".to_vec(), b"12.5".to_vec()])
+            Some(vec![b"SET".to_vec(), b"kf".to_vec(), b"12.5".to_vec(), b"KEEPTTL".to_vec()])
         );
         // Case-insensitive command token.
         assert_eq!(
             rw(&[b"incrbyfloat", b"kf", b"2.5"], bulk(b"12.5")),
-            Some(vec![b"SET".to_vec(), b"kf".to_vec(), b"12.5".to_vec()])
+            Some(vec![b"SET".to_vec(), b"kf".to_vec(), b"12.5".to_vec(), b"KEEPTTL".to_vec()])
         );
         // HINCRBYFLOAT key field incr -> HSET key field <result>
         assert_eq!(
