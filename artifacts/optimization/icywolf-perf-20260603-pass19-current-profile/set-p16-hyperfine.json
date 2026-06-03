@@ -1,25 +1,25 @@
 {
   "results": [
     {
-      "command": "target-icywolf-pass19-current-profile/release-perf/fr-bench --host 127.0.0.1 --port 16419 --clients 50 --requests 100000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out artifacts/optimization/icywolf-perf-20260603-pass19-current-profile/set-p16-hf-last.json --key-prefix icywolf-pass19-hf",
-      "mean": 0.3415905168000001,
-      "stddev": 0.01512922753067296,
-      "median": 0.33806318980000005,
-      "user": 0.08632809999999999,
-      "system": 0.16195518,
-      "min": 0.32572788480000003,
-      "max": 0.37322305980000003,
+      "command": "target-icywolf-pass19-current-profile-rch/release-perf/fr-bench --host 127.0.0.1 --port 18879 --clients 50 --requests 100000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out artifacts/optimization/icywolf-perf-20260603-pass19-current-profile/set-p16-hf-last.json --key-prefix icywolf-pass19-hf",
+      "mean": 0.3304634678,
+      "stddev": 0.00962755071763118,
+      "median": 0.3281302961,
+      "user": 0.08653662000000001,
+      "system": 0.15580154,
+      "min": 0.3201804046,
+      "max": 0.3489866716,
       "times": [
-        0.32685939780000006,
-        0.34909645880000006,
-        0.34367380480000004,
-        0.3309559898,
-        0.35708292980000006,
-        0.34447282780000005,
-        0.32572788480000003,
-        0.37322305980000003,
-        0.33236023980000007,
-        0.33245257480000007
+        0.33289482260000003,
+        0.3205627386,
+        0.3238809956,
+        0.3248917906,
+        0.3312063636,
+        0.3201804046,
+        0.3335669466,
+        0.3250542286,
+        0.3434097156,
+        0.3489866716
       ],
       "exit_codes": [
         0,
