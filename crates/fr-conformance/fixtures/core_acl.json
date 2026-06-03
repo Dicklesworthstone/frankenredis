@@ -2202,7 +2202,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "NOPERM this user has no permissions to run the 'DEL' command"
+        "value": "NOPERM User restricted has no permissions to run the 'del' command"
       },
       "expect_threat": {
         "threat_class": "auth_policy_confusion",
@@ -2220,7 +2220,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "NOPERM this user has no permissions to run the 'INCR' command"
+        "value": "NOPERM User restricted has no permissions to run the 'incr' command"
       },
       "expect_threat": {
         "threat_class": "auth_policy_confusion",
@@ -2238,7 +2238,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "NOPERM this user has no permissions to run the 'KEYS' command"
+        "value": "NOPERM User restricted has no permissions to run the 'keys' command"
       },
       "expect_threat": {
         "threat_class": "auth_policy_confusion",
@@ -2338,7 +2338,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "NOPERM this user has no permissions to run the 'SET' command"
+        "value": "NOPERM User reader has no permissions to run the 'set' command"
       },
       "expect_threat": {
         "threat_class": "auth_policy_confusion",
@@ -2425,7 +2425,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "NOPERM this user has no permissions to run the 'FLUSHDB' command"
+        "value": "NOPERM User nodanger has no permissions to run the 'flushdb' command"
       },
       "expect_threat": {
         "threat_class": "auth_policy_confusion",
@@ -2442,7 +2442,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "NOPERM this user has no permissions to run the 'FLUSHALL' command"
+        "value": "NOPERM User nodanger has no permissions to run the 'flushall' command"
       },
       "expect_threat": {
         "threat_class": "auth_policy_confusion",

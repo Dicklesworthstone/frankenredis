@@ -2142,13 +2142,21 @@ pub fn dispatch_argv(
         && let Some(permission_error) = dispatch_acl_permission_error_for_argv(argv, permissions)
     {
         let command_name = String::from_utf8_lossy(raw_cmd).into_owned();
+        // A command-level ACL denial reports the authenticated username and the
+        // command's canonical lowercase fullname (`config|get` for subcommands),
+        // matching vendored redis 7.2.4. (frankenredis-1ktss)
+        let acl_denied_user =
+            String::from_utf8_lossy(&store.dispatch_client_ctx.authenticated_user).into_owned();
+        let acl_command_fullname = acl_command_selectors_for_argv(argv)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| command_name.to_ascii_lowercase());
         let (reason, object, error) = match permission_error {
             DispatchAclPermissionError::Command => (
                 DispatchAclPermissionReason::Command,
                 command_name.to_ascii_uppercase(),
                 CommandError::Custom(format!(
-                    "NOPERM this user has no permissions to run the '{}' command",
-                    command_name
+                    "NOPERM User {acl_denied_user} has no permissions to run the '{acl_command_fullname}' command"
                 )),
             ),
             DispatchAclPermissionError::Key(key) => {
@@ -7598,12 +7606,7 @@ fn stream_full_group_lag_frame(
     // range, the lag can't be determined — upstream streamCGLag returns nil
     // (the same condition that invalidates entries-read). The structural
     // fallback below must not fabricate a concrete lag here.
-    if stream_lag_range_has_tombstones(
-        stream_len,
-        first_id,
-        max_deleted_id,
-        last_delivered_id,
-    ) {
+    if stream_lag_range_has_tombstones(stream_len, first_id, max_deleted_id, last_delivered_id) {
         return RespFrame::BulkString(None);
     }
     let Some(first_id) = first_id else {
@@ -25988,7 +25991,7 @@ mod tests {
         .expect_err("SET denied");
         match err {
             CommandError::Custom(msg) => assert!(
-                msg.contains("NOPERM this user has no permissions to run the 'SET' command"),
+                msg.contains("NOPERM User alice has no permissions to run the 'set' command"),
                 "{msg}"
             ),
             other => panic!("expected NOPERM command, got {other:?}"),
@@ -49672,7 +49675,13 @@ mod tests {
                 &store,
                 1_000_000,
             ),
-            Some(vec![v(b"SET"), v(b"k"), v(b"val"), v(b"PXAT"), v(b"1100000")])
+            Some(vec![
+                v(b"SET"),
+                v(b"k"),
+                v(b"val"),
+                v(b"PXAT"),
+                v(b"1100000")
+            ])
         );
 
         // XADD `*` -> concrete id from the reply.
@@ -49697,7 +49706,12 @@ mod tests {
         );
         // GETDEL -> DEL.
         assert_eq!(
-            super::rewrite_effect_command_for_propagation(&[v(b"GETDEL"), v(b"k")], &b(b"x"), &store, 0),
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"GETDEL"), v(b"k")],
+                &b(b"x"),
+                &store,
+                0
+            ),
             Some(vec![v(b"DEL"), v(b"k")])
         );
         // SPOP with the set still present -> SREM <members>.
@@ -49779,7 +49793,14 @@ mod tests {
         );
         assert_eq!(
             super::rewrite_effect_command_for_propagation(
-                &[v(b"BLMOVE"), v(b"s"), v(b"d"), v(b"LEFT"), v(b"RIGHT"), v(b"0")],
+                &[
+                    v(b"BLMOVE"),
+                    v(b"s"),
+                    v(b"d"),
+                    v(b"LEFT"),
+                    v(b"RIGHT"),
+                    v(b"0")
+                ],
                 &b(b"x"),
                 &store,
                 0,
@@ -49789,7 +49810,15 @@ mod tests {
         // (B)LMPOP / (B)ZMPOP -> LPOP/RPOP/ZPOPMIN/ZPOPMAX <served-key> <count>.
         assert_eq!(
             super::rewrite_effect_command_for_propagation(
-                &[v(b"LMPOP"), v(b"2"), v(b"x"), v(b"l"), v(b"LEFT"), v(b"COUNT"), v(b"2")],
+                &[
+                    v(b"LMPOP"),
+                    v(b"2"),
+                    v(b"x"),
+                    v(b"l"),
+                    v(b"LEFT"),
+                    v(b"COUNT"),
+                    v(b"2")
+                ],
                 &arr(vec![b(b"l"), arr(vec![b(b"a"), b(b"b")])]),
                 &store,
                 0,
@@ -49798,10 +49827,20 @@ mod tests {
         );
         assert_eq!(
             super::rewrite_effect_command_for_propagation(
-                &[v(b"ZMPOP"), v(b"1"), v(b"z"), v(b"MIN"), v(b"COUNT"), v(b"2")],
+                &[
+                    v(b"ZMPOP"),
+                    v(b"1"),
+                    v(b"z"),
+                    v(b"MIN"),
+                    v(b"COUNT"),
+                    v(b"2")
+                ],
                 &arr(vec![
                     b(b"z"),
-                    arr(vec![arr(vec![b(b"a"), b(b"1")]), arr(vec![b(b"b"), b(b"2")])]),
+                    arr(vec![
+                        arr(vec![b(b"a"), b(b"1")]),
+                        arr(vec![b(b"b"), b(b"2")])
+                    ]),
                 ]),
                 &store,
                 0,
@@ -49819,7 +49858,12 @@ mod tests {
         );
         // Non-targeted command -> verbatim (None).
         assert_eq!(
-            super::rewrite_effect_command_for_propagation(&[v(b"SET"), v(b"k"), v(b"x")], &b(b"OK"), &store, 0),
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"SET"), v(b"k"), v(b"x")],
+                &b(b"OK"),
+                &store,
+                0
+            ),
             None
         );
     }

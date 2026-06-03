@@ -1142,7 +1142,11 @@ impl AclUser {
                     .map(|pattern| format!("&{}", String::from_utf8_lossy(pattern))),
             );
         }
-        parts.extend(self.commands_string().split_whitespace().map(str::to_string));
+        parts.extend(
+            self.commands_string()
+                .split_whitespace()
+                .map(str::to_string),
+        );
         format!("({})", parts.join(" "))
     }
 
@@ -1708,9 +1712,7 @@ impl AuthState {
                     }
                 }
                 if !closed {
-                    return Err(
-                        "ERR Unmatched parenthesis in selector specification.".to_string()
-                    );
+                    return Err("ERR Unmatched parenthesis in selector specification.".to_string());
                 }
                 out.push(acc);
             } else {
@@ -5527,6 +5529,16 @@ impl Runtime {
         }
 
         if let Some(permission_error) = self.acl_permission_error(&argv) {
+            // Upstream rejects a command-level ACL denial with the authenticated
+            // username and the command's canonical lowercase fullname (e.g.
+            // `User u has no permissions to run the 'config|get' command`).
+            // (frankenredis-1ktss)
+            let acl_denied_user =
+                String::from_utf8_lossy(self.session.current_user_name()).into_owned();
+            let acl_command_fullname = fr_command::acl_command_selectors_for_argv(&argv)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| command_name.to_ascii_lowercase());
             let (acl_reason, log_reason, object, reason_code, threat_reason, reply) =
                 match permission_error {
                     AclCommandPermissionError::Command => (
@@ -5539,8 +5551,8 @@ impl Runtime {
                             command_name
                         ),
                         RespFrame::Error(format!(
-                            "NOPERM this user has no permissions to run the '{}' command",
-                            command_name
+                            "NOPERM User {acl_command_user} has no permissions to run the '{acl_command_fullname}' command",
+                            acl_command_user = acl_denied_user
                         )),
                     ),
                     AclCommandPermissionError::Key(key) => {
@@ -14141,13 +14153,20 @@ replica_announced:1\r\n",
         for argv in &queued {
             if let Some(permission_error) = self.acl_permission_error(argv) {
                 let command_name = String::from_utf8_lossy(&argv[0]).into_owned();
+                // Command-level denial uses the username + canonical lowercase
+                // fullname, matching upstream. (frankenredis-1ktss)
+                let acl_denied_user =
+                    String::from_utf8_lossy(self.session.current_user_name()).into_owned();
+                let acl_command_fullname = fr_command::acl_command_selectors_for_argv(argv)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| command_name.to_ascii_lowercase());
                 let (log_reason, object, reply) = match permission_error {
                     AclCommandPermissionError::Command => (
                         "command",
                         command_name.to_ascii_uppercase(),
                         RespFrame::Error(format!(
-                            "NOPERM this user has no permissions to run the '{}' command",
-                            command_name
+                            "NOPERM User {acl_denied_user} has no permissions to run the '{acl_command_fullname}' command"
                         )),
                     ),
                     AclCommandPermissionError::Key(key) => {
@@ -17087,7 +17106,10 @@ mod tests {
 
         // The flush invalidation encodes as `invalidate` + RESP3 null.
         let frame = fr_command::pubsub_message_to_frame_for_protocol(
-            messages.into_iter().next().expect("flush invalidation queued"),
+            messages
+                .into_iter()
+                .next()
+                .expect("flush invalidation queued"),
             3,
         );
         assert_eq!(
@@ -17411,6 +17433,7 @@ mod tests {
         let _ = rt.swap_session(previous);
     }
 
+    #[test]
     fn multi_db_select_scopes_keyspace_commands() {
         let mut rt = Runtime::default_strict();
 
@@ -18373,7 +18396,7 @@ mod tests {
         let before = rt.aof_records().len();
 
         // Run the cycle well past the deadline; it reaps `ek`.
-        rt.run_active_expire_cycle(5_000, ActiveExpireCycleKind::Fast);
+        let _ = rt.run_active_expire_cycle(5_000, ActiveExpireCycleKind::Fast);
 
         let new_argvs: Vec<Vec<Vec<u8>>> = rt.aof_records()[before..]
             .iter()
@@ -18393,15 +18416,15 @@ mod tests {
         replica.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6379"]), 900);
         replica.execute_frame(command(&[b"SET", b"rk", b"v", b"PX", b"100"]), 900);
         let rbefore = replica.aof_records().len();
-        replica.run_active_expire_cycle(5_000, ActiveExpireCycleKind::Fast);
+        let _ = replica.run_active_expire_cycle(5_000, ActiveExpireCycleKind::Fast);
         let rnew: Vec<Vec<Vec<u8>>> = replica.aof_records()[rbefore..]
             .iter()
             .map(|r| r.argv.clone())
             .collect();
         assert!(
-            !rnew.iter().any(|argv| argv
-                .first()
-                .is_some_and(|c| c.eq_ignore_ascii_case(b"DEL"))),
+            !rnew
+                .iter()
+                .any(|argv| argv.first().is_some_and(|c| c.eq_ignore_ascii_case(b"DEL"))),
             "a replica must not generate expiry DELs, got {rnew:?}"
         );
     }
@@ -18431,16 +18454,16 @@ mod tests {
             .map(|r| r.argv.clone())
             .collect();
         assert!(
-            argvs.iter().any(|a| a
-                .first()
-                .is_some_and(|c| c.eq_ignore_ascii_case(b"DEL"))
-                && a.get(1).is_some_and(|k| k.as_slice() == b"k")),
+            argvs.iter().any(
+                |a| a.first().is_some_and(|c| c.eq_ignore_ascii_case(b"DEL"))
+                    && a.get(1).is_some_and(|k| k.as_slice() == b"k")
+            ),
             "lazy expiry must propagate DEL k, got {argvs:?}"
         );
         assert!(
-            !argvs.iter().any(|a| a
-                .first()
-                .is_some_and(|c| c.eq_ignore_ascii_case(b"GET"))),
+            !argvs
+                .iter()
+                .any(|a| a.first().is_some_and(|c| c.eq_ignore_ascii_case(b"GET"))),
             "the GET that lazy-expired must NOT propagate, got {argvs:?}"
         );
 
@@ -19162,10 +19185,10 @@ mod tests {
         let records = decode_aof_stream(&bytes).expect("decode flushed AOF");
         let argvs: Vec<Vec<Vec<u8>>> = records.iter().map(|r| r.argv.clone()).collect();
         assert!(
-            argvs
-                .iter()
-                .any(|a| a.first().is_some_and(|c| c.eq_ignore_ascii_case(b"SET"))
-                    && a.get(1).is_some_and(|k| k.as_slice() == b"k1")),
+            argvs.iter().any(
+                |a| a.first().is_some_and(|c| c.eq_ignore_ascii_case(b"SET"))
+                    && a.get(1).is_some_and(|k| k.as_slice() == b"k1")
+            ),
             "flushed AOF must contain `SET k1`, got {argvs:?}"
         );
 
@@ -19178,7 +19201,7 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read AOF after second flush");
         let records = decode_aof_stream(&bytes).expect("decode AOF after second flush");
         let mut reloaded = Runtime::default_strict();
-        reloaded.replay_aof_records(&records, 9_000);
+        let _ = reloaded.replay_aof_records(&records, 9_000);
         for (k, v) in [(b"k1", b"v1"), (b"k2", b"v2"), (b"k3", b"v3")] {
             assert_eq!(
                 reloaded.execute_frame(command(&[b"GET", k]), 9_001),
@@ -19215,7 +19238,7 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read AOF");
         let records = decode_aof_stream(&bytes).expect("decode AOF");
         let mut reloaded = Runtime::default_strict();
-        reloaded.replay_aof_records(&records, 9_000);
+        let _ = reloaded.replay_aof_records(&records, 9_000);
         assert_eq!(
             reloaded.execute_frame(command(&[b"GET", b"base"]), 9_001),
             RespFrame::BulkString(Some(b"1".to_vec())),
@@ -26825,7 +26848,7 @@ mod tests {
         assert_eq!(
             out,
             RespFrame::Error(
-                "NOPERM this user has no permissions to run the 'ACL' command".to_string()
+                "NOPERM User alice has no permissions to run the 'acl|whoami' command".to_string()
             )
         );
     }
@@ -27167,7 +27190,12 @@ mod tests {
         assert_eq!(
             rt.execute_frame(
                 command(&[
-                    b"ACL", b"SETUSER", b"selu", b"on", b"nopass", b"(+get ~app1:*)",
+                    b"ACL",
+                    b"SETUSER",
+                    b"selu",
+                    b"on",
+                    b"nopass",
+                    b"(+get ~app1:*)",
                     b"(+set ~app2:*)",
                 ]),
                 0
@@ -27242,23 +27270,35 @@ mod tests {
         // reset wipes everything. (frankenredis-d919b)
         let mut rt = Runtime::default_strict();
         rt.execute_frame(
-            command(&[b"ACL", b"SETUSER", b"selu", b"on", b"nopass", b"(+get ~app1:*)"]),
+            command(&[
+                b"ACL",
+                b"SETUSER",
+                b"selu",
+                b"on",
+                b"nopass",
+                b"(+get ~app1:*)",
+            ]),
             0,
         );
         let has_selector = |rt: &mut Runtime| -> bool {
             match rt.execute_frame(command(&[b"ACL", b"LIST"]), 99) {
-                RespFrame::Array(Some(items)) => items.iter().any(|f| matches!(
-                    f,
-                    RespFrame::BulkString(Some(b))
-                        if String::from_utf8_lossy(b).starts_with("user selu ")
-                            && String::from_utf8_lossy(b).contains('(')
-                )),
+                RespFrame::Array(Some(items)) => items.iter().any(|f| {
+                    matches!(
+                        f,
+                        RespFrame::BulkString(Some(b))
+                            if String::from_utf8_lossy(b).starts_with("user selu ")
+                                && String::from_utf8_lossy(b).contains('(')
+                    )
+                }),
                 _ => false,
             }
         };
         assert!(has_selector(&mut rt), "selector present after SETUSER");
 
-        rt.execute_frame(command(&[b"ACL", b"SETUSER", b"selu", b"clearselectors"]), 1);
+        rt.execute_frame(
+            command(&[b"ACL", b"SETUSER", b"selu", b"clearselectors"]),
+            1,
+        );
         assert!(!has_selector(&mut rt), "clearselectors drops the selector");
 
         // Re-add then reset.
@@ -27307,7 +27347,7 @@ mod tests {
         assert_eq!(
             whoami_reply,
             RespFrame::Error(
-                "NOPERM this user has no permissions to run the 'ACL' command".to_string()
+                "NOPERM User sub has no permissions to run the 'acl|whoami' command".to_string()
             )
         );
     }
@@ -27581,7 +27621,7 @@ mod tests {
         assert_eq!(
             cat_reply,
             RespFrame::Error(
-                "NOPERM this user has no permissions to run the 'ACL' command".to_string()
+                "NOPERM User sub has no permissions to run the 'acl|cat' command".to_string()
             )
         );
 
@@ -28535,7 +28575,7 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"INCR", b"foo"]), 4),
             RespFrame::Error(
-                "NOPERM this user has no permissions to run the 'INCR' command".to_string()
+                "NOPERM User antirez has no permissions to run the 'incr' command".to_string()
             )
         );
         assert_eq!(
@@ -28603,7 +28643,7 @@ mod tests {
         assert_eq!(
             exec_results[0],
             RespFrame::Error(
-                "NOPERM this user has no permissions to run the 'INCR' command".to_string()
+                "NOPERM User antirez has no permissions to run the 'incr' command".to_string()
             )
         );
         assert_eq!(
@@ -28656,7 +28696,7 @@ mod tests {
         ) else {
             unreachable!("expected EVAL ACL failure");
         };
-        assert!(err.contains("NOPERM this user has no permissions to run the 'incr' command"));
+        assert!(err.contains("NOPERM User antirez has no permissions to run the 'incr' command"));
         assert_eq!(
             rt.execute_frame(command(&[b"AUTH", b"default", b""]), 4),
             RespFrame::SimpleString("OK".to_string())
@@ -29973,7 +30013,7 @@ mod tests {
         );
         assert!(matches!(
             rt.execute_frame(command(&[b"DEL", b"allowed:1"]), 3),
-            RespFrame::Error(err) if err == "NOPERM this user has no permissions to run the 'DEL' command"
+            RespFrame::Error(err) if err == "NOPERM User alice has no permissions to run the 'del' command"
         ));
         assert_eq!(
             rt.execute_frame(command(&[b"GET", b"blocked:1"]), 4),

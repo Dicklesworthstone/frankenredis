@@ -1995,7 +1995,10 @@ fn tcp_resp3_subscriber_may_run_normal_commands() {
 
     c.write_all(&encode_command(&[b"GET", b"k"]));
     let get = c.read_resp3_response_bytes();
-    assert_eq!(get, b"$1\r\nv\r\n", "RESP3 subscriber GET must return value");
+    assert_eq!(
+        get, b"$1\r\nv\r\n",
+        "RESP3 subscriber GET must return value"
+    );
 
     send_shutdown_nosave(port);
 }
@@ -2033,7 +2036,10 @@ fn tcp_protocol_errors_use_upstream_wording() {
             b"*1\r\n$abc\r\nPING\r\n",
             b"-ERR Protocol error: invalid bulk length\r\n",
         ),
-        (b"*xyz\r\n", b"-ERR Protocol error: invalid multibulk length\r\n"),
+        (
+            b"*xyz\r\n",
+            b"-ERR Protocol error: invalid multibulk length\r\n",
+        ),
         (
             b"*1000000000000\r\n",
             b"-ERR Protocol error: invalid multibulk length\r\n",
@@ -3099,7 +3105,7 @@ fn tcp_config_file_applies_aclfile_startup_load() {
     assert_eq!(
         send_command(&mut alice, &[b"SET", b"k", b"v"]),
         RespFrame::Error(
-            "NOPERM this user has no permissions to run the 'SET' command".to_string()
+            "NOPERM User alice has no permissions to run the 'set' command".to_string()
         )
     );
 
