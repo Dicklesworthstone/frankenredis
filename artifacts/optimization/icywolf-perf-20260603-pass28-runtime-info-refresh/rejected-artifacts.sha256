@@ -1,0 +1,5 @@
+23e01919dca979309291fd60a42a2f7ce6d0c3b537a0bbb280cee0b9e2e37d76  artifacts/optimization/icywolf-perf-20260603-pass28-runtime-info-refresh/REJECTION_PROOF.md
+0713944f7bc2dc0074288445108c40feb06f20d00f80064d45219515fa4b351f  artifacts/optimization/icywolf-perf-20260603-pass28-runtime-info-refresh/baseline-direct.json
+5002d235ab58c0a70c2ed5788c32d6f743c69b2634ba6c4f328cf50b019b3ecd  artifacts/optimization/icywolf-perf-20260603-pass28-runtime-info-refresh/candidate-direct.json
+d8dac1332ac306d04abb86ddbb5558c1a7e9172298800a8ccb827fe563be4782  artifacts/optimization/icywolf-perf-20260603-pass28-runtime-info-refresh/paired-hyperfine.json
+18617507fcdbd717d20fe94a56acb66f985368e0b522f8e70fa6cb7b5a1ca3bf  artifacts/optimization/icywolf-perf-20260603-pass28-runtime-info-refresh/paired-hyperfine-2m.json

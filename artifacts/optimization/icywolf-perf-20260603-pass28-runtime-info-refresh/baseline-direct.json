@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780514117853,
+  "host": "127.0.0.1",
+  "port": 20630,
+  "workload": "set",
+  "clients": 50,
+  "requests": 500000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "icywolf-pass28-runtimeinfo-base-direct",
+  "total_time_ms": 1728,
+  "ops_per_sec": 289196.0110166976,
+  "bytes_sent": 39894725,
+  "bytes_received": 2500000,
+  "latency_us": {
+    "min": 220,
+    "p50": 2553,
+    "p95": 3683,
+    "p99": 4499,
+    "p999": 6239,
+    "max": 7439,
+    "mean": 2742.2920419999955,
+    "samples": 500000
+  }
+}
