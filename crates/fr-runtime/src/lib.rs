@@ -5874,10 +5874,15 @@ impl Runtime {
             "del"
         } else if cmd.eq_ignore_ascii_case(b"APPEND") {
             "append"
-        } else if cmd.eq_ignore_ascii_case(b"INCR") || cmd.eq_ignore_ascii_case(b"INCRBY") {
+        } else if cmd.eq_ignore_ascii_case(b"INCR")
+            || cmd.eq_ignore_ascii_case(b"INCRBY")
+            || cmd.eq_ignore_ascii_case(b"DECR")
+            || cmd.eq_ignore_ascii_case(b"DECRBY")
+        {
+            // (frankenredis-0gibs) Upstream t_string.c routes INCR/INCRBY/DECR/
+            // DECRBY all through incrDecrCommand, which fires NOTIFY_STRING
+            // "incrby" unconditionally — DECR/DECRBY do NOT get a "decrby" event.
             "incrby"
-        } else if cmd.eq_ignore_ascii_case(b"DECR") || cmd.eq_ignore_ascii_case(b"DECRBY") {
-            "decrby"
         } else if cmd.eq_ignore_ascii_case(b"INCRBYFLOAT") {
             "incrbyfloat"
         } else if cmd.eq_ignore_ascii_case(b"EXPIRE")
@@ -5925,8 +5930,32 @@ impl Runtime {
             "spop"
         } else if cmd.eq_ignore_ascii_case(b"SMOVE") {
             "smove"
-        } else if cmd.eq_ignore_ascii_case(b"ZADD") {
+        } else if cmd.eq_ignore_ascii_case(b"GEOADD") {
+            // (frankenredis-irbta) Upstream geo.c::geoaddCommand builds a ZADD
+            // argv and dispatches zaddGenericCommand, firing NOTIFY_ZSET "zadd".
             "zadd"
+        } else if cmd.eq_ignore_ascii_case(b"ZADD") {
+            // (frankenredis-msv0x) ZADD with the INCR flag fires NOTIFY_ZSET
+            // "zincr" (like ZINCRBY), not "zadd", per t_zset.c::zaddGenericCommand.
+            // Scan only the leading option tokens so a member literally named
+            // "INCR" (which appears after the first score) is not misread.
+            let mut incr = false;
+            for a in argv.iter().skip(2) {
+                if a.eq_ignore_ascii_case(b"INCR") {
+                    incr = true;
+                    break;
+                }
+                if a.eq_ignore_ascii_case(b"NX")
+                    || a.eq_ignore_ascii_case(b"XX")
+                    || a.eq_ignore_ascii_case(b"GT")
+                    || a.eq_ignore_ascii_case(b"LT")
+                    || a.eq_ignore_ascii_case(b"CH")
+                {
+                    continue;
+                }
+                break;
+            }
+            if incr { "zincr" } else { "zadd" }
         } else if cmd.eq_ignore_ascii_case(b"ZREM") {
             "zrem"
         } else if cmd.eq_ignore_ascii_case(b"ZREMRANGEBYRANK") {
@@ -26612,6 +26641,21 @@ mod tests {
         };
         assert_eq!(ev(&[b"SETRANGE", b"k", b"0", b"x"]), "setrange");
         assert_eq!(ev(&[b"ZINCRBY", b"z", b"1", b"m"]), "zincr");
+        // (frankenredis-irbta/msv0x/0gibs) GEOADD -> zadd; ZADD INCR -> zincr;
+        // DECR/DECRBY -> incrby (all route through the upstream generic paths).
+        assert_eq!(ev(&[b"GEOADD", b"g", b"13.0", b"38.0", b"m"]), "zadd");
+        assert_eq!(ev(&[b"ZADD", b"z", b"INCR", b"1", b"m"]), "zincr");
+        assert_eq!(
+            ev(&[b"ZADD", b"z", b"GT", b"CH", b"INCR", b"1", b"m"]),
+            "zincr"
+        );
+        assert_eq!(ev(&[b"ZADD", b"z", b"1", b"m"]), "zadd");
+        assert_eq!(ev(&[b"ZADD", b"z", b"GT", b"1", b"m"]), "zadd");
+        // Member literally named INCR (after the score) must stay "zadd".
+        assert_eq!(ev(&[b"ZADD", b"z", b"1", b"INCR"]), "zadd");
+        assert_eq!(ev(&[b"DECR", b"k"]), "incrby");
+        assert_eq!(ev(&[b"DECRBY", b"k", b"3"]), "incrby");
+        assert_eq!(ev(&[b"INCR", b"k"]), "incrby");
         assert_eq!(ev(&[b"GETDEL", b"k"]), "del");
         assert_eq!(ev(&[b"GETEX", b"k", b"EX", b"100"]), "expire");
         assert_eq!(ev(&[b"GETEX", b"k", b"PERSIST"]), "persist");
