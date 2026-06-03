@@ -23358,10 +23358,17 @@ fn move_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     if !store.exists(&source, now_ms) || store.exists(&destination, now_ms) {
         return Ok(RespFrame::Integer(0));
     }
+    let dirty_before = store.dirty;
     store
         .copy(&source, &destination, false, now_ms)
         .map_err(CommandError::Store)?;
     store.del(&[source], now_ms);
+    // (frankenredis-movedirty) Upstream db.c::moveCommand does `server.dirty++`
+    // exactly once for the whole transfer. fr implements MOVE as copy + del,
+    // and each helper bumps the dirty counter, so the move double-counted —
+    // diverging rdb_changes_since_last_save and the auto-save threshold from
+    // vendored. Normalize to a single dirty unit.
+    store.dirty = dirty_before.saturating_add(1);
     Ok(RespFrame::Integer(1))
 }
 
@@ -49004,6 +49011,37 @@ mod tests {
         assert_eq!(out, RespFrame::Integer(1));
         assert!(!store.exists(&fr_store::encode_db_key(0, b"foo"), 0));
         assert!(store.exists(&fr_store::encode_db_key(1, b"foo"), 0));
+    }
+
+    #[test]
+    fn move_bumps_dirty_exactly_once() {
+        // (frankenredis-movedirty) Upstream db.c::moveCommand does
+        // `server.dirty++` once; fr's copy+del implementation would
+        // double-count without the normalization in move_cmd.
+        let mut store = Store::new();
+        store.set(fr_store::encode_db_key(0, b"k"), b"v".to_vec(), None, 0);
+        let before = store.dirty;
+        let out = dispatch_argv(
+            &[b"MOVE".to_vec(), b"k".to_vec(), b"1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("move");
+        assert_eq!(out, RespFrame::Integer(1));
+        assert_eq!(store.dirty, before + 1);
+
+        // A no-op MOVE (destination already occupied) does not dirty.
+        store.set(fr_store::encode_db_key(0, b"k2"), b"v".to_vec(), None, 0);
+        store.set(fr_store::encode_db_key(1, b"k2"), b"x".to_vec(), None, 0);
+        let before = store.dirty;
+        let out = dispatch_argv(
+            &[b"MOVE".to_vec(), b"k2".to_vec(), b"1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("move noop");
+        assert_eq!(out, RespFrame::Integer(0));
+        assert_eq!(store.dirty, before);
     }
 
     #[test]

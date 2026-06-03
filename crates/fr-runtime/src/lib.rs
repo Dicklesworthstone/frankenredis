@@ -12457,11 +12457,17 @@ impl Runtime {
         {
             return Ok(RespFrame::Integer(0));
         }
+        let dirty_before = self.server.store.dirty;
         self.server
             .store
             .copy(&source, &destination, false, now_ms)
             .map_err(CommandError::Store)?;
         self.server.store.del(&[source], now_ms);
+        // (frankenredis-movedirty) Upstream db.c::moveCommand does
+        // `server.dirty++` exactly once; the copy + del helpers each bump the
+        // counter, double-counting. Normalize to a single dirty unit so
+        // rdb_changes_since_last_save / the auto-save threshold match vendored.
+        self.server.store.dirty = dirty_before.saturating_add(1);
         Ok(RespFrame::Integer(1))
     }
 
