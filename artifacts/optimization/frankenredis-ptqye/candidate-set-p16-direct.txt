@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:20302
+workload: set
+clients: 50  requests: 100000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 408 ms  throughput: 244764.89 ops/sec
+latency(us): min=178 p50=2921 p95=4639 p99=5667 p999=6531 max=6839 mean=3173.04
+bytes: sent=6138763 received=500000 key_prefix=icywolf-ptqye-direct

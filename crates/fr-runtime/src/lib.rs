@@ -1080,14 +1080,10 @@ impl AclUser {
         };
         let mut best: Option<AclCommandPermissionError> = None;
         for set in std::iter::once(self).chain(self.selectors.iter()) {
-            match set.permission_error_for_set(argv) {
-                None => return None,
-                Some(err) => {
-                    let take = best.as_ref().is_none_or(|prev| depth(&err) > depth(prev));
-                    if take {
-                        best = Some(err);
-                    }
-                }
+            let err = set.permission_error_for_set(argv)?;
+            let take = best.as_ref().is_none_or(|prev| depth(&err) > depth(prev));
+            if take {
+                best = Some(err);
             }
         }
         best
@@ -1266,6 +1262,7 @@ struct AuthState {
     requirepass: Option<Vec<u8>>,
     acl_pubsub_default: AclPubsubDefault,
     acl_users: BTreeMap<Vec<u8>, AclUser>,
+    dispatch_permissions_generation: u64,
 }
 
 impl Default for AuthState {
@@ -1282,11 +1279,13 @@ impl AuthState {
             requirepass: None,
             acl_pubsub_default,
             acl_users,
+            dispatch_permissions_generation: 0,
         }
     }
 
     fn set_acl_pubsub_default(&mut self, acl_pubsub_default: AclPubsubDefault) {
         self.acl_pubsub_default = acl_pubsub_default;
+        self.bump_dispatch_permissions_generation();
     }
 
     fn set_requirepass(&mut self, requirepass: Option<Vec<u8>>) {
@@ -1303,6 +1302,7 @@ impl AuthState {
             default_user.passwords.clear();
             default_user.nopass = true;
         }
+        self.bump_dispatch_permissions_generation();
     }
 
     fn add_user(&mut self, username: Vec<u8>, password: Vec<u8>) {
@@ -1312,6 +1312,7 @@ impl AuthState {
             .or_insert_with(AclUser::new_default);
         user.passwords = vec![sha256_hex_bytes(&password)];
         user.nopass = false;
+        self.bump_dispatch_permissions_generation();
     }
 
     fn auth_required(&self) -> bool {
@@ -1372,6 +1373,8 @@ impl AuthState {
             let rules: Vec<&[u8]> = parts[2..].iter().map(|part| part.as_bytes()).collect();
             loaded.set_user(username, &rules)?;
         }
+        loaded.dispatch_permissions_generation =
+            self.dispatch_permissions_generation.wrapping_add(1);
         *self = loaded;
         Ok(())
     }
@@ -1398,6 +1401,9 @@ impl AuthState {
                     self.acl_users.remove(&username_for_rollback);
                 }
             }
+        }
+        if result.is_ok() {
+            self.bump_dispatch_permissions_generation();
         }
         result
     }
@@ -1767,13 +1773,25 @@ impl AuthState {
         if username == DEFAULT_AUTH_USER {
             return false;
         }
-        self.acl_users.remove(username).is_some()
+        let removed = self.acl_users.remove(username).is_some();
+        if removed {
+            self.bump_dispatch_permissions_generation();
+        }
+        removed
     }
 
     fn can_authenticate_as(&self, username: &[u8]) -> bool {
         self.acl_users
             .get(username)
             .is_some_and(|user| user.enabled)
+    }
+
+    fn dispatch_permissions_generation(&self) -> u64 {
+        self.dispatch_permissions_generation
+    }
+
+    fn bump_dispatch_permissions_generation(&mut self) {
+        self.dispatch_permissions_generation = self.dispatch_permissions_generation.wrapping_add(1);
     }
 }
 
@@ -3267,6 +3285,8 @@ pub struct Runtime {
     pub server: ServerState,
     session: ClientSession,
     execution_source: ExecutionSource,
+    dispatch_acl_snapshot_user: Option<Vec<u8>>,
+    dispatch_acl_snapshot_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3366,6 +3386,8 @@ impl Runtime {
             server,
             session,
             execution_source: ExecutionSource::Client,
+            dispatch_acl_snapshot_user: None,
+            dispatch_acl_snapshot_generation: 0,
         }
     }
 
@@ -7009,11 +7031,25 @@ impl Runtime {
         } else {
             -1
         };
-        let acl_permissions = self
-            .server
-            .auth_state
-            .get_user(session.current_user_name())
-            .map(AclUser::to_dispatch_acl_permissions);
+        let acl_generation = self.server.auth_state.dispatch_permissions_generation();
+        let current_user = session.current_user_name();
+        if self.dispatch_acl_snapshot_generation != acl_generation
+            || self.dispatch_acl_snapshot_user.as_deref() != Some(current_user)
+            || self
+                .server
+                .store
+                .dispatch_client_ctx
+                .acl_permissions
+                .is_none()
+        {
+            self.server.store.dispatch_client_ctx.acl_permissions = self
+                .server
+                .auth_state
+                .get_user(current_user)
+                .map(AclUser::to_dispatch_acl_permissions);
+            self.dispatch_acl_snapshot_user = Some(current_user.to_vec());
+            self.dispatch_acl_snapshot_generation = acl_generation;
+        }
 
         let ctx = &mut self.server.store.dispatch_client_ctx;
         ctx.client_id = client_id;
@@ -7060,7 +7096,6 @@ impl Runtime {
         ctx.client_reply.clone_from(&session.client_reply);
         ctx.client_no_evict = session.client_no_evict;
         ctx.client_no_touch = session.client_no_touch;
-        ctx.acl_permissions = acl_permissions;
     }
 
     fn apply_existing_client_reply_suppression_to_undispatched_reply(&mut self) {
@@ -15088,7 +15123,7 @@ mod tests {
         build_hello_response, canonical_static_config_param, canonicalize_acl_rules,
         classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
-        client_wrong_subcommand_arity, parse_acl_key_selector, sha256_hex_bytes,
+        client_wrong_subcommand_arity, digest_bytes, parse_acl_key_selector, sha256_hex_bytes,
         store_to_rdb_entries, wrong_arity_error,
     };
 
@@ -27124,6 +27159,107 @@ mod tests {
         assert!(
             matches!(&del_reply, RespFrame::Error(e) if e.contains("NOPERM")),
             "DEL should be denied, got: {del_reply:?}"
+        );
+    }
+
+    #[test]
+    fn acl_dispatch_permission_snapshot_cache_invalidates_on_acl_generation_and_user_switch_ptqye()
+    {
+        let mut rt = Runtime::default_strict();
+        let mut trace = Vec::new();
+
+        let mut run = |rt: &mut Runtime, parts: &[&[u8]], now_ms: u64| {
+            let reply = rt.execute_frame(command(parts), now_ms);
+            trace.extend_from_slice(&reply.to_bytes());
+            reply
+        };
+
+        assert_eq!(
+            run(
+                &mut rt,
+                &[
+                    b"ACL", b"SETUSER", b"default", b"-@all", b"+acl", b"+get", b"~*", b"&*"
+                ],
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            run(&mut rt, &[b"GET", b"cache:warm"], 2),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            rt.dispatch_acl_snapshot_user.as_deref(),
+            Some(DEFAULT_AUTH_USER)
+        );
+        assert!(
+            rt.server
+                .store
+                .dispatch_client_ctx
+                .acl_permissions
+                .as_ref()
+                .is_some_and(|permissions| permissions.allowed_commands.contains("get")
+                    && !permissions.allowed_commands.contains("set")),
+            "GET dispatch should cache the restrictive ACL snapshot"
+        );
+
+        assert_eq!(
+            run(&mut rt, &[b"ACL", b"SETUSER", b"default", b"+set"], 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            run(&mut rt, &[b"SET", b"cache:warm", b"v"], 4),
+            RespFrame::SimpleString("OK".to_string()),
+            "SET must observe ACL SETUSER invalidation instead of stale cached permissions"
+        );
+        assert!(
+            rt.server
+                .store
+                .dispatch_client_ctx
+                .acl_permissions
+                .as_ref()
+                .is_some_and(|permissions| permissions.allowed_commands.contains("set")),
+            "dispatch ACL snapshot should refresh after auth-state generation changes"
+        );
+
+        let mut selector_rt = Runtime::default_strict();
+        assert_eq!(
+            run(
+                &mut selector_rt,
+                &[
+                    b"ACL",
+                    b"SETUSER",
+                    b"selu",
+                    b"on",
+                    b">pass",
+                    b"-@all",
+                    b"(+get ~cache:*)"
+                ],
+                5,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            run(&mut selector_rt, &[b"AUTH", b"selu", b"pass"], 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            run(&mut selector_rt, &[b"GET", b"cache:hit"], 7),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            selector_rt.dispatch_acl_snapshot_user.as_deref(),
+            Some(b"selu".as_slice())
+        );
+        assert_eq!(
+            run(&mut selector_rt, &[b"GET", b"other"], 8),
+            RespFrame::Error("NOPERM No permissions to access a key".to_string())
+        );
+
+        assert_eq!(
+            digest_bytes(&trace),
+            "cf0aa84b371ae1ca",
+            "golden trace digest should stay stable across cache changes"
         );
     }
 

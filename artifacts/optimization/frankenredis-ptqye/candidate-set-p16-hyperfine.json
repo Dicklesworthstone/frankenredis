@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "target-icywolf-ptqye-candidate-rch/release-perf/fr-bench --host 127.0.0.1 --port 20302 --clients 50 --requests 100000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out artifacts/optimization/frankenredis-ptqye/candidate-set-p16-hf-last.json --key-prefix icywolf-ptqye-hf",
+      "mean": 0.36351994365999996,
+      "stddev": 0.019732029730372965,
+      "median": 0.35829144156000003,
+      "user": 0.08572896,
+      "system": 0.17960026,
+      "min": 0.34367205706000004,
+      "max": 0.40645248506000003,
+      "times": [
+        0.34367205706000004,
+        0.36042080106,
+        0.34373281306000003,
+        0.35074555006,
+        0.35616208206000005,
+        0.35355913006000006,
+        0.37438504906000003,
+        0.36184889606000004,
+        0.38422057306,
+        0.40645248506000003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

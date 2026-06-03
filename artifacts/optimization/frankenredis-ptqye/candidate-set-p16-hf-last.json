@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780503763796,
+  "host": "127.0.0.1",
+  "port": 20302,
+  "workload": "set",
+  "clients": 50,
+  "requests": 100000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "icywolf-ptqye-hf",
+  "total_time_ms": 404,
+  "ops_per_sec": 247353.2044563114,
+  "bytes_sent": 5739039,
+  "bytes_received": 500000,
+  "latency_us": {
+    "min": 149,
+    "p50": 2941,
+    "p95": 4351,
+    "p99": 4999,
+    "p999": 5971,
+    "max": 8167,
+    "mean": 3155.462810000002,
+    "samples": 100000
+  }
+}

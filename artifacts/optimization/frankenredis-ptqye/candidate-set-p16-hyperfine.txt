@@ -1,0 +1,4 @@
+Benchmark 1: target-icywolf-ptqye-candidate-rch/release-perf/fr-bench --host 127.0.0.1 --port 20302 --clients 50 --requests 100000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out artifacts/optimization/frankenredis-ptqye/candidate-set-p16-hf-last.json --key-prefix icywolf-ptqye-hf
+  Time (mean ± σ):     363.5 ms ±  19.7 ms    [User: 85.7 ms, System: 179.6 ms]
+  Range (min … max):   343.7 ms … 406.5 ms    10 runs
+ 
