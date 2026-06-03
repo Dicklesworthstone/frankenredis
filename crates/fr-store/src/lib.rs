@@ -16962,6 +16962,12 @@ fn invalid_lex_range_error() -> StoreError {
 
 const HLL_P: u32 = 14;
 const HLL_REGISTERS: usize = 1 << HLL_P; // 16384
+// (frankenredis-2bpzv) Constants for the Otmar Ertl 2017 cardinality estimator
+// (redis hyperloglog.c::hllCount), matching upstream byte-for-byte.
+const HLL_Q: usize = 64 - HLL_P as usize; // 50 — max rho the hash can yield is HLL_Q+1
+// 0.5/ln(2). Shortest decimal that round-trips to the exact same f64 as
+// upstream's `0.721347520444481703680`, so the estimate is bit-identical.
+const HLL_ALPHA_INF: f64 = 0.7213475204444817;
 const HLL_REDIS_MAGIC: &[u8] = b"HYLL";
 const HLL_MAGIC_V2: &[u8] = b"HYL2";
 const HLL_HEADER_SIZE: usize = HLL_MAGIC_V2.len() + 1;
@@ -17348,28 +17354,69 @@ fn hll_sparse_decode(registers: &[u8]) -> Result<String, StoreError> {
     Ok(segments.join(" "))
 }
 
-fn hll_estimate(registers: &[u8]) -> u64 {
-    let m = HLL_REGISTERS as f64;
-    let alpha_m = 0.7213 / (1.0 + 1.079 / m);
-
-    let mut sum = 0.0_f64;
-    let mut zeros = 0_u32;
-    for &reg in registers {
-        sum += 2.0_f64.powi(-i32::from(reg));
-        if reg == 0 {
-            zeros += 1;
+/// `hllSigma` from redis hyperloglog.c — converges via exact f64 equality, so
+/// it reproduces upstream's loop bit-for-bit. (frankenredis-2bpzv)
+fn hll_sigma(mut x: f64) -> f64 {
+    if x == 1.0 {
+        return f64::INFINITY;
+    }
+    let mut y = 1.0_f64;
+    let mut z = x;
+    loop {
+        x *= x;
+        let z_prime = z;
+        z += x * y;
+        y += y;
+        if z_prime == z {
+            break;
         }
     }
+    z
+}
 
-    let estimate = alpha_m * m * m / sum;
-
-    // Small-range correction via linear counting
-    if estimate <= 2.5 * m && zeros > 0 {
-        let lc = m * (m / f64::from(zeros)).ln();
-        lc.round() as u64
-    } else {
-        estimate.round() as u64
+/// `hllTau` from redis hyperloglog.c. (frankenredis-2bpzv)
+fn hll_tau(mut x: f64) -> f64 {
+    if x == 0.0 || x == 1.0 {
+        return 0.0;
     }
+    let mut y = 1.0_f64;
+    let mut z = 1.0 - x;
+    loop {
+        x = x.sqrt();
+        let z_prime = z;
+        y *= 0.5;
+        z -= (1.0 - x).powi(2) * y;
+        if z_prime == z {
+            break;
+        }
+    }
+    z / 3.0
+}
+
+/// Estimate HLL cardinality using the Otmar Ertl 2017 algorithm
+/// ("New cardinality estimation algorithms for HyperLogLog sketches",
+/// arXiv:1702.01284), a direct port of redis 7.2.4 hyperloglog.c::hllCount.
+/// The older Flajolet 2007 estimator (alpha*m^2/sum + linear-counting) that
+/// fr used previously diverged from upstream by ~1 at higher cardinalities
+/// even with byte-identical registers. (frankenredis-2bpzv)
+fn hll_estimate(registers: &[u8]) -> u64 {
+    let m = HLL_REGISTERS as f64;
+    // Register-value histogram. Register rho values are 6-bit (0..=63); mask
+    // keeps the index in bounds for any malformed RESTORE payload, matching
+    // upstream's fixed reghisto[64].
+    let mut reghisto = [0_i64; 64];
+    for &reg in registers {
+        reghisto[(reg as usize) & 63] += 1;
+    }
+
+    let mut z = m * hll_tau((m - reghisto[HLL_Q + 1] as f64) / m);
+    for j in (1..=HLL_Q).rev() {
+        z += reghisto[j] as f64;
+        z *= 0.5;
+    }
+    z += m * hll_sigma(reghisto[0] as f64 / m);
+    let e = (HLL_ALPHA_INF * m * m / z).round();
+    e as u64
 }
 
 fn hll_add_to_registers(registers: &mut [u8], element: &[u8]) {
@@ -25727,6 +25774,26 @@ mod tests {
     fn hll_selftest_passes() {
         let store = Store::new();
         store.hll_selftest().unwrap();
+    }
+
+    #[test]
+    fn hll_estimate_matches_redis_ertl_count_exactly() {
+        // (frankenredis-2bpzv) The Otmar Ertl 2017 estimator must reproduce
+        // redis 7.2.4 PFCOUNT byte-for-byte from identical registers. These
+        // golden counts were captured from vendored redis-server 7.2.4 for the
+        // element sets e0..e(N-1); the prior Flajolet estimator returned 4969
+        // (not 4968) at N=5000 from the very same registers.
+        let mut store = Store::new();
+        for (n, expected) in [(1000usize, 1008u64), (5000, 4968)] {
+            let key = format!("hll{n}").into_bytes();
+            let elems: Vec<Vec<u8>> = (0..n).map(|i| format!("e{i}").into_bytes()).collect();
+            store.pfadd(&key, &elems, 0).unwrap();
+            assert_eq!(
+                store.pfcount(&[key.as_slice()], 0).unwrap(),
+                expected,
+                "PFCOUNT for e0..e{n} must match redis 7.2.4 exactly"
+            );
+        }
     }
 
     #[test]
