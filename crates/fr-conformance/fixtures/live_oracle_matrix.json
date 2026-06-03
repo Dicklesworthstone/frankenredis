@@ -6,196 +6,267 @@
       "mode": "command",
       "fixture": "core_strings.json",
       "scenario_class": "golden",
-      "profiles": ["baseline", "parity"]
+      "profiles": [
+        "baseline",
+        "parity"
+      ]
     },
     {
       "name": "fr_p2c_001_eventloop_journey",
       "mode": "command",
       "fixture": "fr_p2c_001_eventloop_journey.json",
       "scenario_class": "golden",
-      "profiles": ["baseline", "parity"]
+      "profiles": [
+        "baseline",
+        "parity"
+      ]
     },
     {
       "name": "fr_p2c_006_replication_journey",
       "mode": "command",
       "fixture": "fr_p2c_006_replication_journey.json",
       "scenario_class": "golden",
-      "profiles": ["baseline", "parity"]
+      "profiles": [
+        "baseline",
+        "parity"
+      ]
     },
     {
       "name": "fr_p2c_003_dispatch_journey",
       "mode": "command",
       "fixture": "fr_p2c_003_dispatch_journey.json",
       "scenario_class": "golden",
-      "profiles": ["baseline", "parity"]
+      "profiles": [
+        "baseline",
+        "parity"
+      ]
     },
     {
       "name": "core_errors",
       "mode": "command",
       "fixture": "core_errors.json",
       "scenario_class": "regression",
-      "profiles": ["baseline", "parity"]
+      "profiles": [
+        "baseline",
+        "parity"
+      ]
     },
     {
       "name": "fr_p2c_002_protocol_negative",
       "mode": "protocol",
       "fixture": "protocol_negative.json",
       "scenario_class": "failure_injection",
-      "profiles": ["baseline", "parity"]
+      "profiles": [
+        "baseline",
+        "parity"
+      ]
     },
     {
       "name": "core_hash",
       "mode": "command",
       "fixture": "core_hash.json",
       "scenario_class": "command_family",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_list",
       "mode": "command",
       "fixture": "core_list.json",
       "scenario_class": "command_family",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_set",
       "mode": "command",
       "fixture": "core_set.json",
       "scenario_class": "command_family",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_zset",
       "mode": "command",
       "fixture": "core_zset.json",
       "scenario_class": "command_family",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_generic",
       "mode": "command",
       "fixture": "core_generic.json",
       "scenario_class": "command_family",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_geo",
       "mode": "command",
       "fixture": "core_geo.json",
       "scenario_class": "command_family",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_stream",
       "mode": "command",
       "fixture": "core_stream.json",
       "scenario_class": "command_family",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_hyperloglog",
       "mode": "command",
       "fixture": "core_hyperloglog.json",
       "scenario_class": "command_family",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_bitmap",
       "mode": "command",
       "fixture": "core_bitmap.json",
       "scenario_class": "command_family",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_transaction",
       "mode": "command",
       "fixture": "core_transaction.json",
       "scenario_class": "command_family",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_sort",
       "mode": "command",
       "fixture": "core_sort.json",
       "scenario_class": "command_family",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
+    },
+    {
+      "name": "core_command_edges",
+      "mode": "command",
+      "fixture": "core_command_edges.json",
+      "scenario_class": "command_family",
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_scan",
       "mode": "command",
       "fixture": "core_scan.json",
       "scenario_class": "command_family",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_copy",
       "mode": "command",
       "fixture": "core_copy.json",
       "scenario_class": "command_family",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_scripting",
       "mode": "command",
       "fixture": "core_scripting.json",
       "scenario_class": "command_family",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_function",
       "mode": "command",
       "fixture": "core_function.json",
       "scenario_class": "command_family",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_expiry",
       "mode": "command",
       "fixture": "core_expiry.json",
       "scenario_class": "command_family",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_acl",
       "mode": "command",
       "fixture": "core_acl.json",
       "scenario_class": "security",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_connection",
       "mode": "command",
       "fixture": "core_connection.json",
       "scenario_class": "control_plane",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_client",
       "mode": "command",
       "fixture": "core_client.json",
       "scenario_class": "control_plane",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_server",
       "mode": "command",
       "fixture": "core_server.json",
       "scenario_class": "control_plane",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_config",
       "mode": "command",
       "fixture": "core_config.json",
       "scenario_class": "control_plane",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_replication",
       "mode": "command",
       "fixture": "core_replication.json",
       "scenario_class": "replication",
-      "profiles": ["parity"],
+      "profiles": [
+        "parity"
+      ],
       "case_names": [
         "replconf_ack_ok",
         "replconf_ack_zero",
@@ -242,42 +313,54 @@
       "mode": "command",
       "fixture": "core_module_sentinel.json",
       "scenario_class": "control_plane",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_cluster",
       "mode": "command",
       "fixture": "core_cluster.json",
       "scenario_class": "control_plane",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_object",
       "mode": "command",
       "fixture": "core_object.json",
       "scenario_class": "introspection",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_pfdebug",
       "mode": "command",
       "fixture": "core_pfdebug.json",
       "scenario_class": "introspection",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_debug",
       "mode": "command",
       "fixture": "core_debug.json",
       "scenario_class": "control_plane",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_wait",
       "mode": "command",
       "fixture": "core_wait.json",
       "scenario_class": "replication",
-      "profiles": ["parity"],
+      "profiles": [
+        "parity"
+      ],
       "case_names": [
         "wait_standalone_zero_replicas",
         "wait_case_insensitive",
@@ -298,7 +381,9 @@
       "mode": "command",
       "fixture": "core_pubsub.json",
       "scenario_class": "pubsub",
-      "profiles": ["parity"],
+      "profiles": [
+        "parity"
+      ],
       "case_names": [
         "subscribe_single_channel",
         "unsubscribe_mychannel",
@@ -323,7 +408,9 @@
       "mode": "command",
       "fixture": "core_migrate.json",
       "scenario_class": "migration",
-      "profiles": ["parity"],
+      "profiles": [
+        "parity"
+      ],
       "case_names": [
         "migrate_wrong_arity_no_args",
         "migrate_wrong_arity_too_few",
@@ -360,42 +447,54 @@
       "mode": "command",
       "fixture": "fr_p2c_004_acl_journey.json",
       "scenario_class": "packet_journey",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "fr_p2c_007_cluster_journey",
       "mode": "command",
       "fixture": "fr_p2c_007_cluster_journey.json",
       "scenario_class": "packet_journey",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "fr_p2c_008_expire_evict_journey",
       "mode": "command",
       "fixture": "fr_p2c_008_expire_evict_journey.json",
       "scenario_class": "packet_journey",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "fr_p2c_009_tls_config_journey",
       "mode": "command",
       "fixture": "fr_p2c_009_tls_config_journey.json",
       "scenario_class": "packet_journey",
-      "profiles": ["parity"]
+      "profiles": [
+        "parity"
+      ]
     },
     {
       "name": "core_pubsub_multi_client",
       "mode": "multi_client",
       "fixture": "core_pubsub_multi_client.json",
       "scenario_class": "multi_client",
-      "profiles": ["multi_client"]
+      "profiles": [
+        "multi_client"
+      ]
     },
     {
       "name": "core_blocking_multi_client",
       "mode": "multi_client",
       "fixture": "core_blocking_multi_client.json",
       "scenario_class": "multi_client",
-      "profiles": ["multi_client"]
+      "profiles": [
+        "multi_client"
+      ]
     }
   ]
 }

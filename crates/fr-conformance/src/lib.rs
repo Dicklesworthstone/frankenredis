@@ -1359,15 +1359,23 @@ fn pubsub_message_to_frame(msg: &fr_store::PubSubMessage) -> RespFrame {
             RespFrame::BulkString(Some(channel.clone())),
             RespFrame::BulkString(Some(data.clone())),
         ])),
-        fr_store::PubSubMessage::Invalidate { keys } => RespFrame::Array(Some(vec![
-            RespFrame::BulkString(Some(b"invalidate".to_vec())),
-            RespFrame::Array(Some(
-                keys.iter()
-                    .cloned()
-                    .map(|key| RespFrame::BulkString(Some(key)))
-                    .collect(),
-            )),
-        ])),
+        fr_store::PubSubMessage::Invalidate { keys } => {
+            // (frankenredis-o90ga) Empty key set = flush-all invalidation → NULL payload.
+            let payload = if keys.is_empty() {
+                RespFrame::BulkString(None)
+            } else {
+                RespFrame::Array(Some(
+                    keys.iter()
+                        .cloned()
+                        .map(|key| RespFrame::BulkString(Some(key)))
+                        .collect(),
+                ))
+            };
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"invalidate".to_vec())),
+                payload,
+            ]))
+        }
     }
 }
 

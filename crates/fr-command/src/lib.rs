@@ -21423,14 +21423,25 @@ pub fn pubsub_message_to_frame(msg: PubSubMessage) -> RespFrame {
             RespFrame::BulkString(Some(channel)),
             RespFrame::BulkString(Some(data)),
         ])),
-        PubSubMessage::Invalidate { keys } => RespFrame::Array(Some(vec![
-            RespFrame::BulkString(Some(b"invalidate".to_vec())),
-            RespFrame::Array(Some(
-                keys.into_iter()
-                    .map(|key| RespFrame::BulkString(Some(key)))
-                    .collect(),
-            )),
-        ])),
+        PubSubMessage::Invalidate { keys } => {
+            // (frankenredis-o90ga) An empty key set is the flush-all sentinel:
+            // upstream's FLUSHALL/FLUSHDB invalidation is `invalidate` + a NULL
+            // payload (rendered `_\r\n` for RESP3 clients) meaning "drop your
+            // whole cache". The per-key path never produces an empty set.
+            let payload = if keys.is_empty() {
+                RespFrame::BulkString(None)
+            } else {
+                RespFrame::Array(Some(
+                    keys.into_iter()
+                        .map(|key| RespFrame::BulkString(Some(key)))
+                        .collect(),
+                ))
+            };
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"invalidate".to_vec())),
+                payload,
+            ]))
+        }
     }
 }
 

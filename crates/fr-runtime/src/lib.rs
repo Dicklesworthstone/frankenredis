@@ -4452,6 +4452,52 @@ impl Runtime {
         }
     }
 
+    /// Send a flush-all client-tracking invalidation. Upstream
+    /// db.c::signalFlushedDb → trackingInvalidateKeysOnFlush emits a single
+    /// `invalidate` push carrying a NULL payload to every tracking client when
+    /// the keyspace is flushed (FLUSHALL/FLUSHDB), telling each one to evict
+    /// its entire client-side cache. fr previously emitted nothing, leaving a
+    /// tracking client with stale cached entries after a flush.
+    /// (frankenredis-o90ga)
+    ///
+    /// The NULL payload is carried as an `Invalidate` with an EMPTY key vector
+    /// — a value the per-key path never produces (it guards `!keys.is_empty()`)
+    /// — which the frame encoder renders as `invalidate` + RESP3 null.
+    fn queue_client_tracking_flush_invalidation(&mut self) {
+        let mut targets: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        for (owner_id, session) in self
+            .server
+            .client_sessions
+            .iter()
+            .filter(|(owner_id, _)| **owner_id != self.session.client_id)
+            .chain(std::iter::once((&self.session.client_id, &self.session)))
+        {
+            let tracking = &session.client_tracking;
+            if !tracking.enabled {
+                continue;
+            }
+            // A NOLOOP client that issued the flush does not get its own
+            // invalidation (mirrors trackingInvalidateKey's current_client skip).
+            if tracking.noloop && *owner_id == self.session.client_id {
+                continue;
+            }
+            let target_id = tracking.redirect.unwrap_or(*owner_id);
+            if self.client_session_exists_including_current(target_id) {
+                targets.insert(target_id);
+            }
+        }
+        for target_id in targets {
+            self.server
+                .pubsub_outbox
+                .entry(target_id)
+                .or_default()
+                .push(fr_store::PubSubMessage::Invalidate { keys: Vec::new() });
+        }
+        // Every key is gone; drop the observed-keys table so no stale per-key
+        // invalidation can later fire for a key that no longer exists.
+        self.server.client_tracking_observed_keys.clear();
+    }
+
     fn client_session_exists_including_current(&self, client_id: u64) -> bool {
         client_id == self.session.client_id || self.server.client_sessions.contains_key(&client_id)
     }
@@ -7129,6 +7175,9 @@ impl Runtime {
         }
         if eq_ascii_token(command, b"FLUSHDB") {
             return self.handle_flushdb_command(argv);
+        }
+        if eq_ascii_token(command, b"FLUSHALL") {
+            return self.handle_flushall_command(argv);
         }
         if eq_ascii_token(command, b"RANDOMKEY") {
             return self.handle_randomkey_command(argv, now_ms);
@@ -12357,6 +12406,26 @@ impl Runtime {
             return Err(CommandError::SyntaxError);
         }
         self.server.store.flush_database(self.session.selected_db);
+        // (frankenredis-o90ga) Tell tracking clients to evict their cache.
+        self.queue_client_tracking_flush_invalidation();
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    }
+
+    /// FLUSHALL clears every database. Mirrors fr_command::flushall (same
+    /// ASYNC/SYNC arg validation + `store.flushdb()` all-DBs primitive) but is
+    /// intercepted at the runtime layer so it can emit the client-tracking
+    /// flush invalidation, which needs runtime/session state the store lacks.
+    /// (frankenredis-o90ga)
+    fn handle_flushall_command(&mut self, argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+        if argv.len() > 2
+            || (argv.len() == 2
+                && !argv[1].eq_ignore_ascii_case(b"ASYNC")
+                && !argv[1].eq_ignore_ascii_case(b"SYNC"))
+        {
+            return Err(CommandError::SyntaxError);
+        }
+        self.server.store.flushdb();
+        self.queue_client_tracking_flush_invalidation();
         Ok(RespFrame::SimpleString("OK".to_string()))
     }
 
@@ -16758,6 +16827,79 @@ mod tests {
         assert!(frame.to_bytes().starts_with(b">3\r\n"));
 
         let _subscriber = rt.swap_session(publisher);
+        let _ = rt.swap_session(previous);
+    }
+
+    #[test]
+    fn flushall_sends_null_invalidation_to_tracking_clients() {
+        // (frankenredis-o90ga) FLUSHALL/FLUSHDB must emit an `invalidate` push
+        // carrying a NULL payload to every tracking client so it evicts its
+        // entire client-side cache. fr previously emitted nothing.
+        let mut rt = Runtime::default_strict();
+        let tracker = rt.new_session();
+        let mutator = rt.new_session();
+
+        // Tracker connection: RESP3, default tracking ON, observe a key.
+        let previous = rt.swap_session(tracker);
+        assert!(matches!(
+            rt.execute_frame(command(&[b"HELLO", b"3"]), 0),
+            RespFrame::Map(Some(_))
+        ));
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"ck", b"v1"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.execute_frame(command(&[b"GET", b"ck"]), 3);
+        let tracker = rt.swap_session(mutator);
+        rt.record_client_session(&tracker);
+
+        // A different connection flushes the keyspace.
+        assert_eq!(
+            rt.execute_frame(command(&[b"FLUSHALL"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let messages = rt.drain_pubsub_for_client(tracker.client_id);
+        assert_eq!(
+            messages,
+            vec![fr_store::PubSubMessage::Invalidate { keys: Vec::new() }],
+            "FLUSHALL must queue a flush invalidation for the tracking client"
+        );
+
+        // The flush invalidation encodes as `invalidate` + RESP3 null.
+        let frame = fr_command::pubsub_message_to_frame_for_protocol(
+            messages.into_iter().next().expect("flush invalidation queued"),
+            3,
+        );
+        assert_eq!(
+            frame,
+            RespFrame::Push(vec![
+                RespFrame::BulkString(Some(b"invalidate".to_vec())),
+                RespFrame::BulkString(None),
+            ])
+        );
+        let mut bytes = Vec::new();
+        frame.encode_into_resp3(&mut bytes);
+        assert_eq!(bytes, b">2\r\n$10\r\ninvalidate\r\n_\r\n");
+
+        // FLUSHDB on the selected DB behaves the same way.
+        let fresh = rt.new_session();
+        let mutator2 = rt.swap_session(fresh);
+        rt.record_client_session(&mutator2);
+        assert_eq!(
+            rt.execute_frame(command(&[b"FLUSHDB"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.drain_pubsub_for_client(tracker.client_id),
+            vec![fr_store::PubSubMessage::Invalidate { keys: Vec::new() }],
+            "FLUSHDB must also queue a flush invalidation"
+        );
+
         let _ = rt.swap_session(previous);
     }
 
