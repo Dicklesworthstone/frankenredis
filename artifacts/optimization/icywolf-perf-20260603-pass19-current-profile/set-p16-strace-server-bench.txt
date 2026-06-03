@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:16420
+workload: set
+clients: 50  requests: 500000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 5964 ms  throughput: 83834.54 ops/sec
+latency(us): min=1968 p50=9103 p95=14463 p99=17679 p999=20143 max=20927 mean=9515.71
+bytes: sent=34894548 received=2500000 key_prefix=icywolf-pass19-strace-server

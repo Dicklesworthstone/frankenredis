@@ -1,0 +1,4 @@
+Benchmark 1: target-icywolf-pass19-current-profile/release-perf/fr-bench --host 127.0.0.1 --port 16419 --clients 50 --requests 100000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out artifacts/optimization/icywolf-perf-20260603-pass19-current-profile/set-p16-hf-last.json --key-prefix icywolf-pass19-hf
+  Time (mean ± σ):     341.6 ms ±  15.1 ms    [User: 86.3 ms, System: 162.0 ms]
+  Range (min … max):   325.7 ms … 373.2 ms    10 runs
+ 
