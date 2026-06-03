@@ -15469,118 +15469,14 @@ pub fn sha1_hex_public(data: &[u8]) -> String {
     sha1_hex(data)
 }
 
-/// (frankenredis-nhy73) Convert a sorted-set / GEO score to the
-/// RESP bulk-string form vendored Redis 7.2.4 emits.
-///
-/// Upstream util.c::d2string fast-paths exact-integer doubles
-/// (double2ll → ll2string) and otherwise delegates to
-/// fpconv_dtoa (Grisu3 shortest roundtrip).
-///
-/// Rust's f64::to_string() also produces a shortest-roundtrip
-/// decimal but always in FIXED form, so values like 1e308 expand to
-/// 309 chars instead of vendored's "1e+308". This helper mirrors
-/// upstream by:
-///   - emitting "nan" / "inf" / "-inf" / "0" / "-0" for the special
-///     cases (matches d2string verbatim);
-///   - returning the i64 decimal when the score is an exact integer
-///     in [i64::MIN, i64::MAX];
-///   - otherwise using Rust's shortest-roundtrip fixed-point for
-///     reasonably-scaled values, and switching to scientific (with
-///     '+' on positive exponents to match vendored) when the
-///     base-10 exponent is <= -7 or >= 19. Those thresholds were
-///     calibrated empirically against vendored Redis 7.2.4 ZSCORE
-///     output (1e-6 stays as "0.000001"; 1e-7 becomes "1e-7";
-///     1e18 stays as "1000000000000000000"; 1e19 becomes "1e+19").
+/// (frankenredis-nhy73) Convert a sorted-set / GEO score to the RESP
+/// bulk-string form vendored Redis 7.2.4 emits (ZSCORE, ZADD INCR,
+/// ZINCRBY, GEODIST, …). This is the same conversion the RESP3 Double
+/// type uses, so the canonical d2string/fpconv_dtoa port lives in
+/// fr-protocol and both RESP2 and RESP3 share it. (frankenredis-sk4ss)
+#[must_use]
 pub fn redis_score_to_string(value: f64) -> String {
-    if value.is_nan() {
-        return "nan".to_string();
-    }
-    if value.is_infinite() {
-        return if value > 0.0 {
-            "inf".to_string()
-        } else {
-            "-inf".to_string()
-        };
-    }
-    if value == 0.0 {
-        return if value.is_sign_negative() {
-            "-0".to_string()
-        } else {
-            "0".to_string()
-        };
-    }
-
-    // Exact-integer fast path mirrors double2ll. The bounds match
-    // i64's representable range; the equality re-check guards
-    // against f64s like 1e19 that fall outside i64 even though the
-    // bounds check would pass for marginal values.
-    if value >= i64::MIN as f64 && value <= i64::MAX as f64 {
-        let truncated = value as i64;
-        if truncated as f64 == value {
-            return truncated.to_string();
-        }
-    }
-
-    // Non-integer: replicate vendored deps/fpconv/fpconv_dtoa.c
-    // ::emit_digits byte-for-byte. Rust's `{:e}` yields the same
-    // shortest-roundtrip significant digits and base-10 exponent that
-    // fpconv's Grisu derives (both are the unique shortest decimal),
-    // so we only need to re-lay them out using fpconv's exact
-    // fixed-vs-scientific rules — keyed on K (the power of the LAST
-    // digit), not on the leading exponent. The earlier log10_floor
-    // heuristic mis-classified high-significant-digit values such as
-    // 123456789.12345679 (which fpconv emits as 1.2345678912345679e+8
-    // because K=-8 <= -7, not fixed). (frankenredis-sk4ss)
-    let sci = format!("{value:e}");
-    let (mantissa, exp_str) = sci.split_once('e').expect("{:e} always emits 'e'");
-    let scientific_exp: i32 = exp_str.parse().expect("{:e} exponent is an integer");
-    let neg = mantissa.starts_with('-');
-    let digits: String = mantissa.bytes().filter(u8::is_ascii_digit).map(char::from).collect();
-    let ndigits = digits.len() as i32;
-    // value = digits * 10^k, with the leading digit at 10^scientific_exp.
-    let k = scientific_exp - (ndigits - 1);
-    let exp_abs = scientific_exp.abs(); // == |K + ndigits - 1|
-
-    let mut out = String::with_capacity(digits.len() + 8);
-    if neg {
-        out.push('-');
-    }
-
-    if k >= 0 && exp_abs < ndigits + 7 {
-        // Plain integer: significant digits followed by K zeros.
-        out.push_str(&digits);
-        for _ in 0..k {
-            out.push('0');
-        }
-    } else if k < 0 && (k > -7 || exp_abs < 4) {
-        // Fixed decimal (no scientific notation).
-        let offset = ndigits - k.abs();
-        if offset <= 0 {
-            out.push_str("0.");
-            for _ in 0..(-offset) {
-                out.push('0');
-            }
-            out.push_str(&digits);
-        } else {
-            let o = offset as usize;
-            out.push_str(&digits[..o]);
-            out.push('.');
-            out.push_str(&digits[o..]);
-        }
-    } else {
-        // Scientific notation: d[.ddd]e±N (N has no leading zeros).
-        // fpconv caps significant digits at 18-neg, which never
-        // triggers for shortest-roundtrip f64s (<= 17 digits).
-        out.push_str(&digits[..1]);
-        if ndigits > 1 {
-            out.push('.');
-            out.push_str(&digits[1..]);
-        }
-        out.push('e');
-        out.push(if scientific_exp < 0 { '-' } else { '+' });
-        out.push_str(&exp_abs.to_string());
-    }
-    out
+    fr_protocol::format_redis_double(value)
 }
 
 /// Generate a 40-character hex run ID (like Redis's run_id).
