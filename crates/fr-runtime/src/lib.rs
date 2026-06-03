@@ -705,6 +705,16 @@ struct AclUser {
     allowed_categories: HashSet<String>,
     /// Explicitly denied categories (lowercase).
     denied_categories: HashSet<String>,
+    /// (frankenredis-4kuad) Command-rule override tokens in the exact order they
+    /// were applied, e.g. `["+get", "+set", "+@read"]` or `["-@dangerous"]`.
+    /// Upstream acl.c stores the literal command-rule string and re-emits it in
+    /// insertion order; the `HashSet`s above answer membership/enforcement but
+    /// lose order. This list is the rendering source of truth for
+    /// `commands_string` (each token is `<+|->target`; `target` is `cmd`,
+    /// `cmd|sub`, or `@cat`). Cleared by `+@all`/`-@all`/`reset` (which reset
+    /// the baseline), and adding a token for an existing target replaces it
+    /// in place at the new position.
+    command_rule_tokens: Vec<String>,
     /// Explicitly allowed key glob patterns, each carrying the read/write
     /// access it grants (`~` / `%R~` / `%W~` / `%RW~`).
     key_patterns: Vec<AclKeyPattern>,
@@ -747,6 +757,7 @@ impl AclUser {
             denied_commands: HashSet::new(),
             allowed_categories: HashSet::new(),
             denied_categories: HashSet::new(),
+            command_rule_tokens: Vec::new(),
             key_patterns: Vec::new(),
             all_keys: true,
             channel_patterns: Vec::new(),
@@ -768,6 +779,7 @@ impl AclUser {
             denied_commands: HashSet::new(),
             allowed_categories: HashSet::new(),
             denied_categories: HashSet::new(),
+            command_rule_tokens: Vec::new(),
             key_patterns: Vec::new(),
             all_keys: false,
             channel_patterns: Vec::new(),
@@ -848,71 +860,40 @@ impl AclUser {
         self.all_commands
     }
 
+    /// Record a command-rule override token (`+cmd`/`-cmd`/`+@cat`/`-@cat`,
+    /// possibly `+cmd|sub`) in application order. (frankenredis-4kuad) A later
+    /// rule for an existing target replaces the earlier one in place at the new
+    /// position with the new sign, mirroring upstream acl.c.
+    fn record_command_rule(&mut self, token: String) {
+        let target = token[1..].to_string();
+        self.command_rule_tokens
+            .retain(|existing| existing.get(1..) != Some(target.as_str()));
+        self.command_rule_tokens.push(token);
+    }
+
     fn commands_string(&self) -> String {
-        // (frankenredis-23o12) Vendored acl.c::ACLDescribeUserCommandRules
-        // re-emits every explicit `+cmd`/`+@cat` even when `+@all` is
-        // already in effect, so a rule like `+@all -DEBUG +debug` round-
-        // trips as `+@all +debug`. The early-return shortcut here only
-        // applies when the user has ONLY `+@all` and no explicit allow
-        // or deny modifiers on top.
-        if self.all_commands
-            && self.allowed_commands.is_empty()
-            && self.allowed_categories.is_empty()
-            && self.denied_commands.is_empty()
-            && self.denied_categories.is_empty()
-        {
+        // (frankenredis-4kuad) Emit the override tokens in their original
+        // application order, mirroring upstream acl.c::ACLDescribeUserCommandRules
+        // (which re-emits the literal command-rule string). fr previously
+        // rebuilt the string from sorted HashSets, reordering rules like
+        // `+get +set +@read` into `+@read +get +set`.
+        //
+        // The baseline (`+@all`/`-@all`) leads. (frankenredis-23o12) `+@all`
+        // still re-emits later explicit grants because it clears the override
+        // list but subsequent `+cmd`/`+@cat` re-append. (frankenredis-dv0ve)
+        // a non-allcommands user opens with `-@all` even with positive grants
+        // so the rule string round-trips.
+        if self.all_commands && self.command_rule_tokens.is_empty() {
             return "+@all".to_string();
         }
-
-        let mut parts: Vec<String> = Vec::new();
-
-        if self.all_commands {
-            parts.push("+@all".to_string());
+        let mut parts: Vec<String> = Vec::with_capacity(self.command_rule_tokens.len() + 1);
+        parts.push(if self.all_commands {
+            "+@all".to_string()
         } else {
-            // (frankenredis-dv0ve) Mirror upstream
-            // acl.c::ACLDescribeUserCommandRules: when the user does NOT
-            // have allcommands, ACL LIST opens with the deny-all
-            // baseline ("-@all") even when explicit positive grants
-            // follow, so callers can re-apply the rule string to
-            // reproduce the exact permission set. fr previously emitted
-            // "-@all" only when zero explicit grants existed, making
-            // "+@read" round-trip as the wrong (broader) permission.
-            parts.push("-@all".to_string());
-        }
-
-        // Add allowed categories.
-        let mut sorted_cats: Vec<&String> = self.allowed_categories.iter().collect();
-        sorted_cats.sort();
-        for cat in sorted_cats {
-            parts.push(format!("+@{cat}"));
-        }
-
-        // Add denied categories.
-        let mut sorted_denied_cats: Vec<&String> = self.denied_categories.iter().collect();
-        sorted_denied_cats.sort();
-        for cat in sorted_denied_cats {
-            parts.push(format!("-@{cat}"));
-        }
-
-        // Add allowed commands.
-        let mut sorted_cmds: Vec<&String> = self.allowed_commands.iter().collect();
-        sorted_cmds.sort();
-        for cmd in sorted_cmds {
-            parts.push(format!("+{cmd}"));
-        }
-
-        // Add denied commands.
-        let mut sorted_denied: Vec<&String> = self.denied_commands.iter().collect();
-        sorted_denied.sort();
-        for cmd in sorted_denied {
-            parts.push(format!("-{cmd}"));
-        }
-
-        if parts.is_empty() {
             "-@all".to_string()
-        } else {
-            parts.join(" ")
-        }
+        });
+        parts.extend(self.command_rule_tokens.iter().cloned());
+        parts.join(" ")
     }
 
     fn keys_string(&self) -> String {
@@ -1352,6 +1333,7 @@ impl AuthState {
                 user.denied_commands.clear();
                 user.allowed_categories.clear();
                 user.denied_categories.clear();
+                user.command_rule_tokens.clear();
             } else if rule_str.eq_ignore_ascii_case("allkeys") || rule_str == "~*" {
                 user.all_keys = true;
                 user.key_patterns.clear();
@@ -1378,6 +1360,7 @@ impl AuthState {
                 user.denied_commands.clear();
                 user.allowed_categories.clear();
                 user.denied_categories.clear();
+                user.command_rule_tokens.clear();
             } else if let Some(cat) = rule_str.strip_prefix("+@") {
                 // +@category — allow all commands in this category.
                 // Upstream acl.c::ACLSetUser rejects unknown
@@ -1397,9 +1380,11 @@ impl AuthState {
                     user.denied_commands.clear();
                     user.allowed_categories.clear();
                     user.denied_categories.clear();
+                    user.command_rule_tokens.clear();
                 } else {
                     user.allowed_categories.insert(cat_lower.clone());
                     user.denied_categories.remove(&cat_lower);
+                    user.record_command_rule(format!("+@{cat_lower}"));
                 }
             } else if let Some(cat) = rule_str.strip_prefix("-@") {
                 // -@category — deny all commands in this category.
@@ -1418,9 +1403,11 @@ impl AuthState {
                     user.denied_commands.clear();
                     user.allowed_categories.clear();
                     user.denied_categories.clear();
+                    user.command_rule_tokens.clear();
                 } else {
                     user.denied_categories.insert(cat_lower.clone());
                     user.allowed_categories.remove(&cat_lower);
+                    user.record_command_rule(format!("-@{cat_lower}"));
                 }
             } else if let Some(cmd) = rule_str.strip_prefix('+') {
                 // +command — allow this specific command. Upstream
@@ -1465,6 +1452,7 @@ impl AuthState {
                 }
                 user.allowed_commands.insert(cmd_lower.clone());
                 user.denied_commands.remove(&cmd_lower);
+                user.record_command_rule(format!("+{cmd_lower}"));
             } else if let Some(cmd) = rule_str.strip_prefix('-') {
                 // -command — deny this specific command. (br-frankenredis-aclcmd)
                 // (frankenredis-6lgmx) Upstream asymmetry: while
@@ -1485,6 +1473,7 @@ impl AuthState {
                 }
                 user.denied_commands.insert(cmd_lower.clone());
                 user.allowed_commands.remove(&cmd_lower);
+                user.record_command_rule(format!("-{cmd_lower}"));
             } else if let Some(pass) = rule_str.strip_prefix('>') {
                 user.passwords.push(sha256_hex_bytes(pass.as_bytes()));
                 user.nopass = false; // adding a password disables nopass
@@ -1573,6 +1562,7 @@ impl AuthState {
                 user.denied_commands.clear();
                 user.allowed_categories.clear();
                 user.denied_categories.clear();
+                user.command_rule_tokens.clear();
                 user.all_keys = false;
                 user.key_patterns.clear();
                 user.channel_patterns.clear();
@@ -28370,6 +28360,44 @@ mod tests {
         let client_info = String::from_utf8_lossy(client_info);
         assert!(client_info.contains("cmd=eval"));
         assert!(client_info.contains("user=antirez"));
+    }
+
+    #[test]
+    fn acl_getuser_commands_preserve_rule_insertion_order() {
+        // (frankenredis-4kuad) ACL GETUSER `commands` must re-emit rules in
+        // application order (upstream acl.c::ACLDescribeUserCommandRules), not
+        // regrouped/sorted. Mixed individual + category grants expose the bug:
+        // fr previously rendered `-@all +@read +get +set`.
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(
+            command(&[
+                b"ACL", b"SETUSER", b"ru", b"on", b"nopass", b"+get", b"+set", b"+@read",
+            ]),
+            0,
+        );
+        let read_commands = |rt: &mut Runtime| -> Vec<u8> {
+            let getuser = rt.execute_frame(command(&[b"ACL", b"GETUSER", b"ru"]), 1);
+            let RespFrame::Array(Some(items)) = getuser else {
+                panic!("ACL GETUSER should return an array");
+            };
+            let pos = items
+                .iter()
+                .position(|f| matches!(f, RespFrame::BulkString(Some(b)) if b == b"commands"))
+                .expect("commands field");
+            match &items[pos + 1] {
+                RespFrame::BulkString(Some(b)) => b.clone(),
+                other => panic!("commands value should be a bulk string, got {other:?}"),
+            }
+        };
+        assert_eq!(read_commands(&mut rt), b"-@all +get +set +@read");
+
+        // A later opposite-sign rule for an existing target moves it to the end.
+        rt.execute_frame(command(&[b"ACL", b"SETUSER", b"ru", b"-set"]), 2);
+        assert_eq!(read_commands(&mut rt), b"-@all +get +@read -set");
+
+        // `+@all` resets the override baseline; later grants re-append.
+        rt.execute_frame(command(&[b"ACL", b"SETUSER", b"ru", b"+@all", b"-get"]), 3);
+        assert_eq!(read_commands(&mut rt), b"+@all -get");
     }
 
     #[test]
