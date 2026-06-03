@@ -1,0 +1,980 @@
+
+=== sample 01 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=5, a2=2199025550080, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  __internal_syscall_cancel (a1=5, a2=2199025550080, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=5, a2=2199025550080, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x0000743eda33900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000062f88cc22240 in std::sys::net::connection::socket::TcpStream::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/net/tcp.rs:689
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+[Inferior 1 (process 2143397) detached]
+
+=== sample 02 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__memcmp_avx2_movbe () at ../sysdeps/x86_64/multiarch/memcmp-avx2-movbe.S:415
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  __memcmp_avx2_movbe () at ../sysdeps/x86_64/multiarch/memcmp-avx2-movbe.S:415
+#1  0x000062f88cb96adc in equal_same_length<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:154
+#2  eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:23
+#3  eq<[u8], [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2124
+#4  equivalent<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>> () at /rust/deps/hashbrown-0.16.1/src/lib.rs:174
+#5  {closure#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry> () at /rust/deps/hashbrown-0.16.1/src/map.rs:224
+#6  {closure#0}<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.16.1/src/raw/mod.rs:1236
+#7  find_inner () at /rust/deps/hashbrown-0.16.1/src/raw/mod.rs:2075
+#8  find<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.16.1/src/raw/mod.rs:1236
+#9  get<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.16.1/src/raw/mod.rs:1251
+[Inferior 1 (process 2143397) detached]
+
+=== sample 03 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=21, a2=2199025552128, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  __internal_syscall_cancel (a1=21, a2=2199025552128, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=21, a2=2199025552128, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x0000743eda33900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000062f88cc22240 in std::sys::net::connection::socket::TcpStream::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/net/tcp.rs:689
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+[Inferior 1 (process 2143397) detached]
+
+=== sample 04 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=10, a2=2199025550976, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  __internal_syscall_cancel (a1=10, a2=2199025550976, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=10, a2=2199025550976, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x0000743eda33900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000062f88cc22240 in std::sys::net::connection::socket::TcpStream::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/net/tcp.rs:689
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+[Inferior 1 (process 2143397) detached]
+
+=== sample 05 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000062f88cb08621 in refresh_store_runtime_info_context () at crates/fr-runtime/src/lib.rs:4843
+4843	            if session.client_tracking.enabled {
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x000062f88cb08621 in refresh_store_runtime_info_context () at crates/fr-runtime/src/lib.rs:4843
+#1  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5167
+#2  0x000062f88cc0d29e in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#3  process_buffered_frames () at crates/fr-server/src/main.rs:1456
+#4  0x000062f88cc17675 in handle_readable () at crates/fr-server/src/main.rs:1256
+#5  main () at crates/fr-server/src/main.rs:865
+#6  0x000062f88cc08db3 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#7  __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#8  0x000062f88cc09119 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#9  0x000062f88cc5fede in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+[Inferior 1 (process 2143397) detached]
+
+=== sample 06 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000062f88c95c9da in classify_command () at crates/fr-command/src/lib.rs:2891
+2891	    match cmd.len() {
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x000062f88c95c9da in classify_command () at crates/fr-command/src/lib.rs:2891
+#1  0x000062f88c967376 in fr_command::is_write_command () at crates/fr-command/src/lib.rs:2533
+#2  0x000062f88cabdb3e in capture_aof_record () at crates/fr-runtime/src/lib.rs:6944
+#3  0x000062f88cae8f36 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5987
+#4  0x000062f88cb08cfa in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#5  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#6  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#7  0x000062f88cc0d29e in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#8  process_buffered_frames () at crates/fr-server/src/main.rs:1456
+#9  0x000062f88cc17675 in handle_readable () at crates/fr-server/src/main.rs:1256
+[Inferior 1 (process 2143397) detached]
+
+=== sample 07 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+core::str::converts::from_utf8 () at library/core/src/str/converts.rs:89
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  core::str::converts::from_utf8 () at library/core/src/str/converts.rs:89
+#1  0x000062f88c971880 in check_command_arity () at crates/fr-command/src/lib.rs:15825
+#2  0x000062f88c97fa08 in command_key_references () at crates/fr-command/src/lib.rs:1131
+#3  0x000062f88c97b250 in command_acl_key_access () at crates/fr-command/src/lib.rs:1211
+#4  0x000062f88ca9a0c2 in permission_error_for_set () at crates/fr-runtime/src/lib.rs:1052
+#5  acl_permission_error_for_argv () at crates/fr-runtime/src/lib.rs:1083
+#6  0x000062f88cae7af1 in acl_permission_error () at crates/fr-runtime/src/lib.rs:4906
+#7  execute_frame_internal () at crates/fr-runtime/src/lib.rs:5553
+#8  0x000062f88cb08cfa in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#9  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+[Inferior 1 (process 2143397) detached]
+
+=== sample 08 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+encode_into () at crates/fr-protocol/src/lib.rs:204
+204	    pub fn encode_into(&self, out: &mut Vec<u8>) {
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  encode_into () at crates/fr-protocol/src/lib.rs:204
+#1  0x000062f88cc0ee9b in encode_client_reply () at crates/fr-server/src/main.rs:3298
+#2  process_buffered_frames () at crates/fr-server/src/main.rs:1506
+#3  0x000062f88cc17675 in handle_readable () at crates/fr-server/src/main.rs:1256
+#4  main () at crates/fr-server/src/main.rs:865
+#5  0x000062f88cc08db3 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#6  __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#7  0x000062f88cc09119 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#8  0x000062f88cc5fede in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#9  std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+[Inferior 1 (process 2143397) detached]
+
+=== sample 09 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000062f88cb96ac1 in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:20
+20	        let len = self.len();
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x000062f88cb96ac1 in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:20
+#1  eq<[u8], [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2124
+#2  equivalent<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>> () at /rust/deps/hashbrown-0.16.1/src/lib.rs:174
+#3  {closure#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry> () at /rust/deps/hashbrown-0.16.1/src/map.rs:224
+#4  {closure#0}<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.16.1/src/raw/mod.rs:1236
+#5  find_inner () at /rust/deps/hashbrown-0.16.1/src/raw/mod.rs:2075
+#6  find<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.16.1/src/raw/mod.rs:1236
+#7  get<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.16.1/src/raw/mod.rs:1251
+#8  get<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /rust/deps/hashbrown-0.16.1/src/map.rs:1311
+#9  get<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:1006
+[Inferior 1 (process 2143397) detached]
+
+=== sample 10 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=28, a2=2199025553024, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  __internal_syscall_cancel (a1=28, a2=2199025553024, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=28, a2=2199025553024, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x0000743eda33900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000062f88cc22240 in std::sys::net::connection::socket::TcpStream::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/net/tcp.rs:689
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+[Inferior 1 (process 2143397) detached]
+
+=== sample 11 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000062f88cace111 in drain_pending_pubsub () at crates/fr-runtime/src/lib.rs:4161
+4161	    pub fn drain_pending_pubsub(&mut self) -> Vec<fr_store::PubSubMessage> {
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x000062f88cace111 in drain_pending_pubsub () at crates/fr-runtime/src/lib.rs:4161
+#1  0x000062f88cc0f183 in process_buffered_frames () at crates/fr-server/src/main.rs:1519
+#2  0x000062f88cc17675 in handle_readable () at crates/fr-server/src/main.rs:1256
+#3  main () at crates/fr-server/src/main.rs:865
+#4  0x000062f88cc08db3 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#5  __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#6  0x000062f88cc09119 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#7  0x000062f88cc5fede in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#8  std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#9  std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+[Inferior 1 (process 2143397) detached]
+
+=== sample 12 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000062f88cb08644 in refresh_store_runtime_info_context () at crates/fr-runtime/src/lib.rs:4843
+4843	            if session.client_tracking.enabled {
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x000062f88cb08644 in refresh_store_runtime_info_context () at crates/fr-runtime/src/lib.rs:4843
+#1  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5167
+#2  0x000062f88cc0d29e in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#3  process_buffered_frames () at crates/fr-server/src/main.rs:1456
+#4  0x000062f88cc17675 in handle_readable () at crates/fr-server/src/main.rs:1256
+#5  main () at crates/fr-server/src/main.rs:865
+#6  0x000062f88cc08db3 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#7  __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#8  0x000062f88cc09119 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#9  0x000062f88cc5fede in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+[Inferior 1 (process 2143397) detached]
+
+=== sample 13 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000062f88cc80a50 in mi_page_malloc_zero (theap=0x62f88cca8480 <theap_main>, page=0x2000002d580, size=24, zero=false, usable=0x0) at c_src/mimalloc/v3/src/alloc.c:50
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x000062f88cc80a50 in mi_page_malloc_zero (theap=0x62f88cca8480 <theap_main>, page=0x2000002d580, size=24, zero=false, usable=0x0) at c_src/mimalloc/v3/src/alloc.c:50
+#1  _mi_page_malloc_zero (theap=0x62f88cca8480 <theap_main>, page=0x2000002d580, size=24, zero=false) at c_src/mimalloc/v3/src/alloc.c:120
+#2  0x000062f88c9a04e7 in alloc () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mimalloc-0.1.49/src/lib.rs:51
+#3  __rust_alloc () at crates/fr-server/src/main.rs:18
+#4  alloc () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:100
+#5  alloc_impl_runtime () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:209
+#6  alloc_impl () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:331
+#7  allocate () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:448
+#8  box_new_uninit () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/boxed.rs:248
+#9  new_uninit<[fr_command::CommandKeyReference; 1]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/boxed.rs:317
+[Inferior 1 (process 2143397) detached]
+
+=== sample 14 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=37, a2=140728143208832, a3=8192, a4=0, a5=0, a6=0, nr=45) at ./nptl/cancellation.c:40
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  __internal_syscall_cancel (a1=37, a2=140728143208832, a3=8192, a4=0, a5=0, a6=0, nr=45) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=37, a2=140728143208832, a3=8192, a4=0, a5=a5@entry=0, a6=a6@entry=0, nr=45) at ./nptl/cancellation.c:75
+#2  0x0000743eda338f5f in __libc_recv (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/recv.c:28
+#3  0x000062f88cc1614b in std::sys::net::connection::socket::unix::Socket::recv_with_flags () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/sys/net/connection/socket/unix.rs:289
+#4  std::sys::net::connection::socket::unix::Socket::read () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/sys/net/connection/socket/unix.rs:304
+#5  std::sys::net::connection::socket::TcpStream::read () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/sys/net/connection/socket/mod.rs:414
+#6  std::net::tcp::{impl#3}::read () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/net/tcp.rs:670
+#7  {closure#0} () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:281
+#8  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#1}::read::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#9  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#1}::read::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+[Inferior 1 (process 2143397) detached]
+
+=== sample 15 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000062f88ca689b8 in copy_nonoverlapping<u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:551
+551	    unsafe { crate::intrinsics::copy_nonoverlapping(src, dst, count) }
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x000062f88ca689b8 in copy_nonoverlapping<u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:551
+#1  append_elements<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:2902
+#2  spec_extend<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:56
+#3  extend_from_slice<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3519
+#4  encode_into () at crates/fr-protocol/src/lib.rs:207
+#5  0x000062f88cc0ee9b in encode_client_reply () at crates/fr-server/src/main.rs:3298
+#6  process_buffered_frames () at crates/fr-server/src/main.rs:1506
+#7  0x000062f88cc17675 in handle_readable () at crates/fr-server/src/main.rs:1256
+#8  main () at crates/fr-server/src/main.rs:865
+#9  0x000062f88cc08db3 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+[Inferior 1 (process 2143397) detached]
+
+=== sample 16 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=13, a2=2199025551104, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  __internal_syscall_cancel (a1=13, a2=2199025551104, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=13, a2=2199025551104, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x0000743eda33900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000062f88cc22240 in std::sys::net::connection::socket::TcpStream::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/net/tcp.rs:689
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+[Inferior 1 (process 2143397) detached]
+
+=== sample 17 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+core::fmt::num::imp::{impl#0}::fmt () at library/core/src/fmt/num.rs:151
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  core::fmt::num::imp::{impl#0}::fmt () at library/core/src/fmt/num.rs:151
+#1  0x000062f88c8ed6ca in core::fmt::rt::Argument::fmt () at library/core/src/fmt/rt.rs:152
+#2  0x000062f88c8ed6ca in core::fmt::write ()
+#3  0x000062f88c8f4c7b in core::fmt::Formatter::write_fmt () at library/core/src/fmt/mod.rs:2126
+#4  core::net::ip_addr::{impl#8}::fmt () at library/core/src/macros/mod.rs:604
+#5  0x000062f88c8ed6ca in core::fmt::rt::Argument::fmt () at library/core/src/fmt/rt.rs:152
+#6  0x000062f88c8ed6ca in core::fmt::write ()
+#7  0x000062f88c8f4b48 in core::fmt::Formatter::write_fmt () at library/core/src/fmt/mod.rs:2126
+#8  core::net::socket_addr::{impl#8}::fmt () at library/core/src/macros/mod.rs:604
+#9  0x000062f88c8ed6ca in core::fmt::rt::Argument::fmt () at library/core/src/fmt/rt.rs:152
+[Inferior 1 (process 2143397) detached]
+
+=== sample 18 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000062f88cb03aea in namespace_argv_for_selected_db () at crates/fr-runtime/src/lib.rs:6997
+6997	    fn namespace_argv_for_selected_db(&self, argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x000062f88cb03aea in namespace_argv_for_selected_db () at crates/fr-runtime/src/lib.rs:6997
+#1  0x000062f88cafc27e in execute_db_scoped_command () at crates/fr-runtime/src/lib.rs:7432
+#2  0x000062f88cae8aaa in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5892
+#3  0x000062f88cb08cfa in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#4  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#5  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#6  0x000062f88cc0d29e in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#7  process_buffered_frames () at crates/fr-server/src/main.rs:1456
+#8  0x000062f88cc17675 in handle_readable () at crates/fr-server/src/main.rs:1256
+#9  main () at crates/fr-server/src/main.rs:865
+[Inferior 1 (process 2143397) detached]
+
+=== sample 19 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000062f88cc0571f in drop_in_place<fr_protocol::RespFrame> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	where
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x000062f88cc0571f in drop_in_place<fr_protocol::RespFrame> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  0x000062f88cc0f3b1 in process_buffered_frames () at crates/fr-server/src/main.rs:1542
+#2  0x000062f88cc17675 in handle_readable () at crates/fr-server/src/main.rs:1256
+#3  main () at crates/fr-server/src/main.rs:865
+#4  0x000062f88cc08db3 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#5  __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#6  0x000062f88cc09119 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#7  0x000062f88cc5fede in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#8  std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#9  std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+[Inferior 1 (process 2143397) detached]
+
+=== sample 20 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+eq_ignore_ascii_case_simple () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:91
+91	            if first_a.eq_ignore_ascii_case(&first_b) {
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  eq_ignore_ascii_case_simple () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:91
+#1  eq_ignore_ascii_case () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:77
+#2  eq_ignore_ascii_case () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2837
+#3  {closure#0} () at crates/fr-command/src/lib.rs:15859
+#4  find<(&str, i64, &str, i64, i64, i64), fr_command::get_command_flags::{closure_env#0}> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:349
+#5  get_command_flags () at crates/fr-command/src/lib.rs:15859
+#6  0x000062f88cb08bc4 in processed_command_counts () at crates/fr-runtime/src/lib.rs:228
+#7  {closure#0} () at crates/fr-runtime/src/lib.rs:5184
+#8  map<&alloc::vec::Vec<alloc::vec::Vec<u8, alloc::alloc::Global>, alloc::alloc::Global>, (u64, u64), fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#0}> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs:1165
+#9  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5184
+[Inferior 1 (process 2143397) detached]
+
+=== sample 21 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000062f88cb03c1a in namespace_argv_for_selected_db () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/into_iter.rs:223
+223	                // say that they're all at the beginning of the "allocation".
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x000062f88cb03c1a in namespace_argv_for_selected_db () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/into_iter.rs:223
+#1  0x000062f88cafc27e in execute_db_scoped_command () at crates/fr-runtime/src/lib.rs:7432
+#2  0x000062f88cae8aaa in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5892
+#3  0x000062f88cb08cfa in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#4  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#5  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+#6  0x000062f88cc0d29e in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#7  process_buffered_frames () at crates/fr-server/src/main.rs:1456
+#8  0x000062f88cc17675 in handle_readable () at crates/fr-server/src/main.rs:1256
+#9  main () at crates/fr-server/src/main.rs:865
+[Inferior 1 (process 2143397) detached]
+
+=== sample 22 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+wrapping_sub () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:2548
+2548	        /// saturating at the numeric bounds instead of overflowing.
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  wrapping_sub () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:2548
+#1  needs_to_grow<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:767
+#2  reserve<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:673
+#3  reserve<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:341
+#4  reserve<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1464
+#5  append_elements<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:2898
+#6  spec_extend<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:56
+#7  extend_from_slice<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3519
+#8  push_str () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:1102
+#9  write_str () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:3345
+[Inferior 1 (process 2143397) detached]
+
+=== sample 23 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000743eda760986 in ?? ()
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x0000743eda760986 in ?? ()
+#1  0x0000743eda2f628d in __GI___clock_gettime (clock_id=<optimized out>, tp=<optimized out>) at ../sysdeps/unix/sysv/linux/clock_gettime.c:42
+#2  0x000062f88cc51213 in std::sys::pal::unix::time::Timespec::now () at library/std/src/sys/pal/unix/time.rs:101
+#3  0x000062f88cc4f8e6 in std::sys::time::unix::Instant::now () at library/std/src/sys/time/unix.rs:74
+#4  std::time::Instant::now () at library/std/src/time.rs:288
+#5  std::time::Instant::elapsed () at library/std/src/time.rs:391
+#6  0x000062f88cae8ac8 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5894
+#7  0x000062f88cb08cfa in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#8  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#9  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+[Inferior 1 (process 2143397) detached]
+
+=== sample 24 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=40, a2=2199025554304, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  __internal_syscall_cancel (a1=40, a2=2199025554304, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=40, a2=2199025554304, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x0000743eda33900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000062f88cc22240 in std::sys::net::connection::socket::TcpStream::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/net/tcp.rs:689
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+[Inferior 1 (process 2143397) detached]
+
+=== sample 25 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000062f88cc80a50 in mi_page_malloc_zero (theap=0x62f88cca8480 <theap_main>, page=0x2000002be88, size=72, zero=false, usable=0x0) at c_src/mimalloc/v3/src/alloc.c:50
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x000062f88cc80a50 in mi_page_malloc_zero (theap=0x62f88cca8480 <theap_main>, page=0x2000002be88, size=72, zero=false, usable=0x0) at c_src/mimalloc/v3/src/alloc.c:50
+#1  _mi_page_malloc_zero (theap=0x62f88cca8480 <theap_main>, page=0x2000002be88, size=72, zero=false) at c_src/mimalloc/v3/src/alloc.c:120
+#2  0x000062f88c95211a in alloc () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mimalloc-0.1.49/src/lib.rs:51
+#3  __rust_alloc () at crates/fr-server/src/main.rs:18
+#4  alloc () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:100
+#5  alloc_impl_runtime () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:209
+#6  alloc_impl () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:331
+#7  allocate () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:448
+#8  try_allocate_in<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:465
+#9  with_capacity_in<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:434
+[Inferior 1 (process 2143397) detached]
+
+=== sample 26 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000062f88cb065e7 in init_front<alloc::collections::btree::node::marker::Immut, u64, fr_runtime::ClientSession> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/navigate.rs:224
+224	        if let Some(LazyLeafHandle::Root(root)) = &self.front {
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x000062f88cb065e7 in init_front<alloc::collections::btree::node::marker::Immut, u64, fr_runtime::ClientSession> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/navigate.rs:224
+#1  next_unchecked<u64, fr_runtime::ClientSession> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/navigate.rs:161
+#2  next<u64, fr_runtime::ClientSession> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1721
+#3  try_fold<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, (), core::iter::traits::iterator::Iterator::find::check::{closure_env#0}<(&u64, &fr_runtime::ClientSession), &mut fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>, core::ops::control_flow::ControlFlow<(&u64, &fr_runtime::ClientSession), ()>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2510
+#4  find<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, &mut fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2991
+#5  next<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/filter.rs:98
+#6  call_once<fn(&mut core::iter::adapters::filter::Filter<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>) -> core::option::Option<(&u64, &fr_runtime::ClientSession)>, (&mut core::iter::adapters::filter::Filter<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>)> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#7  and_then_or_clear<core::iter::adapters::filter::Filter<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>, (&u64, &fr_runtime::ClientSession), fn(&mut core::iter::adapters::filter::Filter<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>) -> core::option::Option<(&u64, &fr_runtime::ClientSession)>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/chain.rs:332
+#8  next<core::iter::adapters::filter::Filter<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>, core::iter::sources::once::Once<(&u64, &fr_runtime::ClientSession)>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/chain.rs:82
+#9  queue_client_tracking_invalidations () at crates/fr-runtime/src/lib.rs:4608
+[Inferior 1 (process 2143397) detached]
+
+=== sample 27 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=7, a2=2199025550464, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  __internal_syscall_cancel (a1=7, a2=2199025550464, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=7, a2=2199025550464, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x0000743eda33900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000062f88cc22240 in std::sys::net::connection::socket::TcpStream::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/net/tcp.rs:689
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+[Inferior 1 (process 2143397) detached]
+
+=== sample 28 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=11, a2=2199025550336, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  __internal_syscall_cancel (a1=11, a2=2199025550336, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=11, a2=2199025550336, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x0000743eda33900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000062f88cc22240 in std::sys::net::connection::socket::TcpStream::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/net/tcp.rs:689
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+[Inferior 1 (process 2143397) detached]
+
+=== sample 29 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000062f88cb96ac1 in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:20
+20	        let len = self.len();
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x000062f88cb96ac1 in eq<u8, u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:20
+#1  eq<[u8], [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2124
+#2  equivalent<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>> () at /rust/deps/hashbrown-0.16.1/src/lib.rs:174
+#3  {closure#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry> () at /rust/deps/hashbrown-0.16.1/src/map.rs:224
+#4  {closure#0}<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.16.1/src/raw/mod.rs:1236
+#5  find_inner () at /rust/deps/hashbrown-0.16.1/src/raw/mod.rs:2075
+#6  find<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.16.1/src/raw/mod.rs:1236
+#7  get<(alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<[u8], alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry>> () at /rust/deps/hashbrown-0.16.1/src/raw/mod.rs:1251
+#8  get<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /rust/deps/hashbrown-0.16.1/src/map.rs:1311
+#9  get<alloc::vec::Vec<u8, alloc::alloc::Global>, fr_store::Entry, std::hash::random::RandomState, alloc::alloc::Global, [u8]> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:1006
+[Inferior 1 (process 2143397) detached]
+
+=== sample 30 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5190
+5190	        let disable_touch = self.session.client_no_touch
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5190
+#1  0x000062f88cc0d29e in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#2  process_buffered_frames () at crates/fr-server/src/main.rs:1456
+#3  0x000062f88cc17675 in handle_readable () at crates/fr-server/src/main.rs:1256
+#4  main () at crates/fr-server/src/main.rs:865
+#5  0x000062f88cc08db3 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#6  __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#7  0x000062f88cc09119 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#8  0x000062f88cc5fede in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#9  std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+[Inferior 1 (process 2143397) detached]
+
+=== sample 31 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=52, a2=2199025555840, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  __internal_syscall_cancel (a1=52, a2=2199025555840, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=52, a2=2199025555840, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x0000743eda33900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000062f88cc22240 in std::sys::net::connection::socket::TcpStream::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/net/tcp.rs:689
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+[Inferior 1 (process 2143397) detached]
+
+=== sample 32 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+try_fold<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, (), core::iter::traits::iterator::Iterator::find::check::{closure_env#0}<(&u64, &fr_runtime::ClientSession), &mut fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>, core::ops::control_flow::ControlFlow<(&u64, &fr_runtime::ClientSession), ()>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2511
+2511	    /// use std::fs::rename;
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  try_fold<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, (), core::iter::traits::iterator::Iterator::find::check::{closure_env#0}<(&u64, &fr_runtime::ClientSession), &mut fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>, core::ops::control_flow::ControlFlow<(&u64, &fr_runtime::ClientSession), ()>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2511
+#1  find<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, &mut fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2991
+#2  next<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/filter.rs:98
+#3  call_once<fn(&mut core::iter::adapters::filter::Filter<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>) -> core::option::Option<(&u64, &fr_runtime::ClientSession)>, (&mut core::iter::adapters::filter::Filter<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>)> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#4  and_then_or_clear<core::iter::adapters::filter::Filter<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>, (&u64, &fr_runtime::ClientSession), fn(&mut core::iter::adapters::filter::Filter<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>) -> core::option::Option<(&u64, &fr_runtime::ClientSession)>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/chain.rs:332
+#5  next<core::iter::adapters::filter::Filter<alloc::collections::btree::map::Iter<u64, fr_runtime::ClientSession>, fr_runtime::{impl#16}::queue_client_tracking_invalidations::{closure_env#1}>, core::iter::sources::once::Once<(&u64, &fr_runtime::ClientSession)>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/chain.rs:82
+#6  queue_client_tracking_invalidations () at crates/fr-runtime/src/lib.rs:4608
+#7  0x000062f88caeb262 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5997
+#8  0x000062f88cb08cfa in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#9  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+[Inferior 1 (process 2143397) detached]
+
+=== sample 33 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000062f88cb0844a in next<u64, fr_runtime::ClientSession> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1717
+1717	        BTreeMap { root: Some(root), length, alloc: ManuallyDrop::new(alloc), _marker: PhantomData }
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x000062f88cb0844a in next<u64, fr_runtime::ClientSession> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1717
+#1  next<u64, fr_runtime::ClientSession> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:2052
+#2  refresh_store_runtime_info_context () at crates/fr-runtime/src/lib.rs:4842
+#3  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5167
+#4  0x000062f88cc0d29e in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#5  process_buffered_frames () at crates/fr-server/src/main.rs:1456
+#6  0x000062f88cc17675 in handle_readable () at crates/fr-server/src/main.rs:1256
+#7  main () at crates/fr-server/src/main.rs:865
+#8  0x000062f88cc08db3 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+[Inferior 1 (process 2143397) detached]
+
+=== sample 34 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__internal_syscall_cancel (a1=23, a2=2199025552384, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  __internal_syscall_cancel (a1=23, a2=2199025552384, a3=80, a4=16384, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:40
+#1  __syscall_cancel (a1=23, a2=2199025552384, a3=80, a4=16384, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#2  0x0000743eda33900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#3  0x000062f88cc22240 in std::sys::net::connection::socket::TcpStream::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/sys/net/connection/socket/mod.rs:433
+#4  std::net::tcp::{impl#4}::write () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/net/tcp.rs:689
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#6  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#8  write () at /tmp/rch-cargo-home-vmi1149989-2113245-1780510793548390236/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#9  try_flush () at crates/fr-server/src/main.rs:198
+[Inferior 1 (process 2143397) detached]
+
+=== sample 35 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000743eda760986 in ?? ()
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x0000743eda760986 in ?? ()
+#1  0x0000743eda2f628d in __GI___clock_gettime (clock_id=<optimized out>, tp=<optimized out>) at ../sysdeps/unix/sysv/linux/clock_gettime.c:42
+#2  0x000062f88cc51213 in std::sys::pal::unix::time::Timespec::now () at library/std/src/sys/pal/unix/time.rs:101
+#3  0x000062f88caa5150 in std::sys::time::unix::Instant::now () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/sys/time/unix.rs:74
+#4  std::time::Instant::now () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/time.rs:288
+#5  run_active_expire_cycle () at crates/fr-runtime/src/lib.rs:2816
+#6  0x000062f88caf25a0 in <fr_runtime::Runtime>::run_active_expire_cycle () at crates/fr-runtime/src/lib.rs:3655
+#7  0x000062f88cae8469 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5883
+#8  0x000062f88cb08cfa in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#9  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+[Inferior 1 (process 2143397) detached]
+
+=== sample 36 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+is_ascii_uppercase () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:812
+812	    /// assert!(!lf.is_ascii_alphabetic());
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  is_ascii_uppercase () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:812
+#1  to_ascii_lowercase () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:665
+#2  eq_ignore_ascii_case () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:690
+#3  eq_ignore_ascii_case_simple () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:91
+#4  eq_ignore_ascii_case () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:77
+#5  eq_ignore_ascii_case () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2837
+#6  {closure#0} () at crates/fr-command/src/lib.rs:967
+#7  find<(&str, i64, &str, i64, i64, i64), fr_command::command_has_keys::{closure_env#0}> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:349
+#8  command_has_keys () at crates/fr-command/src/lib.rs:967
+#9  command_key_references () at crates/fr-command/src/lib.rs:1121
+[Inferior 1 (process 2143397) detached]
+
+=== sample 37 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000062f88cc51209 in std::sys::pal::unix::time::Timespec::now () at library/std/src/sys/pal/unix/time.rs:69
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x000062f88cc51209 in std::sys::pal::unix::time::Timespec::now () at library/std/src/sys/pal/unix/time.rs:69
+#1  0x000062f88caa52ce in std::sys::time::unix::Instant::now () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/sys/time/unix.rs:74
+#2  std::time::Instant::now () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/time.rs:288
+#3  std::time::Instant::elapsed () at /rustc/362211dc29abc4e8f8cfc384740237f144929b03/library/std/src/time.rs:391
+#4  run_active_expire_cycle () at crates/fr-runtime/src/lib.rs:2835
+#5  0x000062f88caf25a0 in <fr_runtime::Runtime>::run_active_expire_cycle () at crates/fr-runtime/src/lib.rs:3655
+#6  0x000062f88cae8469 in execute_frame_internal () at crates/fr-runtime/src/lib.rs:5883
+#7  0x000062f88cb08cfa in {closure#3} () at crates/fr-runtime/src/lib.rs:5198
+#8  with_touch_disabled<fr_protocol::RespFrame, fr_runtime::{impl#16}::execute_frame_with_optional_unix_time_us::{closure_env#3}> () at crates/fr-store/src/lib.rs:82
+#9  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5197
+[Inferior 1 (process 2143397) detached]
+
+=== sample 38 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:256
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  __memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:256
+#1  0x000062f88cb03baf in copy_nonoverlapping<u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:551
+#2  copy_to_nonoverlapping<u8> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/const_ptr.rs:1252
+#3  to_vec<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:454
+#4  to_vec_in<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:400
+#5  clone<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3768
+#6  to_vec<alloc::vec::Vec<u8, alloc::alloc::Global>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:432
+#7  to_vec_in<alloc::vec::Vec<u8, alloc::alloc::Global>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:400
+#8  to_vec<alloc::vec::Vec<u8, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:376
+#9  namespace_argv_for_selected_db () at crates/fr-runtime/src/lib.rs:6998
+[Inferior 1 (process 2143397) detached]
+
+=== sample 39 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000062f88cb08644 in refresh_store_runtime_info_context () at crates/fr-runtime/src/lib.rs:4843
+4843	            if session.client_tracking.enabled {
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  0x000062f88cb08644 in refresh_store_runtime_info_context () at crates/fr-runtime/src/lib.rs:4843
+#1  execute_frame_with_optional_unix_time_us () at crates/fr-runtime/src/lib.rs:5167
+#2  0x000062f88cc0d29e in execute_frame_with_unix_time_us () at crates/fr-runtime/src/lib.rs:5153
+#3  process_buffered_frames () at crates/fr-server/src/main.rs:1456
+#4  0x000062f88cc17675 in handle_readable () at crates/fr-server/src/main.rs:1256
+#5  main () at crates/fr-server/src/main.rs:865
+#6  0x000062f88cc08db3 in call_once<fn() -> std::process::ExitCode, ()> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#7  __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#8  0x000062f88cc09119 in {closure#0}<std::process::ExitCode> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#9  0x000062f88cc5fede in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+[Inferior 1 (process 2143397) detached]
+
+=== sample 40 ===
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+write_str () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:3344
+3344	    /// let v1 = String::try_from(s1).unwrap();
+
+Thread 1 (Thread 0x743eda60cc40 (LWP 2143397) "frankenredis"):
+#0  write_str () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:3344
+#1  0x000062f88c8ed5d8 in core::fmt::write () at library/core/src/fmt/mod.rs:1665
+#2  0x000062f88c8f4b48 in core::fmt::Formatter::write_fmt () at library/core/src/fmt/mod.rs:2126
+#3  core::net::socket_addr::{impl#8}::fmt () at library/core/src/macros/mod.rs:604
+#4  0x000062f88c8ed6ca in core::fmt::rt::Argument::fmt () at library/core/src/fmt/rt.rs:152
+#5  0x000062f88c8ed6ca in core::fmt::write ()
+#6  0x000062f88cb00bfb in spec_write_fmt<alloc::string::String> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/fmt/mod.rs:236
+#7  write_fmt<alloc::string::String> () at /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/fmt/mod.rs:241
+#8  refresh_current_dispatch_client_context () at crates/fr-runtime/src/lib.rs:7071
+#9  dispatch_with_client_context () at crates/fr-runtime/src/lib.rs:7349
+[Inferior 1 (process 2143397) detached]

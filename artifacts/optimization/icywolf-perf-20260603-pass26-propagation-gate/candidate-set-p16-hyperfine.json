@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "command": "target-icywolf-g4nfc-candidate-rch/release-perf/fr-bench --host 127.0.0.1 --port 20467 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out artifacts/optimization/icywolf-perf-20260603-pass26-propagation-gate/candidate-set-p16-last.json --key-prefix icywolf-g4nfc-candidate",
+      "mean": 1.640092583065,
+      "stddev": 0.03919449598340771,
+      "median": 1.6341486354399999,
+      "user": 0.39420832499999997,
+      "system": 0.7589525750000001,
+      "min": 1.5936617764399998,
+      "max": 1.69327440144,
+      "times": [
+        1.5936617764399998,
+        1.61142476544,
+        1.6473861754399999,
+        1.69057119844,
+        1.69327440144,
+        1.60143019144,
+        1.62091109544,
+        1.6620810604399998
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780511279843,
+  "host": "127.0.0.1",
+  "port": 20467,
+  "workload": "set",
+  "clients": 50,
+  "requests": 500000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "icywolf-g4nfc-candidate",
+  "total_time_ms": 1659,
+  "ops_per_sec": 301313.1034013724,
+  "bytes_sent": 32394887,
+  "bytes_received": 2500000,
+  "latency_us": {
+    "min": 111,
+    "p50": 2529,
+    "p95": 3343,
+    "p99": 3899,
+    "p999": 4535,
+    "max": 8527,
+    "mean": 2618.6806460000016,
+    "samples": 500000
+  }
+}

@@ -1,0 +1,156 @@
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 415	../sysdeps/x86_64/multiarch/memcmp-avx2-movbe.S: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 89	library/core/src/str/converts.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 50	c_src/mimalloc/v3/src/alloc.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 151	library/core/src/fmt/num.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 50	c_src/mimalloc/v3/src/alloc.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 40	./nptl/cancellation.c: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 69	library/std/src/sys/pal/unix/time.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 256	../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/projects/frankenredis_icywolf_post9e457_profile_20260603T1817Z/target-icywolf-post9e457-profile-rch/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.

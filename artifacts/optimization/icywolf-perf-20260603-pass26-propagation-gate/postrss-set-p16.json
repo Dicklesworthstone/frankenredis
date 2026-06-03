@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780510894567,
+  "host": "127.0.0.1",
+  "port": 20464,
+  "workload": "set",
+  "clients": 50,
+  "requests": 500000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "icywolf-postrss-profile",
+  "total_time_ms": 4815,
+  "ops_per_sec": 103830.48934835955,
+  "bytes_sent": 32394187,
+  "bytes_received": 2500000,
+  "latency_us": {
+    "min": 4132,
+    "p50": 7223,
+    "p95": 11487,
+    "p99": 15023,
+    "p999": 27375,
+    "max": 29663,
+    "mean": 7669.368976000002,
+    "samples": 500000
+  }
+}

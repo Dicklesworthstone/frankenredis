@@ -1,0 +1,4 @@
+Benchmark 1: target-icywolf-g4nfc-candidate-rch/release-perf/fr-bench --host 127.0.0.1 --port 20467 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out artifacts/optimization/icywolf-perf-20260603-pass26-propagation-gate/candidate-set-p16-last.json --key-prefix icywolf-g4nfc-candidate
+  Time (mean ± σ):      1.640 s ±  0.039 s    [User: 0.394 s, System: 0.759 s]
+  Range (min … max):    1.594 s …  1.693 s    8 runs
+ 

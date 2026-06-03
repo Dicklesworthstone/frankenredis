@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "command": "target-icywolf-post9e457-profile-rch/release-perf/fr-bench --host 127.0.0.1 --port 20466 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out artifacts/optimization/icywolf-perf-20260603-pass26-propagation-gate/baseline-set-p16-last.json --key-prefix icywolf-g4nfc-baseline",
+      "mean": 1.71655794528,
+      "stddev": 0.1430980013548997,
+      "median": 1.6559791757799998,
+      "user": 0.41853669,
+      "system": 0.8310886849999999,
+      "min": 1.57540023628,
+      "max": 2.0068032792799997,
+      "times": [
+        1.64221659328,
+        1.57540023628,
+        2.0068032792799997,
+        1.80600579128,
+        1.7894906552799998,
+        1.6248561492799998,
+        1.61794909928,
+        1.6697417582799998
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
