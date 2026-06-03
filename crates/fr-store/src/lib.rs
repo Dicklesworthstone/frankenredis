@@ -2871,7 +2871,14 @@ impl Store {
             None => (0, key.to_vec()),
         };
         if i128::from(when_ms) <= i128::from(now_ms) {
-            self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", &logical_key, db);
+            // (frankenredis-08t0x) Upstream expire.c::expireGenericCommand, when
+            // the deadline is already in the past on a master, deletes the key
+            // synchronously and fires NOTIFY_GENERIC "del" — NOT the "expired"
+            // event, which is reserved for natural lazy/active expiry. Verified
+            // differentially vs vendored 7.2.4 (EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT
+            // with a past deadline all emit "del"). Mirrors the relative-time
+            // sibling expire_milliseconds above.
+            self.notify_keyspace_event(NOTIFY_GENERIC, "del", &logical_key, db);
             self.internal_entries_remove(key);
             self.stream_groups.remove(key);
             self.stream_last_ids.remove(key);
@@ -18337,17 +18344,21 @@ mod tests {
     }
 
     #[test]
-    fn expire_at_milliseconds_emits_expired_event_when_deadline_in_past() {
+    fn expire_at_milliseconds_emits_del_event_when_deadline_in_past() {
         let mut store = Store::new();
-        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_EXPIRED;
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_GENERIC;
         store.set(b"k".to_vec(), b"v".to_vec(), None, 1_000);
 
-        // Deadline in the past (500ms < now 1000ms) should emit "expired" not "del"
+        // (frankenredis-08t0x) A past deadline supplied to the EXPIREAT command
+        // path deletes the key synchronously and emits NOTIFY_GENERIC "del",
+        // matching upstream expire.c::expireGenericCommand. "expired" is only
+        // for natural lazy/active expiry, not command-driven past deadlines.
+        // Verified differentially vs vendored Redis 7.2.4.
         assert!(store.expire_at_milliseconds(b"k", 500, 1_000));
         assert_eq!(store.get(b"k", 1_000).unwrap(), None);
         assert_eq!(
             store.drain_keyspace_notifications(),
-            vec![(b"__keyevent@0__:expired".to_vec(), b"k".to_vec())]
+            vec![(b"__keyevent@0__:del".to_vec(), b"k".to_vec())]
         );
     }
 
