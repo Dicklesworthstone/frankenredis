@@ -1775,7 +1775,10 @@ pub fn decode_db_key(key: &[u8]) -> Option<(usize, &[u8])> {
 pub fn read_rss_bytes() -> Option<usize> {
     #[cfg(target_os = "linux")]
     {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let mut file = std::fs::File::open("/proc/self/status").ok()?;
+        let mut buf = [0_u8; 8192];
+        let len = std::io::Read::read(&mut file, &mut buf).ok()?;
+        let status = std::str::from_utf8(&buf[..len]).ok()?;
         for line in status.lines() {
             if let Some(rest) = line.strip_prefix("VmRSS:") {
                 let kb_str = rest.trim().strip_suffix("kB")?.trim();

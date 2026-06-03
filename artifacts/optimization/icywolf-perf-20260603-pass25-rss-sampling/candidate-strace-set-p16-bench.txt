@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:20464
+workload: set
+clients: 50  requests: 500000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 4954 ms  throughput: 100914.06 ops/sec
+latency(us): min=1729 p50=7631 p95=11879 p99=14983 p999=20431 max=22655 mean=7886.13
+bytes: sent=35894328 received=2500000 key_prefix=icywolf-zjhte-candidate-strace

@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780509570280,
+  "host": "127.0.0.1",
+  "port": 20462,
+  "workload": "set",
+  "clients": 50,
+  "requests": 500000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "icywolf-zjhte-baseline",
+  "total_time_ms": 1587,
+  "ops_per_sec": 314975.1308802618,
+  "bytes_sent": 31894538,
+  "bytes_received": 2500000,
+  "latency_us": {
+    "min": 183,
+    "p50": 2437,
+    "p95": 3079,
+    "p99": 3559,
+    "p999": 4013,
+    "max": 4647,
+    "mean": 2519.622458000004,
+    "samples": 500000
+  }
+}

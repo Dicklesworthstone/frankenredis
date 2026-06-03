@@ -1,0 +1,4 @@
+Benchmark 1: /data/projects/frankenredis_icywolf_postb148_profile_20260603T1753Z/target-icywolf-postb148-profile-rch/release-perf/fr-bench --host 127.0.0.1 --port 20462 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis_icywolf_postb148_profile_20260603T1753Z/artifacts/optimization/icywolf-perf-20260603-pass25-rss-sampling/baseline-set-p16-last.json --key-prefix icywolf-zjhte-baseline
+  Time (mean ± σ):      1.592 s ±  0.031 s    [User: 0.386 s, System: 0.774 s]
+  Range (min … max):    1.546 s …  1.636 s    8 runs
+ 

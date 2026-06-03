@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780509791367,
+  "host": "127.0.0.1",
+  "port": 20464,
+  "workload": "set",
+  "clients": 50,
+  "requests": 500000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "icywolf-zjhte-candidate-strace",
+  "total_time_ms": 4954,
+  "ops_per_sec": 100914.06427545208,
+  "bytes_sent": 35894328,
+  "bytes_received": 2500000,
+  "latency_us": {
+    "min": 1729,
+    "p50": 7631,
+    "p95": 11879,
+    "p99": 14983,
+    "p999": 20431,
+    "max": 22655,
+    "mean": 7886.125356000002,
+    "samples": 500000
+  }
+}
