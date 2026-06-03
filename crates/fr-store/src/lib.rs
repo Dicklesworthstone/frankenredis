@@ -1529,6 +1529,12 @@ pub struct Store {
     /// via the pub/sub system after command execution.
     pub keyspace_notifications: Vec<(Vec<u8>, Vec<u8>)>,
 
+    /// (frankenredis-1d2xf) db-encoded keys lazily expired (via `drop_if_expired`)
+    /// during the current command, so the runtime can propagate a `DEL`/`UNLINK`
+    /// per key — ordered BEFORE the triggering command's own propagation — to
+    /// replicas + AOF. Drained every command by the runtime dispatch arm.
+    pub lazy_expired_propagation: Vec<Vec<u8>>,
+
     /// (frankenredis-f7xy7) Transient signal set by the XADD command handler
     /// when its inline MAXLEN/MINID trim actually removed entries. Upstream
     /// xaddCommand fires a secondary "xtrim" keyspace event (after "xadd") in
@@ -1885,6 +1891,7 @@ impl Default for Store {
             cached_memory_usage_dirty: std::cell::Cell::new(0),
             notify_keyspace_events: 0,
             keyspace_notifications: Vec::new(),
+            lazy_expired_propagation: Vec::new(),
             last_xadd_trimmed: false,
             server_run_id: generate_run_id(),
             cluster_shard_id: generate_run_id(),
@@ -11112,6 +11119,10 @@ impl Store {
             self.stream_last_ids.remove(key);
             self.dirty = self.dirty.saturating_add(1);
             self.stat_expired_keys = self.stat_expired_keys.saturating_add(1);
+            // (frankenredis-1d2xf) Record the db-encoded key so the runtime can
+            // propagate this lazy-expiry deletion to replicas + AOF, ordered
+            // before the triggering command's own propagation.
+            self.lazy_expired_propagation.push(key.to_vec());
             // Emit expired keyspace notification (use logical key, not physical)
             let (db, logical_key) = match decode_db_key(key) {
                 Some((db, lk)) => (db, lk),
@@ -11119,6 +11130,12 @@ impl Store {
             };
             self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", logical_key, db);
         }
+    }
+
+    /// (frankenredis-1d2xf) Drain the keys lazily expired during the current
+    /// command, for the runtime to propagate as `DEL`/`UNLINK`.
+    pub fn take_lazy_expired_propagation(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.lazy_expired_propagation)
     }
 
     // ── Hash field TTL primitives (Redis 7.4 HEXPIRE family) ────────

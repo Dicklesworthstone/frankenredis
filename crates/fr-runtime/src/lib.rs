@@ -5662,7 +5662,18 @@ impl Runtime {
         match result {
             Ok(reply) => {
                 let cmd_keys = fr_command::command_keys(&argv);
-                if dirty_after > dirty_before {
+                // (frankenredis-1d2xf) Propagate any lazy-expiry deletions this
+                // command triggered FIRST, before the command's own record, so a
+                // command that recreates the key (e.g. SET on an expired key)
+                // isn't undone by a late stale DEL on the replica. Each lazy
+                // eviction bumped `dirty`, so the command itself is considered to
+                // have modified data only if it dirtied BEYOND those evictions —
+                // this keeps a read (e.g. GET) that merely lazy-expired a key from
+                // propagating itself.
+                let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+                let lazy_count = lazy_evicted.len() as u64;
+                self.server.propagate_expired_key_deletions(&lazy_evicted);
+                if dirty_after.saturating_sub(dirty_before) > lazy_count {
                     // Record AOF only for non-special commands (special ones record themselves)
                     if special_command.is_none() && !handled_migrate {
                         if let Some(script_commands) =
@@ -17897,6 +17908,66 @@ mod tests {
                 .first()
                 .is_some_and(|c| c.eq_ignore_ascii_case(b"DEL"))),
             "a replica must not generate expiry DELs, got {rnew:?}"
+        );
+    }
+
+    #[test]
+    fn lazy_expiry_on_access_propagates_del_and_not_the_read() {
+        // (frankenredis-1d2xf) A command that lazily expires a key on access must
+        // propagate the DEL (so replicas/AOF delete it) but must NOT propagate the
+        // triggering read itself; and a write that recreates the key must order
+        // the DEL before its own record.
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(42);
+        // Disable the active cycle so access triggers LAZY expiry (otherwise the
+        // pre-dispatch active cycle reaps the key first).
+        rt.server.store.active_expire_enabled = false;
+
+        rt.execute_frame(command(&[b"SET", b"k", b"v", b"PX", b"100"]), 900); // expires t=1000
+        let before = rt.aof_records().len();
+
+        // GET at t=5000 lazily expires k -> nil; propagate DEL k, NOT the GET.
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 5000),
+            RespFrame::BulkString(None)
+        );
+        let argvs: Vec<Vec<Vec<u8>>> = rt.aof_records()[before..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        assert!(
+            argvs.iter().any(|a| a
+                .first()
+                .is_some_and(|c| c.eq_ignore_ascii_case(b"DEL"))
+                && a.get(1).is_some_and(|k| k.as_slice() == b"k")),
+            "lazy expiry must propagate DEL k, got {argvs:?}"
+        );
+        assert!(
+            !argvs.iter().any(|a| a
+                .first()
+                .is_some_and(|c| c.eq_ignore_ascii_case(b"GET"))),
+            "the GET that lazy-expired must NOT propagate, got {argvs:?}"
+        );
+
+        // SET on an expired key recreates it: stream must be [DEL k2, SET k2 ..].
+        rt.execute_frame(command(&[b"SET", b"k2", b"old", b"PX", b"100"]), 900);
+        let before = rt.aof_records().len();
+        rt.execute_frame(command(&[b"SET", b"k2", b"new"]), 5000);
+        let argvs: Vec<Vec<Vec<u8>>> = rt.aof_records()[before..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        let del_pos = argvs.iter().position(|a| {
+            a.first().is_some_and(|c| c.eq_ignore_ascii_case(b"DEL"))
+                && a.get(1).is_some_and(|k| k.as_slice() == b"k2")
+        });
+        let set_pos = argvs.iter().position(|a| {
+            a.first().is_some_and(|c| c.eq_ignore_ascii_case(b"SET"))
+                && a.get(1).is_some_and(|k| k.as_slice() == b"k2")
+        });
+        assert!(
+            matches!((del_pos, set_pos), (Some(d), Some(s)) if d < s),
+            "SET on expired key must propagate DEL k2 before SET k2, got {argvs:?}"
         );
     }
 
