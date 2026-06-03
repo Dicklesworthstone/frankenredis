@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/frankenredis_icywolf_gu5nf23_baseline_20260603T1640Z/target-icywolf-gu5nf23-baseline-rch/release-perf/fr-bench --host 127.0.0.1 --port 20428 --clients 50 --requests 100000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis/artifacts/optimization/icywolf-perf-20260603-pass23-lazy-entry-digest/paired-baseline-set-p16-last.json --key-prefix icywolf-gu5nf25-paired-baseline
+  Time (mean ± σ):     356.9 ms ±  14.8 ms    [User: 79.6 ms, System: 180.0 ms]
+  Range (min … max):   339.0 ms … 386.7 ms    12 runs
+ 
+Benchmark 2: /data/projects/frankenredis_icywolf_gu5nf23_baseline_20260603T1640Z/target-icywolf-gu5nf23-baseline-rch/release-perf/fr-bench --host 127.0.0.1 --port 20429 --clients 50 --requests 100000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis/artifacts/optimization/icywolf-perf-20260603-pass23-lazy-entry-digest/paired-candidate-set-p16-last.json --key-prefix icywolf-gu5nf25-paired-candidate
+  Time (mean ± σ):     347.9 ms ±   9.2 ms    [User: 83.4 ms, System: 183.5 ms]
+  Range (min … max):   332.8 ms … 359.3 ms    12 runs
+ 
+Summary
+  /data/projects/frankenredis_icywolf_gu5nf23_baseline_20260603T1640Z/target-icywolf-gu5nf23-baseline-rch/release-perf/fr-bench --host 127.0.0.1 --port 20429 --clients 50 --requests 100000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis/artifacts/optimization/icywolf-perf-20260603-pass23-lazy-entry-digest/paired-candidate-set-p16-last.json --key-prefix icywolf-gu5nf25-paired-candidate ran
+    1.03 ± 0.05 times faster than /data/projects/frankenredis_icywolf_gu5nf23_baseline_20260603T1640Z/target-icywolf-gu5nf23-baseline-rch/release-perf/fr-bench --host 127.0.0.1 --port 20428 --clients 50 --requests 100000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis/artifacts/optimization/icywolf-perf-20260603-pass23-lazy-entry-digest/paired-baseline-set-p16-last.json --key-prefix icywolf-gu5nf25-paired-baseline

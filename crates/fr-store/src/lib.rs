@@ -4279,11 +4279,6 @@ impl Store {
         let db = decode_db_key(&key).map(|(db, _)| db).unwrap_or(0);
         let is_new_key = !self.entries.contains_key(&key);
         let new_is_stream = matches!(&entry.value, Value::Stream(_));
-        let old_digest = self
-            .entries
-            .get(&key)
-            .map(|existing| Self::entry_state_digest(&key, existing));
-
         if let Some(old_entry) = self.entries.get(&key) {
             entry.modification_count = old_entry.modification_count.wrapping_add(1);
         }
@@ -4297,7 +4292,9 @@ impl Store {
         if is_new_key {
             self.ordered_keys.insert(key.clone());
         }
-        if let Some(old) = self.entries.insert(key.clone(), entry) {
+        let old_entry = self.entries.insert(key.clone(), entry);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        if let Some(old) = old_entry {
             if matches!(&old.value, Value::Stream(_)) && !new_is_stream {
                 self.stream_groups.remove(&key);
                 self.stream_last_ids.remove(&key);
@@ -4310,21 +4307,11 @@ impl Store {
                     self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
                 }
             }
-            let new_digest = self
-                .entries
-                .get(&key)
-                .map(|inserted| Self::entry_state_digest(&key, inserted));
-            self.update_digest_hashes(old_digest, new_digest);
             Some(old)
         } else {
             if db < self.database_count {
                 self.db_key_counts[db] = self.db_key_counts[db].saturating_add(1);
             }
-            let new_digest = self
-                .entries
-                .get(&key)
-                .map(|inserted| Self::entry_state_digest(&key, inserted));
-            self.update_digest_hashes(None, new_digest);
             None
         }
     }
@@ -19031,6 +19018,22 @@ mod tests {
     }
 
     #[test]
+    fn whole_entry_insert_marks_digest_stale_until_state_digest_recompute() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v1".to_vec(), None, 0);
+        assert!(store.digest_stale);
+        let inserted_digest = format!("{:016x}", store.state_digest_full_scan());
+        assert_eq!(store.state_digest(), inserted_digest);
+        assert!(!store.digest_stale);
+
+        store.set(b"k".to_vec(), b"v2".to_vec(), None, 1);
+        assert!(store.digest_stale);
+        let replaced_digest = format!("{:016x}", store.state_digest_full_scan());
+        assert_eq!(store.state_digest(), replaced_digest);
+        assert!(!store.digest_stale);
+    }
+
+    #[test]
     fn state_digest_stays_stale_after_incremental_update_follows_direct_mutation() {
         let mut store = Store::new();
         store
@@ -24276,7 +24279,11 @@ mod tests {
             )
             .unwrap()
             .expect("group exists");
-        assert_eq!(store.dirty, before + 3, "new consumer create + 2 claimed = 3");
+        assert_eq!(
+            store.dirty,
+            before + 3,
+            "new consumer create + 2 claimed = 3"
+        );
 
         // XCLAIM re-using c2 for one more entry: per-entry only.
         let before = store.dirty;
@@ -24339,7 +24346,11 @@ mod tests {
             )
             .unwrap()
             .expect("group exists");
-        assert_eq!(store.dirty, before + 1, "history read with results dirties +1");
+        assert_eq!(
+            store.dirty,
+            before + 1,
+            "history read with results dirties +1"
+        );
 
         // History read returning ZERO entries (start past the last pending) → still +1.
         let before = store.dirty;
@@ -24353,7 +24364,11 @@ mod tests {
             )
             .unwrap()
             .expect("group exists");
-        assert_eq!(store.dirty, before + 1, "empty history read still dirties +1");
+        assert_eq!(
+            store.dirty,
+            before + 1,
+            "empty history read still dirties +1"
+        );
 
         // '>' read with no new entries → no bump.
         let before = store.dirty;
@@ -24367,7 +24382,10 @@ mod tests {
             )
             .unwrap()
             .expect("group exists");
-        assert_eq!(store.dirty, before, "'>' read with no new entries must not dirty");
+        assert_eq!(
+            store.dirty, before,
+            "'>' read with no new entries must not dirty"
+        );
     }
 
     #[test]
@@ -24636,6 +24654,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant, clippy::excessive_precision)]
     fn redis_score_to_string_matches_vendored_d2string() {
         // Golden values captured from vendored redis 7.2.4 ZSCORE (d2string ->
         // fpconv_dtoa). Verified byte-exact against the oracle across 437

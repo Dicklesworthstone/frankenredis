@@ -1,0 +1,64 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/frankenredis_icywolf_gu5nf23_baseline_20260603T1640Z/target-icywolf-gu5nf23-baseline-rch/release-perf/fr-bench --host 127.0.0.1 --port 20430 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis/artifacts/optimization/icywolf-perf-20260603-pass23-lazy-entry-digest/paired500-baseline-set-p16-last.json --key-prefix icywolf-gu5nf25-paired500-baseline",
+      "mean": 1.794824786075,
+      "stddev": 0.04477938142974641,
+      "median": 1.7960291542,
+      "user": 0.39972722000000005,
+      "system": 0.8045715999999999,
+      "min": 1.7326175757,
+      "max": 1.8705803817,
+      "times": [
+        1.7326175757,
+        1.7651187677,
+        1.7918564767,
+        1.8002018317,
+        1.8160893887,
+        1.7521625216999999,
+        1.8299713447,
+        1.8705803817
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/frankenredis_icywolf_gu5nf23_baseline_20260603T1640Z/target-icywolf-gu5nf23-baseline-rch/release-perf/fr-bench --host 127.0.0.1 --port 20431 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis/artifacts/optimization/icywolf-perf-20260603-pass23-lazy-entry-digest/paired500-candidate-set-p16-last.json --key-prefix icywolf-gu5nf25-paired500-candidate",
+      "mean": 1.7191080241999999,
+      "stddev": 0.048384930826396236,
+      "median": 1.7219749166999998,
+      "user": 0.39771821999999996,
+      "system": 0.8141294749999999,
+      "min": 1.6370993346999998,
+      "max": 1.7874919506999998,
+      "times": [
+        1.7035753637,
+        1.7234375436999998,
+        1.7205122896999998,
+        1.7874919506999998,
+        1.6750405367,
+        1.6370993346999998,
+        1.7369716096999999,
+        1.7687355647
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

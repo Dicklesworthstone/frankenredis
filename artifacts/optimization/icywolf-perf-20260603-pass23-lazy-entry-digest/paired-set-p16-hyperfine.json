@@ -1,0 +1,80 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/frankenredis_icywolf_gu5nf23_baseline_20260603T1640Z/target-icywolf-gu5nf23-baseline-rch/release-perf/fr-bench --host 127.0.0.1 --port 20428 --clients 50 --requests 100000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis/artifacts/optimization/icywolf-perf-20260603-pass23-lazy-entry-digest/paired-baseline-set-p16-last.json --key-prefix icywolf-gu5nf25-paired-baseline",
+      "mean": 0.35685820688666675,
+      "stddev": 0.014805381130065897,
+      "median": 0.35607933172000006,
+      "user": 0.07957295666666667,
+      "system": 0.18001972,
+      "min": 0.33897044872000004,
+      "max": 0.38672050872,
+      "times": [
+        0.34267148372000006,
+        0.34089015672000006,
+        0.33897044872000004,
+        0.34338246972,
+        0.35426139672000007,
+        0.35215228972000007,
+        0.35789726672000005,
+        0.36009531172000003,
+        0.37708399772000006,
+        0.36213755272000003,
+        0.38672050872,
+        0.36603559972000005
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/frankenredis_icywolf_gu5nf23_baseline_20260603T1640Z/target-icywolf-gu5nf23-baseline-rch/release-perf/fr-bench --host 127.0.0.1 --port 20429 --clients 50 --requests 100000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis/artifacts/optimization/icywolf-perf-20260603-pass23-lazy-entry-digest/paired-candidate-set-p16-last.json --key-prefix icywolf-gu5nf25-paired-candidate",
+      "mean": 0.3478915840533334,
+      "stddev": 0.009211002607739204,
+      "median": 0.35113583822000005,
+      "user": 0.08335745666666668,
+      "system": 0.18351905333333332,
+      "min": 0.33281121672,
+      "max": 0.35931669572,
+      "times": [
+        0.35188442172000006,
+        0.33281121672,
+        0.35931669572,
+        0.34625972272000005,
+        0.33525608972000004,
+        0.35038725472000004,
+        0.35768956272,
+        0.33454033272000006,
+        0.35231530872000005,
+        0.35211288472,
+        0.35649737372000007,
+        0.34562814472000003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

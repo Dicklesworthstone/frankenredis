@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780505921852,
+  "host": "127.0.0.1",
+  "port": 20431,
+  "workload": "set",
+  "clients": 50,
+  "requests": 500000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "icywolf-gu5nf25-paired500-candidate",
+  "total_time_ms": 1766,
+  "ops_per_sec": 283102.493730398,
+  "bytes_sent": 38394114,
+  "bytes_received": 2500000,
+  "latency_us": {
+    "min": 89,
+    "p50": 2651,
+    "p95": 3703,
+    "p99": 4443,
+    "p999": 5195,
+    "max": 6183,
+    "mean": 2803.733867999998,
+    "samples": 500000
+  }
+}
