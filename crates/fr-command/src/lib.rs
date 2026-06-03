@@ -64,6 +64,14 @@ fn replicaof_command_name(argv: &[Vec<u8>]) -> &'static str {
     }
 }
 
+const HGET_COMMAND_NAME: &str = "hget";
+const HGET_COMMAND_FLAGS: &str = "readonly fast";
+const HGET_ARITY: usize = 3;
+
+fn is_hget_command(name: &[u8]) -> bool {
+    name.eq_ignore_ascii_case(b"HGET")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrateRequest {
     pub host: String,
@@ -166,6 +174,13 @@ pub fn command_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
     let Some(raw_cmd) = argv.first() else {
         return Vec::new();
     };
+    if is_hget_command(raw_cmd) {
+        return if argv.len() == HGET_ARITY {
+            vec![1]
+        } else {
+            Vec::new()
+        };
+    }
     let cmd_name = match std::str::from_utf8(raw_cmd) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -15400,6 +15415,13 @@ const SUBCOMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
 /// Check if the argument count (including command name) satisfies the command's arity.
 /// Returns Ok(()) if valid, Err(command_name) if arity mismatch.
 pub fn check_command_arity(name: &[u8], argc: usize) -> Result<(), &'static str> {
+    if is_hget_command(name) {
+        return if argc == HGET_ARITY {
+            Ok(())
+        } else {
+            Err(HGET_COMMAND_NAME)
+        };
+    }
     let name_str = match std::str::from_utf8(name) {
         Ok(s) => s,
         Err(_) => return Err(""),
@@ -15428,6 +15450,9 @@ pub fn check_command_arity(name: &[u8], argc: usize) -> Result<(), &'static str>
 /// Return the flags string for a given command name.
 #[must_use]
 pub fn get_command_flags(name: &[u8]) -> Option<&'static str> {
+    if is_hget_command(name) {
+        return Some(HGET_COMMAND_FLAGS);
+    }
     let name_str = std::str::from_utf8(name).ok()?;
     COMMAND_TABLE
         .iter()
@@ -25093,13 +25118,14 @@ mod tests {
         CLIENT_TRACKING_OPT_SWITCH_REQUIRES_DISABLE, CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT,
         CLIENT_TRACKING_PREFIX_REQUIRES_BCAST, CLIENT_TRACKING_REDIRECT_MISSING,
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
-        SCRIPT_NOSCRIPT_ERROR, SUBCOMMAND_TABLE, acl_command_selectors_for_argv, classify_command,
-        client_wrong_subcommand_arity, cluster_disabled_error, cluster_reset_with_keys_error,
-        cluster_wrong_subcommand_arity, command_acl_categories, command_acl_key_access,
-        command_has_acl_subcommands, command_key_indexes, commands_in_acl_category, dispatch_argv,
-        drain_pubsub_messages, eq_ascii_command, eval_script, execute_migrate, format_coord_human,
-        format_eval_read_only_script_error, frame_to_argv, geo_coord_frame, hello_bulk,
-        hello_simple, is_known_acl_command_selector, is_write_command,
+        SCRIPT_NOSCRIPT_ERROR, SUBCOMMAND_TABLE, acl_command_selectors_for_argv,
+        check_command_arity, classify_command, client_wrong_subcommand_arity,
+        cluster_disabled_error, cluster_reset_with_keys_error, cluster_wrong_subcommand_arity,
+        command_acl_categories, command_acl_key_access, command_has_acl_subcommands,
+        command_key_indexes, commands_in_acl_category, dispatch_argv, drain_pubsub_messages,
+        eq_ascii_command, eval_script, execute_migrate, format_coord_human,
+        format_eval_read_only_script_error, frame_to_argv, geo_coord_frame, get_command_flags,
+        hello_bulk, hello_simple, is_known_acl_command_selector, is_write_command,
         parse_blocking_deadline_milliseconds, parse_migrate_request, pubsub_message_to_frame,
         pubsub_message_to_frame_for_protocol, stream_full_group_lag_frame,
     };
@@ -56794,6 +56820,31 @@ mod tests {
         let argv = vec![b"HGET".to_vec(), b"hash".to_vec()];
 
         assert!(command_acl_key_access(&argv).is_empty());
+    }
+
+    #[test]
+    fn hget_command_metadata_fast_paths_preserve_behavior() {
+        let upper = vec![b"HGET".to_vec(), b"hash".to_vec(), b"field".to_vec()];
+        let lower = vec![b"hget".to_vec(), b"hash".to_vec(), b"field".to_vec()];
+
+        assert_eq!(check_command_arity(b"HGET", upper.len()), Ok(()));
+        assert_eq!(check_command_arity(b"hget", lower.len()), Ok(()));
+        assert_eq!(get_command_flags(b"HGET"), Some("readonly fast"));
+        assert_eq!(get_command_flags(b"hget"), Some("readonly fast"));
+        assert_eq!(command_key_indexes(&upper), vec![1]);
+        assert_eq!(command_key_indexes(&lower), vec![1]);
+
+        let missing_field = vec![b"HGET".to_vec(), b"hash".to_vec()];
+        let extra_arg = vec![
+            b"hget".to_vec(),
+            b"hash".to_vec(),
+            b"field".to_vec(),
+            b"extra".to_vec(),
+        ];
+        for argv in [&missing_field, &extra_arg] {
+            assert_eq!(check_command_arity(&argv[0], argv.len()), Err("hget"));
+            assert!(command_key_indexes(argv).is_empty());
+        }
     }
 
     #[test]
