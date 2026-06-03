@@ -11532,6 +11532,53 @@ impl Store {
         Ok(Some(value))
     }
 
+    /// Word-at-a-time (8 bytes/iteration) in-place element-wise bitwise combine
+    /// of the overlapping prefix `dst[..n]` / `src[..n]` (n = min length), via a
+    /// single u64 op per chunk plus a byte-wise remainder tail. Byte-identical to
+    /// the scalar `dst[i] = byte_op(dst[i], src[i])` loop because each byte lane
+    /// is independent, so the endianness of the `from_ne_bytes`/`to_ne_bytes`
+    /// view never changes which source byte maps to which destination byte.
+    /// (frankenredis-0ppgh)
+    #[inline]
+    fn swar_zip_inplace(
+        dst: &mut [u8],
+        src: &[u8],
+        word_op: impl Fn(u64, u64) -> u64,
+        byte_op: impl Fn(u8, u8) -> u8,
+    ) {
+        let n = dst.len().min(src.len());
+        let mut dchunks = dst[..n].chunks_exact_mut(8);
+        let mut schunks = src[..n].chunks_exact(8);
+        for (dc, sc) in dchunks.by_ref().zip(schunks.by_ref()) {
+            let a = u64::from_ne_bytes(dc.try_into().unwrap());
+            let b = u64::from_ne_bytes(sc.try_into().unwrap());
+            dc.copy_from_slice(&word_op(a, b).to_ne_bytes());
+        }
+        let drem = dchunks.into_remainder();
+        let srem = schunks.remainder();
+        for (db, &sb) in drem.iter_mut().zip(srem.iter()) {
+            *db = byte_op(*db, sb);
+        }
+    }
+
+    /// Word-at-a-time bitwise NOT of `src` into `dst` (equal lengths for BITOP
+    /// NOT). Byte-identical to a scalar `dst[i] = !src[i]` loop. (frankenredis-0ppgh)
+    #[inline]
+    fn swar_not_into(dst: &mut [u8], src: &[u8]) {
+        let n = dst.len().min(src.len());
+        let mut dchunks = dst[..n].chunks_exact_mut(8);
+        let mut schunks = src[..n].chunks_exact(8);
+        for (dc, sc) in dchunks.by_ref().zip(schunks.by_ref()) {
+            let b = u64::from_ne_bytes(sc.try_into().unwrap());
+            dc.copy_from_slice(&(!b).to_ne_bytes());
+        }
+        let drem = dchunks.into_remainder();
+        let srem = schunks.remainder();
+        for (db, &sb) in drem.iter_mut().zip(srem.iter()) {
+            *db = !sb;
+        }
+    }
+
     /// BITOP: perform bitwise operation between strings.
     pub fn bitop(
         &mut self,
@@ -11585,15 +11632,13 @@ impl Store {
             if values.len() != 1 {
                 return Err(StoreError::WrongType);
             }
-            for (i, byte) in result.iter_mut().enumerate() {
-                *byte = !values[0].get(i).copied().unwrap_or(0);
-            }
+            // `result` is `max_len == values[0].len()` zeros; NOT every byte.
+            Self::swar_not_into(&mut result, &values[0]);
         } else {
-            // Initialize with first value
+            // Initialize with the first value (shorter operands zero-extend, and
+            // `result` is already zeroed beyond `first.len()`).
             if let Some(first) = values.first() {
-                for (i, byte) in result.iter_mut().enumerate() {
-                    *byte = first.get(i).copied().unwrap_or(0);
-                }
+                result[..first.len()].copy_from_slice(first);
             }
 
             let is_and = eq_ascii_ci(op, b"AND");
@@ -11602,17 +11647,16 @@ impl Store {
 
             for val in values.iter().skip(1) {
                 if is_and {
-                    for (i, byte) in result.iter_mut().enumerate() {
-                        *byte &= val.get(i).copied().unwrap_or(0);
+                    Self::swar_zip_inplace(&mut result, val, |a, b| a & b, |a, b| a & b);
+                    // Bytes beyond a shorter operand are AND-ed with implicit 0.
+                    if val.len() < result.len() {
+                        result[val.len()..].fill(0);
                     }
                 } else if is_or {
-                    for (i, byte) in result.iter_mut().enumerate() {
-                        *byte |= val.get(i).copied().unwrap_or(0);
-                    }
+                    // OR/XOR with implicit-0 tail leave `result` unchanged there.
+                    Self::swar_zip_inplace(&mut result, val, |a, b| a | b, |a, b| a | b);
                 } else if is_xor {
-                    for (i, byte) in result.iter_mut().enumerate() {
-                        *byte ^= val.get(i).copied().unwrap_or(0);
-                    }
+                    Self::swar_zip_inplace(&mut result, val, |a, b| a ^ b, |a, b| a ^ b);
                 }
             }
         }
@@ -20981,6 +21025,117 @@ mod tests {
             other => return Err(format!("RPOP COUNT LFU mismatch: {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn swar_bitop_matches_scalar_and_reports_ab_ratio() {
+        // Golden equivalence (frankenredis-0ppgh): SWAR BITOP must be
+        // byte-identical to the scalar reference for AND/OR/XOR (multi-operand,
+        // ragged lengths exercising zero-extension + all remainder sizes) and
+        // NOT. This is the durable regression guard.
+        fn scalar(op: &str, vals: &[Vec<u8>]) -> Vec<u8> {
+            let max_len = vals.iter().map(|v| v.len()).max().unwrap_or(0);
+            let mut r = vec![0u8; max_len];
+            if op == "NOT" {
+                for (i, b) in r.iter_mut().enumerate() {
+                    *b = !vals[0].get(i).copied().unwrap_or(0);
+                }
+                return r;
+            }
+            if let Some(first) = vals.first() {
+                for (i, b) in r.iter_mut().enumerate() {
+                    *b = first.get(i).copied().unwrap_or(0);
+                }
+            }
+            for val in vals.iter().skip(1) {
+                for (i, b) in r.iter_mut().enumerate() {
+                    let o = val.get(i).copied().unwrap_or(0);
+                    match op {
+                        "AND" => *b &= o,
+                        "OR" => *b |= o,
+                        "XOR" => *b ^= o,
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            r
+        }
+        fn swar(op: &str, vals: &[Vec<u8>]) -> Vec<u8> {
+            let max_len = vals.iter().map(|v| v.len()).max().unwrap_or(0);
+            let mut r = vec![0u8; max_len];
+            if op == "NOT" {
+                Store::swar_not_into(&mut r, &vals[0]);
+                return r;
+            }
+            if let Some(first) = vals.first() {
+                r[..first.len()].copy_from_slice(first);
+            }
+            for val in vals.iter().skip(1) {
+                match op {
+                    "AND" => {
+                        Store::swar_zip_inplace(&mut r, val, |a, b| a & b, |a, b| a & b);
+                        if val.len() < r.len() {
+                            r[val.len()..].fill(0);
+                        }
+                    }
+                    "OR" => Store::swar_zip_inplace(&mut r, val, |a, b| a | b, |a, b| a | b),
+                    "XOR" => Store::swar_zip_inplace(&mut r, val, |a, b| a ^ b, |a, b| a ^ b),
+                    _ => unreachable!(),
+                }
+            }
+            r
+        }
+        let mut state: u64 = 0xD1B5_4A32_D192_ED03;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..300 {
+            // 1..=4 operands of ragged lengths 0..80 (covers all 8-byte remainders)
+            let nvals = 1 + (next() % 4) as usize;
+            let vals: Vec<Vec<u8>> = (0..nvals)
+                .map(|_| {
+                    let len = (next() % 80) as usize;
+                    (0..len).map(|_| (next() & 0xFF) as u8).collect()
+                })
+                .collect();
+            for op in ["AND", "OR", "XOR"] {
+                assert_eq!(scalar(op, &vals), swar(op, &vals), "op={op} vals={vals:?}");
+            }
+            assert_eq!(
+                scalar("NOT", &vals[..1]),
+                swar("NOT", &vals[..1]),
+                "op=NOT"
+            );
+        }
+
+        // A/B timing: XOR of two 16 MiB operands ×5 (run with `--release -- --nocapture`).
+        let n = 16 * 1024 * 1024;
+        let mk = |seed: u8| -> Vec<u8> {
+            (0..n).map(|i| (i as u8).wrapping_mul(seed).wrapping_add(seed)).collect()
+        };
+        let a = mk(31);
+        let b = mk(131);
+        let vals = vec![a, b];
+        let expected = scalar("XOR", &vals);
+        let reps = 5;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(scalar("XOR", std::hint::black_box(&vals)));
+        }
+        let scalar_ns = t0.elapsed().as_nanos().max(1);
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(swar("XOR", std::hint::black_box(&vals)));
+        }
+        let swar_ns = t1.elapsed().as_nanos().max(1);
+        assert_eq!(swar("XOR", &vals), expected);
+        let ratio = scalar_ns as f64 / swar_ns as f64;
+        println!(
+            "BITOP XOR A/B over {n} bytes x{reps}: scalar={scalar_ns}ns swar={swar_ns}ns ratio={ratio:.2}x"
+        );
     }
 
     #[test]
