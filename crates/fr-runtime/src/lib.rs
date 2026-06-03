@@ -5630,6 +5630,13 @@ impl Runtime {
                             // master's exactly instead of drifting upward by the
                             // command's propagation/processing delay.
                             self.capture_aof_record(&rewritten);
+                        } else if let Some(rewritten) =
+                            Self::rewrite_nondeterministic_for_propagation(&argv, &reply)
+                        {
+                            // (frankenredis-1uiql) INCRBYFLOAT/HINCRBYFLOAT
+                            // propagate as SET/HSET of the computed value so a
+                            // replica or AOF replay reproduces the exact float.
+                            self.capture_aof_record(&rewritten);
                         } else {
                             self.capture_aof_record(&argv);
                         }
@@ -6622,6 +6629,40 @@ impl Runtime {
     /// propagation after the conditional already succeeded). A past deadline is
     /// preserved as-is, which deletes the key on the replica just as it did on
     /// the master. Returns `None` for any non-expire command (propagate verbatim).
+    /// Rewrite a non-deterministic write command into a deterministic
+    /// equivalent for AOF/replication propagation, mirroring upstream so a
+    /// replica or AOF replay reproduces the exact value regardless of float
+    /// formatting/precision differences. (frankenredis-1uiql)
+    ///
+    /// - `INCRBYFLOAT key incr`  -> `SET key <result>`     (t_string.c)
+    /// - `HINCRBYFLOAT key f incr` -> `HSET key f <result>` (t_hash.c)
+    ///
+    /// `<result>` is taken from the command's own reply (both handlers reply
+    /// with the new value as a bulk string — the canonical stored form).
+    /// Returns `None` to propagate the command verbatim.
+    fn rewrite_nondeterministic_for_propagation(
+        argv: &[Vec<u8>],
+        reply: &RespFrame,
+    ) -> Option<Vec<Vec<u8>>> {
+        let cmd = argv.first()?;
+        let value = match reply {
+            RespFrame::BulkString(Some(v)) => v.clone(),
+            _ => return None,
+        };
+        if eq_ascii_token(cmd, b"INCRBYFLOAT") && argv.len() == 3 {
+            Some(vec![b"SET".to_vec(), argv[1].clone(), value])
+        } else if eq_ascii_token(cmd, b"HINCRBYFLOAT") && argv.len() == 4 {
+            Some(vec![
+                b"HSET".to_vec(),
+                argv[1].clone(),
+                argv[2].clone(),
+                value,
+            ])
+        } else {
+            None
+        }
+    }
+
     fn rewrite_relative_expire_for_propagation(
         argv: &[Vec<u8>],
         now_ms: u64,
@@ -17886,6 +17927,55 @@ mod tests {
             Some(vec![b"DEL".to_vec(), b"k".to_vec()])
         );
         assert_eq!(rw(&[b"GETEX", b"k"]), None);
+    }
+
+    #[test]
+    fn incrbyfloat_family_rewritten_to_deterministic_set_for_propagation() {
+        // (frankenredis-1uiql) INCRBYFLOAT/HINCRBYFLOAT must propagate as a
+        // SET/HSET of the computed value (from the reply), matching upstream so
+        // a replica or AOF replay reproduces the exact float.
+        let rw = |argv: &[&[u8]], reply: RespFrame| {
+            Runtime::rewrite_nondeterministic_for_propagation(
+                &argv.iter().map(|a| a.to_vec()).collect::<Vec<_>>(),
+                &reply,
+            )
+        };
+        let bulk = |s: &[u8]| RespFrame::BulkString(Some(s.to_vec()));
+
+        // INCRBYFLOAT key incr -> SET key <result>
+        assert_eq!(
+            rw(&[b"INCRBYFLOAT", b"kf", b"2.5"], bulk(b"12.5")),
+            Some(vec![b"SET".to_vec(), b"kf".to_vec(), b"12.5".to_vec()])
+        );
+        // Case-insensitive command token.
+        assert_eq!(
+            rw(&[b"incrbyfloat", b"kf", b"2.5"], bulk(b"12.5")),
+            Some(vec![b"SET".to_vec(), b"kf".to_vec(), b"12.5".to_vec()])
+        );
+        // HINCRBYFLOAT key field incr -> HSET key field <result>
+        assert_eq!(
+            rw(&[b"HINCRBYFLOAT", b"h", b"fld", b"3.5"], bulk(b"13.5")),
+            Some(vec![
+                b"HSET".to_vec(),
+                b"h".to_vec(),
+                b"fld".to_vec(),
+                b"13.5".to_vec()
+            ])
+        );
+
+        // Non-targeted commands and non-bulk replies propagate verbatim (None).
+        assert_eq!(rw(&[b"INCR", b"k"], bulk(b"5")), None);
+        assert_eq!(rw(&[b"SET", b"k", b"v"], bulk(b"OK")), None);
+        assert_eq!(
+            rw(&[b"INCRBYFLOAT", b"kf", b"2.5"], RespFrame::Integer(12)),
+            None
+        );
+        // Wrong arity → verbatim.
+        assert_eq!(rw(&[b"INCRBYFLOAT", b"kf"], bulk(b"12.5")), None);
+        assert_eq!(
+            rw(&[b"HINCRBYFLOAT", b"h", b"fld"], bulk(b"13.5")),
+            None
+        );
     }
 
     #[test]
