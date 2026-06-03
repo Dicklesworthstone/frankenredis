@@ -8558,6 +8558,12 @@ impl Store {
         }
         let is_empty = zs.is_empty();
         if !result.is_empty() {
+            // (frankenredis-zpopcountdirty) Each popped member is a keyspace
+            // mutation: bump dirty by the pop count, mirroring the no-count
+            // zpopmin/zpopmax above and upstream t_zset.c::genericZpopCommand
+            // (server.dirty += result). Without this the count form is invisible
+            // to RDB/AOF persistence, replication, AND keyspace notifications.
+            self.dirty = self.dirty.saturating_add(result.len() as u64);
             if is_empty {
                 self.internal_entries_remove(key);
                 self.stream_groups.remove(key);
@@ -8604,6 +8610,10 @@ impl Store {
         }
         let is_empty = zs.is_empty();
         if !result.is_empty() {
+            // (frankenredis-zpopcountdirty) See zpopmin_count: bump dirty by the
+            // pop count so the count form is visible to persistence/replication/
+            // notifications, matching upstream genericZpopCommand.
+            self.dirty = self.dirty.saturating_add(result.len() as u64);
             if is_empty {
                 self.internal_entries_remove(key);
                 self.stream_groups.remove(key);
@@ -20827,6 +20837,50 @@ mod tests {
         store.zstore_from_pairs(b"d".to_vec(), vec![(b"a".to_vec(), 1.0)], 0);
         assert_eq!(store.dirty, before + 1);
         assert!(store.key_is_present(b"d"));
+    }
+
+    #[test]
+    fn zpopmin_zpopmax_count_bump_dirty_per_popped_member() {
+        // (frankenredis-pjhzg) The count forms must bump dirty by the number of
+        // members popped — matching the no-count zpopmin/zpopmax and upstream
+        // genericZpopCommand — otherwise the pop is invisible to RDB/AOF
+        // persistence, replication, and keyspace notifications.
+        let mk = |store: &mut Store| {
+            store
+                .zadd(
+                    b"z",
+                    &[
+                        (1.0, b"a".to_vec()),
+                        (2.0, b"b".to_vec()),
+                        (3.0, b"c".to_vec()),
+                    ],
+                    0,
+                )
+                .expect("zadd");
+        };
+
+        // Partial pop (count < cardinality): dirty += count, key survives.
+        let mut store = Store::new();
+        mk(&mut store);
+        let before = store.dirty;
+        assert_eq!(store.zpopmin_count(b"z", 2, 0).expect("zpopmin").len(), 2);
+        assert_eq!(store.dirty, before + 2);
+        assert!(store.key_is_present(b"z"));
+
+        // Pop that empties the set: dirty += popped, key removed.
+        let mut store = Store::new();
+        mk(&mut store);
+        let before = store.dirty;
+        assert_eq!(store.zpopmax_count(b"z", 5, 0).expect("zpopmax").len(), 3);
+        assert_eq!(store.dirty, before + 3);
+        assert!(!store.key_is_present(b"z"));
+
+        // No members popped (missing key): dirty unchanged.
+        let mut store = Store::new();
+        let before = store.dirty;
+        let popped = store.zpopmin_count(b"missing", 5, 0).expect("zpopmin");
+        assert!(popped.is_empty());
+        assert_eq!(store.dirty, before);
     }
 
     #[test]
