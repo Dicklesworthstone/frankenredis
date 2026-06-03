@@ -6654,6 +6654,15 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     };
 
     store.xadd(&argv[1], id, &fields, now_ms)?;
+    // (frankenredis-xaddtrimdirty) Upstream t_stream.c::xaddCommand bumps
+    // server.dirty exactly once (for the add). Its inline MAXLEN/MINID trim
+    // fires a separate "xtrim" keyspace event but does NOT add to server.dirty —
+    // only standalone XTRIM does. fr's store.xtrim bumps dirty per removed entry,
+    // so capture the post-add value and restore it after the inline trim to
+    // avoid overcounting rdb_changes_since_last_save (the trim's removals still
+    // happen; only the dirty contribution is dropped). The secondary "xtrim"
+    // keyspace notification on inline trim is tracked separately.
+    let dirty_after_add = store.dirty;
 
     // Apply inline trimming after the add. Approximate trimming
     // (~) without LIMIT is best-effort: upstream lazily skips trimming
@@ -6703,6 +6712,9 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         // node-boundary modeling for follow-up.)
         let _ = store.xtrim_minid(&argv[1], min_id, trim_limit_usize, now_ms);
     }
+    // (frankenredis-xaddtrimdirty) Drop any dirty units the inline trim added;
+    // the XADD itself already accounted for exactly one.
+    store.dirty = dirty_after_add;
 
     Ok(RespFrame::BulkString(Some(format_stream_id(id))))
 }
@@ -49042,6 +49054,68 @@ mod tests {
         .expect("move noop");
         assert_eq!(out, RespFrame::Integer(0));
         assert_eq!(store.dirty, before);
+    }
+
+    #[test]
+    fn xadd_with_inline_trim_bumps_dirty_exactly_once() {
+        // (frankenredis-xaddtrimdirty) Upstream t_stream.c::xaddCommand does
+        // `server.dirty++` once for the add; its inline MAXLEN/MINID trim does
+        // NOT add to server.dirty (only standalone XTRIM does). fr's store.xtrim
+        // bumps dirty per removed entry, so XADD-with-trim must be normalized to
+        // exactly +1 regardless of how many entries the trim removes.
+        let mut store = Store::new();
+        for _ in 0..3 {
+            dispatch_argv(
+                &[b"XADD".to_vec(), b"s".to_vec(), b"*".to_vec(), b"f".to_vec(), b"v".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("xadd seed");
+        }
+        // XADD with MAXLEN 1 trims two entries; dirty must rise by exactly 1.
+        let before = store.dirty;
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"1".to_vec(),
+                b"*".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd maxlen");
+        assert_eq!(store.dirty, before + 1, "XADD MAXLEN trim must net +1 dirty");
+        assert_eq!(store.xlen(b"s", 0).expect("xlen"), 1);
+
+        // MINID variant: seed back up, trim by id, still exactly +1.
+        for id in ["10-1", "11-1", "12-1"] {
+            dispatch_argv(
+                &[b"XADD".to_vec(), b"s".to_vec(), id.as_bytes().to_vec(), b"f".to_vec(), b"v".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("xadd seed minid");
+        }
+        let before = store.dirty;
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"MINID".to_vec(),
+                b"12".to_vec(),
+                b"13-1".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd minid");
+        assert_eq!(store.dirty, before + 1, "XADD MINID trim must net +1 dirty");
     }
 
     #[test]
