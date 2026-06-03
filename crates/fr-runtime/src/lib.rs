@@ -13732,6 +13732,21 @@ replica_announced:1\r\n",
         let mut transaction_aof = Vec::new();
         self.session.transaction_state.executing_exec = true;
 
+        // (frankenredis-wzs7l) A queued command can lazily expire a key; its
+        // DEL/UNLINK must be propagated INSIDE the transaction, before the
+        // command's own record, so a later queued command that recreates the key
+        // isn't undone by a stale DEL on the replica. (Only reachable with the
+        // active-expire cycle disabled — line below runs it before each command.)
+        let expiry_op: &[u8] = if self.server.lazyfree_lazy_expire_enabled() {
+            b"UNLINK"
+        } else {
+            b"DEL"
+        };
+        let exec_is_master = matches!(
+            self.server.replication_runtime_state.role,
+            ReplicationRoleState::Master
+        );
+
         for argv in &queued {
             if let Some(permission_error) = self.acl_permission_error(argv) {
                 let command_name = String::from_utf8_lossy(&argv[0]).into_owned();
@@ -13796,9 +13811,25 @@ replica_announced:1\r\n",
             self.server
                 .record_command_histogram_outcome(argv, elapsed_us, failed);
 
+            // (frankenredis-wzs7l) Emit any lazy-expiry deletions this queued
+            // command triggered, inside the transaction and before the command's
+            // own record. Each lazy eviction bumped `dirty`, so the command is
+            // treated as a write only if it dirtied BEYOND those evictions.
+            let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+            let lazy_count = lazy_evicted.len() as u64;
+            if exec_is_master {
+                for ekey in &lazy_evicted {
+                    let logical = fr_store::decode_db_key(ekey)
+                        .map(|(_, l)| l.to_vec())
+                        .unwrap_or_else(|| ekey.clone());
+                    transaction_dirty = true;
+                    transaction_aof.push(vec![expiry_op.to_vec(), logical]);
+                }
+            }
+
             match result {
                 Ok(mut reply) => {
-                    if dirty_after > dirty_before {
+                    if dirty_after.saturating_sub(dirty_before) > lazy_count {
                         if let Some(script_commands) =
                             self.take_script_propagation_commands_for_capture(argv)
                         {
@@ -17968,6 +17999,50 @@ mod tests {
         assert!(
             matches!((del_pos, set_pos), (Some(d), Some(s)) if d < s),
             "SET on expired key must propagate DEL k2 before SET k2, got {argvs:?}"
+        );
+    }
+
+    #[test]
+    fn lazy_expiry_inside_exec_propagates_del_before_recreate() {
+        // (frankenredis-wzs7l) A queued command in MULTI/EXEC that lazily expires
+        // a key must propagate the DEL INSIDE the transaction, before a later
+        // queued command recreates the key.
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(42);
+        rt.server.store.active_expire_enabled = false;
+
+        rt.execute_frame(command(&[b"SET", b"k", b"old", b"PX", b"100"]), 900); // expires t=1000
+        let before = rt.aof_records().len();
+
+        // Transaction at t=5000: GET k (lazy-expires) then SET k new (recreates).
+        rt.execute_frame(command(&[b"MULTI"]), 5000);
+        rt.execute_frame(command(&[b"GET", b"k"]), 5000);
+        rt.execute_frame(command(&[b"SET", b"k", b"new"]), 5000);
+        rt.execute_frame(command(&[b"EXEC"]), 5000);
+
+        let argvs: Vec<Vec<Vec<u8>>> = rt.aof_records()[before..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        let pos = |name: &[u8], key: Option<&[u8]>| {
+            argvs.iter().position(|a| {
+                a.first().is_some_and(|c| c.eq_ignore_ascii_case(name))
+                    && key.is_none_or(|k| a.get(1).is_some_and(|kk| kk.as_slice() == k))
+            })
+        };
+        let multi = pos(b"MULTI", None);
+        let del = pos(b"DEL", Some(b"k"));
+        let set = pos(b"SET", Some(b"k"));
+        let exec = pos(b"EXEC", None);
+        // Order: MULTI < DEL k < SET k new < EXEC.
+        assert!(
+            matches!((multi, del, set, exec), (Some(m), Some(d), Some(s), Some(e)) if m < d && d < s && s < e),
+            "expected [MULTI, DEL k, SET k, EXEC] in order, got {argvs:?}"
+        );
+        // The lazy-expiring GET must not be propagated.
+        assert!(
+            pos(b"GET", None).is_none(),
+            "the GET that lazy-expired must NOT propagate, got {argvs:?}"
         );
     }
 
