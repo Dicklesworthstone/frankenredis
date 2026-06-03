@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = []
+default = ["upstream-stream-rdb"]
+# (frankenredis-wt4eo) Redis-compatible RDB stream encoding (type 21,
+# STREAM_LISTPACKS_3) for SAVE, so fr's RDB files are loadable by upstream Redis.
+# fr can decode both type 15 (legacy fr-private) and type 21.
 upstream-stream-rdb = []
 
 [dependencies]

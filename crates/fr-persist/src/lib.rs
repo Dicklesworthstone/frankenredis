@@ -3545,7 +3545,7 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _aux) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(decoded, entries);
+        assert_eq!(strip_stream_metadata(decoded), entries);
     }
 
     #[test]
@@ -3558,7 +3558,7 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(decoded, entries);
+        assert_eq!(strip_stream_metadata(decoded), entries);
     }
 
     #[test]
@@ -3571,7 +3571,7 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(decoded, entries);
+        assert_eq!(strip_stream_metadata(decoded), entries);
     }
 
     #[test]
@@ -3584,7 +3584,7 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(decoded, entries);
+        assert_eq!(strip_stream_metadata(decoded), entries);
     }
 
     #[test]
@@ -3600,7 +3600,7 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(decoded, entries);
+        assert_eq!(strip_stream_metadata(decoded), entries);
     }
 
     #[test]
@@ -3613,7 +3613,7 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(decoded, entries);
+        assert_eq!(strip_stream_metadata(decoded), entries);
     }
 
     #[test]
@@ -3627,7 +3627,7 @@ mod tests {
         let aux = [("redis-ver", "7.0.0"), ("ctime", "1700000000")];
         let encoded = encode_rdb(&entries, &aux);
         let (decoded, aux_map) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(decoded, entries);
+        assert_eq!(strip_stream_metadata(decoded), entries);
         assert_eq!(aux_map.get("redis-ver").map(String::as_str), Some("7.0.0"));
         assert_eq!(aux_map.get("ctime").map(String::as_str), Some("1700000000"));
     }
@@ -3845,7 +3845,7 @@ mod tests {
         ];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(decoded, entries);
+        assert_eq!(strip_stream_metadata(decoded), entries);
     }
 
     #[test]
@@ -3992,7 +3992,7 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode lzf-encoded string");
-        assert_eq!(decoded, entries);
+        assert_eq!(strip_stream_metadata(decoded), entries);
 
         // After REDIS0011 + RESIZEDB headers + RDB_TYPE_STRING + key,
         // we expect the value to start with 0xC3 (LZF special encoding).
@@ -4025,7 +4025,7 @@ mod tests {
             &encoded[..body_end.min(48)]
         );
         let (decoded, _) = decode_rdb(&encoded).expect("decode short string");
-        assert_eq!(decoded, entries);
+        assert_eq!(strip_stream_metadata(decoded), entries);
     }
 
     #[test]
@@ -5283,6 +5283,52 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// (frankenredis-wt4eo) A decoded type-21 (Redis-compatible) stream
+    /// carries the original STREAM_LISTPACKS_3 payload as transient
+    /// `RdbStreamMetadata` for byte-identical re-encode; the live store never
+    /// reads it (it rebuilds from the stream DATA). Round-trip tests assert on
+    /// the data, so normalize that transient metadata away.
+    fn strip_stream_metadata(mut entries: Vec<RdbEntry>) -> Vec<RdbEntry> {
+        for entry in &mut entries {
+            if let RdbValue::Stream(_, _, _, metadata, _) = &mut entry.value {
+                *metadata = None;
+            }
+        }
+        entries
+    }
+
+    #[test]
+    fn stream_rdb_save_uses_upstream_compatible_type21() {
+        // (frankenredis-wt4eo) A normal stream must SAVE as the Redis-compatible
+        // STREAM_LISTPACKS_3 (type 21), NOT fr's legacy private type 15, so upstream
+        // Redis can load fr's RDB files. The decoder only stashes
+        // RdbStreamMetadata{upstream_type_byte:21} for an actual type-21 payload, so
+        // its presence proves the upstream-compatible encoding was used.
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"s".to_vec(),
+            value: RdbValue::Stream(
+                vec![(1, 0, vec![(b"f".to_vec(), b"v".to_vec())])],
+                Some((1, 0)),
+                Vec::new(),
+                None,
+                Some(1),
+            ),
+            expire_ms: None,
+        }];
+        let encoded = encode_rdb(&entries, &[]);
+        let (decoded, _) = decode_rdb(&encoded).expect("decode");
+        match &decoded[0].value {
+            RdbValue::Stream(_, _, _, Some(md), _) => {
+                assert_eq!(
+                    md.upstream_type_byte, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3,
+                    "stream must SAVE as type 21 (STREAM_LISTPACKS_3)"
+                );
+            }
+            other => panic!("expected type-21 stream metadata on decode, got {other:?}"),
+        }
+    }
+
     #[test]
     fn rdb_round_trip_stream() {
         let entries = vec![RdbEntry {
@@ -5309,7 +5355,7 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(decoded, entries);
+        assert_eq!(strip_stream_metadata(decoded), entries);
     }
 
     #[test]
@@ -5322,7 +5368,7 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(decoded, entries);
+        assert_eq!(strip_stream_metadata(decoded), entries);
     }
 
     #[test]
@@ -5341,7 +5387,7 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(decoded, entries);
+        assert_eq!(strip_stream_metadata(decoded), entries);
     }
 
     #[test]
@@ -5385,7 +5431,7 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(decoded, entries);
+        assert_eq!(strip_stream_metadata(decoded), entries);
     }
 
     #[cfg(feature = "upstream-stream-rdb")]
@@ -5605,7 +5651,7 @@ mod tests {
         assert_ne!(encoded[14], UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3);
 
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(decoded, entries);
+        assert_eq!(strip_stream_metadata(decoded), entries);
     }
 
     #[test]
@@ -5743,7 +5789,7 @@ mod tests {
         ];
         let encoded = encode_rdb(&entries, &[("redis-ver", "7.2.0")]);
         let (decoded, aux) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(decoded, entries);
+        assert_eq!(strip_stream_metadata(decoded), entries);
         assert_eq!(aux.get("redis-ver").map(String::as_str), Some("7.2.0"));
     }
 
@@ -6230,6 +6276,9 @@ mod tests {
                                 .then_with(|| left.0.cmp(&right.0))
                         });
                     }
+                    // (frankenredis-wt4eo) Drop the transient lossless
+                    // re-encode payload a decoded type-21 stream carries.
+                    RdbValue::Stream(_, _, _, metadata, _) => *metadata = None,
                     _ => {}
                 }
             }
