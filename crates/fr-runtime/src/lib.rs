@@ -5696,7 +5696,23 @@ impl Runtime {
                             let is_getex = argv
                                 .first()
                                 .is_some_and(|c| c.eq_ignore_ascii_case(b"GETEX"));
-                            if is_smove || is_expire_family || is_getex {
+                            // (frankenredis-hqj0t) XREADGROUP / XCLAIM /
+                            // XAUTOCLAIM fire NO per-command keyspace event
+                            // upstream; their only notification is the
+                            // xgroup-createconsumer the Store now queues when a
+                            // consumer is implicitly created. The generic
+                            // fallback ("generic") this dispatcher would emit is
+                            // spurious, so suppress it for them.
+                            let is_stream_consumer_cmd = argv.first().is_some_and(|c| {
+                                c.eq_ignore_ascii_case(b"XREADGROUP")
+                                    || c.eq_ignore_ascii_case(b"XCLAIM")
+                                    || c.eq_ignore_ascii_case(b"XAUTOCLAIM")
+                            });
+                            if is_smove
+                                || is_expire_family
+                                || is_getex
+                                || is_stream_consumer_cmd
+                            {
                                 // Events already queued by the Store method.
                             } else if is_list_move && cmd_keys.len() >= 2 {
                                 let (pop_ev, push_ev) = Self::list_move_events(&argv);

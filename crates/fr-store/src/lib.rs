@@ -9846,7 +9846,23 @@ impl Store {
         // Note: when reading pending entries (cursor is Id), Redis does NOT
         // increment delivery count - it's a non-destructive replay.
 
+        if consumer_created {
+            // (frankenredis-hqj0t) Implicit consumer creation fires the
+            // xgroup-createconsumer keyspace event upstream (streamCreateConsumer
+            // with SCC_DEFAULT). Queued here, after the group borrow ends.
+            self.notify_stream_createconsumer_event(key);
+        }
         Ok(Some(records))
+    }
+
+    /// Queue the `xgroup-createconsumer` keyspace event for an implicitly
+    /// created consumer. `key` is the (db-encoded) stream key. (frankenredis-hqj0t)
+    fn notify_stream_createconsumer_event(&mut self, key: &[u8]) {
+        if let Some((db, logical)) = decode_db_key(key) {
+            self.notify_keyspace_event(NOTIFY_STREAM, "xgroup-createconsumer", logical, db);
+        } else {
+            self.notify_keyspace_event(NOTIFY_STREAM, "xgroup-createconsumer", key, 0);
+        }
     }
 
     pub fn xpending_summary(
@@ -10080,6 +10096,11 @@ impl Store {
             self.dirty = self.dirty.saturating_add(claimed_ids.len() as u64);
         }
 
+        if consumer_created {
+            // (frankenredis-hqj0t) Implicit consumer creation fires
+            // xgroup-createconsumer upstream, even when zero entries are claimed.
+            self.notify_stream_createconsumer_event(key);
+        }
         if options.justid {
             Ok(Some(StreamClaimReply::Ids(claimed_ids)))
         } else {
@@ -10227,6 +10248,11 @@ impl Store {
             })
             .unwrap_or((0, 0));
 
+        if consumer_created {
+            // (frankenredis-hqj0t) Implicit consumer creation fires
+            // xgroup-createconsumer upstream, even when zero entries are claimed.
+            self.notify_stream_createconsumer_event(key);
+        }
         if options.justid {
             Ok(Some(StreamAutoClaimReply::Ids {
                 next_start,
@@ -24215,6 +24241,83 @@ mod tests {
             .unwrap()
             .expect("group exists");
         assert_eq!(store.dirty, before + 1, "existing consumer + 1 claimed = 1");
+    }
+
+    #[test]
+    fn implicit_consumer_creation_fires_xgroup_createconsumer_event() {
+        // (frankenredis-hqj0t) Upstream streamCreateConsumer(SCC_DEFAULT) fires
+        // the NOTIFY_STREAM "xgroup-createconsumer" keyspace event when a
+        // consumer is implicitly created by XREADGROUP / XCLAIM / XAUTOCLAIM —
+        // and fires nothing for an existing consumer.
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | crate::NOTIFY_STREAM;
+        for i in 0..4u64 {
+            store
+                .xadd(b"s", (1000, i), &[(b"f".to_vec(), b"v".to_vec())], 0)
+                .unwrap();
+        }
+        assert!(store.xgroup_create(b"s", b"g", (0, 0), false, 0).unwrap());
+        let _ = store.drain_keyspace_notifications();
+
+        // New consumer via XREADGROUP → one xgroup-createconsumer event.
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(2)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![(
+                b"__keyevent@0__:xgroup-createconsumer".to_vec(),
+                b"s".to_vec()
+            )]
+        );
+
+        // Re-using c1 fires nothing.
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(1)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert!(store.drain_keyspace_notifications().is_empty());
+
+        // New consumer via XCLAIM → one event even though we claim an entry.
+        store
+            .xclaim(
+                b"s",
+                b"g",
+                b"c2",
+                &[(1000, 0)],
+                StreamClaimOptions {
+                    min_idle_time_ms: 0,
+                    idle_ms: None,
+                    time_ms: None,
+                    retry_count: None,
+                    force: false,
+                    justid: false,
+                    last_id: None,
+                },
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![(
+                b"__keyevent@0__:xgroup-createconsumer".to_vec(),
+                b"s".to_vec()
+            )]
+        );
     }
 
     #[test]
