@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/frankenredis_icywolf_nha7f_baseline_20260603T1845Z/target-icywolf-nha7f-baseline-rch/release-perf/fr-bench --host 127.0.0.1 --port 20610 --clients 50 --requests 2000000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis/artifacts/optimization/icywolf-perf-20260603-pass27-ok-template/baseline_set_p16_2m_last.json --key-prefix icywolf-nha7f-baseline-2m",
+      "mean": 7.346549543099999,
+      "stddev": 0.1910261427761409,
+      "median": 7.3216269883,
+      "user": 1.5746136400000001,
+      "system": 3.0876654799999996,
+      "min": 7.0674667133,
+      "max": 7.5440246943,
+      "times": [
+        7.0674667133,
+        7.2930794533,
+        7.5065498663,
+        7.5440246943,
+        7.3216269883
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/frankenredis_icywolf_nha7f_candidate_20260603T1845Z/target-icywolf-nha7f-candidate-rch/release-perf/fr-bench --host 127.0.0.1 --port 20611 --clients 50 --requests 2000000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis/artifacts/optimization/icywolf-perf-20260603-pass27-ok-template/candidate_set_p16_2m_last.json --key-prefix icywolf-nha7f-candidate-2m",
+      "mean": 7.6447110041,
+      "stddev": 0.1363411558550046,
+      "median": 7.5617227473,
+      "user": 1.54008364,
+      "system": 3.15460388,
+      "min": 7.5305697143,
+      "max": 7.8143794823,
+      "times": [
+        7.5305697143,
+        7.5617227473,
+        7.5460228773,
+        7.7708601993,
+        7.8143794823
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/frankenredis_icywolf_nha7f_baseline_20260603T1845Z/target-icywolf-nha7f-baseline-rch/release-perf/fr-bench --host 127.0.0.1 --port 20610 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis/artifacts/optimization/icywolf-perf-20260603-pass27-ok-template/baseline_set_p16_last.json --key-prefix icywolf-nha7f-baseline",
+      "mean": 1.68048302162,
+      "stddev": 0.03509214725275684,
+      "median": 1.68045282262,
+      "user": 0.3879802,
+      "system": 0.7778189799999999,
+      "min": 1.63395071512,
+      "max": 1.74083115512,
+      "times": [
+        1.64565671612,
+        1.71506117412,
+        1.6971360441199999,
+        1.68137422812,
+        1.63991411512,
+        1.70676370512,
+        1.67953141712,
+        1.74083115512,
+        1.66461094612,
+        1.63395071512
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/frankenredis_icywolf_nha7f_candidate_20260603T1845Z/target-icywolf-nha7f-candidate-rch/release-perf/fr-bench --host 127.0.0.1 --port 20611 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis/artifacts/optimization/icywolf-perf-20260603-pass27-ok-template/candidate_set_p16_last.json --key-prefix icywolf-nha7f-candidate",
+      "mean": 1.64933998962,
+      "stddev": 0.037964972234033854,
+      "median": 1.6480376486200001,
+      "user": 0.38666999999999996,
+      "system": 0.76931478,
+      "min": 1.5998421591199998,
+      "max": 1.69812314312,
+      "times": [
+        1.69812314312,
+        1.6979526781199998,
+        1.5998421591199998,
+        1.61331862712,
+        1.6223948661199998,
+        1.6653019891199998,
+        1.68878520012,
+        1.6319521271200002,
+        1.66412317012,
+        1.61160593612
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
