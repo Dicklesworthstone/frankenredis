@@ -1405,7 +1405,13 @@ fn process_buffered_frames(
             Ok((frame, consumed)) => {
                 processed_frames = processed_frames.saturating_add(1);
                 // Subscription mode gate: reject most commands while subscribed.
+                // (frankenredis-j7nwu) Only RESP2 subscribers are restricted —
+                // upstream server.c::processCommand gates the allow-list on
+                // `c->resp == 2`. RESP3 clients may freely interleave any
+                // command with push frames, so the gate (and its runtime mirror
+                // at lib.rs ~5426) must be skipped for them.
                 if runtime.is_in_subscription_mode()
+                    && runtime.client_session().resp_protocol_version() != 3
                     && let Some(reject) = check_subscription_mode_gate(&frame, true)
                 {
                     reject.encode_into(&mut conn.write_buf);

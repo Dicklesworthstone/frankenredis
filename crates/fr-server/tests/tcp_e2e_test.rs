@@ -1965,6 +1965,63 @@ fn tcp_pubsub_multiple_subscribers() {
 }
 
 #[test]
+fn tcp_resp3_subscriber_may_run_normal_commands() {
+    // (frankenredis-j7nwu) Upstream server.c gates the pubsub allow-list on
+    // `c->resp == 2`. A RESP3 subscriber may freely interleave any command
+    // with push frames; fr previously rejected them at the server-side
+    // subscribe gate regardless of protocol version.
+    let port = reserve_port();
+    let _server = spawn_frankenredis(port, None);
+    let mut c = BufferedTcpClient::connect(port);
+
+    c.write_all(&encode_command(&[b"HELLO", b"3"]));
+    let hello = c.read_resp3_response_bytes();
+    assert!(hello.starts_with(b"%"), "HELLO 3 should return a RESP3 map");
+
+    c.write_all(&encode_command(&[b"SUBSCRIBE", b"ch1"]));
+    let sub = c.read_resp3_response_bytes();
+    assert!(
+        sub.starts_with(b">"),
+        "RESP3 SUBSCRIBE confirmation should be a push frame, got {sub:?}"
+    );
+
+    // A normal write/read must NOT be rejected with the subscribe-context error.
+    c.write_all(&encode_command(&[b"SET", b"k", b"v"]));
+    let set = c.read_resp3_response_bytes();
+    assert_eq!(
+        set, b"+OK\r\n",
+        "RESP3 subscriber SET must succeed, got {set:?}"
+    );
+
+    c.write_all(&encode_command(&[b"GET", b"k"]));
+    let get = c.read_resp3_response_bytes();
+    assert_eq!(get, b"$1\r\nv\r\n", "RESP3 subscriber GET must return value");
+
+    send_shutdown_nosave(port);
+}
+
+#[test]
+fn tcp_resp2_subscriber_remains_restricted() {
+    // Parity guard: RESP2 subscribers keep the upstream restriction.
+    let port = reserve_port();
+    let _server = spawn_frankenredis(port, None);
+    let mut c = connect_client(port);
+
+    let sub = send_command(&mut c, &[b"SUBSCRIBE", b"ch1"]);
+    assert!(!matches!(sub, RespFrame::Error(_)), "SUBSCRIBE: {sub:?}");
+
+    match send_command(&mut c, &[b"SET", b"k", b"v"]) {
+        RespFrame::Error(e) => assert!(
+            e.contains("are allowed in this context"),
+            "unexpected error wording: {e}"
+        ),
+        other => panic!("RESP2 subscriber SET must be rejected, got {other:?}"),
+    }
+
+    send_shutdown_nosave(port);
+}
+
+#[test]
 fn tcp_pubsub_pattern_subscribe() {
     let (subscribe, publish_match, message, publish_miss) =
         exercise_pattern_pubsub_cross_client_delivery(|port| spawn_frankenredis(port, None));
