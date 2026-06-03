@@ -74,88 +74,104 @@ pub fn try_parse_inline(buf: &[u8]) -> Result<InlineParseResult, fr_protocol::Re
 /// Split inline command arguments, supporting quoted strings.
 /// Returns Err if quotes are unbalanced (matching Redis behavior).
 pub fn split_inline_args(line: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
+    // (frankenredis-5qqv1) Faithful port of sds.c::sdssplitargs: a token is
+    // built char-by-char with double/single-quote state that can flip MID
+    // token. fr previously only recognised a quote at a token's START, so
+    // `PING"` was a literal token and `SET a"b c` split into 3 args, where
+    // upstream errors "unbalanced quotes" (any quote that isn't closed and
+    // followed by whitespace/end is an error). The `\x`/escape handling and
+    // the closing-quote-must-be-followed-by-whitespace rule (z1h45) are
+    // preserved. Separators are ' ' / '\t' only — try_parse_inline already
+    // strips the trailing CR/LF.
+    const UNBALANCED: &str = "ERR Protocol error: unbalanced quotes in request";
+    let n = line.len();
+    let is_sep = |b: u8| b == b' ' || b == b'\t';
+
     let mut args = Vec::new();
     let mut i = 0;
-    while i < line.len() {
-        if line[i] == b' ' || line[i] == b'\t' {
+    loop {
+        while i < n && is_sep(line[i]) {
             i += 1;
-            continue;
+        }
+        if i >= n {
+            break;
         }
 
-        if line[i] == b'"' {
-            i += 1;
-            let mut arg = Vec::new();
-            while i < line.len() && line[i] != b'"' {
-                if line[i] == b'\\' && i + 1 < line.len() {
+        let mut arg = Vec::new();
+        let mut inq = false; // inside double quotes
+        let mut insq = false; // inside single quotes
+        let mut done = false;
+        while !done {
+            if i >= n {
+                // Ran off the end. An open quote is unterminated.
+                if inq || insq {
+                    return Err(UNBALANCED);
+                }
+                break;
+            }
+            if inq {
+                if line[i] == b'\\'
+                    && i + 3 < n
+                    && line[i + 1] == b'x'
+                    && let Some(byte) = parse_hex_escape(line[i + 2], line[i + 3])
+                {
+                    arg.push(byte);
+                    i += 4;
+                } else if line[i] == b'\\' && i + 1 < n {
                     i += 1;
-                    if line[i] == b'x'
-                        && i + 2 < line.len()
-                        && let Some(byte) = parse_hex_escape(line[i + 1], line[i + 2])
-                    {
-                        arg.push(byte);
-                        i += 3;
-                        continue;
+                    arg.push(match line[i] {
+                        b'n' => b'\n',
+                        b'r' => b'\r',
+                        b't' => b'\t',
+                        b'b' => b'\x08',
+                        b'a' => b'\x07',
+                        other => other,
+                    });
+                    i += 1;
+                } else if line[i] == b'"' {
+                    // Closing quote must be followed by whitespace or end.
+                    if i + 1 < n && !is_sep(line[i + 1]) {
+                        return Err(UNBALANCED);
                     }
-                    match line[i] {
-                        b'n' => arg.push(b'\n'),
-                        b'r' => arg.push(b'\r'),
-                        b't' => arg.push(b'\t'),
-                        b'b' => arg.push(b'\x08'),
-                        b'a' => arg.push(b'\x07'),
-                        b'"' => arg.push(b'"'),
-                        b'\\' => arg.push(b'\\'),
-                        other => {
-                            arg.push(other);
-                        }
-                    }
+                    i += 1;
+                    done = true;
                 } else {
                     arg.push(line[i]);
-                }
-                i += 1;
-            }
-            if i >= line.len() {
-                return Err("ERR Protocol error: unbalanced quotes in request");
-            }
-            i += 1;
-            // (frankenredis-z1h45) Upstream sdssplitargs requires the
-            // closing quote to be followed by whitespace or end-of-line:
-            //     if (*(p+1) && !isspace(*(p+1))) goto err;
-            // Otherwise inputs like `"foo"bar` would silently split into
-            // ["foo", "bar"] — wire-format conformance + security gap.
-            if i < line.len() && line[i] != b' ' && line[i] != b'\t' {
-                return Err("ERR Protocol error: unbalanced quotes in request");
-            }
-            args.push(arg);
-        } else if line[i] == b'\'' {
-            i += 1;
-            let mut arg = Vec::new();
-            while i < line.len() && line[i] != b'\'' {
-                if line[i] == b'\\' && i + 1 < line.len() && line[i + 1] == b'\'' {
                     i += 1;
+                }
+            } else if insq {
+                if line[i] == b'\\' && i + 1 < n && line[i + 1] == b'\'' {
                     arg.push(b'\'');
+                    i += 2;
+                } else if line[i] == b'\'' {
+                    if i + 1 < n && !is_sep(line[i + 1]) {
+                        return Err(UNBALANCED);
+                    }
+                    i += 1;
+                    done = true;
                 } else {
                     arg.push(line[i]);
+                    i += 1;
                 }
-                i += 1;
+            } else {
+                match line[i] {
+                    b' ' | b'\t' => done = true,
+                    b'"' => {
+                        inq = true;
+                        i += 1;
+                    }
+                    b'\'' => {
+                        insq = true;
+                        i += 1;
+                    }
+                    c => {
+                        arg.push(c);
+                        i += 1;
+                    }
+                }
             }
-            if i >= line.len() {
-                return Err("ERR Protocol error: unbalanced quotes in request");
-            }
-            args.push(arg);
-            i += 1;
-            // (frankenredis-z1h45) Upstream's same closing-quote rule
-            // applies to single-quoted tokens too — line 1064-1067 of
-            // sds.c::sdssplitargs.
-            if i < line.len() && line[i] != b' ' && line[i] != b'\t' {
-                return Err("ERR Protocol error: unbalanced quotes in request");
-            }
-        } else {
-            let start = i;
-            while i < line.len() && line[i] != b' ' && line[i] != b'\t' {
-                i += 1;
-            }
-            args.push(line[start..i].to_vec());
         }
+        args.push(arg);
     }
     Ok(args)
 }
@@ -195,6 +211,21 @@ mod tests {
     fn inline_unbalanced_quotes() {
         let result = split_inline_args(b"SET key \"unclosed");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn inline_mid_token_quote_matches_upstream() {
+        // (frankenredis-5qqv1) A quote can begin mid-token; if it isn't closed
+        // and followed by whitespace/end it's an "unbalanced quotes" error,
+        // matching sds.c::sdssplitargs. fr previously only honoured a quote at
+        // a token's start, so these silently parsed instead of erroring.
+        assert!(split_inline_args(b"PING\"").is_err());
+        assert!(split_inline_args(b"SET a\"b c").is_err());
+        assert!(split_inline_args(b"SET key \"hello\"world").is_err());
+        // A mid-token quote that IS closed-then-space is valid and concatenates
+        // the unquoted prefix with the quoted body.
+        let args = split_inline_args(b"SET ab\"c d\" e").unwrap();
+        assert_eq!(args, vec![b"SET".to_vec(), b"abc d".to_vec(), b"e".to_vec()]);
     }
 
     #[test]
