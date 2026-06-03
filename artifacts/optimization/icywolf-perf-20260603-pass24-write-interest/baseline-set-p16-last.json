@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780508108206,
+  "host": "127.0.0.1",
+  "port": 20450,
+  "workload": "set",
+  "clients": 50,
+  "requests": 500000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "icywolf-0grtm-baseline",
+  "total_time_ms": 1569,
+  "ops_per_sec": 318529.28373710666,
+  "bytes_sent": 31894345,
+  "bytes_received": 2500000,
+  "latency_us": {
+    "min": 81,
+    "p50": 2445,
+    "p95": 2911,
+    "p99": 3483,
+    "p999": 4127,
+    "max": 10031,
+    "mean": 2487.429935999994,
+    "samples": 500000
+  }
+}

@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:20441
+workload: set
+clients: 50  requests: 500000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 6184 ms  throughput: 80845.21 ops/sec
+latency(us): min=936 p50=9439 p95=14927 p99=20287 p999=27439 max=31903 mean=9854.68
+bytes: sent=32894692 received=2500000 key_prefix=icywolf-post90810-strace

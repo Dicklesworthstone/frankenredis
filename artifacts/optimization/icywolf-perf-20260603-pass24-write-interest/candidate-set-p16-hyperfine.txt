@@ -1,0 +1,4 @@
+Benchmark 1: /data/projects/frankenredis_icywolf_post90810_profile_20260603T1724Z/target-icywolf-0grtm-candidate-rch/release-perf/fr-bench --host 127.0.0.1 --port 20451 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis_icywolf_post90810_profile_20260603T1724Z/artifacts/optimization/icywolf-perf-20260603-pass24-write-interest/candidate-set-p16-last.json --key-prefix icywolf-0grtm-candidate
+  Time (mean ± σ):      1.571 s ±  0.062 s    [User: 0.386 s, System: 0.765 s]
+  Range (min … max):    1.501 s …  1.722 s    10 runs
+ 

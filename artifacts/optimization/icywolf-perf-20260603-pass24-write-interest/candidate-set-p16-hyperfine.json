@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/frankenredis_icywolf_post90810_profile_20260603T1724Z/target-icywolf-0grtm-candidate-rch/release-perf/fr-bench --host 127.0.0.1 --port 20451 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis_icywolf_post90810_profile_20260603T1724Z/artifacts/optimization/icywolf-perf-20260603-pass24-write-interest/candidate-set-p16-last.json --key-prefix icywolf-0grtm-candidate",
+      "mean": 1.5705677140599996,
+      "stddev": 0.0623787035370888,
+      "median": 1.56391390326,
+      "user": 0.38612164,
+      "system": 0.7645787199999999,
+      "min": 1.50075137926,
+      "max": 1.72174488926,
+      "times": [
+        1.50075137926,
+        1.51184146026,
+        1.53202978726,
+        1.5393472292600001,
+        1.55843087526,
+        1.56939693126,
+        1.5936763792600002,
+        1.58795972926,
+        1.59049848026,
+        1.72174488926
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

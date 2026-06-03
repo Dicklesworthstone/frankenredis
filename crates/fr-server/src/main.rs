@@ -1252,6 +1252,7 @@ fn handle_readable(
     let prev = runtime.swap_session(session);
 
     let write_buf_before = conn.write_buf.len();
+    let had_write_interest = write_tokens.contains(&token);
     let budget_exhausted = process_buffered_frames(
         token,
         conn,
@@ -1298,7 +1299,6 @@ fn handle_readable(
                 Interest::READABLE | Interest::WRITABLE,
             );
         } else {
-            let had_write_interest = write_tokens.contains(&token);
             match conn.try_flush() {
                 Ok(true) => {
                     write_tokens.remove(&token);
@@ -3179,7 +3179,8 @@ fn deliver_pubsub_messages(
 
         for msg in msgs {
             let resp3 = conn.session.resp_protocol_version() == 3;
-            let frame = pubsub_message_to_frame_for_protocol(msg, conn.session.resp_protocol_version());
+            let frame =
+                pubsub_message_to_frame_for_protocol(msg, conn.session.resp_protocol_version());
             // (frankenredis-o90ga) RESP3 clients must receive the RESP3 null
             // type (`_\r\n`) inside a flush invalidation push — encode_into
             // would emit the RESP2 `$-1\r\n`. Null-free messages encode

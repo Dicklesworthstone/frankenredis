@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/frankenredis_icywolf_post90810_profile_20260603T1724Z/target-icywolf-post90810-profile-rch/release-perf/fr-bench --host 127.0.0.1 --port 20450 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis_icywolf_post90810_profile_20260603T1724Z/artifacts/optimization/icywolf-perf-20260603-pass24-write-interest/baseline-set-p16-last.json --key-prefix icywolf-0grtm-baseline",
+      "mean": 1.6243767697800002,
+      "stddev": 0.04058279402257997,
+      "median": 1.60797058428,
+      "user": 0.38644532000000004,
+      "system": 0.7712770999999999,
+      "min": 1.57247158378,
+      "max": 1.6785429737800002,
+      "times": [
+        1.6476281427800001,
+        1.6709836207800002,
+        1.6016389777800002,
+        1.60049949978,
+        1.67806903478,
+        1.6785429737800002,
+        1.61430219078,
+        1.58655134678,
+        1.59308032678,
+        1.57247158378
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
