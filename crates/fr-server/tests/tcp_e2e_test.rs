@@ -2052,6 +2052,36 @@ fn tcp_protocol_errors_use_upstream_wording() {
 }
 
 #[test]
+fn tcp_command_multibulk_rejects_non_bulk_elements() {
+    // (frankenredis-5qqv1) A client command multibulk's elements must each be a
+    // non-null bulk string — upstream processMultibulkBuffer rejects others.
+    let port = reserve_port();
+    let _server = spawn_frankenredis(port, None);
+    let cases: [(&[u8], &[u8]); 4] = [
+        (
+            b"*1\r\n+PING\r\n",
+            b"-ERR Protocol error: expected '$', got '+'\r\n",
+        ),
+        (
+            b"*1\r\n:5\r\n",
+            b"-ERR Protocol error: expected '$', got ':'\r\n",
+        ),
+        (
+            b"*2\r\n$3\r\nGET\r\n$-1\r\n",
+            b"-ERR Protocol error: invalid bulk length\r\n",
+        ),
+        // A well-formed bulk command still works.
+        (b"*1\r\n$4\r\nPING\r\n", b"+PONG\r\n"),
+    ];
+    for (req, expected) in cases {
+        let mut c = BufferedTcpClient::connect(port);
+        c.write_all(req);
+        assert_eq!(c.read_resp3_response_bytes(), expected, "request {req:?}");
+    }
+    send_shutdown_nosave(port);
+}
+
+#[test]
 fn tcp_empty_and_null_multibulk_are_skipped() {
     // (frankenredis-w7xy8) `*0\r\n` / `*-1\r\n` are not commands — upstream
     // networking.c resets and processes the next command with no reply. fr

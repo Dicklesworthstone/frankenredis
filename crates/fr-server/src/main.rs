@@ -1397,7 +1397,10 @@ fn process_buffered_frames(
                 Err(e) => Err(e),
             }
         } else {
-            fr_protocol::parse_frame_with_config(unparsed, &runtime.parser_config())
+            // (frankenredis-5qqv1) Client command frames are strict multibulks:
+            // every element must be a non-null bulk string. The generic parser
+            // (used for replies/replication) accepts any element type.
+            fr_protocol::parse_command_frame(unparsed, &runtime.parser_config())
                 .map(|p| (p.frame, p.consumed))
         };
 
@@ -5791,7 +5794,7 @@ mod tests {
         );
         assert!(runtime.is_client_paused(ts + 1));
 
-        let ping = RespFrame::Array(Some(vec![RespFrame::SimpleString("PING".to_string())]));
+        let ping = RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"PING".to_vec()))]));
         conn.read_buf.extend_from_slice(&ping.to_bytes());
 
         let mut blocked_tokens = HashSet::new();
@@ -5973,9 +5976,9 @@ mod tests {
         conn.session = runtime.swap_session(prev);
 
         let set_frame = RespFrame::Array(Some(vec![
-            RespFrame::SimpleString("SET".to_string()),
-            RespFrame::SimpleString("k".to_string()),
-            RespFrame::SimpleString("v".to_string()),
+            RespFrame::BulkString(Some(b"SET".to_vec())),
+            RespFrame::BulkString(Some(b"k".to_vec())),
+            RespFrame::BulkString(Some(b"v".to_vec())),
         ]));
         conn.read_buf.extend_from_slice(&set_frame.to_bytes());
 
@@ -6076,7 +6079,7 @@ mod tests {
         let (_server_stream, _server_addr) = listener.accept().unwrap();
         let mut conn = ClientConnection::new(mio::net::TcpStream::from_std(stream), session, ts);
 
-        let quit = RespFrame::Array(Some(vec![RespFrame::SimpleString("QUIT".to_string())]));
+        let quit = RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"QUIT".to_vec()))]));
         conn.read_buf.extend_from_slice(&quit.to_bytes());
 
         let mut blocked_tokens = HashSet::new();

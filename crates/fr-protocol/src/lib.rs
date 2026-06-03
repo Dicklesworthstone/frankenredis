@@ -408,6 +408,10 @@ pub enum RespParseError {
     MultibulkLengthTooLarge,
     RecursionLimitExceeded,
     LineTooLong,
+    /// (frankenredis-5qqv1) A command multibulk element was not a `$` bulk
+    /// string. Carries the offending type byte for the upstream wording
+    /// "expected '$', got 'X'".
+    ExpectedBulk(u8),
 }
 
 impl Display for RespParseError {
@@ -430,6 +434,7 @@ impl Display for RespParseError {
             Self::MultibulkLengthTooLarge => write!(f, "invalid multibulk length"),
             Self::RecursionLimitExceeded => write!(f, "nested array depth limit exceeded"),
             Self::LineTooLong => write!(f, "RESP line too long"),
+            Self::ExpectedBulk(got) => write!(f, "expected '$', got '{}'", char::from(*got)),
         }
     }
 }
@@ -446,6 +451,58 @@ pub fn parse_frame_with_config(
 ) -> Result<ParseResult, RespParseError> {
     let (frame, consumed) = parse_frame_internal(input, 0, 0, 0, config)?;
     Ok(ParseResult { frame, consumed })
+}
+
+/// Parse a CLIENT → SERVER **command** frame. Unlike [`parse_frame_with_config`]
+/// (which accepts any RESP type for array elements — correct for parsing
+/// *replies*), every element of a command multibulk must be a non-null bulk
+/// string, matching upstream networking.c::processMultibulkBuffer. A non-`$`
+/// element yields `ExpectedBulk(byte)` ("expected '$', got 'X'") and a `$-1`
+/// null argument yields `InvalidBulkLength`. (frankenredis-5qqv1)
+///
+/// Non-multibulk input (e.g. an inline command, which never reaches here)
+/// falls through to the generic parser.
+pub fn parse_command_frame(
+    input: &[u8],
+    config: &ParserConfig,
+) -> Result<ParseResult, RespParseError> {
+    if input.first() != Some(&b'*') {
+        return parse_frame_with_config(input, config);
+    }
+    let (line, mut cursor) = read_line(input, 1)?;
+    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
+    if len == -1 {
+        return Ok(ParseResult {
+            frame: RespFrame::Array(None),
+            consumed: cursor,
+        });
+    }
+    if len < -1 {
+        return Err(RespParseError::InvalidMultibulkLength);
+    }
+    let count = usize::try_from(len).map_err(|_| RespParseError::InvalidMultibulkLength)?;
+    if count > config.max_array_len {
+        return Err(RespParseError::MultibulkLengthTooLarge);
+    }
+    let mut items = Vec::with_capacity(count.min(1024));
+    for _ in 0..count {
+        match input.get(cursor) {
+            None => return Err(RespParseError::Incomplete),
+            Some(&b'$') => {}
+            Some(&other) => return Err(RespParseError::ExpectedBulk(other)),
+        }
+        let (item, consumed) = parse_bulk(input, cursor + 1, config)?;
+        // A `$-1` null bulk is a valid *reply* but never a command argument.
+        if matches!(item, RespFrame::BulkString(None)) {
+            return Err(RespParseError::InvalidBulkLength);
+        }
+        items.push(item);
+        cursor = consumed;
+    }
+    Ok(ParseResult {
+        frame: RespFrame::Array(Some(items)),
+        consumed: cursor,
+    })
 }
 
 /// Maximum number of consecutive RESP3 attribute prefixes ('|...')
@@ -811,9 +868,51 @@ fn read_line(input: &[u8], start: usize) -> Result<(&[u8], usize), RespParseErro
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_LINE_LENGTH, ParserConfig, RespFrame, RespParseError, parse_frame,
+        MAX_LINE_LENGTH, ParserConfig, RespFrame, RespParseError, parse_command_frame, parse_frame,
         parse_frame_with_config,
     };
+
+    #[test]
+    fn parse_command_frame_requires_bulk_elements() {
+        // (frankenredis-5qqv1) A command multibulk's elements must each be a
+        // non-null bulk string, matching upstream processMultibulkBuffer.
+        let cfg = ParserConfig::default();
+
+        // Valid command parses normally.
+        let ok = parse_command_frame(b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n", &cfg).unwrap();
+        assert_eq!(
+            ok.frame,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"GET".to_vec())),
+                RespFrame::BulkString(Some(b"k".to_vec())),
+            ]))
+        );
+
+        // Non-`$` element -> ExpectedBulk carrying the offending type byte.
+        for (input, got) in [
+            (&b"*1\r\n+PING\r\n"[..], b'+'),
+            (b"*1\r\n:5\r\n", b':'),
+            (b"*1\r\n*0\r\n", b'*'),
+        ] {
+            assert_eq!(
+                parse_command_frame(input, &cfg).unwrap_err(),
+                RespParseError::ExpectedBulk(got),
+                "input {input:?}"
+            );
+        }
+
+        // A `$-1` null bulk is a valid reply but never a command argument.
+        assert_eq!(
+            parse_command_frame(b"*2\r\n$3\r\nGET\r\n$-1\r\n", &cfg).unwrap_err(),
+            RespParseError::InvalidBulkLength
+        );
+
+        // `expected '$', got 'X'` wording matches upstream.
+        assert_eq!(
+            RespParseError::ExpectedBulk(b'+').to_string(),
+            "expected '$', got '+'"
+        );
+    }
 
     const PACKET_ID: &str = "FR-P2C-002";
     const SCHEMA_VERSION: &str = "fr_testlog_v1";
