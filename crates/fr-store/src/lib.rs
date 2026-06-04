@@ -2152,6 +2152,15 @@ pub struct ScriptPropagationRecord {
 pub struct Store {
     entries: HashMap<Vec<u8>, Entry>,
     ordered_keys: BTreeSet<Vec<u8>>,
+    /// Db-encoded keys that currently carry a TTL (a subset of `ordered_keys`).
+    /// The active-expire cycle samples from this set instead of every key, so
+    /// it finds expirable keys as efficiently as upstream's `activeExpireCycle`
+    /// (which scans `db->expires`) rather than wasting samples on persistent
+    /// keys. This is purely a sampling HINT: `evaluate_expiry` still re-checks
+    /// each candidate's real `expires_at_ms`, so a stale entry only costs a
+    /// wasted sample and a missing entry only defers a key to lazy expiry —
+    /// never an incorrect result. (frankenredis-yvg7h)
+    volatile_keys: BTreeSet<Vec<u8>>,
     running_digest: u64,
     digest_mutations: u64,
     digest_stale: bool,
@@ -2574,6 +2583,7 @@ impl Default for Store {
         Self {
             entries: HashMap::new(),
             ordered_keys: BTreeSet::new(),
+            volatile_keys: BTreeSet::new(),
             running_digest: 0,
             digest_mutations: 0,
             digest_stale: false,
@@ -3644,6 +3654,8 @@ impl Store {
                     self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
                 }
             }
+            // The key now carries a TTL — track it for active-expire sampling.
+            self.volatile_keys.insert(key.to_vec());
             self.dirty = self.dirty.saturating_add(1);
             self.notify_keyspace_event(NOTIFY_GENERIC, "expire", &logical_key, db);
         }
@@ -3692,6 +3704,8 @@ impl Store {
                     self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
                 }
             }
+            // The key now carries a TTL — track it for active-expire sampling.
+            self.volatile_keys.insert(key.to_vec());
             self.dirty = self.dirty.saturating_add(1);
             self.notify_keyspace_event(NOTIFY_GENERIC, "expire", &logical_key, db);
         }
@@ -4597,6 +4611,7 @@ impl Store {
         self.with_mutated_entry(key, |entry| {
             entry.expires_at_ms = None;
         });
+        self.volatile_keys.remove(key);
         self.expires_count = self.expires_count.saturating_sub(1);
         let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
         if db < self.database_count {
@@ -5077,7 +5092,8 @@ impl Store {
             entry.modification_count = old_entry.modification_count.wrapping_add(1);
         }
 
-        if entry.expires_at_ms.is_some() {
+        let new_has_expiry = entry.expires_at_ms.is_some();
+        if new_has_expiry {
             self.expires_count = self.expires_count.saturating_add(1);
             if db < self.database_count {
                 self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
@@ -5085,6 +5101,14 @@ impl Store {
         }
         if is_new_key {
             self.ordered_keys.insert(key.clone());
+        }
+        // Keep the volatile-key sampling set in sync: the stored key is volatile
+        // iff the entry replacing it carries a TTL (an overwrite that drops the
+        // TTL must drop it from the set too). (frankenredis-yvg7h)
+        if new_has_expiry {
+            self.volatile_keys.insert(key.clone());
+        } else {
+            self.volatile_keys.remove(&key);
         }
         let old_entry = self.entries.insert(key.clone(), entry);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
@@ -5113,6 +5137,7 @@ impl Store {
     fn internal_entries_remove(&mut self, key: &[u8]) -> Option<Entry> {
         if let Some(entry) = self.entries.remove(key) {
             self.ordered_keys.remove(key);
+            self.volatile_keys.remove(key);
             let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
             if db < self.database_count {
                 self.db_key_counts[db] = self.db_key_counts[db].saturating_sub(1);
@@ -5403,7 +5428,12 @@ impl Store {
         start_cursor: Option<Vec<u8>>,
         sample_limit: usize,
     ) -> ActiveExpireCycleResult {
-        if sample_limit == 0 || self.entries.is_empty() {
+        // Sample only volatile (TTL-bearing) keys, mirroring upstream's
+        // activeExpireCycle which scans `db->expires` rather than the whole
+        // keyspace. With no volatile keys there is nothing to reap, so the
+        // cycle is O(1) instead of sampling persistent keys in vain.
+        // (frankenredis-yvg7h)
+        if sample_limit == 0 || self.volatile_keys.is_empty() {
             return ActiveExpireCycleResult {
                 sampled_keys: 0,
                 evicted_keys: 0,
@@ -5412,21 +5442,21 @@ impl Store {
             };
         }
 
-        let ordered_key_count = self.ordered_keys.len();
+        let volatile_key_count = self.volatile_keys.len();
         let keys_to_check: Vec<Vec<u8>> = match start_cursor {
             Some(ref k) => {
-                let mut it = self.ordered_keys.range(k.clone()..).cloned();
+                let mut it = self.volatile_keys.range(k.clone()..).cloned();
                 let mut collected: Vec<Vec<u8>> = it.by_ref().take(sample_limit).collect();
                 if collected.len() < sample_limit {
-                    // Wrap around without sampling any ordered key twice.
-                    let remaining_unique_keys = ordered_key_count.saturating_sub(collected.len());
+                    // Wrap around without sampling any volatile key twice.
+                    let remaining_unique_keys = volatile_key_count.saturating_sub(collected.len());
                     let remaining = (sample_limit - collected.len()).min(remaining_unique_keys);
-                    collected.extend(self.ordered_keys.iter().take(remaining).cloned());
+                    collected.extend(self.volatile_keys.iter().take(remaining).cloned());
                 }
                 collected
             }
             None => self
-                .ordered_keys
+                .volatile_keys
                 .iter()
                 .take(sample_limit)
                 .cloned()
@@ -5459,11 +5489,11 @@ impl Store {
             }
         }
 
-        let next_cursor = if keys_to_check.len() >= ordered_key_count {
+        let next_cursor = if keys_to_check.len() >= volatile_key_count {
             None
         } else {
             keys_to_check.last().and_then(|last| {
-                self.ordered_keys
+                self.volatile_keys
                     .range((Excluded(last.clone()), Unbounded))
                     .next()
                     .cloned()
@@ -5490,6 +5520,7 @@ impl Store {
         // similarly survived as orphan TTLs without their parent
         // hashes, breaking HTTL/HEXPIRETIME on subsequent re-creates.
         self.ordered_keys.clear();
+        self.volatile_keys.clear();
         self.hash_field_expires.clear();
         self.running_digest = 0;
         self.digest_stale = false;
@@ -12344,6 +12375,7 @@ impl Store {
                                 self.db_expires_counts[db].saturating_add(1);
                         }
                     }
+                    self.volatile_keys.insert(key.to_vec());
                     self.dirty = self.dirty.saturating_add(1);
                     self.notify_keyspace_event(NOTIFY_GENERIC, "expire", &logical_key, db);
                 }
@@ -12356,6 +12388,7 @@ impl Store {
                         self.with_mutated_entry(key, |entry| {
                             entry.expires_at_ms = None;
                         });
+                        self.volatile_keys.remove(key);
                         self.expires_count = self.expires_count.saturating_sub(1);
                         if db < self.database_count {
                             self.db_expires_counts[db] =
@@ -19749,7 +19782,10 @@ mod tests {
         store.set(b"c".to_vec(), b"3".to_vec(), None, 0);
 
         let result = store.run_active_expire_cycle(10, None, 10);
-        assert_eq!(result.sampled_keys, 3);
+        // (frankenredis-yvg7h) Active-expire now samples only volatile keys, so
+        // the persistent `c` is not sampled (2 sampled, not 3) — matching
+        // upstream's expires-dict scan. The eviction outcome is unchanged.
+        assert_eq!(result.sampled_keys, 2);
         assert_eq!(result.evicted_keys, 2);
         assert_eq!(store.stat_expired_keys, 2);
         assert_eq!(store.dbsize_in_db(0), 1);
@@ -19764,14 +19800,83 @@ mod tests {
         store.set(b"c".to_vec(), b"3".to_vec(), Some(1), 0);
         store.set(b"d".to_vec(), b"4".to_vec(), None, 0);
 
+        // (frankenredis-yvg7h) Sampling the volatile set {a, c} (persistent b, d
+        // are excluded): a limit-2 cycle now reaps BOTH expired keys at once and
+        // the cursor wraps to None — the effectiveness gain over diluting the
+        // sample with persistent keys. A follow-up cycle has nothing to do.
         let first = store.run_active_expire_cycle(10, None, 2);
         assert_eq!(first.sampled_keys, 2);
-        assert_eq!(first.evicted_keys, 1);
-        assert_eq!(first.next_cursor, Some(b"c".to_vec()));
+        assert_eq!(first.evicted_keys, 2);
+        assert_eq!(first.next_cursor, None);
 
         let second = store.run_active_expire_cycle(10, first.next_cursor.clone(), 2);
-        assert_eq!(second.sampled_keys, 2);
-        assert_eq!(second.evicted_keys, 1);
+        assert_eq!(second.sampled_keys, 0);
+        assert_eq!(second.evicted_keys, 0);
+    }
+
+    #[test]
+    fn volatile_keys_index_tracks_ttl_transitions() {
+        // (frankenredis-yvg7h) The volatile-key sampling set must follow every
+        // TTL transition so active-expire samples exactly the keys with a TTL.
+        let mut store = Store::new();
+        store.set(b"p".to_vec(), b"v".to_vec(), None, 0); // persistent
+        store.set(b"v".to_vec(), b"x".to_vec(), Some(5_000), 0); // volatile
+        assert!(!store.volatile_keys.contains(b"p".as_slice()));
+        assert!(store.volatile_keys.contains(b"v".as_slice()));
+
+        // PERSIST drops the TTL -> leaves the volatile set.
+        assert!(store.persist(b"v", 0));
+        assert!(!store.volatile_keys.contains(b"v".as_slice()));
+
+        // EXPIREAT adds a TTL to a persistent key -> enters the set.
+        assert!(store.expire_at_milliseconds(b"p", 9_999, 0));
+        assert!(store.volatile_keys.contains(b"p".as_slice()));
+
+        // Overwriting with a TTL-less SET clears it again.
+        store.set(b"p".to_vec(), b"y".to_vec(), None, 0);
+        assert!(!store.volatile_keys.contains(b"p".as_slice()));
+
+        // DEL of a volatile key removes it from the set.
+        store.set(b"d".to_vec(), b"z".to_vec(), Some(1_000), 0);
+        assert!(store.volatile_keys.contains(b"d".as_slice()));
+        store.del(&[b"d".to_vec()], 0);
+        assert!(!store.volatile_keys.contains(b"d".as_slice()));
+
+        // FLUSHDB clears the set.
+        store.set(b"f".to_vec(), b"z".to_vec(), Some(1_000), 0);
+        assert!(!store.volatile_keys.is_empty());
+        store.flushdb();
+        assert!(store.volatile_keys.is_empty());
+    }
+
+    #[test]
+    fn active_expire_samples_volatile_keys_only_not_persistent() {
+        // (frankenredis-yvg7h) With a mostly-persistent keyspace, active-expire
+        // must still reap expired volatile keys promptly — it samples the
+        // volatile set, not the whole keyspace. All-key sampling with the same
+        // small sample_limit would almost never hit the handful of TTL keys.
+        let mut store = Store::new();
+        for i in 0..1000u32 {
+            store.set(format!("persist:{i:04}").into_bytes(), b"v".to_vec(), None, 0);
+        }
+        for i in 0..5u32 {
+            store.set(format!("vol:{i}").into_bytes(), b"v".to_vec(), Some(100), 0);
+        }
+        // Single cycle at t=1000 (all 5 volatile keys expired), sample_limit=10.
+        let result = store.run_active_expire_cycle(1000, None, 10);
+        assert_eq!(
+            result.sampled_keys, 5,
+            "must sample only the 5 volatile keys, not the 1000 persistent ones"
+        );
+        assert_eq!(result.evicted_keys, 5, "every expired volatile key reaped");
+        assert_eq!(result.next_cursor, None);
+        // The 1000 persistent keys are untouched.
+        assert_eq!(store.entries.len(), 1000);
+        // No volatile keys remain -> the next cycle is an O(1) no-op.
+        assert!(store.volatile_keys.is_empty());
+        let empty = store.run_active_expire_cycle(2000, None, 10);
+        assert_eq!(empty.sampled_keys, 0);
+        assert_eq!(empty.evicted_keys, 0);
     }
 
     #[test]
