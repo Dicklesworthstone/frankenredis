@@ -660,10 +660,197 @@ impl<'a> Iterator for PackedStrMapIter<'a> {
     }
 }
 
+// ───────────────────────── packed string LIST (for small lists) ─────────────
+
+/// Packed element list for SMALL lists: a sequence of `[vint len][elem]` records
+/// in order, one allocation instead of a `VecDeque<Vec<u8>>` (heap block per
+/// element). Front operations and random insert/remove shift the buffer (O(n)),
+/// which is the right trade below the list-max-listpack threshold (n ≤ 128) and
+/// MATCHES redis's listpack list node — redis's quicklist only avoids the shift
+/// for LARGE lists by chaining listpack nodes, so a single packed buffer is the
+/// correct small-list representation. (frankenredis-9mh3o step 4)
+///
+/// `allow(dead_code)`: the primitive + its VecDeque-equivalence proptest land
+/// first; wiring it into `Value::List` is the follow-up (step 4b).
+#[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
+pub struct PackedList {
+    buf: Vec<u8>,
+    len: usize,
+}
+
+#[allow(dead_code)]
+impl PackedList {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            len: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn with_capacity(bytes: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(bytes),
+            len: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// `(record_start, elem_start, elem_end)` of the `idx`-th element.
+    fn bounds(&self, idx: usize) -> Option<(usize, usize, usize)> {
+        if idx >= self.len {
+            return None;
+        }
+        let mut pos = 0;
+        for _ in 0..idx {
+            let (elen, e_start) = read_varint(&self.buf, pos);
+            pos = e_start + elen;
+        }
+        let record_start = pos;
+        let (elen, e_start) = read_varint(&self.buf, pos);
+        Some((record_start, e_start, e_start + elen))
+    }
+
+    fn encode(elem: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(elem.len() + 2);
+        write_varint(&mut out, elem.len());
+        out.extend_from_slice(elem);
+        out
+    }
+
+    pub fn push_back(&mut self, elem: &[u8]) {
+        write_varint(&mut self.buf, elem.len());
+        self.buf.extend_from_slice(elem);
+        self.len += 1;
+    }
+
+    pub fn push_front(&mut self, elem: &[u8]) {
+        let enc = Self::encode(elem);
+        self.buf.splice(0..0, enc);
+        self.len += 1;
+    }
+
+    pub fn pop_front(&mut self) -> Option<Vec<u8>> {
+        let (_rs, es, ee) = self.bounds(0)?;
+        let out = self.buf[es..ee].to_vec();
+        self.buf.drain(0..ee);
+        self.len -= 1;
+        Some(out)
+    }
+
+    pub fn pop_back(&mut self) -> Option<Vec<u8>> {
+        let (rs, es, ee) = self.bounds(self.len.checked_sub(1)?)?;
+        debug_assert_eq!(ee, self.buf.len(), "last record must end the buffer");
+        let out = self.buf[es..ee].to_vec();
+        self.buf.truncate(rs);
+        self.len -= 1;
+        Some(out)
+    }
+
+    #[must_use]
+    pub fn get(&self, idx: usize) -> Option<&[u8]> {
+        let (_rs, es, ee) = self.bounds(idx)?;
+        Some(&self.buf[es..ee])
+    }
+
+    /// Replace the element at `idx` (LSET); returns false if out of range.
+    pub fn set(&mut self, idx: usize, elem: &[u8]) -> bool {
+        let Some((rs, _es, ee)) = self.bounds(idx) else {
+            return false;
+        };
+        self.buf.splice(rs..ee, Self::encode(elem));
+        true
+    }
+
+    /// Insert `elem` BEFORE index `idx` (`idx == len` appends), matching
+    /// `VecDeque::insert`.
+    pub fn insert(&mut self, idx: usize, elem: &[u8]) {
+        if idx >= self.len {
+            self.push_back(elem);
+            return;
+        }
+        let (rs, _es, _ee) = self.bounds(idx).expect("idx < len");
+        self.buf.splice(rs..rs, Self::encode(elem));
+        self.len += 1;
+    }
+
+    pub fn remove(&mut self, idx: usize) -> Option<Vec<u8>> {
+        let (rs, es, ee) = self.bounds(idx)?;
+        let out = self.buf[es..ee].to_vec();
+        self.buf.drain(rs..ee);
+        self.len -= 1;
+        Some(out)
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
+        let survivors: Vec<Vec<u8>> = self.iter().filter(|e| keep(e)).map(<[u8]>::to_vec).collect();
+        let mut nb = PackedList::with_capacity(self.buf.len());
+        for e in &survivors {
+            nb.push_back(e);
+        }
+        *self = nb;
+    }
+
+    #[must_use]
+    pub fn iter(&self) -> PackedListIter<'_> {
+        PackedListIter {
+            buf: &self.buf,
+            pos: 0,
+        }
+    }
+}
+
+impl<'a> FromIterator<&'a [u8]> for PackedList {
+    fn from_iter<I: IntoIterator<Item = &'a [u8]>>(iter: I) -> Self {
+        let mut l = PackedList::new();
+        for e in iter {
+            l.push_back(e);
+        }
+        l
+    }
+}
+
+/// Borrowing iterator over packed list elements, front to back.
+#[allow(dead_code)]
+pub struct PackedListIter<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Iterator for PackedListIter<'a> {
+    type Item = &'a [u8];
+    fn next(&mut self) -> Option<&'a [u8]> {
+        if self.pos >= self.buf.len() {
+            return None;
+        }
+        let (elen, e_start) = read_varint(self.buf, self.pos);
+        let e_end = e_start + elen;
+        self.pos = e_end;
+        Some(&self.buf[e_start..e_end])
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PackedStrMap, PackedStrSet};
+    use super::{PackedList, PackedStrMap, PackedStrSet};
     use indexmap::{IndexMap, IndexSet};
+    use std::collections::VecDeque;
     use proptest::prelude::*;
 
     #[test]
@@ -774,6 +961,68 @@ mod tests {
                 let p: Vec<(&[u8], &[u8])> = packed.iter().collect();
                 let o: Vec<(&[u8], &[u8])> =
                     oracle.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+                prop_assert_eq!(p, o);
+            }
+        }
+    }
+
+    #[test]
+    fn list_basic_ops_and_order() {
+        let mut l = PackedList::new();
+        l.push_back(b"b");
+        l.push_back(b"c");
+        l.push_front(b"a");
+        assert_eq!(l.iter().collect::<Vec<_>>(), vec![&b"a"[..], b"b", b"c"]);
+        assert_eq!(l.get(1), Some(&b"b"[..]));
+        assert!(l.set(1, b"BBBBB")); // value-length change
+        assert_eq!(l.get(1), Some(&b"BBBBB"[..]));
+        l.insert(1, b"x"); // before index 1
+        assert_eq!(l.iter().collect::<Vec<_>>(), vec![&b"a"[..], b"x", b"BBBBB", b"c"]);
+        assert_eq!(l.remove(0), Some(b"a".to_vec()));
+        assert_eq!(l.pop_back(), Some(b"c".to_vec()));
+        assert_eq!(l.pop_front(), Some(b"x".to_vec()));
+        assert_eq!(l.iter().collect::<Vec<_>>(), vec![&b"BBBBB"[..]]);
+        assert_eq!(l.len(), 1);
+    }
+
+    proptest! {
+        /// PackedList must behave EXACTLY like a VecDeque<Vec<u8>> under an
+        /// arbitrary op stream: same elements in the same order after every
+        /// push/pop (both ends), get, set, insert, remove, and retain. This is
+        /// the isomorphism the eventual Value::List wiring relies on.
+        #[test]
+        fn list_equivalent_to_vecdeque(ops in proptest::collection::vec(
+            (0u8..7, proptest::collection::vec(0u8..4, 0..4), any::<u8>()), 0..300)) {
+            let mut packed = PackedList::new();
+            let mut oracle: VecDeque<Vec<u8>> = VecDeque::new();
+            for (op, elem, raw_idx) in ops {
+                let n = oracle.len();
+                let idx = if n == 0 { 0 } else { raw_idx as usize % n };
+                match op {
+                    0 => { packed.push_back(&elem); oracle.push_back(elem.clone()); }
+                    1 => { packed.push_front(&elem); oracle.push_front(elem.clone()); }
+                    2 => { prop_assert_eq!(packed.pop_back(), oracle.pop_back()); }
+                    3 => { prop_assert_eq!(packed.pop_front(), oracle.pop_front()); }
+                    4 => {
+                        if n > 0 {
+                            prop_assert_eq!(packed.set(idx, &elem), true);
+                            oracle[idx] = elem.clone();
+                        }
+                    }
+                    5 => {
+                        let ins = if n == 0 { 0 } else { raw_idx as usize % (n + 1) };
+                        packed.insert(ins, &elem);
+                        oracle.insert(ins, elem.clone());
+                    }
+                    _ => {
+                        if n > 0 {
+                            prop_assert_eq!(packed.remove(idx), Some(oracle.remove(idx).unwrap()));
+                        }
+                    }
+                }
+                prop_assert_eq!(packed.len(), oracle.len());
+                let p: Vec<&[u8]> = packed.iter().collect();
+                let o: Vec<&[u8]> = oracle.iter().map(|v| v.as_slice()).collect();
                 prop_assert_eq!(p, o);
             }
         }
