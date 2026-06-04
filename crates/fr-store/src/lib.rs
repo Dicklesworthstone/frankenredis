@@ -397,13 +397,22 @@ pub enum StoreError {
     GenericError(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct SortedSet {
     /// member -> score
     dict: HashMap<Vec<u8>, f64>,
     /// (score, member) -> ()
     /// We use ScoreMember wrapper to handle f64 comparison and lexicographical member tie-breaking.
     ordered: BTreeMap<ScoreMember, ()>,
+    /// Behavior-invisible order-stat caches for repeated ZRANK/ZREVRANK on stable zsets.
+    rank_cache_asc: Option<HashMap<Vec<u8>, usize>>,
+    rank_cache_desc: Option<HashMap<Vec<u8>, usize>>,
+}
+
+impl PartialEq for SortedSet {
+    fn eq(&self, other: &Self) -> bool {
+        self.dict == other.dict && self.ordered == other.ordered
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -479,6 +488,8 @@ impl SortedSet {
         Self {
             dict: HashMap::new(),
             ordered: BTreeMap::new(),
+            rank_cache_asc: None,
+            rank_cache_desc: None,
         }
     }
 
@@ -496,17 +507,20 @@ impl SortedSet {
             if old_score.total_cmp(&score).is_eq() {
                 return false;
             }
+            self.invalidate_rank_caches();
             self.ordered
                 .remove(&ScoreMember::actual(old_score, member.clone()));
             self.ordered.insert(ScoreMember::actual(score, member), ());
             return false;
         }
+        self.invalidate_rank_caches();
         self.ordered.insert(ScoreMember::actual(score, member), ());
         true
     }
 
     fn remove(&mut self, member: &[u8]) -> bool {
         if let Some(score) = self.dict.remove(member) {
+            self.invalidate_rank_caches();
             self.ordered
                 .remove(&ScoreMember::actual(score, member.to_vec()));
             true
@@ -538,6 +552,7 @@ impl SortedSet {
             if let Some(member) = sm.member.into_actual() {
                 let score = sm.score;
                 self.dict.remove(&member);
+                self.invalidate_rank_caches();
                 return Some((member, score));
             }
         }
@@ -550,6 +565,7 @@ impl SortedSet {
             if let Some(member) = sm.member.into_actual() {
                 let score = sm.score;
                 self.dict.remove(&member);
+                self.invalidate_rank_caches();
                 return Some((member, score));
             }
         }
@@ -564,6 +580,61 @@ impl SortedSet {
     /// Return an iterator over the member keys.
     fn keys(&self) -> impl Iterator<Item = &Vec<u8>> {
         self.dict.keys()
+    }
+
+    fn rank(&mut self, member: &[u8]) -> Option<usize> {
+        let score = self.get_score(member)?;
+        if self.rank_cache_asc.is_none() {
+            let mut cache = HashMap::with_capacity(self.dict.len());
+            for (rank, (ranked_member, _score)) in self.iter_asc().enumerate() {
+                cache.insert(ranked_member.clone(), rank);
+            }
+            self.rank_cache_asc = Some(cache);
+        }
+        if let Some(rank) = self
+            .rank_cache_asc
+            .as_ref()
+            .and_then(|cache| cache.get(member).copied())
+        {
+            return Some(rank);
+        }
+        Some(
+            self.iter_asc()
+                .take_while(|&(ranked_member, ranked_score)| {
+                    score_member_lt(*ranked_score, ranked_member, score, member)
+                })
+                .count(),
+        )
+    }
+
+    fn rev_rank(&mut self, member: &[u8]) -> Option<usize> {
+        let score = self.get_score(member)?;
+        if self.rank_cache_desc.is_none() {
+            let mut cache = HashMap::with_capacity(self.dict.len());
+            for (rank, (ranked_member, _score)) in self.iter_desc().enumerate() {
+                cache.insert(ranked_member.clone(), rank);
+            }
+            self.rank_cache_desc = Some(cache);
+        }
+        if let Some(rank) = self
+            .rank_cache_desc
+            .as_ref()
+            .and_then(|cache| cache.get(member).copied())
+        {
+            return Some(rank);
+        }
+        Some(
+            self.iter_desc()
+                .take_while(|&(ranked_member, ranked_score)| {
+                    score_member_lt(score, member, *ranked_score, ranked_member)
+                })
+                .count(),
+        )
+    }
+
+    fn invalidate_rank_caches(&mut self) {
+        self.rank_cache_asc = None;
+        self.rank_cache_desc = None;
     }
 }
 
@@ -8125,17 +8196,11 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
-                        let Some(score) = zs.get_score(member) else {
-                            return Ok(None);
-                        };
-                        let rank = zs
-                            .iter_asc()
-                            .take_while(|&(m, s)| score_member_lt(*s, m, score, member))
-                            .count();
+                        let rank = zs.rank(member);
                         entry.touch(now_ms);
-                        Ok(Some(rank))
+                        Ok(rank)
                     }
                     _ => Err(StoreError::WrongType),
                 }
@@ -8167,17 +8232,11 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
-                        let Some(score) = zs.get_score(member) else {
-                            return Ok(None);
-                        };
-                        let rank = zs
-                            .iter_desc()
-                            .take_while(|&(m, s)| score_member_lt(score, member, *s, m))
-                            .count();
+                        let rank = zs.rev_rank(member);
                         entry.touch(now_ms);
-                        Ok(Some(rank))
+                        Ok(rank)
                     }
                     _ => Err(StoreError::WrongType),
                 }
@@ -22841,6 +22900,40 @@ mod tests {
         assert_eq!(store.zrevrank(b"z", b"c", 0).unwrap(), Some(0));
         assert_eq!(store.zrevrank(b"z", b"b", 0).unwrap(), Some(1));
         assert_eq!(store.zrevrank(b"z", b"a", 0).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn zrank_cache_invalidates_after_sorted_set_mutations() {
+        let mut store = Store::new();
+        store
+            .zadd(
+                b"z",
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"b".to_vec()),
+                    (3.0, b"c".to_vec()),
+                ],
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(store.zrank(b"z", b"b", 0).unwrap(), Some(1));
+        assert_eq!(store.zrevrank(b"z", b"b", 0).unwrap(), Some(1));
+
+        store
+            .zadd(b"z", &[(4.0, b"b".to_vec()), (0.0, b"d".to_vec())], 1)
+            .unwrap();
+        assert_eq!(store.zrank(b"z", b"d", 1).unwrap(), Some(0));
+        assert_eq!(store.zrank(b"z", b"b", 1).unwrap(), Some(3));
+        assert_eq!(store.zrevrank(b"z", b"b", 1).unwrap(), Some(0));
+
+        assert_eq!(store.zrem(b"z", &[b"c"], 2).unwrap(), 1);
+        assert_eq!(store.zrank(b"z", b"b", 2).unwrap(), Some(2));
+        assert_eq!(store.zrevrank(b"z", b"d", 2).unwrap(), Some(2));
+        assert_eq!(
+            store.zrange(b"z", 0, -1, 2).unwrap(),
+            vec![b"d".to_vec(), b"a".to_vec(), b"b".to_vec()]
+        );
     }
 
     #[test]

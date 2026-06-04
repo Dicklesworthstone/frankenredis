@@ -1,0 +1,8 @@
+mode=Golden
+n=20000
+queries=20000
+elapsed_ns=19871955
+rank_sum=199661328
+revrank_sum=200318672
+first=member-00000000,member-00000001,member-00000002
+last=member-00019999,member-00019998,member-00019997

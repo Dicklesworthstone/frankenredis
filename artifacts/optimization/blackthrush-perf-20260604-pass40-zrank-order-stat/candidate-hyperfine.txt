@@ -1,0 +1,3 @@
+Benchmark 1: target-blackthrush-pass40-zrank-candidate-rch/release/zrank-order-stat-harness --mode paired --n 20000 --queries 20000
+  Time (mean ± σ):      26.9 ms ±   5.0 ms    [User: 21.2 ms, System: 5.7 ms]
+  Range (min … max):    20.0 ms …  35.6 ms    10 runs
