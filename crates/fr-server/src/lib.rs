@@ -225,7 +225,10 @@ mod tests {
         // A mid-token quote that IS closed-then-space is valid and concatenates
         // the unquoted prefix with the quoted body.
         let args = split_inline_args(b"SET ab\"c d\" e").unwrap();
-        assert_eq!(args, vec![b"SET".to_vec(), b"abc d".to_vec(), b"e".to_vec()]);
+        assert_eq!(
+            args,
+            vec![b"SET".to_vec(), b"abc d".to_vec(), b"e".to_vec()]
+        );
     }
 
     #[test]

@@ -17,7 +17,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream as StdTcpStream};
 #[cfg(unix)]
@@ -136,7 +137,10 @@ impl BlockingOp {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
-                argv.iter().skip(3).take(num_keys).any(|k| ready.contains(k))
+                argv.iter()
+                    .skip(3)
+                    .take(num_keys)
+                    .any(|k| ready.contains(k))
             }
             BlockingOp::BXread { argv } | BlockingOp::BXreadgroup { argv } => {
                 let streams_idx = argv.iter().position(|a| a.eq_ignore_ascii_case(b"STREAMS"));
@@ -158,6 +162,141 @@ struct BlockedState {
     op: BlockingOp,
     /// Absolute timestamp (ms) when the block expires. `u64::MAX` = no timeout.
     deadline_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlockedWakeRef {
+    seq: u64,
+    token: Token,
+}
+
+#[derive(Debug)]
+struct BlockedWakeRegistration {
+    seq: u64,
+    deadline_ms: u64,
+    is_wait: bool,
+}
+
+/// Advisory wake index for blocked clients.
+///
+/// `blocked_tokens` and `conn.blocked` remain authoritative. This sidecar only
+/// narrows which tokens `check_blocked_clients` visits on a tick; every
+/// candidate is revalidated against the current connection state before a
+/// timeout or key-ready wake is applied.
+#[derive(Debug, Default)]
+struct BlockedWakeIndex {
+    next_seq: u64,
+    by_key: HashMap<Vec<u8>, VecDeque<BlockedWakeRef>>,
+    timeouts: BinaryHeap<Reverse<(u64, u64, usize)>>,
+    waiters: VecDeque<BlockedWakeRef>,
+    live: HashMap<Token, BlockedWakeRegistration>,
+}
+
+impl BlockedWakeIndex {
+    fn insert(&mut self, token: Token, blocked: &BlockedState) {
+        self.remove(token);
+        self.next_seq = self.next_seq.wrapping_add(1).max(1);
+        let seq = self.next_seq;
+        let wake_ref = BlockedWakeRef { seq, token };
+        for key in blocked.op.keys() {
+            self.by_key.entry(key).or_default().push_back(wake_ref);
+        }
+        if blocked.deadline_ms != u64::MAX {
+            self.timeouts
+                .push(Reverse((blocked.deadline_ms, seq, token.0)));
+        }
+        let is_wait = matches!(
+            blocked.op,
+            BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. }
+        );
+        if is_wait {
+            self.waiters.push_back(wake_ref);
+        }
+        self.live.insert(
+            token,
+            BlockedWakeRegistration {
+                seq,
+                deadline_ms: blocked.deadline_ms,
+                is_wait,
+            },
+        );
+    }
+
+    fn remove(&mut self, token: Token) {
+        self.live.remove(&token);
+    }
+
+    fn clear(&mut self) {
+        self.by_key.clear();
+        self.timeouts.clear();
+        self.waiters.clear();
+        self.live.clear();
+    }
+
+    fn is_live_ref(&self, wake_ref: BlockedWakeRef) -> bool {
+        self.live
+            .get(&wake_ref.token)
+            .is_some_and(|registration| registration.seq == wake_ref.seq)
+    }
+
+    fn candidates(&mut self, ready_keys: &HashSet<Vec<u8>>, now_ms: u64) -> Vec<Token> {
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+
+        let live = &self.live;
+        for key in ready_keys {
+            if let Some(queue) = self.by_key.get_mut(key) {
+                while queue.front().is_some_and(|wake_ref| {
+                    !live
+                        .get(&wake_ref.token)
+                        .is_some_and(|registration| registration.seq == wake_ref.seq)
+                }) {
+                    queue.pop_front();
+                }
+                for wake_ref in queue.iter().copied() {
+                    if live
+                        .get(&wake_ref.token)
+                        .is_some_and(|registration| registration.seq == wake_ref.seq)
+                        && seen.insert(wake_ref.token)
+                    {
+                        candidates.push(wake_ref.token);
+                    }
+                }
+            }
+        }
+
+        while let Some(Reverse((deadline_ms, seq, token_raw))) = self.timeouts.peek().copied() {
+            if deadline_ms > now_ms {
+                break;
+            }
+            self.timeouts.pop();
+            let token = Token(token_raw);
+            if self.live.get(&token).is_some_and(|registration| {
+                registration.seq == seq && registration.deadline_ms == deadline_ms
+            }) && seen.insert(token)
+            {
+                candidates.push(token);
+            }
+        }
+
+        while self
+            .waiters
+            .front()
+            .is_some_and(|wake_ref| !self.is_live_ref(*wake_ref))
+        {
+            self.waiters.pop_front();
+        }
+        for wake_ref in self.waiters.iter().copied() {
+            if self.live.get(&wake_ref.token).is_some_and(|registration| {
+                registration.seq == wake_ref.seq && registration.is_wait
+            }) && seen.insert(wake_ref.token)
+            {
+                candidates.push(wake_ref.token);
+            }
+        }
+
+        candidates
+    }
 }
 
 /// Per-client connection state.
@@ -848,6 +987,7 @@ fn main() -> ExitCode {
     let mut clients: HashMap<Token, ClientConnection> = HashMap::new();
     let mut client_id_to_token: HashMap<u64, Token> = HashMap::new();
     let mut blocked_tokens: HashSet<Token> = HashSet::new();
+    let mut blocked_wake_index = BlockedWakeIndex::default();
     let mut closing_tokens: HashSet<Token> = HashSet::new();
     let mut write_tokens: HashSet<Token> = HashSet::new();
     let mut paused_tokens: HashSet<Token> = HashSet::new();
@@ -906,6 +1046,7 @@ fn main() -> ExitCode {
                             &mut runtime,
                             &mut poll,
                             &mut blocked_tokens,
+                            &mut blocked_wake_index,
                             &mut closing_tokens,
                             &mut write_tokens,
                             &mut paused_tokens,
@@ -948,6 +1089,7 @@ fn main() -> ExitCode {
             clients: &mut clients,
             client_id_to_token: &client_id_to_token,
             blocked_tokens: &mut blocked_tokens,
+            blocked_wake_index: &mut blocked_wake_index,
             closing_tokens: &mut closing_tokens,
             paused_tokens: &mut paused_tokens,
             runtime: &mut runtime,
@@ -962,6 +1104,7 @@ fn main() -> ExitCode {
         check_blocked_clients(CheckBlockedClientsContext {
             clients: &mut clients,
             blocked_tokens: &mut blocked_tokens,
+            blocked_wake_index: &mut blocked_wake_index,
             closing_tokens: &mut closing_tokens,
             paused_tokens: &mut paused_tokens,
             runtime: &mut runtime,
@@ -974,6 +1117,7 @@ fn main() -> ExitCode {
         process_deferred_buffered_clients(DeferredBufferedClientsContext {
             clients: &mut clients,
             blocked_tokens: &mut blocked_tokens,
+            blocked_wake_index: &mut blocked_wake_index,
             closing_tokens: &mut closing_tokens,
             write_tokens: &mut write_tokens,
             paused_tokens: &mut paused_tokens,
@@ -1047,6 +1191,7 @@ fn main() -> ExitCode {
         for token in to_remove {
             if let Some(mut conn) = clients.remove(&token) {
                 blocked_tokens.remove(&token);
+                blocked_wake_index.remove(token);
                 closing_tokens.remove(&token);
                 write_tokens.remove(&token);
                 paused_tokens.remove(&token);
@@ -1200,6 +1345,7 @@ fn handle_readable(
     runtime: &mut Runtime,
     poll: &mut Poll,
     blocked_tokens: &mut HashSet<Token>,
+    blocked_wake_index: &mut BlockedWakeIndex,
     closing_tokens: &mut HashSet<Token>,
     write_tokens: &mut HashSet<Token>,
     paused_tokens: &mut HashSet<Token>,
@@ -1300,6 +1446,7 @@ fn handle_readable(
         conn,
         runtime,
         blocked_tokens,
+        blocked_wake_index,
         closing_tokens,
         write_tokens,
         paused_tokens,
@@ -1387,6 +1534,7 @@ fn process_buffered_frames(
     conn: &mut ClientConnection,
     runtime: &mut Runtime,
     blocked_tokens: &mut HashSet<Token>,
+    blocked_wake_index: &mut BlockedWakeIndex,
     closing_tokens: &mut HashSet<Token>,
     write_tokens: &mut HashSet<Token>,
     paused_tokens: &mut HashSet<Token>,
@@ -1546,6 +1694,9 @@ fn process_buffered_frames(
                     } else {
                         conn.blocked = Some(blocked);
                         blocked_tokens.insert(token);
+                        if let Some(blocked) = &conn.blocked {
+                            blocked_wake_index.insert(token, blocked);
+                        }
                         runtime.mark_client_blocked(runtime.client_id());
                         consumed_total += consumed;
                         break; // Stop processing — client is now blocked.
@@ -2608,6 +2759,7 @@ fn blocked_timeout_response(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64)
 struct CheckBlockedClientsContext<'a> {
     clients: &'a mut HashMap<Token, ClientConnection>,
     blocked_tokens: &'a mut HashSet<Token>,
+    blocked_wake_index: &'a mut BlockedWakeIndex,
     closing_tokens: &'a mut HashSet<Token>,
     paused_tokens: &'a mut HashSet<Token>,
     runtime: &'a mut Runtime,
@@ -2623,6 +2775,7 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
     let CheckBlockedClientsContext {
         clients,
         blocked_tokens,
+        blocked_wake_index,
         closing_tokens,
         paused_tokens,
         runtime,
@@ -2633,19 +2786,22 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
     } = ctx;
     if blocked_tokens.is_empty() {
         runtime.clear_ready_keys();
+        blocked_wake_index.clear();
         return;
     }
 
     let ready_keys = runtime.drain_ready_keys();
-    let active_blocked: Vec<Token> = blocked_tokens.iter().copied().collect();
+    let active_blocked = blocked_wake_index.candidates(&ready_keys, ts);
 
     for token in active_blocked {
         let Some(conn) = clients.get_mut(&token) else {
             blocked_tokens.remove(&token);
+            blocked_wake_index.remove(token);
             continue;
         };
         let Some(blocked) = &conn.blocked else {
             blocked_tokens.remove(&token);
+            blocked_wake_index.remove(token);
             continue;
         };
 
@@ -2672,6 +2828,7 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
             );
             conn.blocked = None;
             blocked_tokens.remove(&token);
+            blocked_wake_index.remove(token);
             runtime.mark_client_unblocked(conn.session.client_id);
 
             // Process any commands the client pipelined while blocked.
@@ -2683,6 +2840,7 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
                     conn,
                     runtime,
                     blocked_tokens,
+                    blocked_wake_index,
                     closing_tokens,
                     write_tokens,
                     paused_tokens,
@@ -2711,6 +2869,7 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
             encode_client_reply(&response, resp3, &mut conn.write_buf);
             conn.blocked = None;
             blocked_tokens.remove(&token);
+            blocked_wake_index.remove(token);
             runtime.mark_client_unblocked(runtime.client_id());
 
             // Process any commands the client pipelined while blocked.
@@ -2721,6 +2880,7 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
                     conn,
                     runtime,
                     blocked_tokens,
+                    blocked_wake_index,
                     closing_tokens,
                     write_tokens,
                     paused_tokens,
@@ -2745,6 +2905,7 @@ struct PendingClientUnblocksContext<'a> {
     clients: &'a mut HashMap<Token, ClientConnection>,
     client_id_to_token: &'a HashMap<u64, Token>,
     blocked_tokens: &'a mut HashSet<Token>,
+    blocked_wake_index: &'a mut BlockedWakeIndex,
     closing_tokens: &'a mut HashSet<Token>,
     paused_tokens: &'a mut HashSet<Token>,
     runtime: &'a mut Runtime,
@@ -2759,6 +2920,7 @@ fn apply_pending_client_unblocks(ctx: PendingClientUnblocksContext<'_>) {
         clients,
         client_id_to_token,
         blocked_tokens,
+        blocked_wake_index,
         closing_tokens,
         paused_tokens,
         runtime,
@@ -2776,11 +2938,13 @@ fn apply_pending_client_unblocks(ctx: PendingClientUnblocksContext<'_>) {
         let Some(conn) = clients.get_mut(&token) else {
             runtime.mark_client_unblocked(client_id);
             blocked_tokens.remove(&token);
+            blocked_wake_index.remove(token);
             continue;
         };
         let Some(blocked) = &conn.blocked else {
             runtime.mark_client_unblocked(client_id);
             blocked_tokens.remove(&token);
+            blocked_wake_index.remove(token);
             continue;
         };
 
@@ -2798,6 +2962,7 @@ fn apply_pending_client_unblocks(ctx: PendingClientUnblocksContext<'_>) {
         encode_client_reply(&response, resp3, &mut conn.write_buf);
         conn.blocked = None;
         blocked_tokens.remove(&token);
+        blocked_wake_index.remove(token);
         runtime.mark_client_unblocked(client_id);
 
         if !conn.read_buf.is_empty() {
@@ -2808,6 +2973,7 @@ fn apply_pending_client_unblocks(ctx: PendingClientUnblocksContext<'_>) {
                 conn,
                 runtime,
                 blocked_tokens,
+                blocked_wake_index,
                 closing_tokens,
                 write_tokens,
                 paused_tokens,
@@ -2826,6 +2992,7 @@ fn apply_pending_client_unblocks(ctx: PendingClientUnblocksContext<'_>) {
 struct DeferredBufferedClientsContext<'a> {
     clients: &'a mut HashMap<Token, ClientConnection>,
     blocked_tokens: &'a mut HashSet<Token>,
+    blocked_wake_index: &'a mut BlockedWakeIndex,
     closing_tokens: &'a mut HashSet<Token>,
     write_tokens: &'a mut HashSet<Token>,
     paused_tokens: &'a mut HashSet<Token>,
@@ -2840,6 +3007,7 @@ fn process_deferred_buffered_clients(ctx: DeferredBufferedClientsContext<'_>) {
     let DeferredBufferedClientsContext {
         clients,
         blocked_tokens,
+        blocked_wake_index,
         closing_tokens,
         write_tokens,
         paused_tokens,
@@ -2874,6 +3042,7 @@ fn process_deferred_buffered_clients(ctx: DeferredBufferedClientsContext<'_>) {
             conn,
             runtime,
             blocked_tokens,
+            blocked_wake_index,
             closing_tokens,
             write_tokens,
             paused_tokens,
@@ -3408,6 +3577,7 @@ mod tests {
     use fr_config::RuntimePolicy;
     use fr_protocol::{ParserConfig, RespFrame};
     use fr_runtime::Runtime;
+    use mio::Token;
     use std::io::{ErrorKind, Write};
     use std::net::{TcpListener as StdTcpListener, TcpStream as StdTcpStream};
     use std::thread;
@@ -3420,10 +3590,18 @@ mod tests {
     fn any_key_ready_matches_keys_membership_for_every_blocking_op() {
         use std::collections::HashSet;
         let ops = [
-            BlockingOp::BLpop { keys: vec![b"a".to_vec(), b"b".to_vec()] },
-            BlockingOp::BRpop { keys: vec![b"x".to_vec()] },
-            BlockingOp::BZpopMax { keys: vec![b"z1".to_vec(), b"z2".to_vec()] },
-            BlockingOp::BZpopMin { keys: vec![b"b".to_vec()] },
+            BlockingOp::BLpop {
+                keys: vec![b"a".to_vec(), b"b".to_vec()],
+            },
+            BlockingOp::BRpop {
+                keys: vec![b"x".to_vec()],
+            },
+            BlockingOp::BZpopMax {
+                keys: vec![b"z1".to_vec(), b"z2".to_vec()],
+            },
+            BlockingOp::BZpopMin {
+                keys: vec![b"b".to_vec()],
+            },
             BlockingOp::BLmove {
                 source: b"src".to_vec(),
                 destination: b"dst".to_vec(),
@@ -3433,31 +3611,52 @@ mod tests {
             // BLMPOP: [timeout, numkeys, k1, k2, LEFT, COUNT, 1]
             BlockingOp::BLmpop {
                 argv: vec![
-                    b"0".to_vec(), b"2".to_vec(), b"a".to_vec(), b"k2".to_vec(),
-                    b"LEFT".to_vec(), b"COUNT".to_vec(), b"1".to_vec(),
+                    b"0".to_vec(),
+                    b"2".to_vec(),
+                    b"a".to_vec(),
+                    b"k2".to_vec(),
+                    b"LEFT".to_vec(),
+                    b"COUNT".to_vec(),
+                    b"1".to_vec(),
                 ],
             },
             BlockingOp::BZmpop {
-                argv: vec![b"0".to_vec(), b"1".to_vec(), b"z2".to_vec(), b"MIN".to_vec()],
+                argv: vec![
+                    b"0".to_vec(),
+                    b"1".to_vec(),
+                    b"z2".to_vec(),
+                    b"MIN".to_vec(),
+                ],
             },
             // XREAD ... STREAMS s1 s2 0 0  -> keys s1, s2
             BlockingOp::BXread {
                 argv: vec![
-                    b"BLOCK".to_vec(), b"0".to_vec(), b"STREAMS".to_vec(),
-                    b"s1".to_vec(), b"s2".to_vec(), b"0".to_vec(), b"0".to_vec(),
+                    b"BLOCK".to_vec(),
+                    b"0".to_vec(),
+                    b"STREAMS".to_vec(),
+                    b"s1".to_vec(),
+                    b"s2".to_vec(),
+                    b"0".to_vec(),
+                    b"0".to_vec(),
                 ],
             },
             BlockingOp::BXreadgroup {
                 argv: vec![b"STREAMS".to_vec(), b"src".to_vec(), b">".to_vec()],
             },
-            BlockingOp::Wait { argv: vec![b"1".to_vec(), b"100".to_vec()] },
-            BlockingOp::Waitaof { argv: vec![b"1".to_vec(), b"0".to_vec(), b"0".to_vec()] },
+            BlockingOp::Wait {
+                argv: vec![b"1".to_vec(), b"100".to_vec()],
+            },
+            BlockingOp::Waitaof {
+                argv: vec![b"1".to_vec(), b"0".to_vec(), b"0".to_vec()],
+            },
         ];
         // Exercise empty, partial, full, and disjoint ready-sets.
         let ready_sets: Vec<HashSet<Vec<u8>>> = vec![
             HashSet::new(),
             ["a".as_bytes().to_vec()].into_iter().collect(),
-            ["b".as_bytes().to_vec(), "z2".as_bytes().to_vec()].into_iter().collect(),
+            ["b".as_bytes().to_vec(), "z2".as_bytes().to_vec()]
+                .into_iter()
+                .collect(),
             ["src".as_bytes().to_vec()].into_iter().collect(),
             ["s2".as_bytes().to_vec()].into_iter().collect(),
             ["k2".as_bytes().to_vec()].into_iter().collect(),
@@ -3530,7 +3729,205 @@ mod tests {
             new_ns / 1_000_000,
         );
         // New path must never be slower than the allocating one.
-        assert!(new_ns <= old_ns + old_ns / 10, "alloc-free scan regressed: {ratio:.2}x");
+        assert!(
+            new_ns <= old_ns + old_ns / 10,
+            "alloc-free scan regressed: {ratio:.2}x"
+        );
+    }
+
+    fn blocked_state(op: BlockingOp, deadline_ms: u64) -> crate::BlockedState {
+        crate::BlockedState { op, deadline_ms }
+    }
+
+    #[test]
+    fn blocked_wake_index_returns_only_ready_key_waiters() {
+        use std::collections::HashSet;
+
+        let mut index = crate::BlockedWakeIndex::default();
+        for i in 0..2000usize {
+            let state = blocked_state(
+                BlockingOp::BLpop {
+                    keys: vec![format!("queue:{i}").into_bytes()],
+                },
+                u64::MAX,
+            );
+            index.insert(Token(i + 1), &state);
+        }
+
+        let ready: HashSet<Vec<u8>> = [b"queue:1733".to_vec()].into_iter().collect();
+        assert_eq!(index.candidates(&ready, 10), vec![Token(1734)]);
+    }
+
+    #[test]
+    fn blocked_wake_index_preserves_per_key_fifo() {
+        use std::collections::HashSet;
+
+        let mut index = crate::BlockedWakeIndex::default();
+        for token in [Token(11), Token(12), Token(13)] {
+            let state = blocked_state(
+                BlockingOp::BRpop {
+                    keys: vec![b"queue".to_vec()],
+                },
+                u64::MAX,
+            );
+            index.insert(token, &state);
+        }
+
+        let ready: HashSet<Vec<u8>> = [b"queue".to_vec()].into_iter().collect();
+        assert_eq!(
+            index.candidates(&ready, 1),
+            vec![Token(11), Token(12), Token(13)]
+        );
+    }
+
+    #[test]
+    fn blocked_wake_index_pops_only_due_timeouts() {
+        let mut index = crate::BlockedWakeIndex::default();
+        let finite = blocked_state(
+            BlockingOp::BLpop {
+                keys: vec![b"finite".to_vec()],
+            },
+            50,
+        );
+        let forever = blocked_state(
+            BlockingOp::BLpop {
+                keys: vec![b"forever".to_vec()],
+            },
+            u64::MAX,
+        );
+        index.insert(Token(1), &finite);
+        index.insert(Token(2), &forever);
+
+        assert!(
+            index
+                .candidates(&std::collections::HashSet::new(), 49)
+                .is_empty()
+        );
+        assert_eq!(
+            index.candidates(&std::collections::HashSet::new(), 50),
+            vec![Token(1)]
+        );
+        assert!(
+            index
+                .candidates(&std::collections::HashSet::new(), 51)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn blocked_wake_index_wait_ops_are_tick_candidates() {
+        let mut index = crate::BlockedWakeIndex::default();
+        let wait = blocked_state(
+            BlockingOp::Wait {
+                argv: vec![b"WAIT".to_vec(), b"1".to_vec(), b"100".to_vec()],
+            },
+            100,
+        );
+        let waitaof = blocked_state(
+            BlockingOp::Waitaof {
+                argv: vec![
+                    b"WAITAOF".to_vec(),
+                    b"1".to_vec(),
+                    b"0".to_vec(),
+                    b"100".to_vec(),
+                ],
+            },
+            100,
+        );
+        index.insert(Token(1), &wait);
+        index.insert(Token(2), &waitaof);
+
+        assert_eq!(
+            index.candidates(&std::collections::HashSet::new(), 1),
+            vec![Token(1), Token(2)]
+        );
+    }
+
+    #[test]
+    fn blocked_wake_index_ignores_stale_reinserted_token() {
+        use std::collections::HashSet;
+
+        let mut index = crate::BlockedWakeIndex::default();
+        let first = blocked_state(
+            BlockingOp::BLpop {
+                keys: vec![b"old".to_vec()],
+            },
+            u64::MAX,
+        );
+        let second = blocked_state(
+            BlockingOp::BLpop {
+                keys: vec![b"new".to_vec()],
+            },
+            u64::MAX,
+        );
+        index.insert(Token(7), &first);
+        index.remove(Token(7));
+        index.insert(Token(7), &second);
+
+        let old_ready: HashSet<Vec<u8>> = [b"old".to_vec()].into_iter().collect();
+        let new_ready: HashSet<Vec<u8>> = [b"new".to_vec()].into_iter().collect();
+        assert!(index.candidates(&old_ready, 1).is_empty());
+        assert_eq!(index.candidates(&new_ready, 1), vec![Token(7)]);
+    }
+
+    #[test]
+    fn blocked_wake_index_avoids_full_blocked_scan_at_scale() {
+        use std::collections::HashSet;
+        use std::time::Instant;
+
+        let blocked: Vec<(Token, BlockingOp)> = (0..10_000usize)
+            .map(|i| {
+                (
+                    Token(i + 1),
+                    BlockingOp::BLpop {
+                        keys: vec![
+                            format!("queue:{i}:a").into_bytes(),
+                            format!("queue:{i}:b").into_bytes(),
+                            format!("queue:{i}:c").into_bytes(),
+                        ],
+                    },
+                )
+            })
+            .collect();
+        let ready: HashSet<Vec<u8>> = [b"queue:7333:b".to_vec()].into_iter().collect();
+        let iters = 200u32;
+
+        let t0 = Instant::now();
+        let mut scan_hits = Vec::new();
+        for _ in 0..iters {
+            scan_hits.clear();
+            for (token, op) in &blocked {
+                if op.any_key_ready(&ready) {
+                    scan_hits.push(*token);
+                }
+            }
+        }
+        let scan_ns = t0.elapsed().as_nanos().max(1);
+
+        let mut index = crate::BlockedWakeIndex::default();
+        for (token, op) in &blocked {
+            index.insert(*token, &blocked_state(op.clone(), u64::MAX));
+        }
+
+        let t1 = Instant::now();
+        let mut indexed_hits = Vec::new();
+        for _ in 0..iters {
+            indexed_hits = index.candidates(&ready, 1);
+        }
+        let index_ns = t1.elapsed().as_nanos().max(1);
+
+        assert_eq!(scan_hits, vec![Token(7334)]);
+        assert_eq!(indexed_hits, scan_hits);
+        let ratio = scan_ns as f64 / index_ns as f64;
+        println!(
+            "blocked wake candidates (10000 clients x3 keys, one ready): scan {} ms -> index {} us = {ratio:.2}x",
+            scan_ns / 1_000_000,
+            index_ns / 1_000,
+        );
+        assert!(
+            index_ns.saturating_mul(5) < scan_ns,
+            "indexed wake candidates insufficiently faster: {ratio:.2}x",
+        );
     }
 
     #[test]
@@ -5263,6 +5660,7 @@ mod tests {
         );
 
         let mut blocked_tokens = HashSet::new();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = HashSet::new();
         let mut write_tokens = HashSet::new();
         let mut paused_tokens = HashSet::new();
@@ -5274,6 +5672,7 @@ mod tests {
             &mut conn,
             &mut runtime,
             &mut blocked_tokens,
+            &mut blocked_wake_index,
             &mut closing_tokens,
             &mut write_tokens,
             &mut paused_tokens,
@@ -5310,6 +5709,7 @@ mod tests {
         check_blocked_clients(CheckBlockedClientsContext {
             clients: &mut clients,
             blocked_tokens: &mut blocked_tokens,
+            blocked_wake_index: &mut blocked_wake_index,
             closing_tokens: &mut closing_tokens,
             paused_tokens: &mut paused_tokens,
             runtime: &mut runtime,
@@ -5402,6 +5802,7 @@ mod tests {
         );
 
         let mut blocked_tokens = HashSet::new();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = HashSet::new();
         let mut write_tokens = HashSet::new();
         let mut paused_tokens = HashSet::new();
@@ -5413,6 +5814,7 @@ mod tests {
             &mut conn,
             &mut runtime,
             &mut blocked_tokens,
+            &mut blocked_wake_index,
             &mut closing_tokens,
             &mut write_tokens,
             &mut paused_tokens,
@@ -5449,6 +5851,7 @@ mod tests {
         check_blocked_clients(CheckBlockedClientsContext {
             clients: &mut clients,
             blocked_tokens: &mut blocked_tokens,
+            blocked_wake_index: &mut blocked_wake_index,
             closing_tokens: &mut closing_tokens,
             paused_tokens: &mut paused_tokens,
             runtime: &mut runtime,
@@ -5579,6 +5982,7 @@ mod tests {
 
         let token = Token(1); // ubs:ignore
         let mut blocked_tokens = HashSet::new();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = HashSet::new();
         let mut write_tokens = HashSet::new();
         let mut paused_tokens = HashSet::new();
@@ -5589,6 +5993,7 @@ mod tests {
             &mut conn,
             &mut runtime,
             &mut blocked_tokens,
+            &mut blocked_wake_index,
             &mut closing_tokens,
             &mut write_tokens,
             &mut paused_tokens,
@@ -5887,6 +6292,7 @@ mod tests {
         conn.read_buf.extend_from_slice(&unpause_bytes);
 
         let mut blocked_tokens = HashSet::new();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = HashSet::new();
         let mut write_tokens = HashSet::new();
         let mut paused_tokens = HashSet::new();
@@ -5895,6 +6301,7 @@ mod tests {
             &mut conn,
             &mut runtime,
             &mut blocked_tokens,
+            &mut blocked_wake_index,
             &mut closing_tokens,
             &mut write_tokens,
             &mut paused_tokens,
@@ -5944,6 +6351,7 @@ mod tests {
         conn.read_buf.extend_from_slice(&ping.to_bytes());
 
         let mut blocked_tokens = HashSet::new();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = HashSet::new();
         let mut write_tokens = HashSet::new();
         let mut paused_tokens = HashSet::new();
@@ -5952,6 +6360,7 @@ mod tests {
             &mut conn,
             &mut runtime,
             &mut blocked_tokens,
+            &mut blocked_wake_index,
             &mut closing_tokens,
             &mut write_tokens,
             &mut paused_tokens,
@@ -6006,6 +6415,7 @@ mod tests {
         }
 
         let mut blocked_tokens = HashSet::new();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = HashSet::new();
         let mut write_tokens = HashSet::new();
         let mut paused_tokens = HashSet::new();
@@ -6015,6 +6425,7 @@ mod tests {
             &mut conn,
             &mut runtime,
             &mut blocked_tokens,
+            &mut blocked_wake_index,
             &mut closing_tokens,
             &mut write_tokens,
             &mut paused_tokens,
@@ -6071,6 +6482,7 @@ mod tests {
         }
 
         let mut blocked_tokens = HashSet::new();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = HashSet::new();
         let mut write_tokens = HashSet::new();
         let mut paused_tokens = HashSet::new();
@@ -6080,6 +6492,7 @@ mod tests {
             &mut conn,
             &mut runtime,
             &mut blocked_tokens,
+            &mut blocked_wake_index,
             &mut closing_tokens,
             &mut write_tokens,
             &mut paused_tokens,
@@ -6129,6 +6542,7 @@ mod tests {
         conn.read_buf.extend_from_slice(&set_frame.to_bytes());
 
         let mut blocked_tokens = HashSet::new();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = HashSet::new();
         let mut write_tokens = HashSet::new();
         let mut paused_tokens = HashSet::new();
@@ -6138,6 +6552,7 @@ mod tests {
             &mut conn,
             &mut runtime,
             &mut blocked_tokens,
+            &mut blocked_wake_index,
             &mut closing_tokens,
             &mut write_tokens,
             &mut paused_tokens,
@@ -6180,6 +6595,7 @@ mod tests {
         conn.read_buf.extend_from_slice(&time.to_bytes());
 
         let mut blocked_tokens = HashSet::new();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = HashSet::new();
         let mut write_tokens = HashSet::new();
         let mut paused_tokens = HashSet::new();
@@ -6189,6 +6605,7 @@ mod tests {
             &mut conn,
             &mut runtime,
             &mut blocked_tokens,
+            &mut blocked_wake_index,
             &mut closing_tokens,
             &mut write_tokens,
             &mut paused_tokens,
@@ -6229,6 +6646,7 @@ mod tests {
         conn.read_buf.extend_from_slice(&quit.to_bytes());
 
         let mut blocked_tokens = HashSet::new();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = HashSet::new();
         let mut write_tokens = HashSet::new();
         let mut paused_tokens = HashSet::new();
@@ -6238,6 +6656,7 @@ mod tests {
             &mut conn,
             &mut runtime,
             &mut blocked_tokens,
+            &mut blocked_wake_index,
             &mut closing_tokens,
             &mut write_tokens,
             &mut paused_tokens,
@@ -6271,6 +6690,7 @@ mod tests {
         conn.read_buf.extend_from_slice(b"*1\r\n$4\r\nPING\r\n");
 
         let mut blocked_tokens = HashSet::new();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         let mut closing_tokens = HashSet::new();
         let mut write_tokens = HashSet::new();
         let mut paused_tokens = HashSet::new();
@@ -6279,6 +6699,7 @@ mod tests {
             &mut conn,
             &mut runtime,
             &mut blocked_tokens,
+            &mut blocked_wake_index,
             &mut closing_tokens,
             &mut write_tokens,
             &mut paused_tokens,
@@ -6349,6 +6770,10 @@ mod tests {
         );
 
         let mut blocked_tokens = HashSet::from([blocked_token]);
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+        if let Some(blocked) = &blocked_conn.blocked {
+            blocked_wake_index.insert(blocked_token, blocked);
+        }
         let mut closing_tokens = HashSet::new();
         let mut write_tokens = HashSet::new();
         let mut paused_tokens = HashSet::new();
@@ -6358,6 +6783,7 @@ mod tests {
             &mut requester_conn,
             &mut runtime,
             &mut blocked_tokens,
+            &mut blocked_wake_index,
             &mut closing_tokens,
             &mut write_tokens,
             &mut paused_tokens,
@@ -6378,6 +6804,7 @@ mod tests {
             clients: &mut clients,
             client_id_to_token: &client_id_to_token,
             blocked_tokens: &mut blocked_tokens,
+            blocked_wake_index: &mut blocked_wake_index,
             closing_tokens: &mut closing_tokens,
             paused_tokens: &mut paused_tokens,
             runtime: &mut runtime,
@@ -6487,6 +6914,13 @@ mod tests {
         let mut clients = HashMap::from([(blocked_token, blocked_conn)]);
         let client_id_to_token = HashMap::from([(blocked_client_id, blocked_token)]); // ubs:ignore
         let mut blocked_tokens = HashSet::from([blocked_token]);
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+        if let Some(blocked) = clients
+            .get(&blocked_token)
+            .and_then(|conn| conn.blocked.as_ref())
+        {
+            blocked_wake_index.insert(blocked_token, blocked);
+        }
         let mut closing_tokens = HashSet::new();
         let mut paused_tokens = HashSet::new();
         let mut write_tokens = HashSet::new();
@@ -6497,6 +6931,7 @@ mod tests {
             clients: &mut clients,
             client_id_to_token: &client_id_to_token,
             blocked_tokens: &mut blocked_tokens,
+            blocked_wake_index: &mut blocked_wake_index,
             closing_tokens: &mut closing_tokens,
             paused_tokens: &mut paused_tokens,
             runtime: &mut runtime,
@@ -6581,6 +7016,13 @@ mod tests {
 
         let mut clients = HashMap::from([(blocked_token, blocked_conn)]);
         let mut blocked_tokens = HashSet::from([blocked_token]);
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+        if let Some(blocked) = clients
+            .get(&blocked_token)
+            .and_then(|conn| conn.blocked.as_ref())
+        {
+            blocked_wake_index.insert(blocked_token, blocked);
+        }
         let mut closing_tokens = HashSet::new();
         let mut paused_tokens = HashSet::new();
         let mut write_tokens = HashSet::new();
@@ -6590,6 +7032,7 @@ mod tests {
         check_blocked_clients(CheckBlockedClientsContext {
             clients: &mut clients,
             blocked_tokens: &mut blocked_tokens,
+            blocked_wake_index: &mut blocked_wake_index,
             closing_tokens: &mut closing_tokens,
             paused_tokens: &mut paused_tokens,
             runtime: &mut runtime,
