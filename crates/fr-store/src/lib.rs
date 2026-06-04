@@ -1162,6 +1162,67 @@ impl SetValue {
             _ => self.retain(|m| !other.contains(m)),
         }
     }
+
+    /// The sorted `i64` array for the intset encoding; `None` for a generic set.
+    fn as_int(&self) -> Option<&Vec<i64>> {
+        match self {
+            SetValue::Int(v) => Some(v),
+            SetValue::Generic(_) => None,
+        }
+    }
+
+    /// Add every member of `other` (in-place set union). When both sets are
+    /// intset-encoded, merge the two sorted `i64` arrays in O(n+m) — no per-member
+    /// string materialisation, no per-insert array shift, no re-parse — promoting
+    /// to generic only if the union exceeds `max_intset_entries`. Identical result
+    /// to `self.extend(other.iter().map(into_owned), max)`. (frankenredis-295fy)
+    pub(crate) fn union_with(&mut self, other: &SetValue, max_intset_entries: usize) {
+        let merged = match (self.as_int(), other.as_int()) {
+            (Some(a), Some(b)) => Some(merge_sorted_unique_i64(a, b)),
+            _ => None,
+        };
+        if let Some(merged) = merged {
+            if merged.len() > max_intset_entries {
+                let mut generic = IndexSet::with_capacity(merged.len());
+                for n in merged {
+                    generic.insert(set_int_to_bytes(n));
+                }
+                *self = SetValue::Generic(generic);
+            } else {
+                *self = SetValue::Int(merged);
+            }
+            return;
+        }
+        let members: Vec<Vec<u8>> = other.iter().map(|m| m.into_owned()).collect();
+        self.extend(members, max_intset_entries);
+    }
+}
+
+/// Merge two ascending, de-duplicated `i64` slices into one ascending,
+/// de-duplicated `Vec<i64>` (set union). (frankenredis-295fy)
+fn merge_sorted_unique_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => {
+                out.push(a[i]);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                out.push(b[j]);
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                out.push(a[i]);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    out.extend_from_slice(&a[i..]);
+    out.extend_from_slice(&b[j..]);
+    out
 }
 
 impl PartialEq for SetValue {
@@ -7995,7 +8056,7 @@ impl Store {
             if let Some(entry) = self.entries.get(*key)
                 && let Value::Set(s) = &entry.value
             {
-                result.extend(s.iter().map(|m| m.into_owned()), max_intset_entries);
+                result.union_with(s, max_intset_entries);
             }
         }
 
@@ -23965,6 +24026,86 @@ mod tests {
         let ratio = old_ns as f64 / new_ns as f64;
         println!(
             "SINTER int A/B (n={n}, x{reps}): generic-retain={old_ns}ns i64-fastpath={new_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
+    }
+
+    #[test]
+    fn setvalue_union_int_fastpath_matches_generic_and_reports_ab_ratio() {
+        use super::SetValue;
+
+        let mut state: u64 = 0x2468_ACE0_1357_9BDF;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        // Equivalence: union_with agrees with extend (same members AND same final
+        // encoding) across Int-Int / Int-Generic / Generic-Generic, with a small
+        // intset limit (16) to exercise promotion-on-overflow.
+        for _ in 0..3000 {
+            let mix = next() % 3;
+            let mut a = SetValue::new();
+            let mut b = SetValue::new();
+            for _ in 0..(next() % 40) {
+                let v = if mix == 1 {
+                    format!("s{}", next() % 60).into_bytes()
+                } else {
+                    ((next() % 120) as i64).to_string().into_bytes()
+                };
+                a.insert(v, 16);
+            }
+            for _ in 0..(next() % 40) {
+                let v = if mix == 2 {
+                    format!("s{}", next() % 60).into_bytes()
+                } else {
+                    ((next() % 120) as i64).to_string().into_bytes()
+                };
+                b.insert(v, 16);
+            }
+            let mut au = a.clone();
+            au.union_with(&b, 16);
+            let mut ag = a.clone();
+            ag.extend(b.iter().map(|m| m.into_owned()), 16);
+            assert_eq!(au, ag, "union members mismatch");
+            assert_eq!(au.is_intset(), ag.is_intset(), "union encoding mismatch");
+        }
+
+        // A/B: union two large intsets. The old extend inserts each member into a
+        // sorted Vec (binary search + O(n) shift) after a string round-trip; the
+        // fast path merges the two sorted i64 arrays once.
+        let n = 4000i64;
+        let mut a = SetValue::new();
+        let mut b = SetValue::new();
+        for i in 0..n {
+            a.insert((i * 2).to_string().into_bytes(), usize::MAX);
+            b.insert((i * 2 + 1).to_string().into_bytes(), usize::MAX);
+        }
+        let reps = 30;
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            let mut r = a.clone();
+            r.extend(b.iter().map(|m| m.into_owned()), usize::MAX);
+            c0 = c0.wrapping_add(r.len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            let mut r = a.clone();
+            r.union_with(&b, usize::MAX);
+            c1 = c1.wrapping_add(r.len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        assert_eq!(c0, c1, "union size mismatch");
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "SUNION int A/B (n={n}, x{reps}): extend-insert={old_ns}ns i64-merge={new_ns}ns ratio={ratio:.2}x"
         );
         assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
     }
