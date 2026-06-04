@@ -1265,8 +1265,13 @@ pub enum Value {
     /// Set: intset (sorted packed i64) for integer-only sets, else a hash-backed
     /// IndexSet (generic). See [`SetValue`]. (frankenredis-hjob8)
     Set(SetValue),
-    /// Sorted set: dual-indexed for efficiency.
-    SortedSet(SortedSet),
+    /// Sorted set: dual-indexed for efficiency. Boxed because `SortedSet` is by
+    /// far the largest variant (dict + ordered BTreeMap + rank treap = 120B),
+    /// and an un-boxed variant forces EVERY `Value` (hence every keyspace
+    /// `Entry`, even a 3-byte string) to that size. Boxing it shrinks `Value`
+    /// 120B->64B and `Entry` 168B->~112B — a ~33% cut in per-key overhead, with
+    /// behaviour unchanged (zset ops auto-deref the box). (frankenredis-w2t01)
+    SortedSet(Box<SortedSet>),
     /// Stream entries keyed by `(milliseconds, sequence)` stream IDs.
     Stream(StreamEntries),
 }
@@ -8657,7 +8662,7 @@ impl Store {
         let zset_max_value = self.zset_max_listpack_value;
         let (added, changed, is_empty, touched) = {
             let entry =
-                self.internal_entry(key.to_vec(), Value::SortedSet(SortedSet::new()), now_ms);
+                self.internal_entry(key.to_vec(), Value::SortedSet(Box::new(SortedSet::new())), now_ms);
             let Value::SortedSet(zs) = &mut entry.value else {
                 return Err(StoreError::WrongType);
             };
@@ -9190,7 +9195,7 @@ impl Store {
         }
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
-        self.internal_entries_insert(key, Entry::new(Value::SortedSet(zs), None, now_ms));
+        self.internal_entries_insert(key, Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms));
         // (frankenredis-bhd3u) Writing the destination set is a keyspace
         // mutation — bump dirty so ZRANGESTORE is persisted to RDB/AOF,
         // replicated, and surfaces keyspace notifications (all gate on the
@@ -9300,7 +9305,7 @@ impl Store {
         let zset_max_value = self.zset_max_listpack_value;
         let (res, is_empty, touched) = {
             let entry =
-                self.internal_entry(key.to_vec(), Value::SortedSet(SortedSet::new()), now_ms);
+                self.internal_entry(key.to_vec(), Value::SortedSet(Box::new(SortedSet::new())), now_ms);
             if lfu_tracking_enabled && key_existed {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
@@ -12690,7 +12695,7 @@ impl Store {
             }
             self.internal_entries_insert(
                 dest.to_vec(),
-                Entry::new(Value::SortedSet(zs), None, now_ms),
+                Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
             );
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
@@ -12880,7 +12885,7 @@ impl Store {
             }
             self.internal_entries_insert(
                 dest.to_vec(),
-                Entry::new(Value::SortedSet(zs), None, now_ms),
+                Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
             );
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
@@ -13596,7 +13601,7 @@ impl Store {
         }
         self.internal_entries_insert(
             dest.to_vec(),
-            Entry::new(Value::SortedSet(zs), None, now_ms),
+            Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
         );
         self.dirty = self.dirty.saturating_add(1);
     }
@@ -14981,7 +14986,7 @@ impl Store {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                 }
-                Value::SortedSet(zs)
+                Value::SortedSet(Box::new(zs))
             }
             RDB_TYPE_STREAM_LISTPACKS
             | RDB_TYPE_STREAM_LISTPACKS_2
@@ -15137,7 +15142,7 @@ impl Store {
                 if zs.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::SortedSet(zs)
+                Value::SortedSet(Box::new(zs))
             }
             RDB_TYPE_ZSET_ZIPLIST => {
                 let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -15146,7 +15151,7 @@ impl Store {
                 if zs.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::SortedSet(zs)
+                Value::SortedSet(Box::new(zs))
             }
             _ => return Err(StoreError::InvalidDumpPayload),
         };
@@ -27366,6 +27371,30 @@ mod tests {
         // (matches the popcount/CRC A/B convention — correctness is the hard
         // assert, the ratio is reported).
         assert!(ratio > 1.2, "foldhash hash-field lookup regressed: {ratio:.2}x");
+    }
+
+    #[test]
+    fn value_size_is_capped_by_boxing_sortedset() {
+        use std::mem::size_of;
+        // (frankenredis-w2t01) SortedSet (120B) is by far the largest variant
+        // and previously sized all of Value (and hence every keyspace Entry) at
+        // 120B. Boxing it drops Value to <=64B (now capped by Hash/Set at 64B).
+        let value_sz = size_of::<super::Value>();
+        let entry_sz = size_of::<super::Entry>();
+        println!(
+            "after boxing SortedSet: Value={value_sz} Entry={entry_sz} (was 120/168) | SortedSet inner={}",
+            size_of::<super::SortedSet>(),
+        );
+        // Value drops 120->72 (now capped by Hash/Set at 64 + tag/padding) and
+        // Entry 168->120 — 48 bytes shaved off EVERY key's overhead.
+        assert!(
+            value_sz <= 72,
+            "Value should be <=72B after boxing SortedSet, got {value_sz}"
+        );
+        assert!(
+            entry_sz < 168,
+            "Entry must shrink below the old 168B, got {entry_sz}"
+        );
     }
 
     #[test]
