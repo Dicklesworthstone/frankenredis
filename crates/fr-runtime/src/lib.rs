@@ -4628,7 +4628,10 @@ impl Runtime {
                     .map(|owners| (key.clone(), owners))
             })
             .collect();
-        let mut invalidations: BTreeMap<u64, Vec<Vec<u8>>> = BTreeMap::new();
+        // BCAST clients: upstream batches every matching key modified by the
+        // command into a SINGLE invalidate message per target (one flush per
+        // command via trackingHandlePendingKeyInvalidations).
+        let mut bcast_invalidations: BTreeMap<u64, Vec<Vec<u8>>> = BTreeMap::new();
         for (owner_id, session) in self
             .server
             .client_sessions
@@ -4651,11 +4654,27 @@ impl Runtime {
 
             for key in keys {
                 if Self::tracking_key_matches_prefixes(key, tracking) {
-                    Self::add_tracking_invalidation(&mut invalidations, target_id, key);
+                    Self::add_tracking_invalidation(&mut bcast_invalidations, target_id, key);
                 }
             }
         }
+        for (target_id, keys) in bcast_invalidations {
+            if !keys.is_empty() {
+                self.server
+                    .pubsub_outbox
+                    .entry(target_id)
+                    .or_default()
+                    .push(fr_store::PubSubMessage::Invalidate { keys });
+            }
+        }
+
+        // Non-BCAST (default / OPTIN / OPTOUT) clients: upstream
+        // trackingInvalidateKey fires PER KEY as each key is modified, so every
+        // invalidated key produces its OWN invalidate push (a single-key
+        // message), in key-modification order — NOT one batched message.
+        // (frankenredis-8ypwc)
         for (key, owner_ids) in observed_keys {
+            let mut targets: Vec<u64> = Vec::new();
             for owner_id in owner_ids {
                 let Some(session) = self.client_session_including_current(owner_id) else {
                     continue;
@@ -4669,18 +4688,21 @@ impl Runtime {
                 }
                 let target_id = tracking.redirect.unwrap_or(owner_id);
                 if self.client_session_exists_including_current(target_id) {
-                    Self::add_tracking_invalidation(&mut invalidations, target_id, &key);
+                    targets.push(target_id);
                 }
             }
-        }
-
-        for (target_id, keys) in invalidations {
-            if !keys.is_empty() {
+            // The owner set's iteration order is unspecified; sort so multi-
+            // observer output is deterministic. One message per caching client,
+            // matching upstream's per-client send.
+            targets.sort_unstable();
+            for target_id in targets {
                 self.server
                     .pubsub_outbox
                     .entry(target_id)
                     .or_default()
-                    .push(fr_store::PubSubMessage::Invalidate { keys });
+                    .push(fr_store::PubSubMessage::Invalidate {
+                        keys: vec![key.clone()],
+                    });
             }
         }
     }
@@ -17464,6 +17486,78 @@ mod tests {
             rt.drain_pending_pubsub(),
             vec![fr_store::PubSubMessage::Invalidate {
                 keys: vec![b"foo:1".to_vec()],
+            }]
+        );
+    }
+
+    #[test]
+    fn non_bcast_tracking_emits_one_invalidate_push_per_key() {
+        // frankenredis-8ypwc: when a single command modifies multiple tracked
+        // keys, a non-BCAST (default/OPTIN/OPTOUT) client must receive one
+        // invalidate push PER key — upstream trackingInvalidateKey fires per key
+        // as each is modified — NOT one batched multi-key push. Verified against
+        // vendored redis 7.2.4 (MSET of two tracked keys → two pushes).
+        let mut rt = Runtime::default_strict();
+        let tracker = rt.new_session();
+        let writer = rt.new_session();
+
+        let previous = rt.swap_session(tracker);
+        assert!(matches!(
+            rt.execute_frame(command(&[b"HELLO", b"3"]), 0),
+            RespFrame::Map(Some(_))
+        ));
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // Register caching interest in both keys via reads.
+        rt.execute_frame(command(&[b"GET", b"m1"]), 2);
+        rt.execute_frame(command(&[b"GET", b"m2"]), 3);
+        let tracker_session = rt.swap_session(writer);
+        rt.record_client_session(&tracker_session);
+
+        // One command modifies both tracked keys, in arg order m1 then m2.
+        assert_eq!(
+            rt.execute_frame(command(&[b"MSET", b"m1", b"1", b"m2", b"2"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.drain_pubsub_for_client(tracker_session.client_id),
+            vec![
+                fr_store::PubSubMessage::Invalidate {
+                    keys: vec![b"m1".to_vec()],
+                },
+                fr_store::PubSubMessage::Invalidate {
+                    keys: vec![b"m2".to_vec()],
+                },
+            ],
+            "non-BCAST tracking must emit one single-key invalidate push per modified key, in key order"
+        );
+
+        let _writer = rt.swap_session(previous);
+    }
+
+    #[test]
+    fn bcast_tracking_batches_multiple_keys_into_one_push() {
+        // frankenredis-8ypwc companion: a BCAST client still batches every
+        // matching key modified by one command into a SINGLE invalidate push
+        // (one flush per command) — the per-key split above must not regress it.
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CLIENT", b"TRACKING", b"ON", b"BCAST", b"PREFIX", b"foo"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"MSET", b"foo1", b"1", b"foo2", b"2"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.drain_pending_pubsub(),
+            vec![fr_store::PubSubMessage::Invalidate {
+                keys: vec![b"foo1".to_vec(), b"foo2".to_vec()],
             }]
         );
     }
