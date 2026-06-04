@@ -14992,16 +14992,16 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
                         .map(|(k_, v_)| {
                             let ttl = store
                                 .hash_field_expires
-                                .get(&(physical.clone(), k_.clone()))
+                                .get(&(physical.clone(), k_.to_vec()))
                                 .copied();
-                            (k_.clone(), v_.clone(), ttl)
+                            (k_.to_vec(), v_.to_vec(), ttl)
                         })
                         .collect();
                     fields.sort_by(|a, b| a.0.cmp(&b.0));
                     RdbValue::HashWithTtls(fields)
                 } else {
                     let mut fields: Vec<(Vec<u8>, Vec<u8>)> =
-                        h.iter().map(|(k_, v_)| (k_.clone(), v_.clone())).collect();
+                        h.iter().map(|(k_, v_)| (k_.to_vec(), v_.to_vec())).collect();
                     fields.sort_by(|a, b| a.0.cmp(&b.0));
                     RdbValue::Hash(fields)
                 }

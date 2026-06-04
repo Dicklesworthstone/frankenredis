@@ -172,7 +172,7 @@ fn read_varint(buf: &[u8], mut pos: usize) -> (usize, usize) {
     (result, pos)
 }
 
-use indexmap::IndexSet;
+use indexmap::{IndexMap, IndexSet};
 
 /// Hashtable storage for a large generic set (the former `GenericSet` alias).
 pub type SetHashTable = IndexSet<Vec<u8>, foldhash::quality::RandomState>;
@@ -349,10 +349,321 @@ impl<'a> Iterator for GenericSetIter<'a> {
     }
 }
 
+/// Hashtable storage for a large hash (the former `HashFieldMap` alias).
+pub type FieldHashTable = IndexMap<Vec<u8>, Vec<u8>, foldhash::quality::RandomState>;
+
+/// Storage for a hash's field→value map: a packed listpack-style buffer while
+/// small, promoting to an `IndexMap` hashtable past the threshold. Drop-in for
+/// the former `IndexMap` alias — same insertion-ordered iteration and identical
+/// get/insert/contains/remove semantics, so HGETALL/HKEYS/HVALS/HSCAN output is
+/// byte-for-byte unchanged. (frankenredis-9mh3o step 3)
+#[derive(Clone, Debug)]
+pub enum HashFieldMap {
+    Packed(PackedStrMap),
+    Hash(FieldHashTable),
+}
+
+impl Default for HashFieldMap {
+    fn default() -> Self {
+        HashFieldMap::Packed(PackedStrMap::new())
+    }
+}
+
+impl HashFieldMap {
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            HashFieldMap::Packed(p) => p.len(),
+            HashFieldMap::Hash(h) => h.len(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[must_use]
+    pub fn get(&self, field: &[u8]) -> Option<&[u8]> {
+        match self {
+            HashFieldMap::Packed(p) => p.get(field),
+            HashFieldMap::Hash(h) => h.get(field).map(|v| v.as_slice()),
+        }
+    }
+
+    #[must_use]
+    pub fn contains_key(&self, field: &[u8]) -> bool {
+        match self {
+            HashFieldMap::Packed(p) => p.contains_key(field),
+            HashFieldMap::Hash(h) => h.contains_key(field),
+        }
+    }
+
+    #[must_use]
+    pub fn get_index(&self, idx: usize) -> Option<(&[u8], &[u8])> {
+        match self {
+            HashFieldMap::Packed(p) => p.get_index(idx),
+            HashFieldMap::Hash(h) => h.get_index(idx).map(|(k, v)| (k.as_slice(), v.as_slice())),
+        }
+    }
+
+    fn promote(&mut self) {
+        if let HashFieldMap::Packed(p) = self {
+            let mut h: FieldHashTable = IndexMap::with_capacity_and_hasher(
+                p.len() + 1,
+                foldhash::quality::RandomState::default(),
+            );
+            for (k, v) in p.iter() {
+                h.insert(k.to_vec(), v.to_vec());
+            }
+            *self = HashFieldMap::Hash(h);
+        }
+    }
+
+    /// Insert/overwrite, returning the previous value (matches `IndexMap::insert`).
+    pub fn insert(&mut self, field: Vec<u8>, value: Vec<u8>) -> Option<Vec<u8>> {
+        if let HashFieldMap::Packed(p) = self
+            && !p.contains_key(&field)
+            && (p.len() >= PACKED_MAX_ENTRIES
+                || field.len() > PACKED_MAX_VALUE
+                || value.len() > PACKED_MAX_VALUE)
+        {
+            self.promote();
+        }
+        match self {
+            HashFieldMap::Packed(p) => p.insert(field, value),
+            HashFieldMap::Hash(h) => h.insert(field, value),
+        }
+    }
+
+    pub fn shift_remove(&mut self, field: &[u8]) -> Option<Vec<u8>> {
+        match self {
+            HashFieldMap::Packed(p) => p.shift_remove(field),
+            HashFieldMap::Hash(h) => h.shift_remove(field),
+        }
+    }
+
+    #[must_use]
+    pub fn iter(&self) -> HashFieldMapIter<'_> {
+        match self {
+            HashFieldMap::Packed(p) => HashFieldMapIter::Packed(p.iter()),
+            HashFieldMap::Hash(h) => HashFieldMapIter::Hash(h.iter()),
+        }
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &[u8]> {
+        self.iter().map(|(k, _)| k)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &[u8]> {
+        self.iter().map(|(_, v)| v)
+    }
+}
+
+/// Map equality is order-independent on (field, value) pairs (matches
+/// `IndexMap`'s `PartialEq`), so a Packed and a Hash map with the same entries
+/// compare equal.
+impl PartialEq for HashFieldMap {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().all(|(k, v)| other.get(k) == Some(v))
+    }
+}
+impl Eq for HashFieldMap {}
+
+impl FromIterator<(Vec<u8>, Vec<u8>)> for HashFieldMap {
+    fn from_iter<I: IntoIterator<Item = (Vec<u8>, Vec<u8>)>>(iter: I) -> Self {
+        let mut m = HashFieldMap::default();
+        for (k, v) in iter {
+            m.insert(k, v);
+        }
+        m
+    }
+}
+
+/// Borrowing iterator over a `HashFieldMap`'s (field, value) pairs.
+pub enum HashFieldMapIter<'a> {
+    Packed(PackedStrMapIter<'a>),
+    Hash(indexmap::map::Iter<'a, Vec<u8>, Vec<u8>>),
+}
+
+impl<'a> Iterator for HashFieldMapIter<'a> {
+    type Item = (&'a [u8], &'a [u8]);
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            HashFieldMapIter::Packed(it) => it.next(),
+            HashFieldMapIter::Hash(it) => it.next().map(|(k, v)| (k.as_slice(), v.as_slice())),
+        }
+    }
+}
+
+// ───────────────────────── packed string MAP (for small hashes) ────────────
+
+/// Packed field→value map for SMALL hashes: a sequence of
+/// `[vint klen][k][vint vlen][v]` records in insertion order, one allocation
+/// instead of an `IndexMap` (heap block + hash slot per field). Mirrors
+/// `PackedStrSet`; insert of an existing field keeps its position and replaces
+/// the value in place (matching `IndexMap::insert`), so HGETALL/HKEYS/HVALS
+/// order is byte-for-byte unchanged. (frankenredis-9mh3o step 3)
+#[derive(Clone, Debug, Default)]
+pub struct PackedStrMap {
+    buf: Vec<u8>,
+    len: usize,
+}
+
+/// Byte offsets of one record located by field: `(record_start, value_enc_start,
+/// value_start, value_end)` where `record_start` begins `[klen]`,
+/// `value_enc_start` begins `[vlen]`, `value_start..value_end` is the raw value.
+struct Located {
+    record_start: usize,
+    value_enc_start: usize,
+    value_start: usize,
+    value_end: usize,
+}
+
+impl PackedStrMap {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            len: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn with_capacity(bytes: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(bytes),
+            len: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        self.buf.len()
+    }
+
+    fn locate(&self, field: &[u8]) -> Option<Located> {
+        let mut pos = 0;
+        while pos < self.buf.len() {
+            let record_start = pos;
+            let (klen, k_start) = read_varint(&self.buf, pos);
+            let k_end = k_start + klen;
+            let (vlen, v_start) = read_varint(&self.buf, k_end);
+            let v_end = v_start + vlen;
+            if self.buf[k_start..k_end] == *field {
+                return Some(Located {
+                    record_start,
+                    value_enc_start: k_end,
+                    value_start: v_start,
+                    value_end: v_end,
+                });
+            }
+            pos = v_end;
+        }
+        None
+    }
+
+    #[must_use]
+    pub fn get(&self, field: &[u8]) -> Option<&[u8]> {
+        self.locate(field)
+            .map(|l| &self.buf[l.value_start..l.value_end])
+    }
+
+    #[must_use]
+    pub fn contains_key(&self, field: &[u8]) -> bool {
+        self.locate(field).is_some()
+    }
+
+    /// Insert/overwrite `field`→`value`. Returns the previous value if the field
+    /// existed (its position is preserved, value replaced in place); `None` if
+    /// newly added (appended). Matches `IndexMap::insert`.
+    pub fn insert(&mut self, field: Vec<u8>, value: Vec<u8>) -> Option<Vec<u8>> {
+        if let Some(l) = self.locate(&field) {
+            let old = self.buf[l.value_start..l.value_end].to_vec();
+            let mut encoded = Vec::with_capacity(value.len() + 2);
+            write_varint(&mut encoded, value.len());
+            encoded.extend_from_slice(&value);
+            self.buf.splice(l.value_enc_start..l.value_end, encoded);
+            Some(old)
+        } else {
+            write_varint(&mut self.buf, field.len());
+            self.buf.extend_from_slice(&field);
+            write_varint(&mut self.buf, value.len());
+            self.buf.extend_from_slice(&value);
+            self.len += 1;
+            None
+        }
+    }
+
+    /// Remove `field`; returns its value if present. Survivors keep order.
+    pub fn shift_remove(&mut self, field: &[u8]) -> Option<Vec<u8>> {
+        let l = self.locate(field)?;
+        let old = self.buf[l.value_start..l.value_end].to_vec();
+        self.buf.drain(l.record_start..l.value_end);
+        self.len -= 1;
+        Some(old)
+    }
+
+    /// nth (field, value) in insertion order (powers HRANDFIELD index selection).
+    #[must_use]
+    pub fn get_index(&self, idx: usize) -> Option<(&[u8], &[u8])> {
+        self.iter().nth(idx)
+    }
+
+    #[must_use]
+    pub fn iter(&self) -> PackedStrMapIter<'_> {
+        PackedStrMapIter {
+            buf: &self.buf,
+            pos: 0,
+        }
+    }
+}
+
+impl FromIterator<(Vec<u8>, Vec<u8>)> for PackedStrMap {
+    fn from_iter<I: IntoIterator<Item = (Vec<u8>, Vec<u8>)>>(iter: I) -> Self {
+        let mut m = Self::new();
+        for (k, v) in iter {
+            m.insert(k, v);
+        }
+        m
+    }
+}
+
+/// Borrowing iterator over (field, value) pairs, in insertion order.
+pub struct PackedStrMapIter<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Iterator for PackedStrMapIter<'a> {
+    type Item = (&'a [u8], &'a [u8]);
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.buf.len() {
+            return None;
+        }
+        let (klen, k_start) = read_varint(self.buf, self.pos);
+        let k_end = k_start + klen;
+        let (vlen, v_start) = read_varint(self.buf, k_end);
+        let v_end = v_start + vlen;
+        self.pos = v_end;
+        Some((&self.buf[k_start..k_end], &self.buf[v_start..v_end]))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{GenericSet, PackedStrSet};
-    use indexmap::IndexSet;
+    use super::{PackedStrMap, PackedStrSet};
+    use indexmap::{IndexMap, IndexSet};
     use proptest::prelude::*;
 
     #[test]
@@ -431,5 +742,57 @@ mod tests {
                 prop_assert_eq!(p, o);
             }
         }
+
+        /// PackedStrMap must behave EXACTLY like an insertion-ordered IndexMap:
+        /// insert returns the previous value AND keeps the field's position on
+        /// update, get/contains/len/shift_remove match, and iteration order is
+        /// identical. The isomorphism the HashFieldMap wiring relies on.
+        #[test]
+        fn map_equivalent_to_indexmap(ops in proptest::collection::vec(
+            (0u8..3, proptest::collection::vec(0u8..3, 0..4), proptest::collection::vec(0u8..9, 0..4)),
+            0..300)) {
+            let mut packed = PackedStrMap::new();
+            let mut oracle: IndexMap<Vec<u8>, Vec<u8>> = IndexMap::new();
+            for (op, field, value) in ops {
+                match op {
+                    0 => {
+                        let a = packed.insert(field.clone(), value.clone());
+                        let b = oracle.insert(field.clone(), value.clone());
+                        prop_assert_eq!(a, b);
+                    }
+                    1 => {
+                        let a = packed.shift_remove(&field);
+                        let b = oracle.shift_remove(&field);
+                        prop_assert_eq!(a, b);
+                    }
+                    _ => {
+                        prop_assert_eq!(packed.get(&field), oracle.get(&field[..]).map(|v| v.as_slice()));
+                        prop_assert_eq!(packed.contains_key(&field), oracle.contains_key(&field[..]));
+                    }
+                }
+                prop_assert_eq!(packed.len(), oracle.len());
+                let p: Vec<(&[u8], &[u8])> = packed.iter().collect();
+                let o: Vec<(&[u8], &[u8])> =
+                    oracle.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+                prop_assert_eq!(p, o);
+            }
+        }
+    }
+
+    #[test]
+    fn map_insert_update_keeps_position() {
+        let mut m = PackedStrMap::new();
+        assert_eq!(m.insert(b"a".to_vec(), b"1".to_vec()), None);
+        assert_eq!(m.insert(b"b".to_vec(), b"2".to_vec()), None);
+        assert_eq!(m.insert(b"c".to_vec(), b"3".to_vec()), None);
+        // updating an existing field keeps its position, returns the old value,
+        // and handles a value-length change (1 -> 5 bytes).
+        assert_eq!(m.insert(b"b".to_vec(), b"22222".to_vec()), Some(b"2".to_vec()));
+        let pairs: Vec<(&[u8], &[u8])> = m.iter().collect();
+        assert_eq!(pairs, vec![(&b"a"[..], &b"1"[..]), (b"b", b"22222"), (b"c", b"3")]);
+        assert_eq!(m.get(b"b"), Some(&b"22222"[..]));
+        assert_eq!(m.shift_remove(b"a"), Some(b"1".to_vec()));
+        assert_eq!(m.get_index(0), Some((&b"b"[..], &b"22222"[..])));
+        assert_eq!(m.len(), 2);
     }
 }

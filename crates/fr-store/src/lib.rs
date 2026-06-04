@@ -4,22 +4,14 @@
 // `GenericSet` stores a small set in one packed buffer, promoting to an IndexSet
 // hashtable past the threshold. SMEMBERS/SSCAN/SPOP output is unchanged.
 mod packed_set;
-use packed_set::GenericSet;
+use packed_set::{GenericSet, HashFieldMap};
 
 use fr_expire::evaluate_expiry;
-use indexmap::IndexMap;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Deref, DerefMut};
-
-/// Hash-field map backing `Value::Hash`. Uses `foldhash` (fast, HashDoS-
-/// resistant, pure-safe-Rust) instead of std SipHash for HGET/HSET/HDEL field
-/// lookups. `IndexMap` iterates in INSERTION order regardless of hasher, so
-/// HGETALL/HKEYS/HSCAN output is byte-identical — the hasher only accelerates
-/// the internal field-index probe. (frankenredis-rqdxh, extends 8kuy1)
-type HashFieldMap = IndexMap<Vec<u8>, Vec<u8>, foldhash::quality::RandomState>;
 
 /// Generic (hash-backed) set encoding behind `SetValue::Generic` — the non-int
 /// string set. foldhash (not SipHash) for fast SADD/SREM/SISMEMBER membership;
@@ -6080,7 +6072,7 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(m.get(field).cloned()),
+                    Value::Hash(m) => Ok(m.get(field).map(<[u8]>::to_vec)),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -6107,7 +6099,7 @@ impl Store {
             };
             let mut removed = 0_u64;
             for field in fields {
-                if m.shift_remove(*field).is_some() {
+                if m.shift_remove(field).is_some() {
                     removed += 1;
                 }
             }
@@ -6218,7 +6210,7 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+                    Value::Hash(m) => Ok(m.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect()),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -6246,7 +6238,7 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(m.keys().cloned().collect()),
+                    Value::Hash(m) => Ok(m.keys().map(<[u8]>::to_vec).collect()),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -6274,7 +6266,7 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(m.values().cloned().collect()),
+                    Value::Hash(m) => Ok(m.values().map(<[u8]>::to_vec).collect()),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -6309,7 +6301,7 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(fields.iter().map(|f| m.get(*f).cloned()).collect()),
+                    Value::Hash(m) => Ok(fields.iter().map(|f| m.get(f).map(<[u8]>::to_vec)).collect()),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -6400,8 +6392,8 @@ impl Store {
                 let Value::Hash(m) = &mut entry.value else {
                     return Err(StoreError::WrongType);
                 };
-                if let indexmap::map::Entry::Vacant(slot) = m.entry(field) {
-                    slot.insert(value);
+                if !m.contains_key(&field) {
+                    m.insert(field, value);
                     entry.touch_write(now_ms);
                     // (frankenredis-yp503) Lock hashtable encoding if
                     // threshold crossed.
@@ -6438,7 +6430,7 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(m.get(field).map_or(0, Vec::len)),
+                    Value::Hash(m) => Ok(m.get(field).map_or(0, <[u8]>::len)),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -6535,7 +6527,7 @@ impl Store {
                             return Ok(None);
                         }
                         let idx = (rand_val as usize) % m.len();
-                        Ok(m.keys().nth(idx).cloned())
+                        Ok(m.keys().nth(idx).map(<[u8]>::to_vec))
                     }
                     _ => Err(StoreError::WrongType),
                 }
@@ -6626,7 +6618,7 @@ impl Store {
             Some(entry) => match &entry.value {
                 Value::Hash(m) => Ok(indices
                     .iter()
-                    .filter_map(|&idx| m.get_index(idx).map(|(k, v)| (k.clone(), v.clone())))
+                    .filter_map(|&idx| m.get_index(idx).map(|(k, v)| (k.to_vec(), v.to_vec())))
                     .collect()),
                 _ => Ok(Vec::new()),
             },
@@ -13406,7 +13398,7 @@ impl Store {
                                 .filter(|(field, _)| {
                                     pattern.is_none_or(|pat| glob_match(pat, field))
                                 })
-                                .map(|(f, v)| (f.clone(), v.clone()))
+                                .map(|(f, v)| (f.to_vec(), v.to_vec()))
                                 .collect();
                             return Ok((0, result));
                         }
@@ -13432,7 +13424,7 @@ impl Store {
                                 }
                                 continue;
                             }
-                            result.push((field.clone(), value.clone()));
+                            result.push((field.to_vec(), value.to_vec()));
                             if processed >= batch_size {
                                 break;
                             }
@@ -15061,8 +15053,8 @@ impl Store {
                     buf.push(RDB_TYPE_HASH_LISTPACK);
                     let mut pairs = Vec::with_capacity(h.len() * 2);
                     for (field, value) in h.iter() {
-                        pairs.push(field.as_slice());
-                        pairs.push(value.as_slice());
+                        pairs.push(field);
+                        pairs.push(value);
                     }
                     encode_dump_bulk(&mut buf, &encode_listpack_strings(&pairs)?);
                 } else {
@@ -15553,15 +15545,15 @@ impl Store {
                 Value::Hash(h) => {
                     if !h.is_empty() {
                         // Sort fields for deterministic output.
-                        let mut fields: Vec<(&Vec<u8>, &Vec<u8>)> = h.iter().collect();
+                        let mut fields: Vec<(&[u8], &[u8])> = h.iter().collect();
                         fields.sort_by(|a, b| a.0.cmp(b.0));
                         for chunk in fields.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
                             // Redis aof.c::rewriteHashObject writes HMSET in
                             // batches capped by AOF_REWRITE_ITEMS_PER_CMD.
                             let mut argv = vec![b"HMSET".to_vec(), logical_key.clone()];
                             for (field, value) in chunk {
-                                argv.push((*field).clone());
-                                argv.push((*value).clone());
+                                argv.push(field.to_vec());
+                                argv.push(value.to_vec());
                             }
                             commands.push(argv);
                         }
@@ -27838,14 +27830,14 @@ mod tests {
         // insertion order regardless of hasher, so HGETALL/SMEMBERS output is
         // unchanged — only the field-index probe is faster. A/B on the exact
         // changed operation: an IndexMap field lookup, SipHash vs foldhash.
-        use indexmap::IndexMap;
         use std::time::Instant;
 
         let fields: Vec<Vec<u8>> = (0..20_000u32)
             .map(|i| format!("field:attribute:{i:010}:name").into_bytes())
             .collect();
-        let mut sip: IndexMap<Vec<u8>, u64> = IndexMap::default();
-        let mut fold: IndexMap<Vec<u8>, u64, foldhash::quality::RandomState> = IndexMap::default();
+        let mut sip: indexmap::IndexMap<Vec<u8>, u64> = indexmap::IndexMap::default();
+        let mut fold: indexmap::IndexMap<Vec<u8>, u64, foldhash::quality::RandomState> =
+            indexmap::IndexMap::default();
         for (i, f) in fields.iter().enumerate() {
             sip.insert(f.clone(), i as u64);
             fold.insert(f.clone(), i as u64);
@@ -33702,7 +33694,7 @@ mod tests {
                             }
                             crate::Value::Hash(hash) => AofValueSnapshot::Hash(
                                 hash.iter()
-                                    .map(|(field, value)| (field.clone(), value.clone()))
+                                    .map(|(field, value)| (field.to_vec(), value.to_vec()))
                                     .collect(),
                             ),
                             crate::Value::SortedSet(zs) => AofValueSnapshot::SortedSet(
