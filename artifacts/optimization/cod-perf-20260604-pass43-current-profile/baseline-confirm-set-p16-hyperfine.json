@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "command": "bash -lc 'log=\"$OUT/baseline-confirm-server.log\"; \"$SERVER\" --port \"$PORT\" --mode strict > \"$log\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for i in {1..100}; do grep -q ready \"$log\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$log\" || exit 1; \"$BENCH\" --host 127.0.0.1 --port \"$PORT\" --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"$OUT/baseline-confirm-set-p16-last.json\" --key-prefix cod-pass43-baseline-confirm' ",
+      "mean": 1.724469654425,
+      "stddev": 0.08065734713191666,
+      "median": 1.6856356673,
+      "user": 1.66297355,
+      "system": 1.313859755,
+      "min": 1.6546931233,
+      "max": 1.8716862713,
+      "times": [
+        1.6853094822999999,
+        1.6546931233,
+        1.7234038003,
+        1.6859618523,
+        1.6713587793,
+        1.8280903993,
+        1.8716862713,
+        1.6752535273
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

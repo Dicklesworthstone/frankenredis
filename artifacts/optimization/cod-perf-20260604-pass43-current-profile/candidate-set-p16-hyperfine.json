@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "command": "bash -lc 'log=\"$OUT/candidate-server.log\"; \"$SERVER\" --port \"$PORT\" --mode strict > \"$log\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for i in {1..100}; do grep -q ready \"$log\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$log\" || exit 1; \"$BENCH\" --host 127.0.0.1 --port \"$PORT\" --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"$OUT/candidate-set-p16-last.json\" --key-prefix cod-pass43-candidate' ",
+      "mean": 1.7489173394699997,
+      "stddev": 0.1734251577469615,
+      "median": 1.72488206972,
+      "user": 1.6908482599999999,
+      "system": 1.38792119,
+      "min": 1.52927728372,
+      "max": 2.0426177867199997,
+      "times": [
+        1.95610755072,
+        2.0426177867199997,
+        1.69534017472,
+        1.52927728372,
+        1.6078263317200001,
+        1.75790372072,
+        1.75442396472,
+        1.64784190272
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
