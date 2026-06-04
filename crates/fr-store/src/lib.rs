@@ -1,5 +1,11 @@
 #![forbid(unsafe_code)]
 
+// Succinct listpack-style packing for small generic sets — the primitive for
+// frankenredis-9mh3o. `allow(dead_code)` until it is wired into `SetValue`
+// (the equivalence proof lives in the module's tests).
+#[allow(dead_code)]
+mod packed_set;
+
 use fr_expire::evaluate_expiry;
 use indexmap::{IndexMap, IndexSet};
 use std::borrow::Cow;
