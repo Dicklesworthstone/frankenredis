@@ -4916,6 +4916,46 @@ fn geo_radius_bbox(clon: f64, clat: f64, radius_m: f64) -> (f64, f64, f64, f64, 
     (lat_min, lat_max, lon_min, lon_max, lon_wrap)
 }
 
+/// Conservative lat/lon bounding box fully containing the GEOSEARCH BYBOX
+/// rectangle (`half_w` x `half_h` metres centred at (`cx`,`cy`)), returned as
+/// `(lat_min, lat_max, lon_min, lon_max, lon_wrap)`. A point passes
+/// `geo_point_in_box` only if its latitude distance <= `half_h`
+/// (=> `|lat-cy| <= half_h/R`, exact) and its east-west distance at its own
+/// latitude <= `half_w` (=> `|lon-cx| <= 2*asin(sin(half_w/2R)/cos(lat))`,
+/// widest at the band edge nearest a pole). Hence every in-box point lies inside
+/// this box, so it is safe purely as a pre-filter; pole / very-wide cases widen
+/// to a full-longitude box (latitude still prunes). (frankenredis-vnsnx)
+fn geo_box_bbox(cx: f64, cy: f64, half_w: f64, half_h: f64) -> (f64, f64, f64, f64, bool) {
+    const MARGIN: f64 = 1.0 + 1e-9;
+    let lat_delta = (half_h / GEO_EARTH_RADIUS_IN_METERS).to_degrees() * MARGIN;
+    let lat_min = cy - lat_delta;
+    let lat_max = cy + lat_delta;
+    let worst_lat = cy.abs() + lat_delta;
+    if worst_lat >= 90.0 {
+        return (lat_min, lat_max, -180.0, 180.0, true);
+    }
+    let cos_worst = worst_lat.to_radians().cos();
+    if cos_worst <= 1e-12 {
+        return (lat_min, lat_max, -180.0, 180.0, true);
+    }
+    let ang = half_w / (2.0 * GEO_EARTH_RADIUS_IN_METERS);
+    if ang >= std::f64::consts::FRAC_PI_2 {
+        return (lat_min, lat_max, -180.0, 180.0, true);
+    }
+    let s = ang.sin() / cos_worst;
+    if s >= 1.0 {
+        return (lat_min, lat_max, -180.0, 180.0, true);
+    }
+    let lon_delta = (2.0 * s.asin()).to_degrees() * MARGIN;
+    if lon_delta >= 180.0 {
+        return (lat_min, lat_max, -180.0, 180.0, true);
+    }
+    let lon_min = cx - lon_delta;
+    let lon_max = cx + lon_delta;
+    let lon_wrap = lon_min < -180.0 || lon_max > 180.0;
+    (lat_min, lat_max, lon_min, lon_max, lon_wrap)
+}
+
 /// GEOSEARCH BYBOX membership, a faithful port of upstream
 /// `geohashGetDistanceIfInRectangle` (geohash_helper.c). The N-S half-extent
 /// test uses the pure latitude distance; the E-W half-extent test measures the
@@ -6529,20 +6569,33 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             store.dispatch_client_ctx.resp_protocol_version == 3,
         ))
     } else if let (Some(w), Some(h)) = (box_width_m, box_height_m) {
-        // BYBOX: filter by bounding box
-        let members = store.zrange_withscores(&argv[1], 0, -1, now_ms)?;
+        // BYBOX: filter by bounding box. Pre-filter with a lat/lon box that
+        // provably contains the search rectangle and scan the zset by reference
+        // (zset_for_each_asc), so the trig-heavy geo_point_in_box / distance run
+        // only for candidates near the box and only survivors are cloned. The
+        // box is a conservative superset, so the surviving result set and its
+        // ascending-score order are identical to scanning every member.
+        // (frankenredis-vnsnx)
         let half_w = w / 2.0;
         let half_h = h / 2.0;
+        let (bb_lat_min, bb_lat_max, bb_lon_min, bb_lon_max, bb_lon_wrap) =
+            geo_box_bbox(cx, cy, half_w, half_h);
         let mut results: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
-        for (member, score) in members {
+        store.zset_for_each_asc(&argv[1], now_ms, |member, score| {
             let Some((lon, lat)) = geo_decode_score(score) else {
-                continue;
+                return;
             };
-            let dist = geo_distance_m(cx, cy, lon, lat);
-            if geo_point_in_box(cx, cy, lon, lat, half_w, half_h) {
-                results.push((member, score, dist, lon, lat));
+            if lat < bb_lat_min || lat > bb_lat_max {
+                return;
             }
-        }
+            if !bb_lon_wrap && (lon < bb_lon_min || lon > bb_lon_max) {
+                return;
+            }
+            if geo_point_in_box(cx, cy, lon, lat, half_w, half_h) {
+                let dist = geo_distance_m(cx, cy, lon, lat);
+                results.push((member.to_vec(), score, dist, lon, lat));
+            }
+        })?;
         // (frankenredis-1axne) Apply the same SORT_NONE handling as
         // geo_search_core: leave zset-iteration order intact unless
         // ASC/DESC was explicit, OR COUNT-without-ANY promotes to ASC
@@ -26590,6 +26643,121 @@ mod tests {
         let ratio = full_ns as f64 / prune_ns as f64;
         println!(
             "GEO radius A/B (n={n}, r={radius}m, x{reps}): full-scan={full_ns}ns bbox-prune={prune_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
+    }
+
+    #[test]
+    fn geo_box_bbox_is_a_superset_and_speeds_up_bybox() {
+        use super::{geo_box_bbox, geo_decode_score, geo_distance_m, geo_encode_wgs84, geo_point_in_box};
+
+        let mut state: u64 = 0xD1B5_4A32_D192_ED03;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut unit = || (next() >> 11) as f64 / (1u64 << 53) as f64;
+
+        // SAFETY INVARIANT: every point inside the search rectangle lies inside
+        // the bounding box, swept over high latitudes and near the antimeridian.
+        for _ in 0..200_000 {
+            let cy = (unit() * 170.0) - 85.0;
+            let cx = (unit() * 360.0) - 180.0;
+            let half_w = 1.0 + unit() * 4_000_000.0;
+            let half_h = 1.0 + unit() * 4_000_000.0;
+            let plat = (unit() * 170.0) - 85.0;
+            let plon = (unit() * 360.0) - 180.0;
+            let (lat_min, lat_max, lon_min, lon_max, lon_wrap) =
+                geo_box_bbox(cx, cy, half_w, half_h);
+            if geo_point_in_box(cx, cy, plon, plat, half_w, half_h) {
+                assert!(
+                    plat >= lat_min && plat <= lat_max,
+                    "lat outside box: c=({cx},{cy}) hw={half_w} hh={half_h} p=({plon},{plat})"
+                );
+                assert!(
+                    lon_wrap || (plon >= lon_min && plon <= lon_max),
+                    "lon outside box: c=({cx},{cy}) hw={half_w} hh={half_h} p=({plon},{plat})"
+                );
+            }
+        }
+
+        // A/B: large geo set, small box. Old = clone every member + box-test all;
+        // new = bbox pre-filter via borrow-scan, clone only survivors.
+        let key = b"geo";
+        let mut store = Store::new();
+        let n = 100_000usize;
+        let mut adds: Vec<(f64, Vec<u8>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let lon = (unit() * 360.0) - 180.0;
+            let lat = (unit() * 170.0) - 85.0;
+            if let Some(bits) = geo_encode_wgs84(lon, lat) {
+                adds.push((bits as f64, format!("m{i}").into_bytes()));
+            }
+        }
+        store.zadd(key, &adds, 0).unwrap();
+        let (cx, cy, half_w, half_h) = (0.0f64, 0.0f64, 50_000.0f64, 50_000.0f64);
+
+        let old_scan = |store: &mut Store| -> Vec<(Vec<u8>, f64)> {
+            let members = store.zrange_withscores(key, 0, -1, 0).unwrap();
+            let mut r = Vec::new();
+            for (m, s) in members {
+                if let Some((lon, lat)) = geo_decode_score(s) {
+                    let dist = geo_distance_m(cx, cy, lon, lat);
+                    if geo_point_in_box(cx, cy, lon, lat, half_w, half_h) {
+                        r.push((m, dist));
+                    }
+                }
+            }
+            r
+        };
+        let new_scan = |store: &mut Store| -> Vec<(Vec<u8>, f64)> {
+            let (la0, la1, lo0, lo1, lw) = geo_box_bbox(cx, cy, half_w, half_h);
+            let mut r = Vec::new();
+            store
+                .zset_for_each_asc(key, 0, |member, score| {
+                    let Some((lon, lat)) = geo_decode_score(score) else {
+                        return;
+                    };
+                    if lat < la0 || lat > la1 {
+                        return;
+                    }
+                    if !lw && (lon < lo0 || lon > lo1) {
+                        return;
+                    }
+                    if geo_point_in_box(cx, cy, lon, lat, half_w, half_h) {
+                        r.push((member.to_vec(), geo_distance_m(cx, cy, lon, lat)));
+                    }
+                })
+                .unwrap();
+            r
+        };
+
+        let mut a = old_scan(&mut store);
+        let mut b = new_scan(&mut store);
+        a.sort_by(|x, y| x.0.cmp(&y.0));
+        b.sort_by(|x, y| x.0.cmp(&y.0));
+        assert_eq!(a, b, "bbox+borrow BYBOX scan must match the full scan exactly");
+
+        let reps = 200;
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            c0 = c0.wrapping_add(old_scan(&mut store).len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            c1 = c1.wrapping_add(new_scan(&mut store).len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "GEO BYBOX A/B (n={n}, 100km box, x{reps}): full-scan={old_ns}ns bbox-borrow={new_ns}ns ratio={ratio:.2}x"
         );
         assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
     }
