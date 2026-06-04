@@ -5094,6 +5094,21 @@ impl Store {
         key: &[u8],
         mutate: impl FnOnce(&mut Entry) -> R,
     ) -> Option<R> {
+        // (frankenredis-8x1i9) When the running digest is already stale,
+        // `state_digest()` recomputes it from a full scan, so `update_digest_hashes`
+        // discards the incremental before/after entry hashes. Computing them is
+        // O(value) FNV over the WHOLE value (plus an O(n log n) member sort for
+        // sets) — pure waste in the common runtime state where some earlier write
+        // already left the digest stale. Skip the hashing; `running_digest` and
+        // `digest_stale` are unchanged, so DEBUG DIGEST output is byte-identical.
+        if self.digest_stale {
+            let entry = self.entries.get_mut(key)?;
+            let result = mutate(entry);
+            // Preserve the (unread) mutation counter exactly as the discarded
+            // update_digest_hashes(Some,Some) path would have.
+            self.bump_digest_mutations();
+            return Some(result);
+        }
         let old_hash = self.current_entry_digest(key)?;
         let result = {
             let entry = self
@@ -5176,7 +5191,14 @@ impl Store {
                     self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
                 }
             }
-            self.update_digest_hashes(Some(Self::entry_state_digest(key, &entry)), None);
+            // (frankenredis-8x1i9) Skip the O(value) removed-entry hash when the
+            // digest is already stale — update_digest_hashes would discard it and
+            // DEBUG DIGEST recomputes via full scan. Preserve the mutation count.
+            if self.digest_stale {
+                self.bump_digest_mutations();
+            } else {
+                self.update_digest_hashes(Some(Self::entry_state_digest(key, &entry)), None);
+            }
             // Whole-key removal drops any per-field hash TTL entries so the
             // field_expires map doesn't accumulate orphan rows.
             // (br-frankenredis-b8ut)
@@ -27121,6 +27143,55 @@ mod tests {
         let v = store.get(b"bm", 0).unwrap().unwrap();
         assert_eq!(v.len(), 3);
         assert!(store.getbit(b"bm", 20, 0).unwrap());
+    }
+
+    #[test]
+    fn stale_digest_mutation_skips_entry_hashing_ab() {
+        // (frankenredis-8x1i9) In-place mutations (EXPIRE/EXPIREAT/PERSIST/GETEX
+        // via with_mutated_entry) used to FNV-hash the whole value twice per call
+        // for the running digest — discarded whenever the digest is stale (the
+        // normal runtime state, since every insert marks it stale and only a rare
+        // DEBUG DIGEST clears it). For large values this hashing IS the command
+        // cost. The A/B measures the eliminated work directly.
+        use std::time::Instant;
+
+        let mut store = Store::new();
+        let key = b"bigval".to_vec();
+        store.set(key.clone(), vec![b'x'; 100_000], None, 0);
+        assert!(store.digest_stale, "inserts leave the digest stale");
+
+        let reps = 300u32;
+        // NEW: each toggle = expire + persist, both via with_mutated_entry, which
+        // now skips the O(value) hashing while the digest is stale.
+        let t0 = Instant::now();
+        for _ in 0..reps {
+            store.expire_at_milliseconds(&key, 10_000, 0);
+            store.persist(&key, 0);
+        }
+        let new_ns = t0.elapsed().as_nanos().max(1);
+
+        // Eliminated work: 2x entry_state_digest per with_mutated_entry call = 4x
+        // per toggle. (Sets pay even more — entry_state_digest also sorts them.)
+        let entry = store.entries.get(key.as_slice()).unwrap();
+        let t1 = Instant::now();
+        let mut sink = 0u64;
+        for _ in 0..reps {
+            for _ in 0..4 {
+                sink ^= Store::entry_state_digest(&key, entry);
+            }
+        }
+        let eliminated_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(sink);
+
+        let old_ns = new_ns + eliminated_ns;
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "stale-digest EXPIRE/PERSIST on 100KB value x{reps}: was ~{} ms -> now {} ms = {ratio:.2}x (dropped {} ms of discarded digest hashing)",
+            old_ns / 1_000_000,
+            new_ns / 1_000_000,
+            eliminated_ns / 1_000_000,
+        );
+        assert!(ratio > 2.0, "expected >2x by dropping discarded digest hashing, got {ratio:.2}x");
     }
 
     #[test]
