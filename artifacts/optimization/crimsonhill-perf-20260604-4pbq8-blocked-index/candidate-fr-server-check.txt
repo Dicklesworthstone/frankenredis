@@ -1,0 +1,213 @@
+  [2m2026-06-04T19:47:05.541803Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ts2 at ubuntu@192.168.1.124 (14 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:05.766867Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenredis-crimsonhill-4pbq8-20260604 (hash: de7c04c6754974ed)[0m
+    [2;3mat[0m rch/src/hook.rs:5987 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:05.766928Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6009 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:09.119488Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker ts2...[0m
+    [2;3mat[0m rch/src/hook.rs:6039 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:09.119544Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604 -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604 on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:11.081879Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1962ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:11.081944Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-bench -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-bench on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:11.431664Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 349ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:11.431725Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-command -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-command on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:11.774257Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 342ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:11.774322Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-config -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-config on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:12.115832Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 341ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:12.115898Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-conformance -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-conformance on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:12.466576Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 350ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:12.466662Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-eventloop -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-eventloop on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:12.805538Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 338ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:12.805600Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-expire -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-expire on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:13.177789Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 372ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:13.177858Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-persist -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-persist on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:13.522720Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 344ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:13.522820Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-protocol -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-protocol on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:14.268132Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 745ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:14.268200Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-repl -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-repl on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:14.614178Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 345ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:14.614255Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-runtime -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-runtime on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:14.956781Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 342ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:14.956852Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-sentinel -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-sentinel on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:15.294007Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 337ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:15.294071Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-server -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-server on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:15.631558Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 337ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:15.631623Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-store -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-store on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:15.957984Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 326ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:15.958020Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 88078 files, 4549068 bytes in 6830ms[0m
+    [2;3mat[0m rch/src/hook.rs:6202 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:16.881343Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: env cargo check -p fr-server --all-targets[0m
+    [2;3mat[0m rch/src/hook.rs:6240 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:16.881386Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /tmp/rch_target_fr_4pbq8_candidate_check -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/.rch-target-ts2-job-29872254800104331-1780602429119480990-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded crypto-common v0.2.1
+  Downloaded cpufeatures v0.3.0
+  Downloaded cfg-if v1.0.4
+  Downloaded block-buffer v0.12.0
+  Downloaded const-oid v0.10.2
+  Downloaded cc v1.2.60
+  Downloaded itoa v1.0.18
+  Downloaded indexmap v2.14.0
+  Downloaded mimalloc v0.1.49
+  Downloaded hex v0.4.3
+  Downloaded equivalent v1.0.2
+  Downloaded digest v0.11.2
+  Downloaded foldhash v0.1.5
+  Downloaded shlex v1.3.0
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded hybrid-array v0.4.10
+  Downloaded sha2 v0.11.0
+  Downloaded zmij v1.0.21
+  Downloaded log v0.4.29
+  Downloaded serde_core v1.0.228
+  Downloaded memchr v2.8.0
+  Downloaded mio v1.2.0
+  Downloaded serde_json v1.0.149
+  Downloaded typenum v1.20.0
+  Downloaded hashbrown v0.17.0
+  Downloaded libmimalloc-sys v0.1.46
+  Downloaded libc v0.2.185
+   Compiling zmij v1.0.21
+   Compiling serde_core v1.0.228
+    Checking typenum v1.20.0
+   Compiling serde_json v1.0.149
+   Compiling libc v0.2.185
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling memchr v2.8.0
+    Checking fr-protocol v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-protocol)
+   Compiling itoa v1.0.18
+    Checking const-oid v0.10.2
+    Checking hashbrown v0.17.0
+    Checking equivalent v1.0.2
+    Checking cpufeatures v0.3.0
+    Checking foldhash v0.1.5
+    Checking cfg-if v1.0.4
+    Checking fr-expire v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-expire)
+    Checking log v0.4.29
+    Checking fr-config v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-config)
+    Checking hex v0.4.3
+    Checking fr-repl v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-repl)
+    Checking fr-eventloop v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-eventloop)
+   Compiling cc v1.2.60
+    Checking fr-persist v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-persist)
+    Checking fr-sentinel v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-sentinel)
+    Checking indexmap v2.14.0
+    Checking hybrid-array v0.4.10
+   Compiling libmimalloc-sys v0.1.46
+    Checking mio v1.2.0
+    Checking fr-store v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-store)
+    Checking crypto-common v0.2.1
+    Checking block-buffer v0.12.0
+    Checking digest v0.11.2
+    Checking sha2 v0.11.0
+    Checking mimalloc v0.1.49
+   Compiling fr-command v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-command)
+warning: unused attribute
+    --> crates/fr-command/src/lib.rs:3503:1
+     |
+3503 | #[inline(always)]
+     | ^^^^^^^^^^^^^^^^^ help: remove this attribute
+     |
+note: attribute also specified here
+    --> crates/fr-command/src/lib.rs:3495:1
+     |
+3495 | #[inline]
+     | ^^^^^^^^^
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: `#[warn(unused_attributes)]` (part of `#[warn(unused)]`) on by default
+
+warning: `fr-command` (lib) generated 1 warning (run `cargo fix --lib -p fr-command` to apply 1 suggestion)
+    Checking fr-runtime v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-runtime)
+    Checking fr-server v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.53s
+  [2m2026-06-04T19:47:26.873380Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 9991ms[0m
+    [2;3mat[0m rch/src/hook.rs:6364 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:26.873697Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6413 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:26.873726Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604 on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:2072 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:27.197453Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 323ms (1 files, 1302 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2111 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:27.197475Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 1302 bytes in 323ms[0m
+    [2;3mat[0m rch/src/hook.rs:6446 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:27.197574Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/.rch-target-ts2-job-29872254800104331-1780602429119480990-0 on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:2072 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:28.863382Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 1665ms (717 files, 11693 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2111 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:28.863408Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 717 files, 11693 bytes in 1665ms[0m
+    [2;3mat[0m rch/src/hook.rs:6570 [2;3mon[0m ThreadId(1)
+
+[RCH] remote ts2 (23.3s)

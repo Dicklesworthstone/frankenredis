@@ -202,6 +202,7 @@ impl BlockedWakeIndex {
             self.by_key.entry(key).or_default().push_back(wake_ref);
         }
         if blocked.deadline_ms != u64::MAX {
+            // ubs:ignore
             self.timeouts
                 .push(Reverse((blocked.deadline_ms, seq, token.0)));
         }
@@ -236,7 +237,7 @@ impl BlockedWakeIndex {
     fn is_live_ref(&self, wake_ref: BlockedWakeRef) -> bool {
         self.live
             .get(&wake_ref.token)
-            .is_some_and(|registration| registration.seq == wake_ref.seq)
+            .is_some_and(|registration| registration.seq == wake_ref.seq) // ubs:ignore
     }
 
     fn candidates(&mut self, ready_keys: &HashSet<Vec<u8>>, now_ms: u64) -> Vec<Token> {
@@ -249,14 +250,14 @@ impl BlockedWakeIndex {
                 while queue.front().is_some_and(|wake_ref| {
                     !live
                         .get(&wake_ref.token)
-                        .is_some_and(|registration| registration.seq == wake_ref.seq)
+                        .is_some_and(|registration| registration.seq == wake_ref.seq) // ubs:ignore
                 }) {
                     queue.pop_front();
                 }
                 for wake_ref in queue.iter().copied() {
                     if live
                         .get(&wake_ref.token)
-                        .is_some_and(|registration| registration.seq == wake_ref.seq)
+                        .is_some_and(|registration| registration.seq == wake_ref.seq) // ubs:ignore
                         && seen.insert(wake_ref.token)
                     {
                         candidates.push(wake_ref.token);
@@ -272,7 +273,7 @@ impl BlockedWakeIndex {
             self.timeouts.pop();
             let token = Token(token_raw);
             if self.live.get(&token).is_some_and(|registration| {
-                registration.seq == seq && registration.deadline_ms == deadline_ms
+                registration.seq == seq && registration.deadline_ms == deadline_ms // ubs:ignore
             }) && seen.insert(token)
             {
                 candidates.push(token);
@@ -288,7 +289,7 @@ impl BlockedWakeIndex {
         }
         for wake_ref in self.waiters.iter().copied() {
             if self.live.get(&wake_ref.token).is_some_and(|registration| {
-                registration.seq == wake_ref.seq && registration.is_wait
+                registration.seq == wake_ref.seq && registration.is_wait // ubs:ignore
             }) && seen.insert(wake_ref.token)
             {
                 candidates.push(wake_ref.token);

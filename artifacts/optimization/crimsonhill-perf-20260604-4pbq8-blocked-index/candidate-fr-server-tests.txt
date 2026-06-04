@@ -1,0 +1,396 @@
+  [2m2026-06-04T19:46:08.117561Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ts2 at ubuntu@192.168.1.124 (0 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:08.263268Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenredis-crimsonhill-4pbq8-20260604 (hash: de7c04c6754974ed)[0m
+    [2;3mat[0m rch/src/hook.rs:5987 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:08.263323Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6009 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:10.969290Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker ts2...[0m
+    [2;3mat[0m rch/src/hook.rs:6039 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:10.969344Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604 -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604 on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:12.997641Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2028ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:12.997726Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-bench -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-bench on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:13.762300Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 764ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:13.762376Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-command -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-command on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:14.124796Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 362ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:14.124870Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-config -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-config on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:14.469886Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 344ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:14.469959Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-conformance -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-conformance on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:14.830164Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 360ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:14.830231Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-eventloop -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-eventloop on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:15.182873Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 352ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:15.182948Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-expire -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-expire on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:15.538680Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 355ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:15.538787Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-persist -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-persist on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:15.884211Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 345ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:15.884280Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-protocol -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-protocol on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:16.232966Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 348ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:16.233051Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-repl -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-repl on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:16.580554Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 347ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:16.580624Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-runtime -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-runtime on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:16.937870Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 357ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:16.937942Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-sentinel -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-sentinel on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:17.287494Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 349ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:17.287572Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-server -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-server on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:17.646467Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 358ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:17.646535Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-store -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-store on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:18.001454Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 354ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:18.001491Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 88077 files, 4549218 bytes in 7023ms[0m
+    [2;3mat[0m rch/src/hook.rs:6202 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:18.969469Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: env cargo test -p fr-server --release -- --nocapture[0m
+    [2;3mat[0m rch/src/hook.rs:6240 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:18.969507Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /tmp/rch_target_fr_4pbq8_candidate_tests -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/.rch-target-ts2-job-29872254800104324-1780602370969283332-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded typenum v1.20.0
+  Downloaded serde_json v1.0.149
+  Downloaded libmimalloc-sys v0.1.46
+  Downloaded hex v0.4.3
+  Downloaded serde_core v1.0.228
+  Downloaded digest v0.11.2
+  Downloaded block-buffer v0.12.0
+  Downloaded equivalent v1.0.2
+  Downloaded foldhash v0.1.5
+  Downloaded cpufeatures v0.3.0
+  Downloaded log v0.4.29
+  Downloaded memchr v2.8.0
+  Downloaded mimalloc v0.1.49
+  Downloaded cc v1.2.60
+  Downloaded crypto-common v0.2.1
+  Downloaded shlex v1.3.0
+  Downloaded zmij v1.0.21
+  Downloaded hashbrown v0.17.0
+  Downloaded hybrid-array v0.4.10
+  Downloaded libc v0.2.185
+  Downloaded cfg-if v1.0.4
+  Downloaded sha2 v0.11.0
+  Downloaded indexmap v2.14.0
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded itoa v1.0.18
+  Downloaded mio v1.2.0
+  Downloaded const-oid v0.10.2
+   Compiling serde_core v1.0.228
+   Compiling zmij v1.0.21
+   Compiling serde_json v1.0.149
+   Compiling typenum v1.20.0
+   Compiling libc v0.2.185
+   Compiling itoa v1.0.18
+   Compiling fr-protocol v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-protocol)
+   Compiling memchr v2.8.0
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling equivalent v1.0.2
+   Compiling hashbrown v0.17.0
+   Compiling const-oid v0.10.2
+   Compiling cfg-if v1.0.4
+   Compiling fr-expire v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-expire)
+   Compiling foldhash v0.1.5
+   Compiling cpufeatures v0.3.0
+   Compiling log v0.4.29
+   Compiling fr-eventloop v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-eventloop)
+   Compiling hex v0.4.3
+   Compiling fr-config v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-config)
+   Compiling fr-repl v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-repl)
+   Compiling cc v1.2.60
+   Compiling fr-sentinel v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-sentinel)
+   Compiling fr-persist v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-persist)
+   Compiling indexmap v2.14.0
+   Compiling hybrid-array v0.4.10
+   Compiling libmimalloc-sys v0.1.46
+   Compiling mio v1.2.0
+   Compiling crypto-common v0.2.1
+   Compiling block-buffer v0.12.0
+   Compiling fr-store v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-store)
+   Compiling digest v0.11.2
+   Compiling sha2 v0.11.0
+   Compiling fr-command v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-command)
+warning: unused attribute
+    --> crates/fr-command/src/lib.rs:3503:1
+     |
+3503 | #[inline(always)]
+     | ^^^^^^^^^^^^^^^^^ help: remove this attribute
+     |
+note: attribute also specified here
+    --> crates/fr-command/src/lib.rs:3495:1
+     |
+3495 | #[inline]
+     | ^^^^^^^^^
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: `#[warn(unused_attributes)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling mimalloc v0.1.49
+   Compiling fr-runtime v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-runtime)
+   Compiling fr-server v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-server)
+warning: `fr-command` (lib) generated 1 warning (run `cargo fix --lib -p fr-command` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 28.15s
+     Running unittests src/lib.rs (.rch-target-ts2-job-29872254800104324-1780602370969283332-0/release/deps/fr_server-02e02078f0587a22)
+
+running 9 tests
+test tests::inline_closing_double_quote_must_be_followed_by_whitespace ... ok
+test tests::inline_closing_single_quote_must_be_followed_by_whitespace ... ok
+test tests::inline_escape_sequences ... ok
+test tests::inline_hex_escape ... ok
+test tests::inline_mid_token_quote_matches_upstream ... ok
+test tests::inline_quoted ... ok
+test tests::inline_simple ... ok
+test tests::inline_single_quotes ... ok
+test tests::inline_unbalanced_quotes ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (.rch-target-ts2-job-29872254800104324-1780602370969283332-0/release/deps/frankenredis-8d85c1acabbe7a55)
+
+running 73 tests
+warn: client write buffer exceeded limit, disconnecting
+warn: replica sync with 127.0.0.1:6380 failed: Connection refused (os error 111)
+test tests::blank_inline_line_is_consumed_without_command ... ok
+test tests::any_key_ready_matches_keys_membership_for_every_blocking_op ... ok
+test tests::blocked_wake_index_pops_only_due_timeouts ... ok
+test tests::blocked_wake_index_ignores_stale_reinserted_token ... ok
+test tests::blocked_wake_index_preserves_per_key_fifo ... ok
+test tests::blocked_wake_index_wait_ops_are_tick_candidates ... ok
+test tests::blocking_state_builder_accepts_resp3_integer_timeout ... ok
+test tests::blocking_state_builder_rejects_fractional_xread_block_timeout ... ok
+test tests::blocking_state_builder_rejects_nonfinite_blpop_timeout ... ok
+test tests::blocking_state_builder_rounds_fractional_blpop_timeout_up ... ok
+test tests::blocked_client_timeout_tracks_paused_tokens_for_pipelined_commands ... ok
+test tests::bzpopmax_propagates_wrongtype_error ... ok
+test tests::client_pause_blocks_simple_string_command_frames ... ok
+test tests::client_reply_off_suppresses_network_replies_until_on ... ok
+test tests::frame_suppression_matcher_preserves_replication_control_cases ... ok
+test tests::client_reply_skip_suppresses_current_and_next_network_reply ... ok
+test tests::inline_command_parsing ... ok
+test tests::client_unblock_tracks_paused_tokens_for_pipelined_commands ... ok
+test tests::drain_leading_replication_keepalive_bytes_strips_newline_prefixes_only ... ok
+test tests::inline_parser_gate_recognizes_all_resp_prefixes ... ok
+test tests::inline_incomplete_returns_error ... ok
+test tests::help_text_documents_all_supported_cli_flags ... ok
+test tests::blocked_wake_index_returns_only_ready_key_waiters ... ok
+test tests::inline_quoted_strings ... ok
+test tests::inline_unbalanced_double_quotes_rejected ... ok
+test tests::client_unblock_error_mode_unblocks_blocked_connection ... ok
+test tests::inline_unbalanced_quotes_via_try_parse ... ok
+test tests::client_unpause_bypasses_pause_gate ... ok
+test tests::inline_unbalanced_single_quotes_rejected ... ok
+test tests::non_psync_commands_emit_no_replication_follow_up ... ok
+test tests::parse_blocking_deadline_handles_signed_zero_and_subnormals ... ok
+test tests::parse_blocking_deadline_rejects_nonfinite_values ... ok
+test tests::parse_blocking_deadline_rejects_out_of_range_values ... ok
+test tests::output_buffer_limit_is_enforced_after_appending_current_response ... ok
+test tests::parse_blocking_deadline_rounds_positive_fractional_values_up ... ok
+test tests::master_to_replica_streaming_propagate_writes ... ok
+test tests::parse_xread_block_deadline_ignores_block_after_streams ... ok
+test tests::parse_xread_block_deadline_rejects_fractional_and_out_of_range_values ... ok
+test tests::psync_continue_emits_aof_backlog_tail ... ok
+test tests::process_buffered_frames_uses_microsecond_clock_for_time ... ok
+test tests::psync_fullresync_emits_rdb_follow_up ... ok
+test tests::quit_frame_matcher_borrows_first_command_token ... ok
+test tests::psync_non_fullresync_response_emits_no_follow_up ... ok
+test tests::replica_handshake_timeout_uses_runtime_repl_timeout ... ok
+test tests::replica_of_replica_chains_propagate_writes ... ok
+test tests::replica_stream_applies_select_prefixed_delta_commands ... ok
+test tests::replica_sync_clears_failed_connection_and_schedules_retry ... ok
+test tests::replica_stream_read_path_enforces_query_buffer_limit ... ok
+test tests::replica_stream_write_path_enforces_output_buffer_limit ... ok
+test tests::replica_stream_reconnect_uses_partial_psync_after_disconnect ... ok
+test tests::replication_prefix_parser_stops_on_incomplete_frame ... ok
+test tests::replicaof_reconfigure_resets_replica_sync_state ... ok
+test tests::replication_snapshot_reader_consumes_trailing_crlf ... ok
+test tests::replica_sync_helper_rejects_continue_when_primary_disconnects ... ok
+test tests::resolve_xread_block_argv_freezes_dollar_at_block_time ... ok
+test tests::replica_sync_helper_applies_fullresync_from_live_primary_socket ... ok
+test tests::server_bootstrap_processes_ping ... ok
+test tests::session_swap_preserves_isolation ... ok
+test tests::server_bootstrap_creates_runtime ... ok
+test tests::replica_sync_helper_authenticates_with_masteruser_and_masterauth ... ok
+test tests::startup_config_from_directives_accepts_slaveof_no_one_alias ... ok
+test tests::startup_config_from_directives_extracts_basic_redis_conf_subset ... ok
+test tests::replica_sync_helper_accepts_eof_marked_snapshot_from_primary_socket ... ok
+test tests::subscription_gate_rejects_simple_string_commands ... ok
+test tests::simple_string_quit_closes_connection ... ok
+test tests::wait_block_matchers_preserve_command_filter_and_satisfaction ... ok
+test tests::xread_wrongtype_unblocks_with_error ... ok
+test tests::xread_blocked_client_unblocks_when_xadd_marks_stream_ready ... ok
+test tests::xreadgroup_blocked_client_unblocks_when_xadd_marks_stream_ready ... ok
+test tests::process_buffered_frames_defers_after_per_client_frame_budget ... ok
+test tests::replica_stream_answers_getack_and_emits_periodic_ack ... ok
+blocked wake candidates (10000 clients x3 keys, one ready): scan 147 ms -> index 31 us = 4721.72x
+test tests::blocked_wake_index_avoids_full_blocked_scan_at_scale ... ok
+blocked-tick scan (2000 clients x3 keys, miss): keys-clone 104 ms -> borrow 59 ms = 1.75x
+test tests::any_key_ready_alloc_free_scan_agrees_with_keys_clone_at_scale ... ok
+
+test result: ok. 73 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running tests/client_kill_test.rs (.rch-target-ts2-job-29872254800104324-1780602370969283332-0/release/deps/client_kill_test-e0898fd959d90390)
+
+running 2 tests
+test client_kill_by_id_disconnects_target ... ok
+test client_kill_by_id_matches_legacy_redis_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/config_rewrite_test.rs (.rch-target-ts2-job-29872254800104324-1780602370969283332-0/release/deps/config_rewrite_test-84723bed07d814e8)
+
+running 1 test
+test config_rewrite_updates_file ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/fuzz_corpus_smoke.rs (.rch-target-ts2-job-29872254800104324-1780602370969283332-0/release/deps/fuzz_corpus_smoke-413c8cc0993a38e3)
+
+running 3 tests
+test fuzz_inline_parser_rejects_resp_prefix_seeds ... ok
+test fuzz_inline_parser_unbalanced_quote_seeds_yield_protocol_error ... ok
+test fuzz_inline_parser_corpus_never_panics ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/noreplicas_test.rs (.rch-target-ts2-job-29872254800104324-1780602370969283332-0/release/deps/noreplicas_test-9f69edab0e00bff9)
+
+running 1 test
+test noreplicas_blocks_writes_when_not_enough_replicas ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/tcp_e2e_test.rs (.rch-target-ts2-job-29872254800104324-1780602370969283332-0/release/deps/tcp_e2e_test-f5594b8bbd2db9a9)
+
+running 51 tests
+test tcp_multiple_commands_pipelined ... ok
+test tcp_error_response ... ok
+test tcp_dbsize_and_flushdb ... ok
+test tcp_ping_pong ... ok
+test tcp_set_get_roundtrip ... ok
+test tcp_config_file_rejects_invalid_aclfile_at_startup ... ok
+test tcp_command_multibulk_rejects_non_bulk_elements ... ok
+test tcp_config_file_applies_aclfile_startup_load ... ok
+test tcp_config_file_applies_persistence_startup_paths ... ok
+test tcp_client_list_includes_all_connected_named_clients_matches_legacy_redis_reference ... ok
+test tcp_config_file_applies_startup_port_and_requirepass ... ok
+test tcp_empty_and_null_multibulk_are_skipped ... ok
+test tcp_frankenredis_to_frankenredis_fullresync_and_live_streaming ... ok
+test tcp_min_replicas_gate_matches_legacy_redis_reference ... ok
+test tcp_failover_command_promotes_target_replica_and_leaves_chain_in_place ... ok
+test tcp_protocol_errors_use_upstream_wording ... ok
+test tcp_pubsub_basic_cross_client_delivery ... ok
+test tcp_multi_client_concurrent_access_roundtrip ... ok
+test tcp_multi_client_concurrent_access_roundtrip_with_pipeline_depth_ten ... ok
+test tcp_pubsub_pattern_subscribe ... ok
+test tcp_pubsub_multiple_subscribers ... ok
+test tcp_replica_of_replica_chain_matches_legacy_redis_reference ... ok
+test tcp_replica_of_replica_chain_replication ... ok
+test tcp_replicaof_cli_flag_bootstraps_replica_link_on_startup ... ok
+test tcp_replicaof_command_connects_to_legacy_primary_and_replicates_writes ... ok
+test tcp_requirepass_rejects_unauthenticated_psync_handshake ... ok
+test tcp_frankenredis_min_replicas_gate_blocks_then_admits_writes ... ok
+test tcp_resp2_subscriber_remains_restricted ... ok
+test tcp_resp3_pubsub_delivery_uses_push_wire_frame ... ok
+test tcp_resp3_subscriber_may_run_normal_commands ... ok
+test tcp_replicaof_command_uses_masterauth_for_protected_legacy_primary ... ok
+test tcp_resp3_tracking_invalidation_redirect_uses_push_wire_frame ... ok
+test tcp_sync_matches_legacy_redis_snapshot_streaming_shape ... ok
+test idle_client_disconnected_after_timeout ... ok
+test tcp_watch_exec_aborts_on_concurrent_modification ... ok
+test tcp_watch_exec_succeeds_without_concurrent_modification ... ok
+test tcp_replconf_internal_control_frames_match_legacy_redis_no_reply_behavior ... ok
+test tcp_aof_restart_preserves_all_data ... ok
+test tcp_pubsub_basic_cross_client_delivery_matches_legacy_redis_reference ... ok
+test tcp_pubsub_pattern_subscribe_matches_legacy_redis_reference ... ok
+test tcp_sentinel_failover_integration ... ok
+test tcp_rdb_restart_preserves_all_data ... ok
+test tcp_watch_exec_abort_matches_legacy_redis_reference ... ok
+test tcp_config_rewrite_updates_file_on_disk ... ok
+test tcp_waitaof_appendfsync_no_keeps_local_ack_visible_across_bgrewriteaof ... ok
+test tcp_xread_block_matches_legacy_redis_reference ... ok
+test tcp_xread_block_zero_waits_indefinitely_and_matches_legacy_redis ... ok
+test tcp_waitaof_local_block_is_released_as_error_when_appendonly_is_disabled ... ok
+test tcp_xreadgroup_block_zero_waits_indefinitely_and_matches_legacy_redis ... ok
+test tcp_xreadgroup_block_matches_legacy_redis_reference ... ok
+test tcp_client_list_age_idle_matches_legacy_redis_reference ... ok
+
+test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.31s
+
+   Doc-tests fr_server
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+  [2m2026-06-04T19:46:52.403299Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 33433ms[0m
+    [2;3mat[0m rch/src/hook.rs:6364 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:52.403608Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6413 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:52.403642Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604 on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:2072 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:52.728104Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 324ms (1 files, 1402 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2111 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:46:52.728133Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 1402 bytes in 324ms[0m
+    [2;3mat[0m rch/src/hook.rs:6446 [2;3mon[0m ThreadId(1)
+
+[RCH] remote ts2 (44.6s)

@@ -1,0 +1,240 @@
+  [2m2026-06-04T19:47:36.274564Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ts2 at ubuntu@192.168.1.124 (14 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:36.413505Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenredis-crimsonhill-4pbq8-20260604 (hash: de7c04c6754974ed)[0m
+    [2;3mat[0m rch/src/hook.rs:5987 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:36.413546Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6009 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:38.724738Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker ts2...[0m
+    [2;3mat[0m rch/src/hook.rs:6039 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:38.724833Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604 -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604 on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:40.564166Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1839ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:40.564229Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-bench -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-bench on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:40.911785Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 347ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:40.911850Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-command -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-command on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:41.261869Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 350ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:41.261935Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-config -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-config on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:41.614083Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 352ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:41.614149Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-conformance -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-conformance on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:41.966478Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 352ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:41.966558Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-eventloop -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-eventloop on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:42.306788Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 340ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:42.306871Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-expire -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-expire on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:42.651694Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 344ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:42.651783Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-persist -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-persist on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:42.996056Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 344ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:42.996117Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-protocol -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-protocol on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:43.357088Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 360ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:43.357164Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-repl -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-repl on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:43.706335Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 349ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:43.706397Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-runtime -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-runtime on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:44.052168Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 345ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:44.052229Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-sentinel -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-sentinel on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:44.396991Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 344ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:44.397059Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-server -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-server on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:44.736143Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 339ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:44.736208Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-store -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-store on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:45.097492Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 361ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:45.097535Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 88079 files, 4546078 bytes in 6366ms[0m
+    [2;3mat[0m rch/src/hook.rs:6202 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:46.064824Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: env cargo clippy -p fr-server --all-targets -- -D warnings[0m
+    [2;3mat[0m rch/src/hook.rs:6240 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-04T19:47:46.064870Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /tmp/rch_target_fr_4pbq8_candidate_clippy -> /data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/.rch-target-ts2-job-29872254800104335-1780602458724730999-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded cfg-if v1.0.4
+  Downloaded block-buffer v0.12.0
+  Downloaded crypto-common v0.2.1
+  Downloaded cc v1.2.60
+  Downloaded const-oid v0.10.2
+  Downloaded cpufeatures v0.3.0
+  Downloaded foldhash v0.1.5
+  Downloaded shlex v1.3.0
+  Downloaded zmij v1.0.21
+  Downloaded digest v0.11.2
+  Downloaded serde_json v1.0.149
+  Downloaded hex v0.4.3
+  Downloaded mimalloc v0.1.49
+  Downloaded equivalent v1.0.2
+  Downloaded typenum v1.20.0
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded sha2 v0.11.0
+  Downloaded log v0.4.29
+  Downloaded mio v1.2.0
+  Downloaded serde_core v1.0.228
+  Downloaded hybrid-array v0.4.10
+  Downloaded itoa v1.0.18
+  Downloaded memchr v2.8.0
+  Downloaded hashbrown v0.17.0
+  Downloaded indexmap v2.14.0
+  Downloaded libmimalloc-sys v0.1.46
+  Downloaded libc v0.2.185
+   Compiling serde_core v1.0.228
+   Compiling zmij v1.0.21
+    Checking typenum v1.20.0
+   Compiling serde_json v1.0.149
+   Compiling libc v0.2.185
+    Checking fr-protocol v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-protocol)
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.0
+   Compiling shlex v1.3.0
+   Compiling find-msvc-tools v0.1.9
+    Checking hashbrown v0.17.0
+    Checking const-oid v0.10.2
+    Checking equivalent v1.0.2
+    Checking cfg-if v1.0.4
+    Checking fr-expire v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-expire)
+    Checking cpufeatures v0.3.0
+    Checking foldhash v0.1.5
+    Checking log v0.4.29
+    Checking fr-repl v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-repl)
+    Checking fr-eventloop v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-eventloop)
+    Checking fr-config v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-config)
+    Checking hex v0.4.3
+   Compiling cc v1.2.60
+    Checking fr-persist v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-persist)
+    Checking fr-sentinel v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-sentinel)
+    Checking indexmap v2.14.0
+    Checking hybrid-array v0.4.10
+    Checking mio v1.2.0
+   Compiling libmimalloc-sys v0.1.46
+    Checking fr-store v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-store)
+    Checking block-buffer v0.12.0
+    Checking crypto-common v0.2.1
+    Checking digest v0.11.2
+    Checking sha2 v0.11.0
+    Checking mimalloc v0.1.49
+   Compiling fr-command v0.1.0 (/data/projects/.scratch/frankenredis-crimsonhill-4pbq8-20260604/crates/fr-command)
+error: `Box::new(_)` of default value
+    --> crates/fr-store/src/lib.rs:5924:55
+     |
+5924 |         self.internal_entry(key.to_vec(), Value::Hash(Box::new(HashFieldMap::default())), now_ms);
+     |                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `Box::default()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#box_default
+     = note: `-D clippy::box-default` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::box_default)]`
+
+error: `Box::new(_)` of default value
+    --> crates/fr-store/src/lib.rs:6231:55
+     |
+6231 |         self.internal_entry(key.to_vec(), Value::Hash(Box::new(HashFieldMap::default())), now_ms);
+     |                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `Box::default()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#box_default
+
+error: `Box::new(_)` of default value
+    --> crates/fr-store/src/lib.rs:6290:55
+     |
+6290 |         self.internal_entry(key.to_vec(), Value::Hash(Box::new(HashFieldMap::default())), now_ms);
+     |                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `Box::default()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#box_default
+
+error: `Box::new(_)` of default value
+    --> crates/fr-store/src/lib.rs:6373:55
+     |
+6373 |         self.internal_entry(key.to_vec(), Value::Hash(Box::new(HashFieldMap::default())), now_ms);
+     |                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `Box::default()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#box_default
+
+error: deref which would be done by auto-deref
+    --> crates/fr-store/src/lib.rs:7752:47
+     |
+7752 | ...                   if s.shift_remove(*m) {
+     |                                         ^^ help: try: `m`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#explicit_auto_deref
+     = note: `-D clippy::explicit-auto-deref` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::explicit_auto_deref)]`
+
+error: deref which would be done by auto-deref
+     --> crates/fr-store/src/lib.rs:12939:79
+      |
+12939 |                     let result: Vec<bool> = members.iter().map(|m| s.contains(*m)).collect();
+      |                                                                               ^^ help: try: `m`
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#explicit_auto_deref
+
+error: usage of `bool::then` in `filter_map`
+     --> crates/fr-store/src/lib.rs:13720:18
+      |
+13720 |                   .filter_map(|(key, entry)| {
+      |  __________________^
+13721 | |                     (!volatile_only || entry.expires_at_ms.is_some()).then(|| key.clone())
+13722 | |                 })
+      | |__________________^ help: use `filter` then `map` instead: `filter(|&(key, entry)| (!volatile_only || entry.expires_at_ms.is_some())).map(|(key, entry)| key.clone())`
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#filter_map_bool_then
+      = note: `-D clippy::filter-map-bool-then` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::filter_map_bool_then)]`
+
+error: could not compile `fr-store` (lib) due to 7 previous errors
+  [2m2026-06-04T19:47:50.718641Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=101 in 4653ms[0m
+    [2;3mat[0m rch/src/hook.rs:6364 [2;3mon[0m ThreadId(1)
+
+[RCH] remote ts2 failed (exit 101)
