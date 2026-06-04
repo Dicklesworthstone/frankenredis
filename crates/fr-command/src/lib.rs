@@ -13933,6 +13933,107 @@ fn compute_lcs_len_scalar(a: &[u8], b: &[u8]) -> usize {
     prev[m] as usize
 }
 
+/// Low-`k`-bits mask (`k <= 64`); `lcs_low_mask(64) == u64::MAX`. (frankenredis-mug2e)
+fn lcs_low_mask(k: usize) -> u64 {
+    if k >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << k) - 1
+    }
+}
+
+/// LCS dynamic-programming oracle shared by `compute_lcs` and
+/// `compute_lcs_matches`. `Full` is the classic O(n*m) u32 matrix, used when
+/// both inputs exceed a machine word and as the equivalence oracle in tests.
+/// The two bit-parallel variants store one Allison-Dix LCS vector per
+/// outer-axis position (the same Crochemore-Iliopoulos-Pinzon-Rytter
+/// `v = (v+u)|(v-u)` recurrence as `compute_lcs_len`), from which any
+/// `dp[i][j]` is recovered by a single prefix-popcount: O(n+m) build + O(1)
+/// cell lookup, replacing the O(n*m) fill/alloc. Because `get` returns the
+/// *exact* scalar `dp` value, the shared backtrack is byte-identical to the
+/// matrix version. (frankenredis-mug2e)
+enum LcsDp {
+    /// Full scalar matrix; `dp[i * cols + j]`.
+    Full { dp: Vec<u32>, cols: usize },
+    /// Pattern = `a` along rows (`a.len() <= 64`); `v[j]` is the LCS vector after
+    /// column `j`, so `dp[i][j] = i - popcount(v[j] & low_mask(i))`.
+    ColBits { v: Vec<u64> },
+    /// Pattern = `b` along columns (`b.len() <= 64`); `v[i]` is the LCS vector
+    /// after row `i`, so `dp[i][j] = j - popcount(v[i] & low_mask(j))`.
+    RowBits { v: Vec<u64> },
+}
+
+impl LcsDp {
+    /// LCS length of the prefixes `a[..i]` x `b[..j]`. Identical to the scalar
+    /// `dp[i][j]` for every `(i, j)`; never underflows because
+    /// `popcount(v & low_mask(k)) <= k`. (frankenredis-mug2e)
+    #[inline]
+    fn get(&self, i: usize, j: usize) -> u32 {
+        match self {
+            LcsDp::Full { dp, cols } => dp[i * cols + j],
+            LcsDp::ColBits { v } => i as u32 - (v[j] & lcs_low_mask(i)).count_ones(),
+            LcsDp::RowBits { v } => j as u32 - (v[i] & lcs_low_mask(j)).count_ones(),
+        }
+    }
+}
+
+/// Build the LCS DP oracle for `a` (rows) x `b` (columns), preferring the
+/// bit-parallel representation whenever either string fits a machine word.
+/// Callers must already have handled the empty-input case. (frankenredis-mug2e)
+fn build_lcs_dp(a: &[u8], b: &[u8]) -> LcsDp {
+    let m = a.len();
+    let n = b.len();
+    if m <= 64 {
+        // Pattern = a over rows: fold each column (b byte) through the word
+        // recurrence, recording the LCS vector after every column.
+        let mut pm = [0u64; 256];
+        for (idx, &c) in a.iter().enumerate() {
+            pm[c as usize] |= 1u64 << idx;
+        }
+        let full = lcs_low_mask(m);
+        let mut v = Vec::with_capacity(n + 1);
+        let mut cur = full;
+        v.push(cur);
+        for &c in b {
+            let u = cur & pm[c as usize];
+            cur = (cur.wrapping_add(u) | cur.wrapping_sub(u)) & full;
+            v.push(cur);
+        }
+        LcsDp::ColBits { v }
+    } else if n <= 64 {
+        // Pattern = b over columns: fold each row (a byte) through the word
+        // recurrence, recording the LCS vector after every row.
+        let mut pm = [0u64; 256];
+        for (idx, &c) in b.iter().enumerate() {
+            pm[c as usize] |= 1u64 << idx;
+        }
+        let full = lcs_low_mask(n);
+        let mut v = Vec::with_capacity(m + 1);
+        let mut cur = full;
+        v.push(cur);
+        for &c in a {
+            let u = cur & pm[c as usize];
+            cur = (cur.wrapping_add(u) | cur.wrapping_sub(u)) & full;
+            v.push(cur);
+        }
+        LcsDp::RowBits { v }
+    } else {
+        // Both strings exceed a machine word: classic flat-matrix DP.
+        let cols = n + 1;
+        let mut dp = vec![0u32; (m + 1) * cols];
+        for i in 1..=m {
+            for j in 1..=n {
+                if a[i - 1] == b[j - 1] {
+                    dp[i * cols + j] = dp[(i - 1) * cols + (j - 1)] + 1;
+                } else {
+                    dp[i * cols + j] = dp[(i - 1) * cols + j].max(dp[i * cols + (j - 1)]);
+                }
+            }
+        }
+        LcsDp::Full { dp, cols }
+    }
+}
+
 fn compute_lcs(a: &[u8], b: &[u8]) -> Result<Vec<u8>, CommandError> {
     let m = a.len();
     let n = b.len();
@@ -13948,27 +14049,16 @@ fn compute_lcs(a: &[u8], b: &[u8]) -> Result<Vec<u8>, CommandError> {
                 .to_string(),
         ));
     }
-    // DP table: flat Vec for cache efficiency
-    let cols = n + 1;
-    let mut dp = vec![0u32; (m + 1) * cols];
-    for i in 1..=m {
-        for j in 1..=n {
-            if a[i - 1] == b[j - 1] {
-                dp[i * cols + j] = dp[(i - 1) * cols + (j - 1)] + 1;
-            } else {
-                dp[i * cols + j] = dp[(i - 1) * cols + j].max(dp[i * cols + (j - 1)]);
-            }
-        }
-    }
-    // Backtrack
-    let mut result = Vec::with_capacity(dp[m * cols + n] as usize);
+    let dp = build_lcs_dp(a, b);
+    // Backtrack (identical tie-break to the scalar matrix version).
+    let mut result = Vec::with_capacity(dp.get(m, n) as usize);
     let (mut i, mut j) = (m, n);
     while i > 0 && j > 0 {
         if a[i - 1] == b[j - 1] {
             result.push(a[i - 1]);
             i -= 1;
             j -= 1;
-        } else if dp[(i - 1) * cols + j] > dp[i * cols + (j - 1)] {
+        } else if dp.get(i - 1, j) > dp.get(i, j - 1) {
             i -= 1;
         } else {
             j -= 1;
@@ -13997,18 +14087,8 @@ fn compute_lcs_matches(
                 .to_string(),
         ));
     }
-    let cols = n + 1;
-    let mut dp = vec![0u32; (m + 1) * cols];
-    for i in 1..=m {
-        for j in 1..=n {
-            if a[i - 1] == b[j - 1] {
-                dp[i * cols + j] = dp[(i - 1) * cols + (j - 1)] + 1;
-            } else {
-                dp[i * cols + j] = dp[(i - 1) * cols + j].max(dp[i * cols + (j - 1)]);
-            }
-        }
-    }
-    // Backtrack to find matching segments
+    let dp = build_lcs_dp(a, b);
+    // Backtrack to find matching segments (identical tie-break to scalar).
     let mut segments = Vec::new();
     let (mut i, mut j) = (m, n);
     while i > 0 && j > 0 {
@@ -14031,7 +14111,7 @@ fn compute_lcs_matches(
                     len,
                 });
             }
-        } else if dp[(i - 1) * cols + j] > dp[i * cols + (j - 1)] {
+        } else if dp.get(i - 1, j) > dp.get(i, j - 1) {
             i -= 1;
         } else {
             j -= 1;
@@ -26173,6 +26253,157 @@ mod tests {
         println!(
             "LCS-LEN A/B (m=60,n=900 x{reps}): scalar={scalar_ns}ns bitpar={bitpar_ns}ns ratio={ratio:.2}x"
         );
+    }
+
+    #[test]
+    fn lcs_reconstruction_bitparallel_matches_scalar_and_reports_ab_ratio() {
+        use super::{compute_lcs, compute_lcs_matches};
+
+        // Independent full-matrix scalar oracles (force the O(n*m) path that the
+        // bit-parallel `build_lcs_dp` replaces for min-len <= 64). Identical
+        // tie-break to the production backtrack, so equality proves isomorphism.
+        fn full_lcs(a: &[u8], b: &[u8]) -> Vec<u8> {
+            let (m, n) = (a.len(), b.len());
+            if m == 0 || n == 0 {
+                return Vec::new();
+            }
+            let cols = n + 1;
+            let mut dp = vec![0u32; (m + 1) * cols];
+            for i in 1..=m {
+                for j in 1..=n {
+                    if a[i - 1] == b[j - 1] {
+                        dp[i * cols + j] = dp[(i - 1) * cols + (j - 1)] + 1;
+                    } else {
+                        dp[i * cols + j] = dp[(i - 1) * cols + j].max(dp[i * cols + (j - 1)]);
+                    }
+                }
+            }
+            let mut result = Vec::new();
+            let (mut i, mut j) = (m, n);
+            while i > 0 && j > 0 {
+                if a[i - 1] == b[j - 1] {
+                    result.push(a[i - 1]);
+                    i -= 1;
+                    j -= 1;
+                } else if dp[(i - 1) * cols + j] > dp[i * cols + (j - 1)] {
+                    i -= 1;
+                } else {
+                    j -= 1;
+                }
+            }
+            result.reverse();
+            result
+        }
+        type Seg = (usize, usize, usize, usize, usize);
+        fn full_matches(a: &[u8], b: &[u8], min_match_len: usize) -> Vec<Seg> {
+            let (m, n) = (a.len(), b.len());
+            if m == 0 || n == 0 {
+                return Vec::new();
+            }
+            let cols = n + 1;
+            let mut dp = vec![0u32; (m + 1) * cols];
+            for i in 1..=m {
+                for j in 1..=n {
+                    if a[i - 1] == b[j - 1] {
+                        dp[i * cols + j] = dp[(i - 1) * cols + (j - 1)] + 1;
+                    } else {
+                        dp[i * cols + j] = dp[(i - 1) * cols + j].max(dp[i * cols + (j - 1)]);
+                    }
+                }
+            }
+            let mut segs = Vec::new();
+            let (mut i, mut j) = (m, n);
+            while i > 0 && j > 0 {
+                if a[i - 1] == b[j - 1] {
+                    let (end_a, end_b) = (i - 1, j - 1);
+                    while i > 0 && j > 0 && a[i - 1] == b[j - 1] {
+                        i -= 1;
+                        j -= 1;
+                    }
+                    let len = end_a - i + 1;
+                    if len >= min_match_len {
+                        segs.push((i, end_a, j, end_b, len));
+                    }
+                } else if dp[(i - 1) * cols + j] > dp[i * cols + (j - 1)] {
+                    i -= 1;
+                } else {
+                    j -= 1;
+                }
+            }
+            segs
+        }
+
+        // Known cases (redis LCS doc example "ohmytext"/"mynewtext" => "mytext").
+        assert_eq!(compute_lcs(b"ohmytext", b"mynewtext").unwrap(), b"mytext");
+        assert_eq!(compute_lcs(b"AB", b"BA").unwrap(), b"B");
+        assert_eq!(compute_lcs(b"", b"abc").unwrap(), b"");
+
+        // Equivalence vs the full-matrix oracle across all length classes, biased
+        // to cover ColBits (m<=64), RowBits (m>64,n<=64) and Full (both>64),
+        // including the 64-byte boundary, for both reconstruction entry points.
+        let mut state: u64 = 0x0BAD_F00D_1357_9BDFu64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let lens = [0usize, 1, 2, 5, 17, 63, 64, 65, 80, 130];
+        for _ in 0..6000 {
+            let la = lens[(next() as usize) % lens.len()];
+            let lb = lens[(next() as usize) % lens.len()];
+            let na = 1 + (next() % 4) as u64;
+            let nb = 1 + (next() % 4) as u64;
+            let a: Vec<u8> = (0..la).map(|_| b'a' + (next() % na) as u8).collect();
+            let b: Vec<u8> = (0..lb).map(|_| b'a' + (next() % nb) as u8).collect();
+            assert_eq!(
+                compute_lcs(&a, &b).unwrap(),
+                full_lcs(&a, &b),
+                "compute_lcs a={a:?} b={b:?}"
+            );
+            for &mml in &[1usize, 2, 3] {
+                let got: Vec<Seg> = compute_lcs_matches(&a, &b, mml)
+                    .unwrap()
+                    .into_iter()
+                    .map(|m| (m.a_start, m.a_end, m.b_start, m.b_end, m.len))
+                    .collect();
+                assert_eq!(got, full_matches(&a, &b, mml), "matches a={a:?} b={b:?} mml={mml}");
+            }
+        }
+
+        // A/B: reconstruct LCS of a 64-byte pattern vs a 2000-byte text
+        // (m=64 -> ColBits: O(n) build + O(n+m) backtrack vs O(n*m) full matrix).
+        let mut mk = |len: usize, alpha: u64| -> Vec<u8> {
+            (0..len).map(|_| b'a' + (next() % alpha) as u8).collect()
+        };
+        let a = mk(64, 5);
+        let b = mk(2000, 5);
+        assert_eq!(compute_lcs(&a, &b).unwrap(), full_lcs(&a, &b));
+        let reps = 2000;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc
+                .wrapping_add(full_lcs(std::hint::black_box(&a), std::hint::black_box(&b)).len());
+        }
+        let scalar_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 = acc2.wrapping_add(
+                compute_lcs(std::hint::black_box(&a), std::hint::black_box(&b))
+                    .unwrap()
+                    .len(),
+            );
+        }
+        let bitpar_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        let ratio = scalar_ns as f64 / bitpar_ns as f64;
+        println!(
+            "LCS-RECON A/B (m=64,n=2000 x{reps}): scalar={scalar_ns}ns bitpar={bitpar_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
     }
 
     #[test]
