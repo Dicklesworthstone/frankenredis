@@ -1,13 +1,13 @@
 #![forbid(unsafe_code)]
 
-// Succinct listpack-style packing for small generic sets — the primitive for
-// frankenredis-9mh3o. `allow(dead_code)` until it is wired into `SetValue`
-// (the equivalence proof lives in the module's tests).
-#[allow(dead_code)]
+// Succinct listpack-style packing for small generic sets (frankenredis-9mh3o):
+// `GenericSet` stores a small set in one packed buffer, promoting to an IndexSet
+// hashtable past the threshold. SMEMBERS/SSCAN/SPOP output is unchanged.
 mod packed_set;
+use packed_set::GenericSet;
 
 use fr_expire::evaluate_expiry;
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -25,8 +25,6 @@ type HashFieldMap = IndexMap<Vec<u8>, Vec<u8>, foldhash::quality::RandomState>;
 /// string set. foldhash (not SipHash) for fast SADD/SREM/SISMEMBER membership;
 /// `IndexSet` iterates in INSERTION order regardless of hasher, so
 /// SMEMBERS/SSCAN/SPOP output is byte-identical. (frankenredis-rqdxh follow-up)
-type GenericSet = IndexSet<Vec<u8>, foldhash::quality::RandomState>;
-
 /// Redis-compatible version string. Single source of truth for all version reporting.
 pub const REDIS_COMPAT_VERSION: &str = "7.2.4";
 
@@ -996,7 +994,7 @@ fn set_int_to_bytes(n: i64) -> Vec<u8> {
 #[allow(dead_code)]
 pub enum SetValueIter<'a> {
     Int(std::slice::Iter<'a, i64>),
-    Generic(indexmap::set::Iter<'a, Vec<u8>>),
+    Generic(packed_set::GenericSetIter<'a>),
 }
 
 impl<'a> Iterator for SetValueIter<'a> {
@@ -1004,7 +1002,7 @@ impl<'a> Iterator for SetValueIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             SetValueIter::Int(it) => it.next().map(|&n| Cow::Owned(set_int_to_bytes(n))),
-            SetValueIter::Generic(it) => it.next().map(|m| Cow::Borrowed(m.as_slice())),
+            SetValueIter::Generic(it) => it.next().map(Cow::Borrowed),
         }
     }
 }
@@ -1118,7 +1116,7 @@ impl SetValue {
     pub fn get_index(&self, idx: usize) -> Option<Cow<'_, [u8]>> {
         match self {
             SetValue::Int(v) => v.get(idx).map(|&n| Cow::Owned(set_int_to_bytes(n))),
-            SetValue::Generic(s) => s.get_index(idx).map(|m| Cow::Borrowed(m.as_slice())),
+            SetValue::Generic(s) => s.get_index(idx).map(Cow::Borrowed),
         }
     }
 

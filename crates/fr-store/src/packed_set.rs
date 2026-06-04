@@ -172,9 +172,186 @@ fn read_varint(buf: &[u8], mut pos: usize) -> (usize, usize) {
     (result, pos)
 }
 
+use indexmap::IndexSet;
+
+/// Hashtable storage for a large generic set (the former `GenericSet` alias).
+pub type SetHashTable = IndexSet<Vec<u8>, foldhash::quality::RandomState>;
+
+/// Storage-promotion thresholds: above these a packed set switches to the
+/// hashtable so membership/removal stay sub-linear. They only bound how large
+/// the O(n) packed scan grows — the observable OBJECT ENCODING `listpack`/
+/// `hashtable` flag is tracked separately (and stickily) by the Store from the
+/// *configured* thresholds, so the exact storage-promotion point is unobservable.
+const PACKED_MAX_ENTRIES: usize = 128;
+const PACKED_MAX_VALUE: usize = 64;
+
+/// Storage for a generic (non-integer) set: a packed listpack-style buffer while
+/// small, promoting to an `IndexSet` hashtable past the threshold. Drop-in for
+/// the former `IndexSet` alias — same insertion-ordered iteration and identical
+/// insert/contains/remove semantics (the PackedStrSet proptest above proves the
+/// packed half), so SMEMBERS/SSCAN/SPOP output is byte-for-byte unchanged.
+/// (frankenredis-9mh3o)
+#[derive(Clone, Debug)]
+pub enum GenericSet {
+    Packed(PackedStrSet),
+    Hash(SetHashTable),
+}
+
+impl Default for GenericSet {
+    fn default() -> Self {
+        GenericSet::Packed(PackedStrSet::new())
+    }
+}
+
+impl GenericSet {
+    #[must_use]
+    pub fn with_capacity_and_hasher(n: usize, _hasher: foldhash::quality::RandomState) -> Self {
+        if n > PACKED_MAX_ENTRIES {
+            GenericSet::Hash(IndexSet::with_capacity_and_hasher(
+                n,
+                foldhash::quality::RandomState::default(),
+            ))
+        } else {
+            GenericSet::Packed(PackedStrSet::with_capacity(n.saturating_mul(8)))
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            GenericSet::Packed(p) => p.len(),
+            GenericSet::Hash(h) => h.len(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[must_use]
+    pub fn contains(&self, member: &[u8]) -> bool {
+        match self {
+            GenericSet::Packed(p) => p.contains(member),
+            GenericSet::Hash(h) => h.contains(member),
+        }
+    }
+
+    /// nth member in insertion order (powers SPOP/SRANDMEMBER index selection).
+    #[must_use]
+    pub fn get_index(&self, idx: usize) -> Option<&[u8]> {
+        match self {
+            GenericSet::Packed(p) => p.iter().nth(idx),
+            GenericSet::Hash(h) => h.get_index(idx).map(|v| v.as_slice()),
+        }
+    }
+
+    fn promote(&mut self) {
+        if let GenericSet::Packed(p) = self {
+            let mut h: SetHashTable = IndexSet::with_capacity_and_hasher(
+                p.len() + 1,
+                foldhash::quality::RandomState::default(),
+            );
+            for m in p.iter() {
+                h.insert(m.to_vec());
+            }
+            *self = GenericSet::Hash(h);
+        }
+    }
+
+    pub fn insert(&mut self, member: Vec<u8>) -> bool {
+        if let GenericSet::Packed(p) = self
+            && (p.len() >= PACKED_MAX_ENTRIES || member.len() > PACKED_MAX_VALUE)
+        {
+            self.promote();
+        }
+        match self {
+            GenericSet::Packed(p) => p.insert(&member),
+            GenericSet::Hash(h) => h.insert(member),
+        }
+    }
+
+    pub fn shift_remove(&mut self, member: &[u8]) -> bool {
+        match self {
+            GenericSet::Packed(p) => p.remove(member),
+            GenericSet::Hash(h) => h.shift_remove(member),
+        }
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
+        match self {
+            GenericSet::Packed(p) => {
+                let survivors: Vec<Vec<u8>> =
+                    p.iter().filter(|m| keep(m)).map(|m| m.to_vec()).collect();
+                let mut np = PackedStrSet::with_capacity(p.byte_len());
+                for m in &survivors {
+                    np.insert(m);
+                }
+                *p = np;
+            }
+            GenericSet::Hash(h) => h.retain(|m| keep(m)),
+        }
+    }
+
+    #[must_use]
+    pub fn iter(&self) -> GenericSetIter<'_> {
+        match self {
+            GenericSet::Packed(p) => GenericSetIter::Packed(p.iter()),
+            GenericSet::Hash(h) => GenericSetIter::Hash(h.iter()),
+        }
+    }
+}
+
+/// Set equality is order-independent (matches `IndexSet`'s `PartialEq`), so a
+/// Packed and a Hash set with the same members compare equal.
+impl PartialEq for GenericSet {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().all(|m| other.contains(m))
+    }
+}
+impl Eq for GenericSet {}
+
+impl FromIterator<Vec<u8>> for GenericSet {
+    fn from_iter<I: IntoIterator<Item = Vec<u8>>>(iter: I) -> Self {
+        let mut s = GenericSet::default();
+        for m in iter {
+            s.insert(m);
+        }
+        s
+    }
+}
+
+impl IntoIterator for GenericSet {
+    type Item = Vec<u8>;
+    type IntoIter = std::vec::IntoIter<Vec<u8>>;
+    fn into_iter(self) -> Self::IntoIter {
+        let owned: Vec<Vec<u8>> = match self {
+            GenericSet::Packed(p) => p.iter().map(<[u8]>::to_vec).collect(),
+            GenericSet::Hash(h) => h.into_iter().collect(),
+        };
+        owned.into_iter()
+    }
+}
+
+/// Borrowing iterator over a `GenericSet`'s members in insertion order.
+pub enum GenericSetIter<'a> {
+    Packed(PackedStrSetIter<'a>),
+    Hash(indexmap::set::Iter<'a, Vec<u8>>),
+}
+
+impl<'a> Iterator for GenericSetIter<'a> {
+    type Item = &'a [u8];
+    fn next(&mut self) -> Option<&'a [u8]> {
+        match self {
+            GenericSetIter::Packed(it) => it.next(),
+            GenericSetIter::Hash(it) => it.next().map(|v| v.as_slice()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::PackedStrSet;
+    use super::{GenericSet, PackedStrSet};
     use indexmap::IndexSet;
     use proptest::prelude::*;
 
