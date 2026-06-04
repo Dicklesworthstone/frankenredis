@@ -9573,11 +9573,14 @@ impl Store {
                     let s_idx = s.max(0) as usize;
                     let e_idx = e.min(len as i64 - 1) as usize;
                     let count = e_idx - s_idx + 1;
+                    // Collect the members in rank range [s_idx, e_idx]; the
+                    // order-statistic tree (when already built) jumps to s_idx in
+                    // O(log n) instead of an O(s_idx) linear skip over the
+                    // filter_map iterator. (frankenredis-2ispi)
                     let to_remove: Vec<Vec<u8>> = zs
-                        .iter_asc()
-                        .skip(s_idx)
-                        .take(count)
-                        .map(|(m, _)| m.clone())
+                        .index_slice_asc(s_idx, count)
+                        .into_iter()
+                        .map(|(m, _)| m)
                         .collect();
                     let removed_count = to_remove.len();
                     for m in &to_remove {
@@ -23348,6 +23351,72 @@ mod tests {
         let ratio = cold_ns as f64 / warm_ns as f64;
         println!(
             "ZRANGE deep-index A/B (n={n}, start={s}, x{reps}): linear-skip={cold_ns}ns treap-select={warm_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
+    }
+
+    #[test]
+    fn zremrangebyrank_treap_matches_linear_and_reports_ab_ratio() {
+        let key = b"z";
+        let n = 100_000usize;
+        let build = || {
+            let mut store = Store::new();
+            let adds: Vec<(f64, Vec<u8>)> =
+                (0..n).map(|i| ((i % 500) as f64, format!("m{i:06}").into_bytes())).collect();
+            store.zadd(key, &adds, 0).unwrap();
+            store
+        };
+
+        // Equivalence: a ZREMRANGEBYRANK through the order-statistic tree (warm)
+        // removes exactly the same members as the linear path (cold).
+        for &(start, stop) in &[
+            (0i64, 9i64),
+            (100, 250),
+            (4_000, 4_100),
+            (99_000, 99_999),
+            (0, -1),
+            (-100, -1),
+            (50_000, 49_000), // empty (start > stop)
+        ] {
+            let mut cold = build();
+            let removed_cold = cold.zremrangebyrank(key, start, stop, 0).unwrap();
+            let remaining_cold = cold.zrange(key, 0, -1, 0).unwrap();
+
+            let mut warm = build();
+            let _ = warm.zrank(key, b"m050000", 0); // build the tree
+            let removed_warm = warm.zremrangebyrank(key, start, stop, 0).unwrap();
+            let remaining_warm = warm.zrange(key, 0, -1, 0).unwrap();
+
+            assert_eq!(removed_cold, removed_warm, "removed count {start}..{stop}");
+            assert_eq!(remaining_cold, remaining_warm, "remaining set {start}..{stop}");
+        }
+
+        // A/B: remove one element at a fixed deep rank repeatedly. Cold pays an
+        // O(rank) linear skip to reach it; warm jumps via the tree in O(log n).
+        let reps = 2_000;
+        let deep = 90_000i64;
+        let mut cold = build();
+        let t0 = std::time::Instant::now();
+        let mut a0 = 0usize;
+        for _ in 0..reps {
+            a0 = a0.wrapping_add(cold.zremrangebyrank(key, deep, deep, 0).unwrap());
+        }
+        let cold_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(a0);
+
+        let mut warm = build();
+        let _ = warm.zrank(key, b"m050000", 0);
+        let t1 = std::time::Instant::now();
+        let mut a1 = 0usize;
+        for _ in 0..reps {
+            a1 = a1.wrapping_add(warm.zremrangebyrank(key, deep, deep, 0).unwrap());
+        }
+        let warm_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(a1);
+        assert_eq!(a0, a1, "same number removed");
+        let ratio = cold_ns as f64 / warm_ns as f64;
+        println!(
+            "ZREMRANGEBYRANK deep A/B (n={n}, rank={deep}, x{reps}): linear={cold_ns}ns treap={warm_ns}ns ratio={ratio:.2}x"
         );
         assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
     }
