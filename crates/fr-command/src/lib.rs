@@ -962,8 +962,7 @@ fn command_has_keys(cmd_name: &str) -> bool {
         return false;
     }
     command_uses_custom_key_specs(cmd_name)
-        || command_table_index(cmd_name.as_bytes())
-            .is_some_and(|idx| COMMAND_TABLE[idx].3 != 0)
+        || command_table_index(cmd_name.as_bytes()).is_some_and(|idx| COMMAND_TABLE[idx].3 != 0)
 }
 
 /// (frankenredis-z53ld) Validate the `numkeys` argument for the
@@ -5541,22 +5540,16 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         let min = parse_score_bound(&argv[2])?;
         let max = parse_score_bound(&argv[3])?;
         let (lo, hi) = if rev { (max, min) } else { (min, max) };
-        let mut pairs = store.zrangebyscore_withscores(&argv[1], lo, hi, now_ms)?;
-        if rev {
-            pairs.reverse();
-        }
-        if let Some(offset) = limit_offset {
-            // In-place LIMIT: drain skipped prefix, then truncate to count.
-            // Avoids allocating a second Vec via .collect(). (frankenredis-5qwm6)
-            if offset > 0 && offset < pairs.len() {
-                pairs.drain(0..offset);
-            } else if offset >= pairs.len() {
-                pairs.clear();
-            }
-            if let Some(count) = limit_count {
-                pairs.truncate(count);
-            }
-        }
+        // LIMIT pushed into the range walk — O(offset+count), not O(range).
+        let pairs = store.zrangebyscore_withscores_limited(
+            &argv[1],
+            lo,
+            hi,
+            rev,
+            limit_offset.unwrap_or(0),
+            limit_count,
+            now_ms,
+        )?;
         zrange_emit_with_resp(
             pairs,
             withscores,
@@ -5755,18 +5748,16 @@ fn zrangebyscore(
     let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
     let min = parse_score_bound(&argv[2])?;
     let max = parse_score_bound(&argv[3])?;
-    let mut pairs = store.zrangebyscore_withscores(&argv[1], min, max, now_ms)?;
-    if let Some(offset) = limit_offset {
-        // In-place LIMIT. (frankenredis-5qwm6)
-        if offset > 0 && offset < pairs.len() {
-            pairs.drain(0..offset);
-        } else if offset >= pairs.len() {
-            pairs.clear();
-        }
-        if let Some(count) = limit_count {
-            pairs.truncate(count);
-        }
-    }
+    // LIMIT pushed into the range walk — O(offset+count), not O(range).
+    let pairs = store.zrangebyscore_withscores_limited(
+        &argv[1],
+        min,
+        max,
+        false,
+        limit_offset.unwrap_or(0),
+        limit_count,
+        now_ms,
+    )?;
     zrange_emit_with_resp(
         pairs,
         withscores,
@@ -12892,19 +12883,16 @@ fn zrevrangebyscore(
     let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
     let max = parse_score_bound(&argv[2])?;
     let min = parse_score_bound(&argv[3])?;
-    let mut pairs = store.zrangebyscore_withscores(&argv[1], min, max, now_ms)?;
-    pairs.reverse();
-    if let Some(offset) = limit_offset {
-        // In-place LIMIT. (frankenredis-5qwm6)
-        if offset > 0 && offset < pairs.len() {
-            pairs.drain(0..offset);
-        } else if offset >= pairs.len() {
-            pairs.clear();
-        }
-        if let Some(count) = limit_count {
-            pairs.truncate(count);
-        }
-    }
+    // REV + LIMIT pushed into the range walk — O(offset+count), not O(range).
+    let pairs = store.zrangebyscore_withscores_limited(
+        &argv[1],
+        min,
+        max,
+        true,
+        limit_offset.unwrap_or(0),
+        limit_count,
+        now_ms,
+    )?;
     zrange_emit_with_resp(
         pairs,
         withscores,
@@ -26166,12 +26154,17 @@ mod tests {
             b"GET\0",
             &[b'x'; 200][..],
         ] {
-            assert_eq!(super::command_table_index(bad), linear(bad), "mismatch for {bad:?}");
+            assert_eq!(
+                super::command_table_index(bad),
+                linear(bad),
+                "mismatch for {bad:?}"
+            );
         }
         // Sanity: a known command resolves and the arity field is reachable.
         let idx = super::command_table_index(b"set").expect("SET present");
         assert!(super::COMMAND_TABLE[idx].0.eq_ignore_ascii_case("set"));
     }
+
     use fr_store::{
         SCRIPT_PROPAGATE_ALL, SCRIPT_PROPAGATE_AOF, SCRIPT_PROPAGATE_REPLICA, Store, StoreError,
         StreamGroupReadCursor, StreamGroupReadOptions,

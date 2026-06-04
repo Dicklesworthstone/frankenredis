@@ -9309,6 +9309,88 @@ impl Store {
         }
     }
 
+    /// ZRANGEBYSCORE/ZREVRANGEBYSCORE/`ZRANGE … BYSCORE` with the final ordering
+    /// (`rev`) and `LIMIT offset count` pushed DOWN into the range walk, so only
+    /// the requested window is materialised. The previous path collected the
+    /// entire score range into a `Vec`, reversed it, then drained/truncated to
+    /// the window — O(range). This walks the ordered map lazily and `skip/take`s
+    /// the window — O(offset + count). Byte-identical output to
+    /// `zrangebyscore_withscores` + `reverse()` (when rev) + the in-place LIMIT.
+    /// `count == None` means unbounded (LIMIT absent or a negative count).
+    #[allow(clippy::too_many_arguments)]
+    pub fn zrangebyscore_withscores_limited(
+        &mut self,
+        key: &[u8],
+        min: ScoreBound,
+        max: ScoreBound,
+        rev: bool,
+        offset: usize,
+        count: Option<usize>,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
+        if score_bound_value(min) > score_bound_value(max) {
+            return Ok(Vec::new());
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let lower = match min {
+                            ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
+                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
+                        };
+                        let upper = match max {
+                            ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
+                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
+                        };
+                        let take = count.unwrap_or(usize::MAX);
+                        // `filter_map` drops the non-actual sentinel members; it is
+                        // position-independent, so applying it before skip/take on a
+                        // reversed range == reversing the filtered forward Vec.
+                        let result: Vec<(Vec<u8>, f64)> = if rev {
+                            zs.ordered
+                                .range((lower, upper))
+                                .rev()
+                                .filter_map(|(sm, _)| {
+                                    sm.member.as_actual().map(|m| (m.clone(), sm.score))
+                                })
+                                .skip(offset)
+                                .take(take)
+                                .collect()
+                        } else {
+                            zs.ordered
+                                .range((lower, upper))
+                                .filter_map(|(sm, _)| {
+                                    sm.member.as_actual().map(|m| (m.clone(), sm.score))
+                                })
+                                .skip(offset)
+                                .take(take)
+                                .collect()
+                        };
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Create or overwrite a sorted set from member-score pairs.
     pub fn zstore_from_pairs(&mut self, key: Vec<u8>, pairs: Vec<(Vec<u8>, f64)>, now_ms: u64) {
         let mut zs = SortedSet::new();
@@ -24895,6 +24977,65 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn zrangebyscore_limited_matches_full_collect_then_slice() {
+        // Isomorphism proof for the LIMIT/REV push-down: the lazy
+        // skip/take walk must produce byte-identical output to the old
+        // path (zrangebyscore_withscores + reverse-if-rev + drain/truncate).
+        let mut store = Store::new();
+        let members: Vec<(f64, Vec<u8>)> = (0..50u32)
+            .map(|i| (f64::from(i), format!("m{i:03}").into_bytes()))
+            .collect();
+        store.zadd(b"z", &members, 0).unwrap();
+
+        // Reference: the exact computation the command layer used to do.
+        let reference = |min: ScoreBound,
+                         max: ScoreBound,
+                         rev: bool,
+                         offset: usize,
+                         count: Option<usize>|
+         -> Vec<(Vec<u8>, f64)> {
+            let mut store2 = Store::new();
+            store2.zadd(b"z", &members, 0).unwrap();
+            let mut pairs = store2.zrangebyscore_withscores(b"z", min, max, 0).unwrap();
+            if rev {
+                pairs.reverse();
+            }
+            if offset > 0 && offset < pairs.len() {
+                pairs.drain(0..offset);
+            } else if offset >= pairs.len() {
+                pairs.clear();
+            }
+            if let Some(c) = count {
+                pairs.truncate(c);
+            }
+            pairs
+        };
+
+        let bounds = [
+            (ScoreBound::Inclusive(f64::NEG_INFINITY), ScoreBound::Inclusive(f64::INFINITY)),
+            (ScoreBound::Inclusive(10.0), ScoreBound::Inclusive(40.0)),
+            (ScoreBound::Exclusive(10.0), ScoreBound::Exclusive(40.0)),
+            (ScoreBound::Inclusive(5.0), ScoreBound::Exclusive(5.0)), // empty
+        ];
+        for &(min, max) in &bounds {
+            for rev in [false, true] {
+                for offset in [0usize, 1, 7, 49, 50, 1000, usize::MAX] {
+                    for count in [None, Some(0usize), Some(3), Some(1000)] {
+                        let got = store
+                            .zrangebyscore_withscores_limited(b"z", min, max, rev, offset, count, 0)
+                            .unwrap();
+                        let want = reference(min, max, rev, offset, count);
+                        assert_eq!(
+                            got, want,
+                            "mismatch rev={rev} offset={offset} count={count:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
