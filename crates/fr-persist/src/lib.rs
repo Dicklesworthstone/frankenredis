@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 #[cfg(feature = "upstream-stream-rdb")]
 use std::collections::BTreeSet;
@@ -11,6 +12,10 @@ use fr_protocol::{RespFrame, RespParseError};
 pub mod listpack;
 #[allow(dead_code)]
 pub(crate) mod rdb_stream;
+
+thread_local! {
+    static LZF_SCRATCH: RefCell<LzfScratch> = const { RefCell::new(LzfScratch::new()) };
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AofRecord {
@@ -1880,6 +1885,66 @@ fn rdb_decode_length(data: &[u8]) -> Option<(usize, usize)> {
 ///
 /// (br-frankenredis-1uin)
 pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
+    LZF_SCRATCH
+        .with(|scratch| lzf_compress_with_scratch(input, out_budget, &mut scratch.borrow_mut()))
+}
+
+#[derive(Clone, Copy, Default)]
+struct LzfHashSlot {
+    generation: u32,
+    pos_plus_one: u32,
+}
+
+struct LzfScratch {
+    generation: u32,
+    htab: Vec<LzfHashSlot>,
+}
+
+impl LzfScratch {
+    const fn new() -> Self {
+        Self {
+            generation: 0,
+            htab: Vec::new(),
+        }
+    }
+
+    fn begin_call(&mut self, hsize: usize) -> u32 {
+        if self.htab.len() != hsize {
+            self.htab.resize(hsize, LzfHashSlot::default());
+            self.generation = 0;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.htab.fill(LzfHashSlot::default());
+            self.generation = 1;
+        }
+        self.generation
+    }
+
+    #[inline]
+    fn get(&self, index: usize, generation: u32) -> u32 {
+        let slot = self.htab[index];
+        if slot.generation == generation {
+            slot.pos_plus_one
+        } else {
+            0
+        }
+    }
+
+    #[inline]
+    fn set(&mut self, index: usize, generation: u32, pos_plus_one: u32) {
+        self.htab[index] = LzfHashSlot {
+            generation,
+            pos_plus_one,
+        };
+    }
+}
+
+fn lzf_compress_with_scratch(
+    input: &[u8],
+    out_budget: usize,
+    scratch: &mut LzfScratch,
+) -> Option<Vec<u8>> {
     // Faithful port of vendored deps/lzf/lzf_c.c with HLOG=16 and the
     // VERY_FAST configuration redis builds (lzfP.h: VERY_FAST=1,
     // ULTRA_FAST=0). Reproducing the rolling `hval`, the liblzf IDX hash,
@@ -1905,8 +1970,10 @@ pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
     };
 
     let mut out: Vec<u8> = Vec::with_capacity(out_budget);
-    // htab stores ip+1 (0 = unset), mirroring the zero-initialised C table.
-    let mut htab = vec![0u32; HSIZE];
+    // htab stores ip+1 (0 = unset). Epoch tags make stale slots read as unset,
+    // preserving the zero-initialised C table semantics without clearing 256 KiB
+    // on every compression attempt. (frankenredis-gu5nf.27)
+    let generation = scratch.begin_call(HSIZE);
 
     let mut ip: usize = 0;
     let mut lit: usize = 0;
@@ -1929,8 +1996,8 @@ pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
         // hval = NEXT(hval, ip) = (hval << 8) | ip[2]
         hval = (hval << 8) | (input[ip + 2] as u32);
         let h = idx(hval);
-        let stored = htab[h];
-        htab[h] = (ip as u32) + 1;
+        let stored = scratch.get(h, generation);
+        scratch.set(h, generation, (ip as u32) + 1);
 
         let mut emitted_match = false;
         if stored != 0 {
@@ -1953,7 +2020,7 @@ pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
                 // run can overshoot maxlen by up to ~16 — this is why
                 // e.g. "a"*21 matches 19 bytes, not 17. The unchecked reads
                 // are in bounds because maxlen > 16 => ip[18] < in_end.
-                'matchloop: loop {
+                'matchloop: {
                     if maxlen > 16 {
                         for _ in 0..16 {
                             len += 1;
@@ -1969,7 +2036,6 @@ pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
                             break;
                         }
                     }
-                    break;
                 }
                 let enc = len - 2; // len -= 2 (octets - 1)
 
@@ -2020,10 +2086,10 @@ pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
                 ip -= 2;
                 hval = ((input[ip] as u32) << 8) | (input[ip + 1] as u32); // FRST(ip)
                 hval = (hval << 8) | (input[ip + 2] as u32); // NEXT
-                htab[idx(hval)] = (ip as u32) + 1;
+                scratch.set(idx(hval), generation, (ip as u32) + 1);
                 ip += 1;
                 hval = (hval << 8) | (input[ip + 2] as u32); // NEXT
-                htab[idx(hval)] = (ip as u32) + 1;
+                scratch.set(idx(hval), generation, (ip as u32) + 1);
                 ip += 1;
             }
         }
@@ -3691,7 +3757,8 @@ mod tests {
         let mut acc = 0usize;
         for _ in 0..reps {
             for (c, len) in &compressed_set {
-                acc = acc.wrapping_add(ref_decompress(std::hint::black_box(c), *len).unwrap().len());
+                acc =
+                    acc.wrapping_add(ref_decompress(std::hint::black_box(c), *len).unwrap().len());
             }
         }
         let bytewise_ns = t0.elapsed().as_nanos().max(1);

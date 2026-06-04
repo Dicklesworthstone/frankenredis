@@ -1,0 +1,11 @@
+Benchmark 1: target-blackthrush-pass38-lzf-baseline-rch/release/lzf-epoch-scratch-harness --bench --reps 200000 --bytes 96
+  Time (mean ± σ):     480.6 ms ±  15.9 ms    [User: 477.3 ms, System: 2.4 ms]
+  Range (min … max):   456.7 ms … 503.7 ms    8 runs
+ 
+Benchmark 2: target-blackthrush-pass38-lzf-candidate-rch/release/lzf-epoch-scratch-harness --bench --reps 200000 --bytes 96
+  Time (mean ± σ):      39.9 ms ±   0.7 ms    [User: 38.2 ms, System: 1.4 ms]
+  Range (min … max):    38.9 ms …  41.2 ms    8 runs
+ 
+Summary
+  target-blackthrush-pass38-lzf-candidate-rch/release/lzf-epoch-scratch-harness --bench --reps 200000 --bytes 96 ran
+   12.04 ± 0.46 times faster than target-blackthrush-pass38-lzf-baseline-rch/release/lzf-epoch-scratch-harness --bench --reps 200000 --bytes 96

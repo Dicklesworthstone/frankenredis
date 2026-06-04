@@ -1,0 +1,1 @@
+lzf_compress_many reps=200000 bytes=96 payloads=7 seconds=0.037581815 ops_per_sec=5321722.753 compressed=171429 total_out=7028557 checksum=571406 table_bytes_per_call=262144 logical_table_bytes_touched=52428800000
