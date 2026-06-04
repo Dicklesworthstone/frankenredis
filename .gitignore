@@ -1,6 +1,7 @@
 # Rust build outputs
 /target
 /target-local
+target-*/
 **/*.rs.bk
 
 # Local agent/task tooling state
@@ -144,7 +145,6 @@ ubs_*.jsonl
 /*.txt
 /*.json
 !package.json
-!claude-upgrade-progress.json
 /*.sh
 /*.py
 /*.md
