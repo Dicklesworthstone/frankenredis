@@ -563,6 +563,54 @@ impl SortedSet {
         }
     }
 
+    /// `count` (member, score) pairs starting at ascending index `start_idx`.
+    /// When the order-statistic tree is already built (a prior ZRANK/ZREVRANK),
+    /// jump to `start_idx` in O(log n) via `select` instead of an O(start_idx)
+    /// linear skip; behaviour is identical either way. (frankenredis-m4uxp)
+    fn index_slice_asc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
+        if let Some(tree) = &self.rank_tree
+            && let Some(start_key) = tree.select(start_idx)
+        {
+            return self
+                .ordered
+                .range(start_key..)
+                .take(count)
+                .filter_map(|(sm, _)| sm.member.as_actual().map(|m| (m.clone(), sm.score)))
+                .collect();
+        }
+        self.iter_asc()
+            .skip(start_idx)
+            .take(count)
+            .map(|(m, s)| (m.clone(), *s))
+            .collect()
+    }
+
+    /// `count` (member, score) pairs starting at descending index `start_idx`
+    /// (0 = highest score), in descending order. Uses the order-statistic tree
+    /// (descending index `i` == ascending index `len-1-i`) for an O(log n) jump
+    /// when it is already built; identical to a linear `iter_desc().skip`.
+    /// (frankenredis-m4uxp)
+    fn index_slice_desc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
+        let len = self.dict.len();
+        if start_idx < len
+            && let Some(tree) = &self.rank_tree
+            && let Some(start_key) = tree.select(len - 1 - start_idx)
+        {
+            return self
+                .ordered
+                .range(..=start_key)
+                .rev()
+                .take(count)
+                .filter_map(|(sm, _)| sm.member.as_actual().map(|m| (m.clone(), sm.score)))
+                .collect();
+        }
+        self.iter_desc()
+            .skip(start_idx)
+            .take(count)
+            .map(|(m, s)| (m.clone(), *s))
+            .collect()
+    }
+
     fn iter_desc(&self) -> impl Iterator<Item = (&Vec<u8>, &f64)> {
         self.ordered
             .keys()
@@ -859,6 +907,24 @@ impl ZRankTreap {
             }
         }
         acc
+    }
+
+    /// The key at ascending rank `idx` (0-based), or `None` if out of range.
+    /// O(log n) order-statistic descent using subtree sizes. (frankenredis-m4uxp)
+    fn select(&self, mut idx: usize) -> Option<ScoreMember> {
+        let mut n = self.root;
+        while n != ZRANK_TREAP_NIL {
+            let lsize = self.size(self.nodes[n].left) as usize;
+            match idx.cmp(&lsize) {
+                std::cmp::Ordering::Less => n = self.nodes[n].left,
+                std::cmp::Ordering::Equal => return Some(self.nodes[n].key.clone()),
+                std::cmp::Ordering::Greater => {
+                    idx -= lsize + 1;
+                    n = self.nodes[n].right;
+                }
+            }
+        }
+        None
     }
 }
 
@@ -8534,10 +8600,9 @@ impl Store {
                         let e_idx = e.min(len - 1) as usize;
                         let count = e_idx - s_idx + 1;
                         let result: Vec<Vec<u8>> = zs
-                            .iter_asc()
-                            .skip(s_idx)
-                            .take(count)
-                            .map(|(m, _)| m.clone())
+                            .index_slice_asc(s_idx, count)
+                            .into_iter()
+                            .map(|(m, _)| m)
                             .collect();
                         entry.touch(now_ms);
                         Ok(result)
@@ -8585,10 +8650,9 @@ impl Store {
                         let e_idx = e.min(len - 1) as usize;
                         let count = e_idx - s_idx + 1;
                         let result: Vec<Vec<u8>> = zs
-                            .iter_desc()
-                            .skip(s_idx)
-                            .take(count)
-                            .map(|(m, _)| m.clone())
+                            .index_slice_desc(s_idx, count)
+                            .into_iter()
+                            .map(|(m, _)| m)
                             .collect();
                         entry.touch(now_ms);
                         Ok(result)
@@ -9097,12 +9161,7 @@ impl Store {
                         let s_idx = s.max(0) as usize;
                         let e_idx = e.min(len - 1) as usize;
                         let count = e_idx - s_idx + 1;
-                        let result: Vec<(Vec<u8>, f64)> = zs
-                            .iter_asc()
-                            .skip(s_idx)
-                            .take(count)
-                            .map(|(m, &s)| (m.clone(), s))
-                            .collect();
+                        let result: Vec<(Vec<u8>, f64)> = zs.index_slice_asc(s_idx, count);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -9232,12 +9291,7 @@ impl Store {
                         let s_idx = s.max(0) as usize;
                         let e_idx = e.min(len - 1) as usize;
                         let count = e_idx - s_idx + 1;
-                        let result: Vec<(Vec<u8>, f64)> = zs
-                            .iter_desc()
-                            .skip(s_idx)
-                            .take(count)
-                            .map(|(m, &s)| (m.clone(), s))
-                            .collect();
+                        let result: Vec<(Vec<u8>, f64)> = zs.index_slice_desc(s_idx, count);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -23212,6 +23266,88 @@ mod tests {
         println!(
             "ZRANK interleaved A/B (n={n}, {reps} re-scores x {} probes): old(rebuild)={old_ns}ns new(treap)={new_ns}ns ratio={ratio:.2}x",
             probes.len()
+        );
+        assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
+    }
+
+    #[test]
+    fn zset_index_slice_treap_matches_linear_and_reports_ab_ratio() {
+        let key = b"z";
+        let mut store = Store::new();
+        let n = 100_000usize;
+        let mut adds: Vec<(f64, Vec<u8>)> = Vec::with_capacity(n);
+        // Small score range forces many ties broken by member bytes, so the
+        // (score, member) ordering is non-trivial.
+        for i in 0..n {
+            adds.push(((i % 500) as f64, format!("m{i:06}").into_bytes()));
+        }
+        store.zadd(key, &adds, 0).unwrap();
+
+        let ranges: [(i64, i64); 9] = [
+            (0, 9),
+            (100, 199),
+            (2_000, 2_050),
+            (49_000, 49_100),
+            (99_900, 99_999),
+            (0, -1),
+            (-100, -1),
+            (-1, -1),
+            (50_000, 49_000), // empty (start > stop)
+        ];
+
+        // Cold path (order-statistic tree NOT yet built — zrange/zrevrange never
+        // build it): capture results for every range + variant.
+        let cold_asc: Vec<_> = ranges.iter().map(|&(s, e)| store.zrange(key, s, e, 0).unwrap()).collect();
+        let cold_desc: Vec<_> = ranges.iter().map(|&(s, e)| store.zrevrange(key, s, e, 0).unwrap()).collect();
+        let cold_asc_ws: Vec<_> =
+            ranges.iter().map(|&(s, e)| store.zrange_withscores(key, s, e, 0).unwrap()).collect();
+        let cold_desc_ws: Vec<_> =
+            ranges.iter().map(|&(s, e)| store.zrevrange_withscores(key, s, e, 0).unwrap()).collect();
+
+        // Warm the order-statistic tree via a ZRANK, then assert every by-index
+        // read returns byte-identical results through the treap-select path.
+        let _ = store.zrank(key, b"m050000", 0);
+        let _ = store.zrevrank(key, b"m050000", 0);
+        for (i, &(s, e)) in ranges.iter().enumerate() {
+            assert_eq!(store.zrange(key, s, e, 0).unwrap(), cold_asc[i], "zrange {s}..{e}");
+            assert_eq!(store.zrevrange(key, s, e, 0).unwrap(), cold_desc[i], "zrevrange {s}..{e}");
+            assert_eq!(
+                store.zrange_withscores(key, s, e, 0).unwrap(),
+                cold_asc_ws[i],
+                "zrange_withscores {s}..{e}"
+            );
+            assert_eq!(
+                store.zrevrange_withscores(key, s, e, 0).unwrap(),
+                cold_desc_ws[i],
+                "zrevrange_withscores {s}..{e}"
+            );
+        }
+
+        // A/B: a deep ZRANGE (large start offset, small page). Cold uses an
+        // O(offset) linear skip; warm uses the O(log n) order-statistic select.
+        let key_cold = b"zc";
+        let mut store_cold = Store::new();
+        store_cold.zadd(key_cold, &adds, 0).unwrap();
+        let (s, e) = (99_900i64, 99_999i64);
+        let reps = 2_000;
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            c0 = c0.wrapping_add(store_cold.zrange(key_cold, s, e, 0).unwrap().len());
+        }
+        let cold_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        // `store` already has the tree warm from the ZRANK above.
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            c1 = c1.wrapping_add(store.zrange(key, s, e, 0).unwrap().len());
+        }
+        let warm_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        let ratio = cold_ns as f64 / warm_ns as f64;
+        println!(
+            "ZRANGE deep-index A/B (n={n}, start={s}, x{reps}): linear-skip={cold_ns}ns treap-select={warm_ns}ns ratio={ratio:.2}x"
         );
         assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
     }
