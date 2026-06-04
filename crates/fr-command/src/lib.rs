@@ -962,10 +962,8 @@ fn command_has_keys(cmd_name: &str) -> bool {
         return false;
     }
     command_uses_custom_key_specs(cmd_name)
-        || COMMAND_TABLE
-            .iter()
-            .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
-            .is_some_and(|&(_, _, _, first_key, _, _)| first_key != 0)
+        || command_table_index(cmd_name.as_bytes())
+            .is_some_and(|idx| COMMAND_TABLE[idx].3 != 0)
 }
 
 /// (frankenredis-z53ld) Validate the `numkeys` argument for the
@@ -1105,9 +1103,8 @@ fn command_key_references(
     };
     let cmd_name =
         std::str::from_utf8(raw_cmd).map_err(|_| CommandKeyLookupError::InvalidCommand)?;
-    let Some(&(table_name, _arity, flags, _, _, _)) = COMMAND_TABLE
-        .iter()
-        .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
+    let Some((table_name, _arity, flags, _, _, _)) =
+        command_table_index(cmd_name.as_bytes()).map(|idx| COMMAND_TABLE[idx])
     else {
         return Err(CommandKeyLookupError::InvalidCommand);
     };
@@ -16082,6 +16079,40 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("zrangestore", -5, "write denyoom", 1, 2, 1),
 ];
 
+/// O(1) case-insensitive lookup of a command name into `COMMAND_TABLE`,
+/// returning its index. Replaces the per-command `COMMAND_TABLE.iter().find(|n|
+/// n.eq_ignore_ascii_case(..))` linear scan (218 case-folding string compares)
+/// that showed up on the pipelined dispatch hot path (check_command_arity,
+/// get_command_flags, command_key_references — frankenredis-yaxr7 profile).
+///
+/// The index is built once (lazily) keyed by the lowercased command-name bytes,
+/// keeping the FIRST occurrence so the result is identical to `.find()` on a
+/// table with duplicate names. Lookups lowercase into a stack buffer to avoid a
+/// per-call heap allocation (command names are short ASCII tokens).
+fn command_table_index(name: &[u8]) -> Option<usize> {
+    static INDEX: OnceLock<HashMap<Vec<u8>, usize>> = OnceLock::new();
+    let index = INDEX.get_or_init(|| {
+        let mut map: HashMap<Vec<u8>, usize> = HashMap::with_capacity(COMMAND_TABLE.len() * 2);
+        for (i, &(table_name, ..)) in COMMAND_TABLE.iter().enumerate() {
+            // keep the first occurrence — matches `.find()` semantics
+            map.entry(table_name.as_bytes().to_ascii_lowercase())
+                .or_insert(i);
+        }
+        map
+    });
+    const STACK: usize = 64;
+    if name.len() <= STACK {
+        let mut buf = [0u8; STACK];
+        for (dst, &src) in buf[..name.len()].iter_mut().zip(name) {
+            *dst = src.to_ascii_lowercase();
+        }
+        index.get(&buf[..name.len()]).copied()
+    } else {
+        // Pathologically long token: cannot be a real command, but stay correct.
+        index.get(name.to_ascii_lowercase().as_slice()).copied()
+    }
+}
+
 /// Subcommand-level COMMAND INFO/LIST entries — the namespaced
 /// "parent|sub" rows that upstream emits from server.c::commandCommand
 /// by walking each container's `subcommand_dict`. fr previously
@@ -16375,16 +16406,10 @@ pub fn check_command_arity(name: &[u8], argc: usize) -> Result<(), &'static str>
             Err(HGET_COMMAND_NAME)
         };
     }
-    let name_str = match std::str::from_utf8(name) {
-        Ok(s) => s,
-        Err(_) => return Err(""),
-    };
-    let Some(&(cmd_name, arity, ..)) = COMMAND_TABLE
-        .iter()
-        .find(|&&(n, ..)| n.eq_ignore_ascii_case(name_str))
-    else {
+    let Some(idx) = command_table_index(name) else {
         return Err(""); // Unknown command — caller handles separately
     };
+    let (cmd_name, arity, ..) = COMMAND_TABLE[idx];
     let argc = argc as i64;
     if arity > 0 {
         // Exact arity required.
@@ -16406,11 +16431,7 @@ pub fn get_command_flags(name: &[u8]) -> Option<&'static str> {
     if is_hget_command(name) {
         return Some(HGET_COMMAND_FLAGS);
     }
-    let name_str = std::str::from_utf8(name).ok()?;
-    COMMAND_TABLE
-        .iter()
-        .find(|&&(n, ..)| n.eq_ignore_ascii_case(name_str))
-        .map(|&(_, _, flags, ..)| flags)
+    command_table_index(name).map(|idx| COMMAND_TABLE[idx].2)
 }
 
 fn command_writes_or_may_replicate_in_readonly_script(argv: &[Vec<u8>]) -> bool {
@@ -26109,6 +26130,48 @@ mod tests {
     use std::time::Instant;
 
     use fr_protocol::RespFrame;
+
+    /// command_table_index (O(1) hash) must return exactly what the previous
+    /// `COMMAND_TABLE.iter().find(|n| n.eq_ignore_ascii_case(name))` linear scan
+    /// returned — same index (first occurrence) for every name, any case, and
+    /// None for unknowns/non-ASCII. (frankenredis-yaxr7 hot-path lever)
+    #[test]
+    fn command_table_index_matches_linear_scan() {
+        let linear = |name: &[u8]| -> Option<usize> {
+            let s = std::str::from_utf8(name).ok()?;
+            super::COMMAND_TABLE
+                .iter()
+                .position(|&(n, ..)| n.eq_ignore_ascii_case(s))
+        };
+        // Every table entry, in its own case and upper/lower/mixed variants.
+        for &(name, ..) in super::COMMAND_TABLE {
+            for variant in [
+                name.to_string(),
+                name.to_ascii_uppercase(),
+                name.to_ascii_lowercase(),
+            ] {
+                let b = variant.as_bytes();
+                assert_eq!(
+                    super::command_table_index(b),
+                    linear(b),
+                    "mismatch for {variant:?}"
+                );
+            }
+        }
+        // Unknowns and edge inputs resolve identically (None).
+        for bad in [
+            &b"definitely-not-a-command"[..],
+            b"",
+            b"\xff\xfe",
+            b"GET\0",
+            &[b'x'; 200][..],
+        ] {
+            assert_eq!(super::command_table_index(bad), linear(bad), "mismatch for {bad:?}");
+        }
+        // Sanity: a known command resolves and the arity field is reachable.
+        let idx = super::command_table_index(b"set").expect("SET present");
+        assert!(super::COMMAND_TABLE[idx].0.eq_ignore_ascii_case("set"));
+    }
     use fr_store::{
         SCRIPT_PROPAGATE_ALL, SCRIPT_PROPAGATE_AOF, SCRIPT_PROPAGATE_REPLICA, Store, StoreError,
         StreamGroupReadCursor, StreamGroupReadOptions,
