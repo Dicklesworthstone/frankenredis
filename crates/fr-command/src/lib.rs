@@ -13879,7 +13879,40 @@ struct LcsMatch {
 const LCS_MAX_DP_SIZE: usize = 16 * 1024 * 1024; // 16M entries = 64MB
 
 fn compute_lcs_len(a: &[u8], b: &[u8]) -> usize {
+    // `a` is the shorter string (the inner / pattern dimension).
     let (a, b) = if a.len() < b.len() { (a, b) } else { (b, a) };
+    let m = a.len();
+    let n = b.len();
+    if m == 0 || n == 0 {
+        return 0;
+    }
+    if m <= 64 {
+        // Bit-parallel LCS-length (Crochemore-Iliopoulos-Pinzon-Rytter, 2001):
+        // encode the pattern `a` (m<=64 bits) as per-byte position masks, then
+        // fold each text byte through one word recurrence instead of the O(m)
+        // inner DP row. The LCS length is `m` minus the popcount of the final
+        // match vector. This is the exact LCS length (not an approximation) and
+        // is byte-identical to the scalar DP — see
+        // compute_lcs_len_scalar and the equivalence test. (frankenredis-t8veh)
+        let mut pm = [0u64; 256];
+        for (i, &c) in a.iter().enumerate() {
+            pm[c as usize] |= 1u64 << i;
+        }
+        let mask: u64 = if m == 64 { !0u64 } else { (1u64 << m) - 1 };
+        let mut v: u64 = mask;
+        for &c in b {
+            let u = v & pm[c as usize];
+            v = (v.wrapping_add(u) | v.wrapping_sub(u)) & mask;
+        }
+        return m - v.count_ones() as usize;
+    }
+    compute_lcs_len_scalar(a, b)
+}
+
+/// Scalar two-row LCS-length DP. Reference fallback for patterns longer than a
+/// machine word (m > 64), and the equivalence oracle for the bit-parallel path.
+/// `a` must be the shorter string. (frankenredis-t8veh)
+fn compute_lcs_len_scalar(a: &[u8], b: &[u8]) -> usize {
     let m = a.len();
     let n = b.len();
     if m == 0 || n == 0 {
@@ -26073,6 +26106,73 @@ mod tests {
     fn classify_packet_008_dispatch_linear(cmd: &[u8]) -> Option<CommandId> {
         let text = std::str::from_utf8(cmd).ok()?;
         classify_command(text.as_bytes())
+    }
+
+    #[test]
+    fn lcs_len_bitparallel_matches_scalar_and_reports_ab_ratio() {
+        use super::{compute_lcs_len, compute_lcs_len_scalar};
+        // Known cases. (frankenredis-t8veh)
+        assert_eq!(compute_lcs_len(b"AB", b"AB"), 2);
+        assert_eq!(compute_lcs_len(b"AB", b"BA"), 1);
+        assert_eq!(compute_lcs_len(b"AC", b"ABC"), 2);
+        assert_eq!(compute_lcs_len(b"", b"abc"), 0);
+        assert_eq!(compute_lcs_len(b"abcde", b"abcde"), 5);
+        assert_eq!(compute_lcs_len(b"abc", b"xyz"), 0);
+        assert_eq!(compute_lcs_len(b"ohmytext", b"mynewtext"), 6); // redis LCS doc example
+
+        // Equivalence vs the scalar DP across all length classes, incl. the m==64
+        // boundary and the m>64 fallback. compute_lcs_len_scalar expects the
+        // shorter string first.
+        let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..4000 {
+            let la = (next() % 90) as usize;
+            let lb = (next() % 90) as usize;
+            let na = 1 + (next() % 4) as usize; // small alphabet => non-trivial LCS
+            let nb = 1 + (next() % 4) as usize;
+            let a: Vec<u8> = (0..la).map(|_| b'a' + (next() % na as u64) as u8).collect();
+            let b: Vec<u8> = (0..lb).map(|_| b'a' + (next() % nb as u64) as u8).collect();
+            let (s, l) = if a.len() < b.len() { (&a, &b) } else { (&b, &a) };
+            assert_eq!(
+                compute_lcs_len(&a, &b),
+                compute_lcs_len_scalar(s, l),
+                "a={a:?} b={b:?}"
+            );
+        }
+
+        // A/B: LCS LEN of two ~60-byte strings (m=60 <= 64 -> bit-parallel).
+        let mut mk = |len: usize, alpha: u64| -> Vec<u8> {
+            (0..len).map(|_| b'a' + (next() % alpha) as u8).collect()
+        };
+        let a = mk(60, 4);
+        let b = mk(900, 4);
+        let (s, l) = (&a, &b);
+        let expected = compute_lcs_len_scalar(s, l);
+        assert_eq!(compute_lcs_len(&a, &b), expected);
+        let reps = 20000;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc.wrapping_add(compute_lcs_len_scalar(std::hint::black_box(s), std::hint::black_box(l)));
+        }
+        let scalar_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 = acc2.wrapping_add(compute_lcs_len(std::hint::black_box(&a), std::hint::black_box(&b)));
+        }
+        let bitpar_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        let ratio = scalar_ns as f64 / bitpar_ns as f64;
+        println!(
+            "LCS-LEN A/B (m=60,n=900 x{reps}): scalar={scalar_ns}ns bitpar={bitpar_ns}ns ratio={ratio:.2}x"
+        );
     }
 
     #[test]
