@@ -3493,12 +3493,46 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
 }
 
 #[inline]
+/// Pack up to 8 ASCII-uppercased bytes of a command name into a `u64`.
+/// Only ASCII lowercase letters are folded (matching `to_ascii_uppercase`
+/// / `eq_ignore_ascii_case` semantics exactly) so non-letter bytes never
+/// collide with a letter. Bytes are placed at distinct, non-overlapping
+/// 8-bit shifts, so for two equal-length slices `pack(a) == pack(b)` iff
+/// every uppercased byte matches — byte-identical to the per-byte fold
+/// below. Caller guarantees `b.len() <= 8`.
+#[inline(always)]
+const fn pack_cmd_u64(b: &[u8]) -> u64 {
+    let mut k = 0u64;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        let up = if c.is_ascii_lowercase() { c - 32 } else { c };
+        k |= (up as u64) << (i * 8);
+        i += 1;
+    }
+    k
+}
+
+/// Case-insensitive command-name compare. For the common case of names up
+/// to 8 bytes (every hot command — GET/SET/HSET/EXPIRE/ZADD/…), this packs
+/// both sides into a single `u64` and compares with one integer op instead
+/// of a per-byte fold loop. Because `pack_cmd_u64(lhs)` depends only on the
+/// (loop-invariant) command bytes, the optimizer hoists it across the
+/// inlined chain of `eq_ascii_command(cmd, b"LITERAL")` comparisons in
+/// `classify_command` and lowers the distinct-constant comparisons into a
+/// jump table — turning each length bucket's O(bucket) linear scan into an
+/// effectively O(1) dispatch. Names longer than 8 bytes keep the byte loop.
+#[inline(always)]
 fn eq_ascii_command(lhs: &[u8], rhs: &[u8]) -> bool {
-    lhs.len() == rhs.len()
-        && lhs
-            .iter()
-            .zip(rhs.iter())
-            .all(|(left, right)| left.to_ascii_uppercase() == *right)
+    if lhs.len() != rhs.len() {
+        return false;
+    }
+    if rhs.len() <= 8 {
+        return pack_cmd_u64(lhs) == pack_cmd_u64(rhs);
+    }
+    lhs.iter()
+        .zip(rhs.iter())
+        .all(|(left, right)| left.to_ascii_uppercase() == *right)
 }
 
 fn ping(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
@@ -27548,6 +27582,153 @@ mod tests {
             resp,
             RespFrame::Error("ERR unknown command 'NOPE', with args beginning with: ".to_string())
         );
+    }
+
+    // Reference: the original per-byte ASCII-uppercase fold compare that
+    // `eq_ascii_command` replaced. Kept here as the isomorphism oracle.
+    fn eq_ascii_command_byte_fold(lhs: &[u8], rhs: &[u8]) -> bool {
+        lhs.len() == rhs.len()
+            && lhs
+                .iter()
+                .zip(rhs.iter())
+                .all(|(l, r)| l.to_ascii_uppercase() == *r)
+    }
+
+    // Old dispatch shape: a linear chain of per-byte fold compares against
+    // compile-time literals (exactly how `classify_command` looked before).
+    #[inline(never)]
+    fn classify6_byte_fold(cmd: &[u8]) -> u32 {
+        let e = eq_ascii_command_byte_fold;
+        if e(cmd, b"EXPIRE") { 1 } else if e(cmd, b"EXISTS") { 2 }
+        else if e(cmd, b"GETSET") { 3 } else if e(cmd, b"LPUSHX") { 4 }
+        else if e(cmd, b"RPUSHX") { 5 } else if e(cmd, b"INCRBY") { 6 }
+        else if e(cmd, b"DECRBY") { 7 } else if e(cmd, b"APPEND") { 8 }
+        else if e(cmd, b"STRLEN") { 9 } else if e(cmd, b"RENAME") { 10 }
+        else if e(cmd, b"GETDEL") { 11 } else if e(cmd, b"SUBSTR") { 12 }
+        else if e(cmd, b"LRANGE") { 13 } else if e(cmd, b"LINDEX") { 14 }
+        else if e(cmd, b"SINTER") { 15 } else if e(cmd, b"SUNION") { 16 }
+        else if e(cmd, b"ZSCORE") { 17 } else if e(cmd, b"ZRANGE") { 18 }
+        else if e(cmd, b"ZCOUNT") { 19 } else if e(cmd, b"HSETNX") { 20 }
+        else if e(cmd, b"BITPOS") { 21 } else if e(cmd, b"DBSIZE") { 22 }
+        else if e(cmd, b"MEMORY") { 23 } else if e(cmd, b"UNLINK") { 24 }
+        else if e(cmd, b"PSETEX") { 25 } else if e(cmd, b"SETBIT") { 26 }
+        else if e(cmd, b"GETBIT") { 27 } else if e(cmd, b"LOLWUT") { 28 }
+        else if e(cmd, b"SCRIPT") { 29 } else if e(cmd, b"PUBSUB") { 30 }
+        else { 0 }
+    }
+
+    // New dispatch shape: identical chain but each compare is the packed-u64
+    // `eq_ascii_command`. `pack(cmd)` is loop-invariant so the optimizer
+    // hoists it once and lowers the distinct-constant arms into a jump
+    // table — O(bucket) linear scan becomes effectively O(1).
+    #[inline(never)]
+    fn classify6_packed(cmd: &[u8]) -> u32 {
+        let e = super::eq_ascii_command;
+        if e(cmd, b"EXPIRE") { 1 } else if e(cmd, b"EXISTS") { 2 }
+        else if e(cmd, b"GETSET") { 3 } else if e(cmd, b"LPUSHX") { 4 }
+        else if e(cmd, b"RPUSHX") { 5 } else if e(cmd, b"INCRBY") { 6 }
+        else if e(cmd, b"DECRBY") { 7 } else if e(cmd, b"APPEND") { 8 }
+        else if e(cmd, b"STRLEN") { 9 } else if e(cmd, b"RENAME") { 10 }
+        else if e(cmd, b"GETDEL") { 11 } else if e(cmd, b"SUBSTR") { 12 }
+        else if e(cmd, b"LRANGE") { 13 } else if e(cmd, b"LINDEX") { 14 }
+        else if e(cmd, b"SINTER") { 15 } else if e(cmd, b"SUNION") { 16 }
+        else if e(cmd, b"ZSCORE") { 17 } else if e(cmd, b"ZRANGE") { 18 }
+        else if e(cmd, b"ZCOUNT") { 19 } else if e(cmd, b"HSETNX") { 20 }
+        else if e(cmd, b"BITPOS") { 21 } else if e(cmd, b"DBSIZE") { 22 }
+        else if e(cmd, b"MEMORY") { 23 } else if e(cmd, b"UNLINK") { 24 }
+        else if e(cmd, b"PSETEX") { 25 } else if e(cmd, b"SETBIT") { 26 }
+        else if e(cmd, b"GETBIT") { 27 } else if e(cmd, b"LOLWUT") { 28 }
+        else if e(cmd, b"SCRIPT") { 29 } else if e(cmd, b"PUBSUB") { 30 }
+        else { 0 }
+    }
+
+    #[test]
+    fn eq_ascii_command_packed_is_isomorphic_to_byte_fold() {
+        // Packed compare must agree with the per-byte fold for EVERY
+        // (input, literal) pair — including non-letter bytes that a naive
+        // `& !0x20` fold would mishandle (e.g. '_' (0x5F) -> 'O' (0x4F)).
+        let literals: &[&[u8]] = &[
+            b"GET", b"SET", b"DEL", b"TTL", b"LCS", b"PING", b"HSET",
+            b"ZADD", b"EXPIRE", b"EXISTS", b"GETSET", b"LPUSH", b"INCRBY",
+            b"CONFIG", b"BZPOPMAX", b"SMEMBERS", b"GETRANGE", b"SINTERCARD",
+        ];
+        let inputs: &[&[u8]] = &[
+            b"get", b"GET", b"GeT", b"gett", b"ge", b"zzz", b"set", b"SET",
+            b"expire", b"EXPIRE", b"ExPiRe", b"c_nfig", b"CONFIG", b"config",
+            b"_____", b"GETSE_", b"hset", b"HSET", b"\x00\x00\x00", b"ZADD",
+            b"smembers", b"GETRANGE", b"getrang", b"bzpopmax", b"[\\]^_`",
+            b"SINTERCARD", b"sintercard", b"SINTERCAR", b"",
+        ];
+        for lit in literals {
+            for inp in inputs {
+                assert_eq!(
+                    super::eq_ascii_command(inp, lit),
+                    eq_ascii_command_byte_fold(inp, lit),
+                    "mismatch: input {inp:?} vs literal {lit:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn classify_command_round_trips_every_known_command_after_packing() {
+        // Golden: every command in the real table classifies, and its
+        // lowercase form classifies identically (case-insensitive), and a
+        // shifted near-miss does not — guards against any pack collision.
+        // Note: some COMMAND_TABLE rows (MULTI/EXEC/SUBSCRIBE/…) are
+        // intercepted above classify_command and correctly return None
+        // here — so the invariant is *case-insensitivity*, not is_some:
+        // upper and lower forms must classify identically.
+        for &(name, ..) in super::COMMAND_TABLE {
+            let upper = name.to_ascii_uppercase();
+            let lower = name.to_ascii_lowercase();
+            let id_u = super::classify_command(upper.as_bytes());
+            let id_l = super::classify_command(lower.as_bytes());
+            assert_eq!(id_u, id_l, "case-insensitivity broke for {name}");
+        }
+        // Golden anchors: packing must not null out real dispatch targets,
+        // and must still reject a non-command of the same length.
+        use super::CommandId;
+        assert_eq!(super::classify_command(b"get"), Some(CommandId::Get));
+        assert_eq!(super::classify_command(b"SET"), Some(CommandId::Set));
+        assert_eq!(super::classify_command(b"ExPiRe"), Some(CommandId::Expire));
+        assert_eq!(
+            super::classify_command(b"sintercard"),
+            Some(CommandId::Sintercard)
+        );
+        assert_eq!(super::classify_command(b"ZZZZZZ"), None);
+    }
+
+    #[test]
+    fn eq_ascii_command_packed_dispatch_beats_byte_fold_ab() {
+        use std::time::Instant;
+        // Worst case: a 6-byte name that misses the whole bucket, forcing a
+        // full scan. (Real `classify_command`'s 6-byte bucket holds 49.)
+        let needle = b"ZZZZZZ";
+        let iters = 6_000_000u64;
+
+        let t0 = Instant::now();
+        let mut acc0 = 0u64;
+        for _ in 0..iters {
+            acc0 += classify6_byte_fold(std::hint::black_box(needle)) as u64;
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+
+        let t1 = Instant::now();
+        let mut acc1 = 0u64;
+        for _ in 0..iters {
+            acc1 += classify6_packed(std::hint::black_box(needle)) as u64;
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+
+        assert_eq!(acc0, acc1, "dispatch results diverged");
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "classify (6-byte bucket miss): byte-fold {} ms -> packed {} ms = {ratio:.2}x",
+            old_ns / 1_000_000,
+            new_ns / 1_000_000,
+        );
+        assert!(ratio > 2.0, "expected >2x dispatch speedup, got {ratio:.2}x");
     }
 
     #[test]
