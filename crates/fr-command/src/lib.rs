@@ -4968,6 +4968,17 @@ fn geo_radius_cell_ranges(clon: f64, clat: f64, radius_m: f64) -> Option<Vec<(f6
     if steps < 3 {
         return None; // cells already span ~the whole world; full scan is fine
     }
+    Some(geo_cells_for_steps(clon, clat, steps))
+}
+
+/// The up-to-9 disjoint geohash-score ranges for the cell containing
+/// (`clon`, `clat`) at precision `steps` plus its 8 neighbours. Longitude wraps
+/// mod 2^steps; out-of-range latitude neighbours are dropped (they hold no
+/// points). Each cell `C` maps to `[C << shift, (C << shift) | (2^shift - 1)]`
+/// where `shift = 2*(26 - steps)`, because the stored score is the 52-bit
+/// interleave whose top `2*steps` bits identify the cell. Shared by the radius
+/// and box neighbour scans. (frankenredis-b9utp)
+fn geo_cells_for_steps(clon: f64, clat: f64, steps: u8) -> Vec<(f64, f64)> {
     let cells = 1i64 << steps;
     let scale = cells as f64;
     let lat_off = (((clat - GEO_LAT_MIN) / (GEO_LAT_MAX - GEO_LAT_MIN)) * scale) as i64;
@@ -5001,7 +5012,42 @@ fn geo_radius_cell_ranges(clon: f64, clat: f64, radius_m: f64) -> Option<Vec<(f6
             ranges.push((score_min as f64, score_max as f64));
         }
     }
-    Some(ranges)
+    ranges
+}
+
+/// Disjoint geohash-score ranges covering the GEOSEARCH BYBOX rectangle
+/// (`half_w` x `half_h` metres at (`clon`,`clat`)): the center cell + 8 neighbours
+/// at the largest precision where one cell is at least as wide as the box's
+/// angular half-extents (from `geo_box_bbox`, the exact superset). At that
+/// precision the box reaches at most one neighbour cell, so the 3x3 grid provably
+/// covers it. Returns `None` when the box wraps the antimeridian or is so wide the
+/// cells span most of the keyspace (the caller then does a full scan).
+/// (frankenredis-b9utp)
+fn geo_box_cell_ranges(clon: f64, clat: f64, half_w: f64, half_h: f64) -> Option<Vec<(f64, f64)>> {
+    if clat < GEO_LAT_MIN || clat > GEO_LAT_MAX || clon < GEO_LONG_MIN || clon > GEO_LONG_MAX {
+        return None;
+    }
+    let (_lat_min, lat_max, _lon_min, lon_max, lon_wrap) = geo_box_bbox(clon, clat, half_w, half_h);
+    if lon_wrap {
+        return None; // box spans too much longitude; full scan is simpler
+    }
+    let lat_ext = lat_max - clat; // degrees, one side
+    let lon_ext = lon_max - clon;
+    let lat_span = GEO_LAT_MAX - GEO_LAT_MIN;
+    let lon_span = GEO_LONG_MAX - GEO_LONG_MIN;
+    let mut steps = 0u8;
+    for s in 1..=GEO_STEP_MAX {
+        let cells = (1u64 << s) as f64;
+        if lat_span / cells >= lat_ext && lon_span / cells >= lon_ext {
+            steps = s;
+        } else {
+            break; // cells only shrink as precision grows
+        }
+    }
+    if steps < 3 {
+        return None;
+    }
+    Some(geo_cells_for_steps(clon, clat, steps))
 }
 
 /// Decode a stored geohash score, apply the radius bbox pre-filter, and on a hit
@@ -5029,6 +5075,36 @@ fn geo_collect_candidate(
     }
     let dist = geo_distance_m(clon, clat, lon, lat);
     if dist <= radius_m {
+        results.push((member.to_vec(), score, dist, lon, lat));
+    }
+}
+
+/// Decode a stored geohash score, apply the box bbox pre-filter, and on an
+/// in-rectangle hit push the exact (member, score, distance, lon, lat) tuple.
+/// Shared by the BYBOX neighbour-cell scan and full bbox scan. `bb` is
+/// (lat_min, lat_max, lon_min, lon_max, lon_wrap). (frankenredis-b9utp)
+#[allow(clippy::too_many_arguments)]
+fn geo_collect_box_candidate(
+    member: &[u8],
+    score: f64,
+    cx: f64,
+    cy: f64,
+    half_w: f64,
+    half_h: f64,
+    bb: (f64, f64, f64, f64, bool),
+    results: &mut Vec<(Vec<u8>, f64, f64, f64, f64)>,
+) {
+    let Some((lon, lat)) = geo_decode_score(score) else {
+        return;
+    };
+    if lat < bb.0 || lat > bb.1 {
+        return;
+    }
+    if !bb.4 && (lon < bb.2 || lon > bb.3) {
+        return;
+    }
+    if geo_point_in_box(cx, cy, lon, lat, half_w, half_h) {
+        let dist = geo_distance_m(cx, cy, lon, lat);
         results.push((member.to_vec(), score, dist, lon, lat));
     }
 }
@@ -6704,24 +6780,30 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // (frankenredis-vnsnx)
         let half_w = w / 2.0;
         let half_h = h / 2.0;
-        let (bb_lat_min, bb_lat_max, bb_lon_min, bb_lon_max, bb_lon_wrap) =
-            geo_box_bbox(cx, cy, half_w, half_h);
+        let bb = geo_box_bbox(cx, cy, half_w, half_h);
         let mut results: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
-        store.zset_for_each_asc(&argv[1], now_ms, |member, score| {
-            let Some((lon, lat)) = geo_decode_score(score) else {
-                return;
-            };
-            if lat < bb_lat_min || lat > bb_lat_max {
-                return;
+        // O(log n + k) geohash neighbour-cell scan when the box fits the center
+        // cell + its 8 neighbours; otherwise the full bbox+borrow scan. Both
+        // apply the identical exact bbox + geo_point_in_box filter, so results
+        // are unchanged. (frankenredis-b9utp)
+        match geo_box_cell_ranges(cx, cy, half_w, half_h) {
+            Some(ranges) => {
+                store.zset_for_each_in_score_ranges(&argv[1], &ranges, now_ms, |member, score| {
+                    geo_collect_box_candidate(member, score, cx, cy, half_w, half_h, bb, &mut results);
+                })?;
+                // Restore ascending (score, member) order to match the full scan.
+                results.sort_by(|a, b| {
+                    a.1.partial_cmp(&b.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.0.cmp(&b.0))
+                });
             }
-            if !bb_lon_wrap && (lon < bb_lon_min || lon > bb_lon_max) {
-                return;
+            None => {
+                store.zset_for_each_asc(&argv[1], now_ms, |member, score| {
+                    geo_collect_box_candidate(member, score, cx, cy, half_w, half_h, bb, &mut results);
+                })?;
             }
-            if geo_point_in_box(cx, cy, lon, lat, half_w, half_h) {
-                let dist = geo_distance_m(cx, cy, lon, lat);
-                results.push((member.to_vec(), score, dist, lon, lat));
-            }
-        })?;
+        }
         // (frankenredis-1axne) Apply the same SORT_NONE handling as
         // geo_search_core: leave zset-iteration order intact unless
         // ASC/DESC was explicit, OR COUNT-without-ANY promotes to ASC
@@ -26879,6 +26961,108 @@ mod tests {
         let ratio = full_ns as f64 / nbr_ns as f64;
         println!(
             "GEO radius neighbour A/B (n={n}, r={radius}m, x{reps}): full-scan={full_ns}ns neighbour={nbr_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
+    }
+
+    #[test]
+    fn geo_box_neighbor_cell_scan_matches_full_scan_and_speeds_up_bybox() {
+        use super::{geo_box_bbox, geo_box_cell_ranges, geo_collect_box_candidate, geo_encode_wgs84};
+
+        let key = b"geo";
+        let mut store = Store::new();
+        let mut state: u64 = 0xB5C0_FBCF_EC4D_3B2F;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut unit = || (next() >> 11) as f64 / (1u64 << 53) as f64;
+
+        let n = 60_000usize;
+        let mut adds: Vec<(f64, Vec<u8>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let lon = (unit() * 360.0) - 180.0;
+            let lat = (unit() * 170.0) - 85.0;
+            if let Some(bits) = geo_encode_wgs84(lon, lat) {
+                adds.push((bits as f64, format!("m{i}").into_bytes()));
+            }
+        }
+        store.zadd(key, &adds, 0).unwrap();
+
+        fn oracle(store: &mut Store, key: &[u8], cx: f64, cy: f64, hw: f64, hh: f64) -> Vec<(Vec<u8>, f64)> {
+            let bb = geo_box_bbox(cx, cy, hw, hh);
+            let mut r: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
+            store
+                .zset_for_each_asc(key, 0, |m, s| geo_collect_box_candidate(m, s, cx, cy, hw, hh, bb, &mut r))
+                .unwrap();
+            r.into_iter().map(|(m, _s, d, _lo, _la)| (m, d)).collect()
+        }
+        fn neighbor(store: &mut Store, key: &[u8], cx: f64, cy: f64, hw: f64, hh: f64) -> Vec<(Vec<u8>, f64)> {
+            let bb = geo_box_bbox(cx, cy, hw, hh);
+            let mut r: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
+            match geo_box_cell_ranges(cx, cy, hw, hh) {
+                Some(ranges) => {
+                    store
+                        .zset_for_each_in_score_ranges(key, &ranges, 0, |m, s| {
+                            geo_collect_box_candidate(m, s, cx, cy, hw, hh, bb, &mut r)
+                        })
+                        .unwrap();
+                    r.sort_by(|a, b| {
+                        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.0.cmp(&b.0))
+                    });
+                }
+                None => {
+                    store
+                        .zset_for_each_asc(key, 0, |m, s| geo_collect_box_candidate(m, s, cx, cy, hw, hh, bb, &mut r))
+                        .unwrap();
+                }
+            }
+            r.into_iter().map(|(m, _s, d, _lo, _la)| (m, d)).collect()
+        }
+
+        let halfs = [25.0, 1_000.0, 30_000.0, 400_000.0, 2_000_000.0, 9_000_000.0];
+        let centers = [(0.0, 0.0), (179.8, 0.0), (-179.8, 10.0), (0.0, 84.0), (30.0, 72.0)];
+        for &(cx, cy) in &centers {
+            for &hw in &halfs {
+                for &hh in &halfs {
+                    let got = neighbor(&mut store, key, cx, cy, hw, hh);
+                    let exp = oracle(&mut store, key, cx, cy, hw, hh);
+                    assert_eq!(got, exp, "box neighbour mismatch c=({cx},{cy}) hw={hw} hh={hh}");
+                }
+            }
+        }
+        for _ in 0..1500 {
+            let cx = (unit() * 360.0) - 180.0;
+            let cy = (unit() * 168.0) - 84.0;
+            let hw = 10f64.powf(1.0 + unit() * 6.0);
+            let hh = 10f64.powf(1.0 + unit() * 6.0);
+            let got = neighbor(&mut store, key, cx, cy, hw, hh);
+            let exp = oracle(&mut store, key, cx, cy, hw, hh);
+            assert_eq!(got, exp, "box neighbour fuzz mismatch c=({cx},{cy}) hw={hw} hh={hh}");
+        }
+
+        // A/B: small box over the whole set.
+        let (cx, cy, hw, hh) = (10.0f64, 40.0f64, 20_000.0f64, 20_000.0f64);
+        let reps = 300;
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            c0 = c0.wrapping_add(oracle(&mut store, key, cx, cy, hw, hh).len());
+        }
+        let full_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            c1 = c1.wrapping_add(neighbor(&mut store, key, cx, cy, hw, hh).len());
+        }
+        let nbr_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        let ratio = full_ns as f64 / nbr_ns as f64;
+        println!(
+            "GEO BYBOX neighbour A/B (n={n}, 40km box, x{reps}): full-scan={full_ns}ns neighbour={nbr_ns}ns ratio={ratio:.2}x"
         );
         assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
     }
