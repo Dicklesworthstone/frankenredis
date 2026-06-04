@@ -5470,7 +5470,7 @@ impl Runtime {
                 // max_bulk_len), preserving the original error-precedence over
                 // the MAX_COMMAND_ARITY check below. Evaluated on argv so the
                 // server hot path never needs the frame. (frankenredis-8yfmt)
-                if let Some(reply) = self.preflight_gate(frame, &argv, now_ms, packet_id) {
+                if let Some(reply) = self.preflight_gate(frame, argv, now_ms, packet_id) {
                     return reply;
                 }
                 if argv.len() > MAX_COMMAND_ARITY {
@@ -5484,7 +5484,7 @@ impl Runtime {
                     let digest_frame: &RespFrame = match frame {
                         Some(f) => f,
                         None => {
-                            recon = fr_command::argv_to_command_frame(&argv);
+                            recon = fr_command::argv_to_command_frame(argv);
                             &recon
                         }
                     };
@@ -5545,30 +5545,30 @@ impl Runtime {
         match special_command {
             Some(RuntimeSpecialCommand::Auth) => {
                 let start = Instant::now();
-                let reply = self.handle_auth_command(&argv, now_ms);
-                let reply = match apply_client_reply_state(&argv, &mut self.session.client_reply) {
+                let reply = self.handle_auth_command(argv, now_ms);
+                let reply = match apply_client_reply_state(argv, &mut self.session.client_reply) {
                     Ok(()) => reply,
                     Err(err) => err.to_resp(),
                 };
                 let elapsed_us = start.elapsed().as_micros() as u64;
-                self.record_slowlog(&argv, elapsed_us, now_ms);
-                self.server.record_latency_sample(&argv, elapsed_us, now_ms);
+                self.record_slowlog(argv, elapsed_us, now_ms);
+                self.server.record_latency_sample(argv, elapsed_us, now_ms);
                 self.server
-                    .record_command_histogram(&argv, elapsed_us, &reply);
+                    .record_command_histogram(argv, elapsed_us, &reply);
                 return reply;
             }
             Some(RuntimeSpecialCommand::Hello) => {
                 let start = Instant::now();
-                let reply = self.handle_hello_command(&argv, now_ms);
-                let reply = match apply_client_reply_state(&argv, &mut self.session.client_reply) {
+                let reply = self.handle_hello_command(argv, now_ms);
+                let reply = match apply_client_reply_state(argv, &mut self.session.client_reply) {
                     Ok(()) => reply,
                     Err(err) => err.to_resp(),
                 };
                 let elapsed_us = start.elapsed().as_micros() as u64;
-                self.record_slowlog(&argv, elapsed_us, now_ms);
-                self.server.record_latency_sample(&argv, elapsed_us, now_ms);
+                self.record_slowlog(argv, elapsed_us, now_ms);
+                self.server.record_latency_sample(argv, elapsed_us, now_ms);
                 self.server
-                    .record_command_histogram(&argv, elapsed_us, &reply);
+                    .record_command_histogram(argv, elapsed_us, &reply);
                 return reply;
             }
             _ => {}
@@ -5590,7 +5590,7 @@ impl Runtime {
             // (frankenredis-infosections) NOAUTH gate is a pre-handler
             // rejection — bump cmdstat_<cmd>:rejected_calls without
             // touching calls/usec, mirroring upstream's call() path.
-            self.server.record_command_rejected(&argv);
+            self.server.record_command_rejected(argv);
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -5603,20 +5603,20 @@ impl Runtime {
                     "rejected '{}' prior to dispatch while unauthenticated",
                     command_name
                 ),
-                input_source: ThreatInputDigestSource::Argv(&argv),
+                input_source: ThreatInputDigestSource::Argv(argv),
                 output: &reply,
             });
             return reply;
         }
 
-        if let Some(permission_error) = self.acl_permission_error(&argv) {
+        if let Some(permission_error) = self.acl_permission_error(argv) {
             // Upstream rejects a command-level ACL denial with the authenticated
             // username and the command's canonical lowercase fullname (e.g.
             // `User u has no permissions to run the 'config|get' command`).
             // (frankenredis-1ktss)
             let acl_denied_user =
                 String::from_utf8_lossy(self.session.current_user_name()).into_owned();
-            let acl_command_fullname = fr_command::acl_command_selectors_for_argv(&argv)
+            let acl_command_fullname = fr_command::acl_command_selectors_for_argv(argv)
                 .into_iter()
                 .next()
                 .unwrap_or_else(|| command_name.to_ascii_lowercase());
@@ -5670,7 +5670,7 @@ impl Runtime {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             // (frankenredis-infosections) NOPERM is a pre-handler
             // rejection — bump cmdstat_<cmd>:rejected_calls per upstream.
-            self.server.record_command_rejected(&argv);
+            self.server.record_command_rejected(argv);
             self.record_acl_access_denied(acl_reason);
             self.record_acl_log_event(
                 log_reason,
@@ -5687,7 +5687,7 @@ impl Runtime {
                 action: "reject_unauthorized_command",
                 reason_code,
                 reason: threat_reason,
-                input_source: ThreatInputDigestSource::Argv(&argv),
+                input_source: ThreatInputDigestSource::Argv(argv),
                 output: &reply,
             });
             return reply;
@@ -5705,10 +5705,10 @@ impl Runtime {
         if resp2
             && command_arity_ok
             && self.is_in_subscription_mode()
-            && !Self::pubsub_command_allowed_in_subscription_mode(special_command, &argv)
+            && !Self::pubsub_command_allowed_in_subscription_mode(special_command, argv)
         {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
-            return Self::pubsub_context_error(&Self::pubsub_blocked_command_name(&argv));
+            return Self::pubsub_context_error(&Self::pubsub_blocked_command_name(argv));
         }
         // Upstream networking.c::pingCommand emits a 2-element array
         // ["pong", optional-msg] when the client is in subscribe mode
@@ -5734,20 +5734,20 @@ impl Runtime {
         }
         if command_arity_ok
             && let Some(reply) =
-                self.reject_due_to_disk_write_error(&argv, special_command, now_ms, packet_id)
+                self.reject_due_to_disk_write_error(argv, special_command, now_ms, packet_id)
         {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return reply;
         }
         if command_arity_ok
             && let Some(reply) =
-                self.reject_due_to_replica_write_quorum(&argv, special_command, now_ms)
+                self.reject_due_to_replica_write_quorum(argv, special_command, now_ms)
         {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return reply;
         }
 
-        if let Some(reply) = self.reject_stale_replica_read_request(&argv, special_command) {
+        if let Some(reply) = self.reject_stale_replica_read_request(argv, special_command) {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return reply;
         }
@@ -5791,7 +5791,7 @@ impl Runtime {
                     self.apply_existing_client_reply_suppression_to_undispatched_reply();
                     return CommandError::UnknownCommand {
                         command: fr_command::trim_and_cap_string(cmd_str, 128),
-                        args_preview: build_unknown_args_preview(&argv),
+                        args_preview: build_unknown_args_preview(argv),
                     }
                     .to_resp();
                 }
@@ -5816,7 +5816,10 @@ impl Runtime {
                         "ERR Command not allowed inside a transaction".to_string(),
                     );
                 }
-                self.session.transaction_state.command_queue.push(argv);
+                self.session
+                    .transaction_state
+                    .command_queue
+                    .push(argv.to_vec());
                 self.apply_existing_client_reply_suppression_to_undispatched_reply();
                 return RespFrame::SimpleString("QUEUED".to_string());
             }
@@ -5828,12 +5831,12 @@ impl Runtime {
                 .is_some_and(|command| eq_ascii_token(command, b"TIME"))
         {
             let start = Instant::now();
-            let reply = Self::handle_time_command_with_unix_time_us(&argv, unix_time_us);
+            let reply = Self::handle_time_command_with_unix_time_us(argv, unix_time_us);
             let elapsed_us = start.elapsed().as_micros() as u64;
-            self.record_slowlog(&argv, elapsed_us, now_ms);
-            self.server.record_latency_sample(&argv, elapsed_us, now_ms);
+            self.record_slowlog(argv, elapsed_us, now_ms);
+            self.server.record_latency_sample(argv, elapsed_us, now_ms);
             self.server
-                .record_command_histogram(&argv, elapsed_us, &reply);
+                .record_command_histogram(argv, elapsed_us, &reply);
             return reply;
         }
 
@@ -5843,96 +5846,90 @@ impl Runtime {
         {
             let special_start = Instant::now();
             let special_reply = match special_command {
-                Some(RuntimeSpecialCommand::Acl) => Some(self.handle_acl_command(&argv, now_ms)),
-                Some(RuntimeSpecialCommand::Config) => Some(self.handle_config_command(&argv)),
+                Some(RuntimeSpecialCommand::Acl) => Some(self.handle_acl_command(argv, now_ms)),
+                Some(RuntimeSpecialCommand::Config) => Some(self.handle_config_command(argv)),
                 Some(RuntimeSpecialCommand::Client) => {
-                    Some(self.handle_client_command(&argv, now_ms))
+                    Some(self.handle_client_command(argv, now_ms))
                 }
-                Some(RuntimeSpecialCommand::Role) => Some(self.handle_role_command(&argv)),
+                Some(RuntimeSpecialCommand::Role) => Some(self.handle_role_command(argv)),
                 Some(RuntimeSpecialCommand::Replconf) => {
-                    Some(self.handle_replconf_command(&argv, now_ms))
+                    Some(self.handle_replconf_command(argv, now_ms))
                 }
                 Some(RuntimeSpecialCommand::Psync) | Some(RuntimeSpecialCommand::Sync) => {
-                    Some(self.handle_psync_command(&argv))
+                    Some(self.handle_psync_command(argv))
                 }
                 Some(RuntimeSpecialCommand::Replicaof) | Some(RuntimeSpecialCommand::Slaveof) => {
-                    Some(self.handle_replicaof_command(&argv))
+                    Some(self.handle_replicaof_command(argv))
                 }
-                Some(RuntimeSpecialCommand::Asking) => Some(self.handle_asking_command(&argv)),
-                Some(RuntimeSpecialCommand::Readonly) => Some(self.handle_readonly_command(&argv)),
-                Some(RuntimeSpecialCommand::Readwrite) => {
-                    Some(self.handle_readwrite_command(&argv))
-                }
+                Some(RuntimeSpecialCommand::Asking) => Some(self.handle_asking_command(argv)),
+                Some(RuntimeSpecialCommand::Readonly) => Some(self.handle_readonly_command(argv)),
+                Some(RuntimeSpecialCommand::Readwrite) => Some(self.handle_readwrite_command(argv)),
                 Some(RuntimeSpecialCommand::Cluster) => {
-                    Some(self.handle_cluster_command(&argv, now_ms))
+                    Some(self.handle_cluster_command(argv, now_ms))
                 }
-                Some(RuntimeSpecialCommand::Wait) => Some(self.handle_wait_command(&argv)),
-                Some(RuntimeSpecialCommand::Waitaof) => Some(self.handle_waitaof_command(&argv)),
-                Some(RuntimeSpecialCommand::Multi) => Some(self.handle_multi_command(&argv)),
+                Some(RuntimeSpecialCommand::Wait) => Some(self.handle_wait_command(argv)),
+                Some(RuntimeSpecialCommand::Waitaof) => Some(self.handle_waitaof_command(argv)),
+                Some(RuntimeSpecialCommand::Multi) => Some(self.handle_multi_command(argv)),
                 Some(RuntimeSpecialCommand::Exec) => {
-                    Some(self.handle_exec_command(&argv, now_ms, packet_id))
+                    Some(self.handle_exec_command(argv, now_ms, packet_id))
                 }
-                Some(RuntimeSpecialCommand::Discard) => Some(self.handle_discard_command(&argv)),
-                Some(RuntimeSpecialCommand::Watch) => {
-                    Some(self.handle_watch_command(&argv, now_ms))
-                }
-                Some(RuntimeSpecialCommand::Unwatch) => Some(self.handle_unwatch_command(&argv)),
+                Some(RuntimeSpecialCommand::Discard) => Some(self.handle_discard_command(argv)),
+                Some(RuntimeSpecialCommand::Watch) => Some(self.handle_watch_command(argv, now_ms)),
+                Some(RuntimeSpecialCommand::Unwatch) => Some(self.handle_unwatch_command(argv)),
                 Some(RuntimeSpecialCommand::Quit) => {
                     Some(RespFrame::SimpleString("OK".to_string()))
                 }
-                Some(RuntimeSpecialCommand::Reset) => Some(self.handle_reset_command(&argv)),
-                Some(RuntimeSpecialCommand::Slowlog) => Some(self.handle_slowlog_command(&argv)),
-                Some(RuntimeSpecialCommand::Debug) => self.handle_debug_command_gate(&argv),
-                Some(RuntimeSpecialCommand::Save) => Some(self.handle_save_command(&argv, now_ms)),
+                Some(RuntimeSpecialCommand::Reset) => Some(self.handle_reset_command(argv)),
+                Some(RuntimeSpecialCommand::Slowlog) => Some(self.handle_slowlog_command(argv)),
+                Some(RuntimeSpecialCommand::Debug) => self.handle_debug_command_gate(argv),
+                Some(RuntimeSpecialCommand::Save) => Some(self.handle_save_command(argv, now_ms)),
                 Some(RuntimeSpecialCommand::Bgsave) => {
-                    Some(self.handle_bgsave_command(&argv, now_ms))
+                    Some(self.handle_bgsave_command(argv, now_ms))
                 }
-                Some(RuntimeSpecialCommand::Lastsave) => Some(self.handle_lastsave_command(&argv)),
+                Some(RuntimeSpecialCommand::Lastsave) => Some(self.handle_lastsave_command(argv)),
                 Some(RuntimeSpecialCommand::Bgrewriteaof) => {
-                    Some(self.handle_bgrewriteaof_command(&argv, now_ms))
+                    Some(self.handle_bgrewriteaof_command(argv, now_ms))
                 }
-                Some(RuntimeSpecialCommand::Failover) => Some(self.handle_failover_command(&argv)),
-                Some(RuntimeSpecialCommand::Shutdown) => Some(self.handle_shutdown_command(&argv)),
-                Some(RuntimeSpecialCommand::Pubsub) => Some(self.handle_pubsub_command(&argv)),
-                Some(RuntimeSpecialCommand::Subscribe) => {
-                    Some(self.handle_subscribe_command(&argv))
-                }
+                Some(RuntimeSpecialCommand::Failover) => Some(self.handle_failover_command(argv)),
+                Some(RuntimeSpecialCommand::Shutdown) => Some(self.handle_shutdown_command(argv)),
+                Some(RuntimeSpecialCommand::Pubsub) => Some(self.handle_pubsub_command(argv)),
+                Some(RuntimeSpecialCommand::Subscribe) => Some(self.handle_subscribe_command(argv)),
                 Some(RuntimeSpecialCommand::Unsubscribe) => {
-                    Some(self.handle_unsubscribe_command(&argv))
+                    Some(self.handle_unsubscribe_command(argv))
                 }
                 Some(RuntimeSpecialCommand::Psubscribe) => {
-                    Some(self.handle_psubscribe_command(&argv))
+                    Some(self.handle_psubscribe_command(argv))
                 }
                 Some(RuntimeSpecialCommand::Punsubscribe) => {
-                    Some(self.handle_punsubscribe_command(&argv))
+                    Some(self.handle_punsubscribe_command(argv))
                 }
-                Some(RuntimeSpecialCommand::Publish) => Some(self.handle_publish_command(&argv)),
+                Some(RuntimeSpecialCommand::Publish) => Some(self.handle_publish_command(argv)),
                 Some(RuntimeSpecialCommand::Ssubscribe) => {
-                    Some(self.handle_ssubscribe_command(&argv))
+                    Some(self.handle_ssubscribe_command(argv))
                 }
                 Some(RuntimeSpecialCommand::Sunsubscribe) => {
-                    Some(self.handle_sunsubscribe_command(&argv))
+                    Some(self.handle_sunsubscribe_command(argv))
                 }
-                Some(RuntimeSpecialCommand::Spublish) => Some(self.handle_spublish_command(&argv)),
-                Some(RuntimeSpecialCommand::Select) => Some(self.handle_select_command(&argv)),
-                Some(RuntimeSpecialCommand::Swapdb) => Some(self.handle_swapdb_command(&argv)),
+                Some(RuntimeSpecialCommand::Spublish) => Some(self.handle_spublish_command(argv)),
+                Some(RuntimeSpecialCommand::Select) => Some(self.handle_select_command(argv)),
+                Some(RuntimeSpecialCommand::Swapdb) => Some(self.handle_swapdb_command(argv)),
                 _ => None,
             };
             if let Some(reply) = special_reply {
-                let reply = match apply_client_reply_state(&argv, &mut self.session.client_reply) {
+                let reply = match apply_client_reply_state(argv, &mut self.session.client_reply) {
                     Ok(()) => reply,
                     Err(err) => err.to_resp(),
                 };
                 let elapsed_us = special_start.elapsed().as_micros() as u64;
-                self.record_slowlog(&argv, elapsed_us, now_ms);
-                self.server.record_latency_sample(&argv, elapsed_us, now_ms);
+                self.record_slowlog(argv, elapsed_us, now_ms);
+                self.server.record_latency_sample(argv, elapsed_us, now_ms);
                 self.server
-                    .record_command_histogram(&argv, elapsed_us, &reply);
+                    .record_command_histogram(argv, elapsed_us, &reply);
                 return reply;
             }
         }
 
-        if let Some(reply) = self.enforce_maxmemory_before_dispatch(&argv, now_ms, packet_id) {
+        if let Some(reply) = self.enforce_maxmemory_before_dispatch(argv, now_ms, packet_id) {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return reply;
         }
@@ -5946,9 +5943,9 @@ impl Runtime {
             .first()
             .is_some_and(|cmd| eq_ascii_token(cmd, b"MIGRATE"));
         let result = if handled_migrate {
-            self.handle_migrate_command(&argv, now_ms)
+            self.handle_migrate_command(argv, now_ms)
         } else {
-            self.execute_db_scoped_command(&argv, now_ms)
+            self.execute_db_scoped_command(argv, now_ms)
         };
         let elapsed_us = start.elapsed().as_micros() as u64;
         let dirty_after = self.server.store.dirty;
@@ -5961,8 +5958,8 @@ impl Runtime {
         // total_error_replies are still updated via the rejection path.
         let unknown_command = matches!(&result, Err(CommandError::UnknownCommand { .. }));
         if !unknown_command {
-            self.record_slowlog(&argv, elapsed_us, now_ms);
-            self.server.record_latency_sample(&argv, elapsed_us, now_ms);
+            self.record_slowlog(argv, elapsed_us, now_ms);
+            self.server.record_latency_sample(argv, elapsed_us, now_ms);
             // (frankenredis-infosections) Classify the eventual reply so the
             // commandstats counters distinguish Success vs Failed without
             // cloning the (potentially large) reply frame.
@@ -5971,7 +5968,7 @@ impl Runtime {
                 Ok(_) => false,
             };
             self.server
-                .record_command_histogram_outcome(&argv, elapsed_us, failed);
+                .record_command_histogram_outcome(argv, elapsed_us, failed);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -5987,13 +5984,13 @@ impl Runtime {
                     "command '{}' took {}us, exceeding budget {}ms",
                     command_name, elapsed_us, self.server.command_time_budget_ms
                 ),
-                input_source: ThreatInputDigestSource::Argv(&argv),
+                input_source: ThreatInputDigestSource::Argv(argv),
                 output: &RespFrame::SimpleString("OK".to_string()), // Dummy for logging
             });
         }
 
         // Feed MONITOR clients before returning
-        self.feed_monitors(&argv, now_ms, self.session.selected_db);
+        self.feed_monitors(argv, now_ms, self.session.selected_db);
 
         // Check if this was a MONITOR command — flag the client
         if argv
@@ -6005,7 +6002,7 @@ impl Runtime {
 
         match result {
             Ok(reply) => {
-                let cmd_keys = fr_command::command_keys(&argv);
+                let cmd_keys = fr_command::command_keys(argv);
                 // (frankenredis-1d2xf) Propagate any lazy-expiry deletions this
                 // command triggered FIRST, before the command's own record, so a
                 // command that recreates the key (e.g. SET on an expired key)
@@ -6021,14 +6018,14 @@ impl Runtime {
                     // Record AOF only for non-special commands (special ones record themselves)
                     if special_command.is_none() && !handled_migrate {
                         if let Some(script_commands) =
-                            self.take_script_propagation_commands_for_capture(&argv)
+                            self.take_script_propagation_commands_for_capture(argv)
                         {
                             for script_argv in script_commands {
                                 self.capture_aof_record(&script_argv);
                             }
                         } else if let Some(rewritten) =
                             fr_command::rewrite_effect_command_for_propagation(
-                                &argv,
+                                argv,
                                 &reply,
                                 &self.server.store,
                                 now_ms,
@@ -6043,7 +6040,7 @@ impl Runtime {
                             // so the three entry points can't drift.
                             self.capture_aof_record(&rewritten);
                         } else {
-                            self.capture_aof_record(&argv);
+                            self.capture_aof_record(argv);
                         }
                     }
 
@@ -6056,8 +6053,8 @@ impl Runtime {
                         self.queue_client_tracking_invalidations(&cmd_keys);
                         // Keyspace notifications: publish events for modified keys.
                         if self.server.store.notify_keyspace_events != 0 {
-                            let event = Self::command_to_keyspace_event(&argv);
-                            let event_type = Self::command_to_notify_type(&argv);
+                            let event = Self::command_to_keyspace_event(argv);
+                            let event_type = Self::command_to_notify_type(argv);
                             let db = self.session.selected_db;
                             let is_rename = argv
                                 .first()
@@ -6123,7 +6120,7 @@ impl Runtime {
                             if is_smove || is_expire_family || is_getex || is_stream_consumer_cmd {
                                 // Events already queued by the Store method.
                             } else if is_list_move && cmd_keys.len() >= 2 {
-                                let (pop_ev, push_ev) = Self::list_move_events(&argv);
+                                let (pop_ev, push_ev) = Self::list_move_events(argv);
                                 self.server.store.notify_keyspace_event(
                                     fr_store::NOTIFY_LIST,
                                     push_ev,
@@ -6232,7 +6229,7 @@ impl Runtime {
                             // SETEX/PSETEX set a TTL as a side effect, so upstream
                             // t_string.c::setGenericCommand fires a second
                             // NOTIFY_GENERIC "expire" event after "set".
-                            if Self::command_sets_expire_as_side_effect(&argv) {
+                            if Self::command_sets_expire_as_side_effect(argv) {
                                 for key in &cmd_keys {
                                     self.server.store.notify_keyspace_event(
                                         fr_store::NOTIFY_GENERIC,
@@ -6902,7 +6899,7 @@ impl Runtime {
                     packet_id,
                     None,
                 )
-                    .to_bytes()
+                .to_bytes()
             }
             Err(err) => {
                 let reason = err.to_string();
@@ -14504,7 +14501,9 @@ replica_announced:1\r\n",
         let max_bulk_len = self.policy.gate.max_bulk_len;
         let offending: Option<usize> = match frame {
             Some(RespFrame::Array(Some(items))) => items.iter().find_map(|item| match item {
-                RespFrame::BulkString(Some(bytes)) if bytes.len() > max_bulk_len => Some(bytes.len()),
+                RespFrame::BulkString(Some(bytes)) if bytes.len() > max_bulk_len => {
+                    Some(bytes.len())
+                }
                 _ => None,
             }),
             _ => argv

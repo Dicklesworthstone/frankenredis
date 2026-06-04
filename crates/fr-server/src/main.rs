@@ -1518,8 +1518,7 @@ fn process_buffered_frames(
                 } else {
                     encode_client_reply(&response, client_resp3, &mut conn.write_buf);
                 }
-                if let Some(follow_up) =
-                    replication_follow_up_bytes(runtime, &argv, &response, ts)
+                if let Some(follow_up) = replication_follow_up_bytes(runtime, &argv, &response, ts)
                 {
                     conn.write_buf.extend_from_slice(&follow_up);
                     if runtime.is_replica(runtime.client_id()) {
@@ -2453,7 +2452,7 @@ fn try_build_blocked_state(argv: &[Vec<u8>], now_ms: u64) -> Option<BlockedState
         };
         Some(BlockedState { op, deadline_ms })
     } else if cmd.eq_ignore_ascii_case(b"XREAD") || cmd.eq_ignore_ascii_case(b"XREADGROUP") {
-        let deadline_ms = parse_xread_block_deadline_argv(&argv, now_ms)?;
+        let deadline_ms = parse_xread_block_deadline_argv(argv, now_ms)?;
         let op = if cmd.eq_ignore_ascii_case(b"XREAD") {
             BlockingOp::BXread {
                 argv: argv.to_vec(),
@@ -2465,7 +2464,7 @@ fn try_build_blocked_state(argv: &[Vec<u8>], now_ms: u64) -> Option<BlockedState
         };
         Some(BlockedState { op, deadline_ms })
     } else if cmd.eq_ignore_ascii_case(b"WAITAOF") {
-        let deadline_ms = parse_waitaof_deadline_argv(&argv, now_ms)?;
+        let deadline_ms = parse_waitaof_deadline_argv(argv, now_ms)?;
         Some(BlockedState {
             op: BlockingOp::Waitaof {
                 argv: argv.to_vec(),
@@ -2473,7 +2472,7 @@ fn try_build_blocked_state(argv: &[Vec<u8>], now_ms: u64) -> Option<BlockedState
             deadline_ms,
         })
     } else if cmd.eq_ignore_ascii_case(b"WAIT") {
-        let deadline_ms = parse_wait_deadline_argv(&argv, now_ms)?;
+        let deadline_ms = parse_wait_deadline_argv(argv, now_ms)?;
         Some(BlockedState {
             op: BlockingOp::Wait {
                 argv: argv.to_vec(),
@@ -2523,7 +2522,7 @@ fn waitaof_should_block(argv: &[Vec<u8>], response: &RespFrame) -> bool {
     if !command.eq_ignore_ascii_case(b"WAITAOF") {
         return false;
     }
-    !waitaof_response_satisfies(&argv, response)
+    !waitaof_response_satisfies(argv, response)
 }
 
 fn wait_response_satisfies(argv: &[Vec<u8>], response: &RespFrame) -> bool {
@@ -2550,7 +2549,7 @@ fn wait_should_block(argv: &[Vec<u8>], response: &RespFrame) -> bool {
     if !command.eq_ignore_ascii_case(b"WAIT") {
         return false;
     }
-    !wait_response_satisfies(&argv, response)
+    !wait_response_satisfies(argv, response)
 }
 
 fn blocked_timeout_response(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> RespFrame {
@@ -3263,9 +3262,7 @@ fn command_frame_can_move_to_argv(frame: &RespFrame) -> bool {
         && items.iter().all(|item| {
             matches!(
                 item,
-                RespFrame::BulkString(Some(_))
-                    | RespFrame::SimpleString(_)
-                    | RespFrame::Integer(_)
+                RespFrame::BulkString(Some(_)) | RespFrame::SimpleString(_) | RespFrame::Integer(_)
             )
         })
 }
@@ -3366,11 +3363,10 @@ mod tests {
         REPLICA_ACK_INTERVAL_MS, REPLICA_RECONNECT_BACKOFF_MS, ReplicaPrimaryConnection,
         ReplicaSyncState, StartupConfig, apply_pending_client_unblocks, check_blocked_clients,
         command_frame_can_move_to_argv, consume_complete_replication_prefix, drain_replica_stream,
-        drive_replica_sync,
-        encode_eof_marked_replication_snapshot, encode_replication_snapshot, find_crlf,
-        frame_matches_suppressed_replication_reply, is_quit_frame, parse_blocking_deadline,
-        parse_xread_block_deadline_argv, process_buffered_frames, read_frame_from_stream,
-        read_replication_snapshot_from_stream, replica_handshake_frame,
+        drive_replica_sync, encode_eof_marked_replication_snapshot, encode_replication_snapshot,
+        find_crlf, frame_matches_suppressed_replication_reply, is_quit_frame,
+        parse_blocking_deadline, parse_xread_block_deadline_argv, process_buffered_frames,
+        read_frame_from_stream, read_replication_snapshot_from_stream, replica_handshake_frame,
         replica_handshake_read_timeout, replication_follow_up_bytes, resolve_xread_block_argv,
         server_help_text, should_try_inline_parsing, startup_config_from_directives,
         sync_replica_with_primary, try_build_blocked_state, try_fulfill_blocked, wait_should_block,
@@ -3403,43 +3399,40 @@ mod tests {
             RespFrame::Array(Some(items))
         }
 
-        assert!(frame_matches_suppressed_replication_reply(&test_argv(array(vec![
-            bulk(b"REPLCONF"),
-            bulk(b"ACK"),
-            bulk(b"123"),
-        ]))));
-        assert!(frame_matches_suppressed_replication_reply(&test_argv(array(vec![
-            bulk(b"replconf"),
-            bulk(b"getack"),
-            RespFrame::SimpleString("*".to_string()),
-        ]))));
-        assert!(frame_matches_suppressed_replication_reply(&test_argv(array(vec![
-            RespFrame::SimpleString("sync".to_string()),
-        ]))));
+        assert!(frame_matches_suppressed_replication_reply(&test_argv(
+            array(vec![bulk(b"REPLCONF"), bulk(b"ACK"), bulk(b"123"),])
+        )));
+        assert!(frame_matches_suppressed_replication_reply(&test_argv(
+            array(vec![
+                bulk(b"replconf"),
+                bulk(b"getack"),
+                RespFrame::SimpleString("*".to_string()),
+            ])
+        )));
+        assert!(frame_matches_suppressed_replication_reply(&test_argv(
+            array(vec![RespFrame::SimpleString("sync".to_string()),])
+        )));
 
-        assert!(!frame_matches_suppressed_replication_reply(&test_argv(array(vec![
-            bulk(b"HGET"),
-            bulk(b"hash"),
-            bulk(b"field"),
-        ]))));
-        assert!(!frame_matches_suppressed_replication_reply(&test_argv(array(vec![
-            bulk(b"REPLCONF"),
-            bulk(b"GETACK"),
-            bulk(b"1"),
-        ]))));
-        assert!(!frame_matches_suppressed_replication_reply(&test_argv(array(vec![
-            bulk(b"REPLCONF"),
-            bulk(b"ACK"),
-        ]))));
-        assert!(!frame_matches_suppressed_replication_reply(&test_argv(array(vec![
-            bulk(b"REPLCONF"),
-            bulk(b"ACK"),
-            bulk(b"1"),
-            bulk(b"extra"),
-        ]))));
-        assert!(!frame_matches_suppressed_replication_reply(&test_argv(array(vec![
-            RespFrame::Integer(0),
-        ]))));
+        assert!(!frame_matches_suppressed_replication_reply(&test_argv(
+            array(vec![bulk(b"HGET"), bulk(b"hash"), bulk(b"field"),])
+        )));
+        assert!(!frame_matches_suppressed_replication_reply(&test_argv(
+            array(vec![bulk(b"REPLCONF"), bulk(b"GETACK"), bulk(b"1"),])
+        )));
+        assert!(!frame_matches_suppressed_replication_reply(&test_argv(
+            array(vec![bulk(b"REPLCONF"), bulk(b"ACK"),])
+        )));
+        assert!(!frame_matches_suppressed_replication_reply(&test_argv(
+            array(vec![
+                bulk(b"REPLCONF"),
+                bulk(b"ACK"),
+                bulk(b"1"),
+                bulk(b"extra"),
+            ])
+        )));
+        assert!(!frame_matches_suppressed_replication_reply(&test_argv(
+            array(vec![RespFrame::Integer(0),])
+        )));
     }
 
     #[test]
@@ -3454,16 +3447,18 @@ mod tests {
 
         assert!(is_quit_frame(&test_argv(array(vec![bulk(b"QUIT")]))));
         assert!(is_quit_frame(&test_argv(array(vec![bulk(b"quit")]))));
-        assert!(is_quit_frame(&test_argv(array(vec![RespFrame::SimpleString(
-            "QuIt".to_string(),
-        )]))));
+        assert!(is_quit_frame(&test_argv(array(vec![
+            RespFrame::SimpleString("QuIt".to_string(),)
+        ]))));
 
         assert!(!is_quit_frame(&test_argv(array(vec![bulk(b"HGET")]))));
         assert!(!command_frame_can_move_to_argv(&array(Vec::new())));
-        assert!(!command_frame_can_move_to_argv(&RespFrame::BulkString(Some(
-            b"QUIT".to_vec()
-        ))));
-        assert!(!is_quit_frame(&test_argv(array(vec![RespFrame::Integer(0)]))));
+        assert!(!command_frame_can_move_to_argv(&RespFrame::BulkString(
+            Some(b"QUIT".to_vec())
+        )));
+        assert!(!is_quit_frame(&test_argv(array(vec![RespFrame::Integer(
+            0
+        )]))));
         assert!(!command_frame_can_move_to_argv(&array(vec![
             RespFrame::BulkString(None)
         ])));
