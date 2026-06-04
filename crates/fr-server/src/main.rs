@@ -113,6 +113,44 @@ impl BlockingOp {
             BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. } => Vec::new(),
         }
     }
+
+    /// True if any key this op is waiting on is present in `ready`, computed
+    /// WITHOUT allocating. This is the per-tick hot path in
+    /// `check_blocked_clients`: previously it called `keys()`, which deep-
+    /// clones every waited-on key (`Vec<Vec<u8>>`) for every blocked client
+    /// on every event-loop tick, just to test membership. Iterating the
+    /// borrowed key slices and probing the `ready` set directly is byte-for-
+    /// byte equivalent (same keys, same membership) with zero allocation.
+    fn any_key_ready(&self, ready: &HashSet<Vec<u8>>) -> bool {
+        match self {
+            BlockingOp::BLpop { keys }
+            | BlockingOp::BRpop { keys }
+            | BlockingOp::BZpopMax { keys }
+            | BlockingOp::BZpopMin { keys } => keys.iter().any(|k| ready.contains(k)),
+            BlockingOp::BLmove { source, .. } => ready.contains(source),
+            BlockingOp::BLmpop { argv } | BlockingOp::BZmpop { argv } => {
+                if argv.len() < 3 {
+                    return false;
+                }
+                let num_keys: usize = std::str::from_utf8(&argv[2])
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                argv.iter().skip(3).take(num_keys).any(|k| ready.contains(k))
+            }
+            BlockingOp::BXread { argv } | BlockingOp::BXreadgroup { argv } => {
+                let streams_idx = argv.iter().position(|a| a.eq_ignore_ascii_case(b"STREAMS"));
+                if let Some(idx) = streams_idx {
+                    let remaining = &argv[idx + 1..];
+                    let num_keys = remaining.len() / 2;
+                    remaining.iter().take(num_keys).any(|k| ready.contains(k))
+                } else {
+                    false
+                }
+            }
+            BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. } => false,
+        }
+    }
 }
 
 /// A client that is blocked waiting for data on one or more keys.
@@ -2616,13 +2654,8 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
                 &blocked.op,
                 BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. }
             );
-        if !should_check {
-            for key in blocked.op.keys() {
-                if ready_keys.contains(&key) {
-                    should_check = true;
-                    break;
-                }
-            }
+        if !should_check && blocked.op.any_key_ready(&ready_keys) {
+            should_check = true;
         }
 
         if !should_check {
@@ -3381,6 +3414,123 @@ mod tests {
 
     fn test_argv(frame: RespFrame) -> Vec<Vec<u8>> {
         fr_command::frame_to_argv(&frame).expect("test command frame should produce argv")
+    }
+
+    #[test]
+    fn any_key_ready_matches_keys_membership_for_every_blocking_op() {
+        use std::collections::HashSet;
+        let ops = [
+            BlockingOp::BLpop { keys: vec![b"a".to_vec(), b"b".to_vec()] },
+            BlockingOp::BRpop { keys: vec![b"x".to_vec()] },
+            BlockingOp::BZpopMax { keys: vec![b"z1".to_vec(), b"z2".to_vec()] },
+            BlockingOp::BZpopMin { keys: vec![b"b".to_vec()] },
+            BlockingOp::BLmove {
+                source: b"src".to_vec(),
+                destination: b"dst".to_vec(),
+                wherefrom: b"LEFT".to_vec(),
+                whereto: b"RIGHT".to_vec(),
+            },
+            // BLMPOP: [timeout, numkeys, k1, k2, LEFT, COUNT, 1]
+            BlockingOp::BLmpop {
+                argv: vec![
+                    b"0".to_vec(), b"2".to_vec(), b"a".to_vec(), b"k2".to_vec(),
+                    b"LEFT".to_vec(), b"COUNT".to_vec(), b"1".to_vec(),
+                ],
+            },
+            BlockingOp::BZmpop {
+                argv: vec![b"0".to_vec(), b"1".to_vec(), b"z2".to_vec(), b"MIN".to_vec()],
+            },
+            // XREAD ... STREAMS s1 s2 0 0  -> keys s1, s2
+            BlockingOp::BXread {
+                argv: vec![
+                    b"BLOCK".to_vec(), b"0".to_vec(), b"STREAMS".to_vec(),
+                    b"s1".to_vec(), b"s2".to_vec(), b"0".to_vec(), b"0".to_vec(),
+                ],
+            },
+            BlockingOp::BXreadgroup {
+                argv: vec![b"STREAMS".to_vec(), b"src".to_vec(), b">".to_vec()],
+            },
+            BlockingOp::Wait { argv: vec![b"1".to_vec(), b"100".to_vec()] },
+            BlockingOp::Waitaof { argv: vec![b"1".to_vec(), b"0".to_vec(), b"0".to_vec()] },
+        ];
+        // Exercise empty, partial, full, and disjoint ready-sets.
+        let ready_sets: Vec<HashSet<Vec<u8>>> = vec![
+            HashSet::new(),
+            ["a".as_bytes().to_vec()].into_iter().collect(),
+            ["b".as_bytes().to_vec(), "z2".as_bytes().to_vec()].into_iter().collect(),
+            ["src".as_bytes().to_vec()].into_iter().collect(),
+            ["s2".as_bytes().to_vec()].into_iter().collect(),
+            ["k2".as_bytes().to_vec()].into_iter().collect(),
+            ["nope".as_bytes().to_vec()].into_iter().collect(),
+        ];
+        for op in &ops {
+            for ready in &ready_sets {
+                // Oracle: the old allocating path — clone keys, probe membership.
+                let oracle = op.keys().iter().any(|k| ready.contains(k));
+                assert_eq!(
+                    op.any_key_ready(ready),
+                    oracle,
+                    "any_key_ready diverged from keys() for {op:?} / {ready:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn any_key_ready_alloc_free_scan_agrees_with_keys_clone_at_scale() {
+        use std::collections::HashSet;
+        use std::time::Instant;
+        // Tick scanning many blocked clients, each waiting on a few keys,
+        // none ready (the common case: one unrelated key became ready, every
+        // other blocked client re-scans). Doubles as a large-scale agreement
+        // check; the ratio is informational (alloc-elimination is a FLOOR
+        // improvement — the structural O(blocked)->O(ready+due) win lives in
+        // the timeout-heap + reverse key-index, tracked by frankenredis-4pbq8).
+        let blocked: Vec<BlockingOp> = (0..2000u32)
+            .map(|i| BlockingOp::BLpop {
+                keys: vec![
+                    format!("queue:{i}:hi").into_bytes(),
+                    format!("queue:{i}:lo").into_bytes(),
+                    format!("queue:{i}:bk").into_bytes(),
+                ],
+            })
+            .collect();
+        let ready: HashSet<Vec<u8>> = ["unrelated".as_bytes().to_vec()].into_iter().collect();
+        let iters = 400u32;
+
+        // OLD: clone every client's keys each tick, then probe.
+        let t0 = Instant::now();
+        let mut hits0 = 0u64;
+        for _ in 0..iters {
+            for op in &blocked {
+                if op.keys().iter().any(|k| ready.contains(k)) {
+                    hits0 += 1;
+                }
+            }
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+
+        // NEW: borrow-and-probe, zero allocation.
+        let t1 = Instant::now();
+        let mut hits1 = 0u64;
+        for _ in 0..iters {
+            for op in &blocked {
+                if op.any_key_ready(&ready) {
+                    hits1 += 1;
+                }
+            }
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+
+        assert_eq!(hits0, hits1, "scan results diverged");
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "blocked-tick scan (2000 clients x3 keys, miss): keys-clone {} ms -> borrow {} ms = {ratio:.2}x",
+            old_ns / 1_000_000,
+            new_ns / 1_000_000,
+        );
+        // New path must never be slower than the allocating one.
+        assert!(new_ns <= old_ns + old_ns / 10, "alloc-free scan regressed: {ratio:.2}x");
     }
 
     #[test]
