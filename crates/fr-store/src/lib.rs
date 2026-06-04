@@ -954,7 +954,7 @@ impl From<std::collections::HashMap<Vec<u8>, f64>> for SortedSet {
 /// `Value::Set` in a follow-up.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub(crate) enum SetValue {
+pub enum SetValue {
     /// Sorted-ascending, unique i64 members (intset encoding).
     Int(Vec<i64>),
     /// Insertion-ordered byte-string members (generic encoding).
@@ -971,7 +971,7 @@ fn set_int_to_bytes(n: i64) -> Vec<u8> {
 /// encoding (each i64 formatted on demand) and borrowed bytes for the generic
 /// encoding. (frankenredis-hjob8)
 #[allow(dead_code)]
-pub(crate) enum SetValueIter<'a> {
+pub enum SetValueIter<'a> {
     Int(std::slice::Iter<'a, i64>),
     Generic(indexmap::set::Iter<'a, Vec<u8>>),
 }
@@ -993,19 +993,19 @@ impl SetValue {
         SetValue::Int(Vec::new())
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         match self {
             SetValue::Int(v) => v.len(),
             SetValue::Generic(s) => s.len(),
         }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Whether the set is currently in the intset encoding.
-    pub(crate) fn is_intset(&self) -> bool {
+    pub fn is_intset(&self) -> bool {
         matches!(self, SetValue::Int(_))
     }
 
@@ -1015,7 +1015,7 @@ impl SetValue {
         parse_i64(member).ok()
     }
 
-    pub(crate) fn contains(&self, member: &[u8]) -> bool {
+    pub fn contains(&self, member: &[u8]) -> bool {
         match self {
             SetValue::Int(v) => match Self::canonical_int(member) {
                 Some(n) => v.binary_search(&n).is_ok(),
@@ -1080,7 +1080,7 @@ impl SetValue {
         }
     }
 
-    pub(crate) fn iter(&self) -> SetValueIter<'_> {
+    pub fn iter(&self) -> SetValueIter<'_> {
         match self {
             SetValue::Int(v) => SetValueIter::Int(v.iter()),
             SetValue::Generic(s) => SetValueIter::Generic(s.iter()),
@@ -1089,11 +1089,52 @@ impl SetValue {
 
     /// The member at encoding index `idx` (ascending-numeric for intset,
     /// insertion-order for generic), matching `iter().nth(idx)`.
-    pub(crate) fn get_index(&self, idx: usize) -> Option<Cow<'_, [u8]>> {
+    pub fn get_index(&self, idx: usize) -> Option<Cow<'_, [u8]>> {
         match self {
             SetValue::Int(v) => v.get(idx).map(|&n| Cow::Owned(set_int_to_bytes(n))),
             SetValue::Generic(s) => s.get_index(idx).map(|m| Cow::Borrowed(m.as_slice())),
         }
+    }
+
+    /// The underlying `IndexSet` for the generic encoding (used by the
+    /// listpack-vs-hashtable encoding helpers); `None` for an intset.
+    pub(crate) fn as_generic(&self) -> Option<&IndexSet<Vec<u8>>> {
+        match self {
+            SetValue::Generic(s) => Some(s),
+            SetValue::Int(_) => None,
+        }
+    }
+
+    /// Reset to an empty set (back to the intset encoding).
+    pub(crate) fn clear(&mut self) {
+        *self = SetValue::Int(Vec::new());
+    }
+
+    /// Keep only members for which `keep` returns true.
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
+        match self {
+            SetValue::Int(v) => v.retain(|&n| keep(&set_int_to_bytes(n))),
+            SetValue::Generic(s) => s.retain(|m| keep(m)),
+        }
+    }
+
+    /// Insert every member of `members` (promoting to generic as needed).
+    pub(crate) fn extend<I: IntoIterator<Item = Vec<u8>>>(
+        &mut self,
+        members: I,
+        max_intset_entries: usize,
+    ) {
+        for m in members {
+            self.insert(m, max_intset_entries);
+        }
+    }
+
+    /// Build the optimal encoding (intset when all members are canonical
+    /// integers within the limit) from an existing `IndexSet`.
+    pub(crate) fn from_index_set(set: IndexSet<Vec<u8>>, max_intset_entries: usize) -> Self {
+        let mut sv = SetValue::new();
+        sv.extend(set, max_intset_entries);
+        sv
     }
 }
 
@@ -1114,8 +1155,9 @@ pub enum Value {
     /// Hash: uses IndexMap to preserve insertion order like Redis listpack.
     Hash(IndexMap<Vec<u8>, Vec<u8>>),
     List(VecDeque<Vec<u8>>),
-    /// Set: uses IndexSet to preserve insertion order like Redis listpack/intset.
-    Set(IndexSet<Vec<u8>>),
+    /// Set: intset (sorted packed i64) for integer-only sets, else a hash-backed
+    /// IndexSet (generic). See [`SetValue`]. (frankenredis-hjob8)
+    Set(SetValue),
     /// Sorted set: dual-indexed for efficiency.
     SortedSet(SortedSet),
     /// Stream entries keyed by `(milliseconds, sequence)` stream IDs.
@@ -3179,17 +3221,24 @@ impl Store {
         true
     }
 
-    fn set_fits_intset(set: &IndexSet<Vec<u8>>, max_intset_entries: usize) -> bool {
-        set.len() <= max_intset_entries && set.iter().all(|member| parse_i64(member).is_ok())
+    fn set_fits_intset(set: &SetValue, max_intset_entries: usize) -> bool {
+        // The intset encoding is now intrinsic: a `SetValue::Int` holds only
+        // canonical integers and is kept within the limit by promotion.
+        set.is_intset() && set.len() <= max_intset_entries
     }
 
     fn set_fits_listpack(
-        set: &IndexSet<Vec<u8>>,
+        set: &SetValue,
         max_listpack_entries: usize,
         max_listpack_value: usize,
     ) -> bool {
-        set.len() <= max_listpack_entries
-            && set.iter().all(|member| member.len() <= max_listpack_value)
+        match set.as_generic() {
+            Some(generic) => {
+                generic.len() <= max_listpack_entries
+                    && generic.iter().all(|member| member.len() <= max_listpack_value)
+            }
+            None => false, // an intset is never listpack-encoded
+        }
     }
 
     fn refresh_set_encoding_flags(
@@ -3266,6 +3315,7 @@ impl Store {
     }
 
     fn set_entry(&self, set: IndexSet<Vec<u8>>, expires_at_ms: Option<u64>, now_ms: u64) -> Entry {
+        let set = SetValue::from_index_set(set, self.set_max_intset_entries);
         let mut entry = Entry::new(Value::Set(set), expires_at_ms, now_ms);
         Self::refresh_set_encoding_flags(
             &mut entry,
@@ -7429,7 +7479,7 @@ impl Store {
                             && Self::set_fits_intset(s, max_intset_entries);
                         let mut added = 0_u64;
                         for m in members {
-                            if s.insert(m.clone()) {
+                            if s.insert(m.clone(), max_intset_entries) {
                                 added += 1;
                             }
                         }
@@ -7441,7 +7491,7 @@ impl Store {
                             // hashtable path in refresh_set_encoding_flags.
                             let intset_int_overflow = was_intset_encoded
                                 && s.len() > max_intset_entries
-                                && s.iter().all(|m| parse_i64(m).is_ok());
+                                && s.iter().all(|m| parse_i64(m.as_ref()).is_ok());
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
@@ -7538,7 +7588,7 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
-                    let members: Vec<Vec<u8>> = s.iter().cloned().collect();
+                    let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
@@ -7729,7 +7779,7 @@ impl Store {
                 }
             }
         }
-        let mut v: Vec<Vec<u8>> = result.into_iter().collect();
+        let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
         v.sort();
         Ok(v)
     }
@@ -7910,6 +7960,7 @@ impl Store {
             },
             None => return Ok(Vec::new()),
         };
+        let max_intset_entries = self.set_max_intset_entries;
 
         for (i, key) in keys.iter().enumerate() {
             if i == base_idx {
@@ -7918,11 +7969,11 @@ impl Store {
             if let Some(entry) = self.entries.get(*key)
                 && let Value::Set(s) = &entry.value
             {
-                result.extend(s.iter().cloned());
+                result.extend(s.iter().map(|m| m.into_owned()), max_intset_entries);
             }
         }
 
-        let mut v: Vec<Vec<u8>> = result.into_iter().collect();
+        let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
         v.sort();
         Ok(v)
     }
@@ -7997,7 +8048,7 @@ impl Store {
                 }
             }
         }
-        let mut v: Vec<Vec<u8>> = result.into_iter().collect();
+        let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
         v.sort();
         Ok(v)
     }
@@ -8027,7 +8078,7 @@ impl Store {
                             return Ok(None);
                         }
                         let idx = (rand_val as usize) % s.len();
-                        let member = s.iter().nth(idx).cloned();
+                        let member = s.iter().nth(idx).map(|m| m.into_owned());
                         if let Some(ref m) = member {
                             s.shift_remove(m);
                         }
@@ -8104,7 +8155,7 @@ impl Store {
                         None
                     } else {
                         let idx = (rand_val as usize) % s.len();
-                        s.iter().nth(idx).cloned()
+                        s.iter().nth(idx).map(|m| m.into_owned())
                     };
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
@@ -8142,7 +8193,7 @@ impl Store {
         if let Some(entry) = self.entries.get_mut(key) {
             match &entry.value {
                 Value::Set(s) => {
-                    let members: Vec<Vec<u8>> = s.iter().cloned().collect();
+                    let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
                     }
@@ -8581,7 +8632,7 @@ impl Store {
                     Ok(result)
                 }
                 Value::Set(s) => {
-                    let mut members: Vec<_> = s.iter().cloned().collect();
+                    let mut members: Vec<_> = s.iter().map(|m| m.into_owned()).collect();
                     members.sort();
                     let result = members.into_iter().map(|m| (m, 1.0)).collect();
                     entry.touch(now_ms);
@@ -12402,10 +12453,10 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                let mut add_member = |member: &Vec<u8>, score: f64| {
+                let mut add_member = |member: &[u8], score: f64| {
                     let weighted = normalize_weighted_score(score, weight);
                     use std::collections::hash_map::Entry as HEntry;
-                    match combined.entry(member.clone()) {
+                    match combined.entry(member.to_vec()) {
                         HEntry::Vacant(e) => {
                             e.insert(weighted);
                         }
@@ -12425,7 +12476,7 @@ impl Store {
                     }
                     Value::Set(s) => {
                         for member in s.iter() {
-                            add_member(member, 1.0);
+                            add_member(member.as_ref(), 1.0);
                         }
                         entry.touch(now_ms);
                     }
@@ -12550,7 +12601,7 @@ impl Store {
                         .collect(),
                     Value::Set(s) => s
                         .iter()
-                        .map(|m| (m.clone(), normalize_weighted_score(1.0, w)))
+                        .map(|m| (m.into_owned(), normalize_weighted_score(1.0, w)))
                         .collect(),
                     _ => return Err(StoreError::WrongType),
                 };
@@ -12963,8 +13014,10 @@ impl Store {
                         if is_listpack_or_intset {
                             let result: Vec<Vec<u8>> = s
                                 .iter()
-                                .filter(|member| pattern.is_none_or(|pat| glob_match(pat, member)))
-                                .cloned()
+                                .filter(|member| {
+                                    pattern.is_none_or(|pat| glob_match(pat, member.as_ref()))
+                                })
+                                .map(|m| m.into_owned())
                                 .collect();
                             return Ok((0, result));
                         }
@@ -12981,14 +13034,14 @@ impl Store {
                             pos += 1;
                             processed += 1;
                             if let Some(pat) = pattern
-                                && !glob_match(pat, member)
+                                && !glob_match(pat, member.as_ref())
                             {
                                 if processed >= batch_size {
                                     break;
                                 }
                                 continue;
                             }
-                            result.push(member.clone());
+                            result.push(member.into_owned());
                             if processed >= batch_size {
                                 break;
                             }
@@ -13196,7 +13249,7 @@ impl Store {
                     Ok(result)
                 }
                 Value::Set(s) => {
-                    let result = s.iter().cloned().collect();
+                    let result = s.iter().map(|m| m.into_owned()).collect();
                     entry.touch(now_ms);
                     Ok(result)
                 }
@@ -13277,7 +13330,7 @@ impl Store {
                 let mut members: Vec<_> = s.iter().collect();
                 members.sort();
                 for m in members {
-                    hash = fnv1a_update(hash, m);
+                    hash = fnv1a_update(hash, m.as_ref());
                 }
             }
             Value::SortedSet(zs) => {
@@ -14472,17 +14525,18 @@ impl Store {
             }
             Value::Set(s) => {
                 let integer_members: Option<Vec<i64>> =
-                    s.iter().map(|member| parse_i64(member).ok()).collect();
+                    s.iter().map(|member| parse_i64(member.as_ref()).ok()).collect();
                 if entry.force_set_hashtable_encoding {
                     buf.push(RDB_TYPE_SET);
                     encode_length(&mut buf, s.len());
-                    for member in s {
-                        encode_dump_bulk(&mut buf, member);
+                    for member in s.iter() {
+                        encode_dump_bulk(&mut buf, member.as_ref());
                     }
                 } else if entry.force_set_listpack_encoding {
                     buf.push(RDB_TYPE_SET_LISTPACK);
-                    let members: Vec<&[u8]> = s.iter().map(Vec::as_slice).collect();
-                    encode_dump_bulk(&mut buf, &encode_listpack_strings(&members)?);
+                    let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
+                    let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+                    encode_dump_bulk(&mut buf, &encode_listpack_strings(&refs)?);
                 } else if s.len() <= self.set_max_intset_entries {
                     if let Some(mut integers) = integer_members {
                         integers.sort_unstable();
@@ -14492,26 +14546,28 @@ impl Store {
                         && s.iter().all(|member| member.len() <= 64)
                     {
                         buf.push(RDB_TYPE_SET_LISTPACK);
-                        let members: Vec<&[u8]> = s.iter().map(Vec::as_slice).collect();
-                        encode_dump_bulk(&mut buf, &encode_listpack_strings(&members)?);
+                        let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
+                        let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+                        encode_dump_bulk(&mut buf, &encode_listpack_strings(&refs)?);
                     } else {
                         buf.push(RDB_TYPE_SET);
                         encode_length(&mut buf, s.len());
-                        for member in s {
-                            encode_dump_bulk(&mut buf, member);
+                        for member in s.iter() {
+                            encode_dump_bulk(&mut buf, member.as_ref());
                         }
                     }
                 } else if s.len() <= self.set_max_listpack_entries
                     && s.iter().all(|member| member.len() <= 64)
                 {
                     buf.push(RDB_TYPE_SET_LISTPACK);
-                    let members: Vec<&[u8]> = s.iter().map(Vec::as_slice).collect();
-                    encode_dump_bulk(&mut buf, &encode_listpack_strings(&members)?);
+                    let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
+                    let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+                    encode_dump_bulk(&mut buf, &encode_listpack_strings(&refs)?);
                 } else {
                     buf.push(RDB_TYPE_SET);
                     encode_length(&mut buf, s.len());
-                    for member in s {
-                        encode_dump_bulk(&mut buf, member);
+                    for member in s.iter() {
+                        encode_dump_bulk(&mut buf, member.as_ref());
                     }
                 }
             }
@@ -14676,7 +14732,7 @@ impl Store {
                     }
                 }
                 force_set_hashtable_encoding = true;
-                Value::Set(set)
+                Value::Set(SetValue::Generic(set))
             }
             RDB_TYPE_HASH => {
                 // Hash
@@ -14861,7 +14917,9 @@ impl Store {
                 if set.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::Set(set)
+                // A loaded intset stays intset-encoded regardless of the current
+                // set-max-intset-entries limit (the limit governs new adds only).
+                Value::Set(SetValue::from_index_set(set, usize::MAX))
             }
             RDB_TYPE_SET_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -14877,7 +14935,7 @@ impl Store {
                     return Err(StoreError::InvalidDumpPayload);
                 }
                 force_set_listpack_encoding = true;
-                Value::Set(set)
+                Value::Set(SetValue::Generic(set))
             }
             RDB_TYPE_ZSET_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -15066,12 +15124,12 @@ impl Store {
                 Value::Set(s) => {
                     if !s.is_empty() {
                         // Sort members for deterministic output.
-                        let mut members: Vec<&Vec<u8>> = s.iter().collect();
+                        let mut members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
                         members.sort();
                         for chunk in members.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
                             let mut argv = vec![b"SADD".to_vec(), logical_key.clone()];
                             for member in chunk {
-                                argv.push((*member).clone());
+                                argv.push(member.clone());
                             }
                             commands.push(argv);
                         }
@@ -16548,15 +16606,15 @@ fn estimate_list_memory_usage_bytes(items: &VecDeque<Vec<u8>>) -> usize {
     }
 }
 
-fn estimate_set_memory_usage_bytes(members: &IndexSet<Vec<u8>>) -> usize {
-    if members.len() <= 512 && members.iter().all(|member| parse_i64(member).is_ok()) {
+fn estimate_set_memory_usage_bytes(members: &SetValue) -> usize {
+    if members.len() <= 512 && members.iter().all(|member| parse_i64(member.as_ref()).is_ok()) {
         let payload = 8usize.saturating_add(members.len().saturating_mul(REDIS_SCORE_BYTES));
         return REDIS_OBJECT_OVERHEAD_BYTES.saturating_add(redis_allocation_size(payload));
     }
     if members.len() <= 128 && members.iter().all(|member| member.len() <= 64) {
         let payload = members
             .iter()
-            .map(|member| estimate_listpack_entry_bytes(member))
+            .map(|member| estimate_listpack_entry_bytes(member.as_ref()))
             .sum();
         return estimate_listpack_object_memory_usage_bytes(payload);
     }
@@ -32320,7 +32378,7 @@ mod tests {
                                 AofValueSnapshot::List(list.iter().cloned().collect())
                             }
                             crate::Value::Set(set) => {
-                                AofValueSnapshot::Set(set.iter().cloned().collect())
+                                AofValueSnapshot::Set(set.iter().map(|m| m.into_owned()).collect())
                             }
                             crate::Value::Hash(hash) => AofValueSnapshot::Hash(
                                 hash.iter()

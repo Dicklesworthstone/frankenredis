@@ -24193,8 +24193,8 @@ fn mix_debug_object_digest(store: &mut Store, key: &[u8], now_ms: u64, digest: &
             }
         }
         Value::Set(members) => {
-            for member in members {
-                xor_digest(digest, &member);
+            for member in members.iter() {
+                xor_digest(digest, member.as_ref());
             }
         }
         Value::Hash(fields) => {

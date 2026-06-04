@@ -14908,7 +14908,7 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
             Value::Integer(v) => RdbValue::String(v.to_string().into_bytes()),
             Value::List(l) => RdbValue::List(l.iter().cloned().collect()),
             Value::Set(s) => {
-                let mut members: Vec<Vec<u8>> = s.iter().cloned().collect();
+                let mut members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
                 members.sort();
                 RdbValue::Set(members)
             }
