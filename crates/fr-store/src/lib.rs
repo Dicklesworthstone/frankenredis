@@ -1136,6 +1136,32 @@ impl SetValue {
         sv.extend(set, max_intset_entries);
         sv
     }
+
+    /// Retain only members also present in `other` (in-place set intersection).
+    /// When both sets are intset-encoded, the intersection is computed directly
+    /// on the sorted `i64` arrays (binary search per element) — no per-member
+    /// string materialisation or re-parse, unlike the generic `contains` path.
+    /// Identical result to `self.retain(|m| other.contains(m))`. (frankenredis-jk9dq)
+    pub(crate) fn retain_intersect(&mut self, other: &SetValue) {
+        match (&mut *self, other) {
+            (SetValue::Int(a), SetValue::Int(b)) => {
+                a.retain(|n| b.binary_search(n).is_ok());
+            }
+            _ => self.retain(|m| other.contains(m)),
+        }
+    }
+
+    /// Retain only members NOT present in `other` (in-place set difference).
+    /// Direct sorted-`i64` path when both are intset-encoded; identical result
+    /// to `self.retain(|m| !other.contains(m))`. (frankenredis-jk9dq)
+    pub(crate) fn retain_diff(&mut self, other: &SetValue) {
+        match (&mut *self, other) {
+            (SetValue::Int(a), SetValue::Int(b)) => {
+                a.retain(|n| b.binary_search(n).is_err());
+            }
+            _ => self.retain(|m| !other.contains(m)),
+        }
+    }
 }
 
 impl PartialEq for SetValue {
@@ -7767,7 +7793,7 @@ impl Store {
             match self.entries.get_mut(*key) {
                 Some(entry) => {
                     if let Value::Set(s) = &entry.value {
-                        result.retain(|m| s.contains(m));
+                        result.retain_intersect(s);
                         if lfu_tracking_enabled {
                             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                         }
@@ -7892,7 +7918,7 @@ impl Store {
             match self.entries.get_mut(*key) {
                 Some(entry) => match &entry.value {
                     Value::Set(s) => {
-                        result.retain(|m| s.contains(m));
+                        result.retain_intersect(s);
                         if lfu_tracking_enabled {
                             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                         }
@@ -8037,7 +8063,7 @@ impl Store {
                 if let Some(entry) = self.entries.get_mut(*key) {
                     match &entry.value {
                         Value::Set(s) => {
-                            result.retain(|m| !s.contains(m));
+                            result.retain_diff(s);
                             if lfu_tracking_enabled {
                                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                             }
@@ -23856,6 +23882,91 @@ mod tests {
         let sv_members: HashSet<Vec<u8>> = sv.iter().map(|m| m.into_owned()).collect();
         assert_eq!(sv_members, model);
         assert!(parse_i64(b"7").is_ok() && parse_i64(b"007").is_err());
+    }
+
+    #[test]
+    fn setvalue_intersect_int_fastpath_matches_generic_and_reports_ab_ratio() {
+        use super::SetValue;
+
+        let mut state: u64 = 0x1357_9BDF_2468_ACE0;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        // Equivalence: retain_intersect / retain_diff agree with the generic
+        // contains-based retain, across Int-Int, Int-Generic, and Generic-Generic
+        // pairs (a small intset limit forces some promotions).
+        for _ in 0..3000 {
+            let mix = next() % 3;
+            let mut a = SetValue::new();
+            let mut b = SetValue::new();
+            for _ in 0..(next() % 40) {
+                let v = if mix == 1 {
+                    format!("s{}", next() % 60).into_bytes()
+                } else {
+                    ((next() % 120) as i64).to_string().into_bytes()
+                };
+                a.insert(v, 16);
+            }
+            for _ in 0..(next() % 40) {
+                let v = if mix == 2 {
+                    format!("s{}", next() % 60).into_bytes()
+                } else {
+                    ((next() % 120) as i64).to_string().into_bytes()
+                };
+                b.insert(v, 16);
+            }
+            let mut ai = a.clone();
+            ai.retain_intersect(&b);
+            let mut ag = a.clone();
+            ag.retain(|m| b.contains(m));
+            assert_eq!(ai, ag, "retain_intersect mismatch");
+            let mut ad = a.clone();
+            ad.retain_diff(&b);
+            let mut agd = a.clone();
+            agd.retain(|m| !b.contains(m));
+            assert_eq!(ad, agd, "retain_diff mismatch");
+        }
+
+        // A/B: intersect two large intsets. Old generic path materialises+reparses
+        // each member; the fast path stays on the sorted i64 arrays.
+        let n = 100_000i64;
+        let mut a = SetValue::new();
+        let mut b = SetValue::new();
+        for i in 0..n {
+            a.insert(i.to_string().into_bytes(), usize::MAX);
+        }
+        for i in 0..n {
+            b.insert((i * 2).to_string().into_bytes(), usize::MAX);
+        }
+        let reps = 200;
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            let mut r = a.clone();
+            r.retain(|m| b.contains(m));
+            c0 = c0.wrapping_add(r.len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            let mut r = a.clone();
+            r.retain_intersect(&b);
+            c1 = c1.wrapping_add(r.len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        assert_eq!(c0, c1, "fast path and generic path produce different sizes");
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "SINTER int A/B (n={n}, x{reps}): generic-retain={old_ns}ns i64-fastpath={new_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
     }
 
     #[test]
