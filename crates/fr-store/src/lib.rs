@@ -1260,11 +1260,13 @@ pub enum Value {
     String(Vec<u8>),
     Integer(i64),
     /// Hash: uses IndexMap to preserve insertion order like Redis listpack.
-    Hash(HashFieldMap),
+    /// Boxed (64B inner) so it doesn't size every `Value`/`Entry`. (w2t01)
+    Hash(Box<HashFieldMap>),
     List(VecDeque<Vec<u8>>),
     /// Set: intset (sorted packed i64) for integer-only sets, else a hash-backed
     /// IndexSet (generic). See [`SetValue`]. (frankenredis-hjob8)
-    Set(SetValue),
+    /// Boxed (64B inner) so it doesn't size every `Value`/`Entry`. (w2t01)
+    Set(Box<SetValue>),
     /// Sorted set: dual-indexed for efficiency. Boxed because `SortedSet` is by
     /// far the largest variant (dict + ordered BTreeMap + rank treap = 120B),
     /// and an un-boxed variant forces EVERY `Value` (hence every keyspace
@@ -3448,7 +3450,7 @@ impl Store {
 
     fn set_entry(&self, set: GenericSet, expires_at_ms: Option<u64>, now_ms: u64) -> Entry {
         let set = SetValue::from_index_set(set, self.set_max_intset_entries);
-        let mut entry = Entry::new(Value::Set(set), expires_at_ms, now_ms);
+        let mut entry = Entry::new(Value::Set(Box::new(set)), expires_at_ms, now_ms);
         Self::refresh_set_encoding_flags(
             &mut entry,
             self.set_max_intset_entries,
@@ -5900,7 +5902,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(HashFieldMap::default()), now_ms);
+        self.internal_entry(key.to_vec(), Value::Hash(Box::new(HashFieldMap::default())), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let result = {
@@ -6207,7 +6209,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(HashFieldMap::default()), now_ms);
+        self.internal_entry(key.to_vec(), Value::Hash(Box::new(HashFieldMap::default())), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self
@@ -6266,7 +6268,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(HashFieldMap::default()), now_ms);
+        self.internal_entry(key.to_vec(), Value::Hash(Box::new(HashFieldMap::default())), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let result = self
@@ -6349,7 +6351,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(HashFieldMap::default()), now_ms);
+        self.internal_entry(key.to_vec(), Value::Hash(Box::new(HashFieldMap::default())), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self
@@ -13512,7 +13514,7 @@ impl Store {
             }
             Value::Hash(m) => {
                 hash = fnv1a_update(hash, b"H");
-                for (k, v) in m {
+                for (k, v) in m.iter() {
                     hash = fnv1a_update(hash, k);
                     hash = fnv1a_update(hash, v);
                 }
@@ -14778,7 +14780,7 @@ impl Store {
                 {
                     buf.push(RDB_TYPE_HASH_LISTPACK);
                     let mut pairs = Vec::with_capacity(h.len() * 2);
-                    for (field, value) in h {
+                    for (field, value) in h.iter() {
                         pairs.push(field.as_slice());
                         pairs.push(value.as_slice());
                     }
@@ -14786,7 +14788,7 @@ impl Store {
                 } else {
                     buf.push(RDB_TYPE_HASH);
                     encode_length(&mut buf, h.len());
-                    for (field, value) in h {
+                    for (field, value) in h.iter() {
                         encode_dump_bulk(&mut buf, field);
                         encode_dump_bulk(&mut buf, value);
                     }
@@ -14930,7 +14932,7 @@ impl Store {
                     }
                 }
                 force_set_hashtable_encoding = true;
-                Value::Set(SetValue::Generic(set))
+                Value::Set(Box::new(SetValue::Generic(set)))
             }
             RDB_TYPE_HASH => {
                 // Hash
@@ -14949,7 +14951,7 @@ impl Store {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                 }
-                Value::Hash(hash)
+                Value::Hash(Box::new(hash))
             }
             RDB_TYPE_ZSET | RDB_TYPE_ZSET_2 => {
                 // Sorted set
@@ -15085,7 +15087,7 @@ impl Store {
                 if hash.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::Hash(hash)
+                Value::Hash(Box::new(hash))
             }
             RDB_TYPE_HASH_ZIPLIST => {
                 let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -15094,7 +15096,7 @@ impl Store {
                 if hash.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::Hash(hash)
+                Value::Hash(Box::new(hash))
             }
             RDB_TYPE_HASH_ZIPMAP => {
                 let (zipmap, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -15103,7 +15105,7 @@ impl Store {
                 if hash.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::Hash(hash)
+                Value::Hash(Box::new(hash))
             }
             RDB_TYPE_SET_INTSET => {
                 let (intset, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -15117,7 +15119,7 @@ impl Store {
                 }
                 // A loaded intset stays intset-encoded regardless of the current
                 // set-max-intset-entries limit (the limit governs new adds only).
-                Value::Set(SetValue::from_index_set(set, usize::MAX))
+                Value::Set(Box::new(SetValue::from_index_set(set, usize::MAX)))
             }
             RDB_TYPE_SET_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -15133,7 +15135,7 @@ impl Store {
                     return Err(StoreError::InvalidDumpPayload);
                 }
                 force_set_listpack_encoding = true;
-                Value::Set(SetValue::Generic(set))
+                Value::Set(Box::new(SetValue::Generic(set)))
             }
             RDB_TYPE_ZSET_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -27382,18 +27384,22 @@ mod tests {
         let value_sz = size_of::<super::Value>();
         let entry_sz = size_of::<super::Entry>();
         println!(
-            "after boxing SortedSet: Value={value_sz} Entry={entry_sz} (was 120/168) | SortedSet inner={}",
+            "after boxing SortedSet+Hash+Set: Value={value_sz} Entry={entry_sz} (was 120/168) | unboxed inners: SortedSet={} Hash={} Set={} List={}",
             size_of::<super::SortedSet>(),
+            size_of::<super::HashFieldMap>(),
+            size_of::<super::SetValue>(),
+            size_of::<std::collections::VecDeque<Vec<u8>>>(),
         );
-        // Value drops 120->72 (now capped by Hash/Set at 64 + tag/padding) and
-        // Entry 168->120 — 48 bytes shaved off EVERY key's overhead.
+        // Boxing SortedSet+Hash+Set: Value 120->~40 (now capped by List/Stream),
+        // Entry 168->~88. ~80 bytes shaved off EVERY key's overhead vs the
+        // original inline-fat-Value layout.
         assert!(
-            value_sz <= 72,
-            "Value should be <=72B after boxing SortedSet, got {value_sz}"
+            value_sz <= 48,
+            "Value should be <=48B after boxing SortedSet+Hash+Set, got {value_sz}"
         );
         assert!(
-            entry_sz < 168,
-            "Entry must shrink below the old 168B, got {entry_sz}"
+            entry_sz <= 96,
+            "Entry should be <=96B after the boxing, got {entry_sz}"
         );
     }
 

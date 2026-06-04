@@ -24232,7 +24232,7 @@ fn mix_debug_object_digest(store: &mut Store, key: &[u8], now_ms: u64, digest: &
             }
         }
         Value::Hash(fields) => {
-            for (field, value) in fields {
+            for (field, value) in fields.iter() {
                 let mut element_digest = [0u8; 20];
                 mix_digest(&mut element_digest, &field);
                 mix_digest(&mut element_digest, &value);
