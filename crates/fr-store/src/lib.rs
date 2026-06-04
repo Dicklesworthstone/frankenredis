@@ -4,7 +4,7 @@
 // `GenericSet` stores a small set in one packed buffer, promoting to an IndexSet
 // hashtable past the threshold. SMEMBERS/SSCAN/SPOP output is unchanged.
 mod packed_set;
-use packed_set::{GenericSet, HashFieldMap};
+use packed_set::{GenericSet, HashFieldMap, ListValue};
 
 use fr_expire::evaluate_expiry;
 use std::borrow::Cow;
@@ -1261,7 +1261,10 @@ pub enum Value {
     /// Hash: uses IndexMap to preserve insertion order like Redis listpack.
     /// Boxed (64B inner) so it doesn't size every `Value`/`Entry`. (w2t01)
     Hash(Box<HashFieldMap>),
-    List(VecDeque<Vec<u8>>),
+    /// List: a packed buffer when small (one allocation), promoting to a
+    /// `VecDeque` (O(1) ends) past the threshold. Boxed so the inner enum
+    /// doesn't size every `Value`/`Entry`. (frankenredis-9mh3o)
+    List(Box<ListValue>),
     /// Set: intset (sorted packed i64) for integer-only sets, else a hash-backed
     /// IndexSet (generic). See [`SetValue`]. (frankenredis-hjob8)
     /// Boxed (64B inner) so it doesn't size every `Value`/`Entry`. (w2t01)
@@ -3435,7 +3438,7 @@ impl Store {
         self.slowlog.len()
     }
 
-    fn list_fits_legacy_listpack_size(&self, list: &VecDeque<Vec<u8>>) -> bool {
+    fn list_fits_legacy_listpack_size(&self, list: &ListValue) -> bool {
         if self.list_max_listpack_size >= 0 {
             return list.len() <= self.list_max_listpack_size as usize;
         }
@@ -3453,7 +3456,7 @@ impl Store {
         // walking the whole list every encoding query.
         // (frankenredis-t1z5)
         let mut total: usize = 0;
-        for v in list {
+        for v in list.iter() {
             total = total.saturating_add(v.len() + 11); // 11 bytes overhead per entry
             if total > max_bytes {
                 return false;
@@ -6673,7 +6676,7 @@ impl Store {
                 let len = l.len();
                 self.internal_entries_insert(
                     key.to_vec(),
-                    Entry::new(Value::List(l), None, now_ms),
+                    Entry::new(Value::List(Box::new(l.into())), None, now_ms),
                 );
                 self.dirty = self.dirty.saturating_add(values.len() as u64);
                 Ok(len)
@@ -6726,7 +6729,7 @@ impl Store {
                 let len = l.len();
                 self.internal_entries_insert(
                     key.to_vec(),
-                    Entry::new(Value::List(l), None, now_ms),
+                    Entry::new(Value::List(Box::new(l.into())), None, now_ms),
                 );
                 self.dirty = self.dirty.saturating_add(values.len() as u64);
                 Ok(len)
@@ -6984,7 +6987,7 @@ impl Store {
                         let s = s as usize;
                         let e = e as usize;
                         let result: Vec<Vec<u8>> =
-                            l.iter().skip(s).take(e - s + 1).cloned().collect();
+                            l.iter().skip(s).take(e - s + 1).map(<[u8]>::to_vec).collect();
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -7024,7 +7027,7 @@ impl Store {
                             return Ok(None);
                         }
                         let idx = normalize_index(index, len) as usize;
-                        let result = l.get(idx).cloned();
+                        let result = l.get(idx).map(<[u8]>::to_vec);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -7063,7 +7066,7 @@ impl Store {
                             return Err(StoreError::IndexOutOfRange);
                         }
                         let idx = normalize_index(index, len) as usize;
-                        l[idx] = value;
+                        l.set(idx, value);
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
@@ -7103,7 +7106,7 @@ impl Store {
                 }
                 match &entry.value {
                     Value::List(l) => {
-                        let result = l.iter().position(|v| v.as_slice() == element);
+                        let result = l.iter().position(|v| v == element);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -7158,7 +7161,7 @@ impl Store {
                         if rank >= 0 {
                             // Forward scan
                             for (i, item) in l.iter().enumerate().take(limit) {
-                                if item.as_slice() == element {
+                                if item == element {
                                     matched += 1;
                                     if matched > skip {
                                         results.push(i);
@@ -7169,15 +7172,12 @@ impl Store {
                                 }
                             }
                         } else {
-                            // Reverse scan
-                            for (i, item) in l
-                                .iter()
-                                .enumerate()
-                                .take(len)
-                                .skip(len.saturating_sub(limit))
-                                .rev()
-                            {
-                                if item.as_slice() == element {
+                            // Reverse scan over indices [len-limit, len) descending.
+                            // (Indexed rather than iter().rev() — the packed list
+                            // iterator is forward-only.)
+                            for i in (len.saturating_sub(limit)..len).rev() {
+                                let item = l.get(i).expect("index in range");
+                                if item == element {
                                     matched += 1;
                                     if matched > skip {
                                         results.push(i);
@@ -7221,7 +7221,7 @@ impl Store {
                 }
                 match &mut entry.value {
                     Value::List(l) => {
-                        if let Some(pos) = l.iter().position(|v| v.as_slice() == pivot) {
+                        if let Some(pos) = l.iter().position(|v| v == pivot) {
                             l.insert(pos, value);
                             let len = l.len();
                             Self::mark_digest_stale_fields(
@@ -7265,7 +7265,7 @@ impl Store {
                 }
                 match &mut entry.value {
                     Value::List(l) => {
-                        if let Some(pos) = l.iter().position(|v| v.as_slice() == pivot) {
+                        if let Some(pos) = l.iter().position(|v| v == pivot) {
                             l.insert(pos + 1, value);
                             let len = l.len();
                             Self::mark_digest_stale_fields(
@@ -7313,7 +7313,7 @@ impl Store {
                         if count > 0 {
                             let limit = count as u64;
                             l.retain(|v| {
-                                if removed < limit && v.as_slice() == value {
+                                if removed < limit && v == value {
                                     removed += 1;
                                     false
                                 } else {
@@ -7322,11 +7322,11 @@ impl Store {
                             });
                         } else if count < 0 {
                             let limit = count.unsigned_abs();
-                            let total = l.iter().filter(|v| v.as_slice() == value).count() as u64;
+                            let total = l.iter().filter(|v| *v == value).count() as u64;
                             let skip = total.saturating_sub(limit);
                             let mut seen = 0_u64;
                             l.retain(|v| {
-                                if v.as_slice() == value {
+                                if v == value {
                                     seen += 1;
                                     if seen > skip {
                                         removed += 1;
@@ -7337,7 +7337,7 @@ impl Store {
                             });
                         } else {
                             let old_len = l.len();
-                            l.retain(|v| v.as_slice() != value);
+                            l.retain(|v| v != value);
                             removed = (old_len - l.len()) as u64;
                         }
                         if removed > 0 {
@@ -7444,7 +7444,7 @@ impl Store {
                 l.push_front(val.clone());
                 self.internal_entries_insert(
                     destination.to_vec(),
-                    Entry::new(Value::List(l), source_ttl, now_ms),
+                    Entry::new(Value::List(Box::new(l.into())), source_ttl, now_ms),
                 );
             }
         }
@@ -7729,7 +7729,7 @@ impl Store {
                 }
                 self.internal_entries_insert(
                     destination.to_vec(),
-                    Entry::new(Value::List(l), source_ttl, now_ms),
+                    Entry::new(Value::List(Box::new(l.into())), source_ttl, now_ms),
                 );
             }
         }
@@ -13715,7 +13715,7 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::List(l) => {
-                    let result = l.iter().cloned().collect();
+                    let result = l.iter().map(<[u8]>::to_vec).collect();
                     entry.touch(now_ms);
                     Ok(result)
                 }
@@ -13748,7 +13748,7 @@ impl Store {
         let stored = elements.len() as u64;
         self.internal_entries_insert(
             key,
-            Entry::new(Value::List(elements.into_iter().collect()), None, 0),
+            Entry::new(Value::List(Box::new(elements.into_iter().collect())), None, 0),
         );
         self.dirty = self.dirty.saturating_add(stored.max(1));
     }
@@ -13792,7 +13792,7 @@ impl Store {
             }
             Value::List(l) => {
                 hash = fnv1a_update(hash, b"L");
-                for item in l {
+                for item in l.iter() {
                     hash = fnv1a_update(hash, item);
                 }
             }
@@ -15186,7 +15186,7 @@ impl Store {
                     cursor += consumed;
                     list.push_back(item);
                 }
-                Value::List(list)
+                Value::List(Box::new(list.into()))
             }
             RDB_TYPE_SET => {
                 // Set
@@ -15302,7 +15302,7 @@ impl Store {
                 if list.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::List(list)
+                Value::List(Box::new(list.into()))
             }
             RDB_TYPE_LIST_QUICKLIST_2 => {
                 let (node_count, consumed) = decode_length(payload, cursor)?;
@@ -15334,7 +15334,7 @@ impl Store {
                 if list.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::List(list)
+                Value::List(Box::new(list.into()))
             }
             RDB_TYPE_LIST_QUICKLIST => {
                 let (node_count, consumed) = decode_length(payload, cursor)?;
@@ -15350,7 +15350,7 @@ impl Store {
                 if list.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::List(list)
+                Value::List(Box::new(list.into()))
             }
             RDB_TYPE_HASH_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -15583,11 +15583,11 @@ impl Store {
                 }
                 Value::List(l) => {
                     if !l.is_empty() {
-                        let items: Vec<&Vec<u8>> = l.iter().collect();
+                        let items: Vec<&[u8]> = l.iter().collect();
                         for chunk in items.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
                             let mut argv = vec![b"RPUSH".to_vec(), logical_key.clone()];
                             for item in chunk {
-                                argv.push((*item).clone());
+                                argv.push((*item).to_vec());
                             }
                             commands.push(argv);
                         }
@@ -15823,7 +15823,7 @@ fn encode_rdb_string(buf: &mut Vec<u8>, data: &[u8]) {
 
 fn encode_dump_quicklist2(
     buf: &mut Vec<u8>,
-    list: &VecDeque<Vec<u8>>,
+    list: &ListValue,
     list_max_listpack_size: i64,
 ) -> Option<()> {
     if list.is_empty() {
@@ -15837,8 +15837,7 @@ fn encode_dump_quicklist2(
 
     let mut nodes = Vec::new();
     let mut packed = Vec::new();
-    for item in list {
-        let item = item.as_slice();
+    for item in list.iter() {
         if quicklist_plain_node_required(item, list_max_listpack_size) {
             if !packed.is_empty() {
                 nodes.push(Node::Packed(std::mem::take(&mut packed)));
@@ -17061,10 +17060,10 @@ fn estimate_hash_memory_usage_bytes(fields: &HashFieldMap) -> usize {
         )
 }
 
-fn estimate_list_memory_usage_bytes(items: &VecDeque<Vec<u8>>) -> usize {
+fn estimate_list_memory_usage_bytes(items: &ListValue) -> usize {
     let payload: usize = items
         .iter()
-        .map(|item| estimate_listpack_entry_bytes(item))
+        .map(estimate_listpack_entry_bytes)
         .sum();
     let listpack_bytes =
         redis_allocation_size(REDIS_LISTPACK_HEADER_AND_EOF_BYTES.saturating_add(payload));
@@ -33687,7 +33686,7 @@ mod tests {
                                 AofValueSnapshot::String(value.to_string().into_bytes())
                             }
                             crate::Value::List(list) => {
-                                AofValueSnapshot::List(list.iter().cloned().collect())
+                                AofValueSnapshot::List(list.iter().map(<[u8]>::to_vec).collect())
                             }
                             crate::Value::Set(set) => {
                                 AofValueSnapshot::Set(set.iter().map(|m| m.into_owned()).collect())

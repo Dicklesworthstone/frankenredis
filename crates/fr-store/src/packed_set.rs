@@ -673,13 +673,11 @@ impl<'a> Iterator for PackedStrMapIter<'a> {
 /// `allow(dead_code)`: the primitive + its VecDeque-equivalence proptest land
 /// first; wiring it into `Value::List` is the follow-up (step 4b).
 #[derive(Clone, Debug, Default)]
-#[allow(dead_code)]
 pub struct PackedList {
     buf: Vec<u8>,
     len: usize,
 }
 
-#[allow(dead_code)]
 impl PackedList {
     #[must_use]
     pub fn new() -> Self {
@@ -827,7 +825,6 @@ impl<'a> FromIterator<&'a [u8]> for PackedList {
 }
 
 /// Borrowing iterator over packed list elements, front to back.
-#[allow(dead_code)]
 pub struct PackedListIter<'a> {
     buf: &'a [u8],
     pos: usize,
@@ -843,6 +840,195 @@ impl<'a> Iterator for PackedListIter<'a> {
         let e_end = e_start + elen;
         self.pos = e_end;
         Some(&self.buf[e_start..e_end])
+    }
+}
+
+use std::collections::VecDeque;
+
+/// Storage for a list: a packed buffer while small, promoting to a
+/// `VecDeque<Vec<u8>>` (which keeps O(1) ends for large lists, redis's quicklist
+/// regime) past the threshold. Drop-in for the former `VecDeque` — same
+/// front-to-back order and identical push/pop/get/insert/remove/retain
+/// semantics, so LRANGE/LINDEX/LPOP/etc. output is byte-for-byte unchanged.
+/// (frankenredis-9mh3o step 4)
+#[derive(Clone, Debug)]
+pub enum ListValue {
+    Packed(PackedList),
+    Deque(VecDeque<Vec<u8>>),
+}
+
+impl Default for ListValue {
+    fn default() -> Self {
+        ListValue::Packed(PackedList::new())
+    }
+}
+
+impl ListValue {
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            ListValue::Packed(p) => p.len(),
+            ListValue::Deque(d) => d.len(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[must_use]
+    pub fn get(&self, idx: usize) -> Option<&[u8]> {
+        match self {
+            ListValue::Packed(p) => p.get(idx),
+            ListValue::Deque(d) => d.get(idx).map(|v| v.as_slice()),
+        }
+    }
+
+    fn promote(&mut self) {
+        if let ListValue::Packed(p) = self {
+            let mut d: VecDeque<Vec<u8>> = VecDeque::with_capacity(p.len() + 1);
+            for e in p.iter() {
+                d.push_back(e.to_vec());
+            }
+            *self = ListValue::Deque(d);
+        }
+    }
+
+    fn maybe_promote(&mut self, added_len: usize) {
+        if let ListValue::Packed(p) = self
+            && (p.len() >= PACKED_MAX_ENTRIES || added_len > PACKED_MAX_VALUE)
+        {
+            self.promote();
+        }
+    }
+
+    pub fn push_back(&mut self, elem: Vec<u8>) {
+        self.maybe_promote(elem.len());
+        match self {
+            ListValue::Packed(p) => p.push_back(&elem),
+            ListValue::Deque(d) => d.push_back(elem),
+        }
+    }
+
+    pub fn push_front(&mut self, elem: Vec<u8>) {
+        self.maybe_promote(elem.len());
+        match self {
+            ListValue::Packed(p) => p.push_front(&elem),
+            ListValue::Deque(d) => d.push_front(elem),
+        }
+    }
+
+    pub fn pop_front(&mut self) -> Option<Vec<u8>> {
+        match self {
+            ListValue::Packed(p) => p.pop_front(),
+            ListValue::Deque(d) => d.pop_front(),
+        }
+    }
+
+    pub fn pop_back(&mut self) -> Option<Vec<u8>> {
+        match self {
+            ListValue::Packed(p) => p.pop_back(),
+            ListValue::Deque(d) => d.pop_back(),
+        }
+    }
+
+    /// Replace the element at `idx` (LSET); false if out of range.
+    pub fn set(&mut self, idx: usize, elem: Vec<u8>) -> bool {
+        match self {
+            ListValue::Packed(p) => p.set(idx, &elem),
+            ListValue::Deque(d) => {
+                if let Some(slot) = d.get_mut(idx) {
+                    *slot = elem;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Insert before index `idx` (`idx >= len` appends), matching `VecDeque::insert`.
+    pub fn insert(&mut self, idx: usize, elem: Vec<u8>) {
+        self.maybe_promote(elem.len());
+        match self {
+            ListValue::Packed(p) => p.insert(idx, &elem),
+            ListValue::Deque(d) => d.insert(idx, elem),
+        }
+    }
+
+    pub fn remove(&mut self, idx: usize) -> Option<Vec<u8>> {
+        match self {
+            ListValue::Packed(p) => p.remove(idx),
+            ListValue::Deque(d) => d.remove(idx),
+        }
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
+        match self {
+            ListValue::Packed(p) => p.retain(&mut keep),
+            ListValue::Deque(d) => d.retain(|v| keep(v)),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        *self = ListValue::default();
+    }
+
+    #[must_use]
+    pub fn iter(&self) -> ListValueIter<'_> {
+        match self {
+            ListValue::Packed(p) => ListValueIter::Packed(p.iter()),
+            ListValue::Deque(d) => ListValueIter::Deque(d.iter()),
+        }
+    }
+}
+
+impl From<VecDeque<Vec<u8>>> for ListValue {
+    fn from(d: VecDeque<Vec<u8>>) -> Self {
+        if d.len() > PACKED_MAX_ENTRIES || d.iter().any(|e| e.len() > PACKED_MAX_VALUE) {
+            ListValue::Deque(d)
+        } else {
+            let mut p = PackedList::new();
+            for e in &d {
+                p.push_back(e);
+            }
+            ListValue::Packed(p)
+        }
+    }
+}
+
+impl FromIterator<Vec<u8>> for ListValue {
+    fn from_iter<I: IntoIterator<Item = Vec<u8>>>(iter: I) -> Self {
+        let mut l = ListValue::default();
+        for e in iter {
+            l.push_back(e);
+        }
+        l
+    }
+}
+
+/// Set-style equality is order-sensitive for lists (matches `VecDeque` eq).
+impl PartialEq for ListValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
+    }
+}
+impl Eq for ListValue {}
+
+/// Borrowing iterator over list elements, front to back.
+pub enum ListValueIter<'a> {
+    Packed(PackedListIter<'a>),
+    Deque(std::collections::vec_deque::Iter<'a, Vec<u8>>),
+}
+
+impl<'a> Iterator for ListValueIter<'a> {
+    type Item = &'a [u8];
+    fn next(&mut self) -> Option<&'a [u8]> {
+        match self {
+            ListValueIter::Packed(it) => it.next(),
+            ListValueIter::Deque(it) => it.next().map(|v| v.as_slice()),
+        }
     }
 }
 

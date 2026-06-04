@@ -24257,8 +24257,8 @@ fn mix_debug_object_digest(store: &mut Store, key: &[u8], now_ms: u64, digest: &
         Value::String(bytes) => mix_digest(digest, &bytes),
         Value::Integer(value) => mix_digest(digest, value.to_string().as_bytes()),
         Value::List(items) => {
-            for item in items {
-                mix_digest(digest, &item);
+            for item in items.iter() {
+                mix_digest(digest, item);
             }
         }
         Value::Set(members) => {
