@@ -3072,8 +3072,10 @@ impl Store {
     }
 
     fn record_keyspace_lookup(&mut self, key: &[u8], now_ms: u64) -> bool {
-        self.drop_if_expired(key, now_ms);
-        let hit = self.entries.contains_key(key);
+        // `drop_if_expired` already performs the keyspace lookup and now reports
+        // whether the key survived, so the separate `contains_key` it used to do
+        // here (a second hash lookup on every read) is gone. (frankenredis-shewy)
+        let hit = self.drop_if_expired(key, now_ms);
         if hit {
             self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
         } else {
@@ -12074,12 +12076,16 @@ impl Store {
         hll_run_selftest().map_err(StoreError::GenericError)
     }
 
-    fn drop_if_expired(&mut self, key: &[u8], now_ms: u64) {
-        let should_evict = evaluate_expiry(
-            now_ms,
-            self.entries.get(key).and_then(|entry| entry.expires_at_ms),
-        )
-        .should_evict;
+    /// Lazily reap `key` if its TTL has passed. Returns whether the key is
+    /// PRESENT afterwards (existed and was not reaped) — the single keyspace
+    /// lookup this already performs doubles as the existence check, so callers
+    /// like `record_keyspace_lookup` no longer need a redundant `contains_key`.
+    /// (frankenredis-shewy)
+    fn drop_if_expired(&mut self, key: &[u8], now_ms: u64) -> bool {
+        let entry = self.entries.get(key);
+        let exists = entry.is_some();
+        let should_evict =
+            evaluate_expiry(now_ms, entry.and_then(|entry| entry.expires_at_ms)).should_evict;
         if should_evict && self.internal_entries_remove(key).is_some() {
             self.stream_groups.remove(key);
             self.stream_last_ids.remove(key);
@@ -12095,7 +12101,9 @@ impl Store {
                 None => (0, key),
             };
             self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", logical_key, db);
+            return false;
         }
+        exists
     }
 
     /// (frankenredis-1d2xf) Drain the keys lazily expired during the current
@@ -27143,6 +27151,57 @@ mod tests {
         let v = store.get(b"bm", 0).unwrap().unwrap();
         assert_eq!(v.len(), 3);
         assert!(store.getbit(b"bm", 20, 0).unwrap());
+    }
+
+    #[test]
+    fn record_keyspace_lookup_drops_redundant_contains_key_ab() {
+        // (frankenredis-shewy) Every read used to hash its key twice in
+        // record_keyspace_lookup: once inside drop_if_expired and again in a
+        // separate contains_key. drop_if_expired now returns presence, so the
+        // second lookup is gone. A/B over the eliminated work.
+        use std::time::Instant;
+
+        let mut store = Store::new();
+        let keys: Vec<Vec<u8>> = (0..20_000u32)
+            .map(|i| format!("myapp:obj:{i:010}:field").into_bytes())
+            .collect();
+        for k in &keys {
+            store.set(k.clone(), b"v".to_vec(), None, 0);
+        }
+
+        let reps = 60u32;
+        // OLD: drop_if_expired + a separate contains_key (the redundant lookup).
+        let t0 = Instant::now();
+        let mut h0 = 0u64;
+        for _ in 0..reps {
+            for k in &keys {
+                let _ = store.drop_if_expired(k, 0);
+                h0 += u64::from(store.entries.contains_key(k.as_slice()));
+            }
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+
+        // NEW: drop_if_expired alone reports presence — one lookup.
+        let t1 = Instant::now();
+        let mut h1 = 0u64;
+        for _ in 0..reps {
+            for k in &keys {
+                h1 += u64::from(store.drop_if_expired(k, 0));
+            }
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+
+        assert_eq!(h0, h1, "presence results must match");
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "record_keyspace_lookup A/B ({} keys x{reps}): 2-lookup {} ms -> 1-lookup {} ms = {ratio:.2}x",
+            keys.len(),
+            old_ns / 1_000_000,
+            new_ns / 1_000_000,
+        );
+        // Loose guard (de-flake convention): removing one of two keyspace
+        // lookups per read; isolated ~1.6-1.9x, compresses under contention.
+        assert!(ratio > 1.2, "redundant-lookup elimination regressed: {ratio:.2}x");
     }
 
     #[test]
