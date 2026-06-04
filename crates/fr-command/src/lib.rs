@@ -4879,6 +4879,43 @@ fn geo_distance_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
     2.0 * GEO_EARTH_RADIUS_IN_METERS * a.sqrt().asin()
 }
 
+/// Conservative lat/lon bounding box fully containing the great-circle disk of
+/// `radius_m` around (`clon`, `clat`), returned as
+/// `(lat_min, lat_max, lon_min, lon_max, lon_wrap)`. When `lon_wrap` is true the
+/// box reaches a pole or crosses the antimeridian and the longitude bounds must
+/// not be used to reject candidates (latitude still prunes). Correctness: every
+/// point within `radius_m` of the center lies inside the returned box, so using
+/// it purely as a pre-filter leaves the radius results unchanged. A point at
+/// great-circle distance d has latitude offset <= d/R (latitude is 1-Lipschitz
+/// on the sphere); and since the geodesic to it stays within that latitude band,
+/// its longitude offset is <= d / (R * cos(worst_lat)) where
+/// `worst_lat = |clat| + lat_delta` is the band edge nearest a pole. A tiny
+/// relative margin absorbs floating-point rounding. (frankenredis-5nimj)
+fn geo_radius_bbox(clon: f64, clat: f64, radius_m: f64) -> (f64, f64, f64, f64, bool) {
+    const MARGIN: f64 = 1.0 + 1e-9;
+    let lat_delta = (radius_m / GEO_EARTH_RADIUS_IN_METERS).to_degrees() * MARGIN;
+    let lat_min = clat - lat_delta;
+    let lat_max = clat + lat_delta;
+    let worst_lat = clat.abs() + lat_delta;
+    if worst_lat >= 90.0 {
+        return (lat_min, lat_max, -180.0, 180.0, true);
+    }
+    let cos_worst = worst_lat.to_radians().cos();
+    if cos_worst <= 1e-12 {
+        return (lat_min, lat_max, -180.0, 180.0, true);
+    }
+    let lon_delta = (radius_m / (GEO_EARTH_RADIUS_IN_METERS * cos_worst)).to_degrees() * MARGIN;
+    if lon_delta >= 180.0 {
+        return (lat_min, lat_max, -180.0, 180.0, true);
+    }
+    let lon_min = clon - lon_delta;
+    let lon_max = clon + lon_delta;
+    // Crossing the antimeridian would need wrap-around comparisons; prefer
+    // correctness and simply skip longitude rejection in that rare case.
+    let lon_wrap = lon_min < -180.0 || lon_max > 180.0;
+    (lat_min, lat_max, lon_min, lon_max, lon_wrap)
+}
+
 /// GEOSEARCH BYBOX membership, a faithful port of upstream
 /// `geohashGetDistanceIfInRectangle` (geohash_helper.c). The N-S half-extent
 /// test uses the pure latitude distance; the E-W half-extent test measures the
@@ -5813,17 +5850,31 @@ fn geo_search_core(
     any: bool,
     now_ms: u64,
 ) -> Result<Vec<(Vec<u8>, f64, f64, f64, f64)>, CommandError> {
-    let members = store.zrange_withscores(key, 0, -1, now_ms)?;
+    // Spatial pre-filter: a lat/lon bounding box that provably contains the
+    // whole great-circle disk of `radius_m`. Points outside it cannot be in
+    // range, so we skip the trig-heavy haversine for them; and by scanning the
+    // zset by reference (zset_for_each_asc) we clone only the members we keep
+    // instead of every member. The box is a conservative superset, so the
+    // surviving result set and its ascending-score order are identical to
+    // scanning and distance-testing every member. (frankenredis-5nimj)
+    let (bb_lat_min, bb_lat_max, bb_lon_min, bb_lon_max, bb_lon_wrap) =
+        geo_radius_bbox(center_lon, center_lat, radius_m);
     let mut results: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
-    for (member, score) in members {
+    store.zset_for_each_asc(key, now_ms, |member, score| {
         let Some((lon, lat)) = geo_decode_score(score) else {
-            continue;
+            return;
         };
+        if lat < bb_lat_min || lat > bb_lat_max {
+            return;
+        }
+        if !bb_lon_wrap && (lon < bb_lon_min || lon > bb_lon_max) {
+            return;
+        }
         let dist = geo_distance_m(center_lon, center_lat, lon, lat);
         if dist <= radius_m {
-            results.push((member, score, dist, lon, lat));
+            results.push((member.to_vec(), score, dist, lon, lat));
         }
-    }
+    })?;
     // (frankenredis-1axne) Match upstream geo.c:714-718: if the
     // user supplied COUNT without explicit ordering and without ANY,
     // promote SORT_NONE → SORT_ASC. Otherwise SORT_NONE leaves the
@@ -26414,6 +26465,131 @@ mod tests {
         let ratio = scalar_ns as f64 / bitpar_ns as f64;
         println!(
             "LCS-RECON A/B (m=64,n=2000 x{reps}): scalar={scalar_ns}ns bitpar={bitpar_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
+    }
+
+    #[test]
+    fn geo_radius_bbox_is_a_superset_and_speeds_up_search() {
+        use super::{
+            GeoSort, geo_decode_score, geo_distance_m, geo_encode_wgs84, geo_radius_bbox,
+            geo_search_core,
+        };
+
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut unit = || (next() >> 11) as f64 / (1u64 << 53) as f64; // [0,1)
+
+        // SAFETY INVARIANT: every point within the radius lies inside the box.
+        // Sweep centers (incl. high latitude and near-antimeridian), radii from
+        // metres to thousands of km, and random probe points.
+        for _ in 0..200_000 {
+            let clat = (unit() * 170.0) - 85.0;
+            let clon = (unit() * 360.0) - 180.0;
+            let radius = 1.0 + unit() * 5_000_000.0;
+            let plat = (unit() * 170.0) - 85.0;
+            let plon = (unit() * 360.0) - 180.0;
+            let (lat_min, lat_max, lon_min, lon_max, lon_wrap) =
+                geo_radius_bbox(clon, clat, radius);
+            if geo_distance_m(clon, clat, plon, plat) <= radius {
+                assert!(
+                    plat >= lat_min && plat <= lat_max,
+                    "lat outside box: c=({clon},{clat}) r={radius} p=({plon},{plat})"
+                );
+                assert!(
+                    lon_wrap || (plon >= lon_min && plon <= lon_max),
+                    "lon outside box: c=({clon},{clat}) r={radius} p=({plon},{plat})"
+                );
+            }
+        }
+
+        // Integration A/B: build a large geo set, search a small radius, and
+        // confirm geo_search_core returns exactly the no-prune result set.
+        let key = b"geo";
+        let mut store = Store::new();
+        let n = 100_000usize;
+        let mut adds: Vec<(f64, Vec<u8>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let lon = (unit() * 360.0) - 180.0;
+            let lat = (unit() * 170.0) - 85.0;
+            if let Some(bits) = geo_encode_wgs84(lon, lat) {
+                adds.push((bits as f64, format!("m{i}").into_bytes()));
+            }
+        }
+        store.zadd(key, &adds, 0).unwrap();
+        let (clon, clat, radius) = (0.0f64, 0.0f64, 50_000.0f64);
+
+        let no_prune = |store: &mut Store| -> Vec<(Vec<u8>, f64)> {
+            let members = store.zrange_withscores(key, 0, -1, 0).unwrap();
+            let mut r = Vec::new();
+            for (m, s) in members {
+                if let Some((lon, lat)) = geo_decode_score(s) {
+                    let d = geo_distance_m(clon, clat, lon, lat);
+                    if d <= radius {
+                        r.push((m, d));
+                    }
+                }
+            }
+            r
+        };
+
+        let mut ref_set: Vec<(Vec<u8>, f64)> = no_prune(&mut store);
+        let mut got: Vec<(Vec<u8>, f64)> = geo_search_core(
+            &mut store,
+            key,
+            clon,
+            clat,
+            radius,
+            None,
+            GeoSort::Unspecified,
+            false,
+            0,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|(m, _s, d, _lon, _lat)| (m, d))
+        .collect();
+        ref_set.sort_by(|a, b| a.0.cmp(&b.0));
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(got, ref_set, "pruned search must match the full scan exactly");
+
+        let reps = 200;
+        let t0 = std::time::Instant::now();
+        let mut a0 = 0usize;
+        for _ in 0..reps {
+            a0 = a0.wrapping_add(no_prune(&mut store).len());
+        }
+        let full_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(a0);
+        let t1 = std::time::Instant::now();
+        let mut a1 = 0usize;
+        for _ in 0..reps {
+            a1 = a1.wrapping_add(
+                geo_search_core(
+                    &mut store,
+                    key,
+                    clon,
+                    clat,
+                    radius,
+                    None,
+                    GeoSort::Unspecified,
+                    false,
+                    0,
+                )
+                .unwrap()
+                .len(),
+            );
+        }
+        let prune_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(a1);
+        let ratio = full_ns as f64 / prune_ns as f64;
+        println!(
+            "GEO radius A/B (n={n}, r={radius}m, x{reps}): full-scan={full_ns}ns bbox-prune={prune_ns}ns ratio={ratio:.2}x"
         );
         assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
     }

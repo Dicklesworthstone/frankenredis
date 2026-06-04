@@ -9100,6 +9100,48 @@ impl Store {
         }
     }
 
+    /// Apply `f` to every (member, score) of the sorted set at `key` in
+    /// ascending (score, member) order, borrowing each member instead of
+    /// cloning it. Performs exactly the same expiry / LFU / touch bookkeeping as
+    /// `zrange_withscores(key, 0, -1, now_ms)`, so a scan-and-filter caller can
+    /// clone only the elements it keeps. Returns Ok(true) when the key held a
+    /// sorted set, Ok(false) when it was missing/expired, WrongType otherwise.
+    /// (frankenredis-5nimj)
+    pub fn zset_for_each_asc(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        mut f: impl FnMut(&[u8], f64),
+    ) -> Result<bool, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        for (member, &score) in zs.iter_asc() {
+                            f(member, score);
+                        }
+                        entry.touch(now_ms);
+                        Ok(true)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => Ok(false),
+        }
+    }
+
     pub fn zrevrange_withscores(
         &mut self,
         key: &[u8],
