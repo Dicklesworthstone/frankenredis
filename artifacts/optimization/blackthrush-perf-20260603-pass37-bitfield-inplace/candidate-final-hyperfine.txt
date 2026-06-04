@@ -1,0 +1,4 @@
+Benchmark 1: target-blackthrush-pass37-bitfield-final-harness-rch/release/bitfield-inplace-harness --bytes 33554432 --reps 128
+  Time (mean ± σ):      32.0 ms ±   1.5 ms    [User: 8.1 ms, System: 23.7 ms]
+  Range (min … max):    29.8 ms …  34.8 ms    8 runs
+ 

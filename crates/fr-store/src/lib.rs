@@ -3494,19 +3494,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<i64, StoreError> {
         self.drop_if_expired(key, now_ms);
-        let (mut bytes, expires_at_ms) = match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::String(v) => (v.clone(), entry.expires_at_ms),
-                _ => return Err(StoreError::WrongType),
-            },
-            None => (Vec::new(), None),
-        };
 
-        // Read old value first
-        let signed = false; // Old value is read as unsigned for SET
-        let old_value = bitfield_read(&bytes, bit_offset, bits, signed);
-
-        // Ensure the byte array is large enough
         let end_bit = bit_offset.saturating_add(u64::from(bits));
         let needed_bytes = end_bit.div_ceil(8) as usize;
         if needed_bytes > 512 * 1024 * 1024 {
@@ -3518,25 +3506,61 @@ impl Store {
             ));
         }
 
-        let old_len = bytes.len();
+        if let Some(entry) = self.entries.get_mut(key) {
+            let Value::String(bytes) = &mut entry.value else {
+                return Err(StoreError::WrongType);
+            };
+            let old_value = bitfield_read(bytes, bit_offset, bits, false);
+            let old_len = bytes.len();
+            if bytes.len() < needed_bytes {
+                bytes.resize(needed_bytes, 0);
+            }
+            bitfield_write(bytes, bit_offset, bits, value);
+            let changed = old_len != bytes.len()
+                || old_value != bitfield_read(bytes, bit_offset, bits, false);
+
+            let had_expiry = entry.expires_at_ms.is_some();
+            entry.last_access_ms = now_ms;
+            entry.lfu_freq = LFU_INIT_VAL;
+            entry.lfu_last_touch_min = now_ms / 60_000;
+            entry.modification_count = entry.modification_count.wrapping_add(1);
+            entry.force_raw_encoding = true;
+            entry.force_string_encoding = false;
+            entry.force_set_listpack_encoding = false;
+            entry.force_set_hashtable_encoding = false;
+            entry.force_hash_hashtable_encoding = false;
+            entry.force_zset_skiplist_encoding = false;
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+            if had_expiry {
+                let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+                self.expires_count = self.expires_count.saturating_add(1);
+                if db < self.database_count {
+                    self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
+                }
+            }
+            if changed {
+                self.dirty = self.dirty.saturating_add(1);
+            }
+            return Ok(old_value);
+        }
+
+        let mut bytes = Vec::new();
+        let old_value = bitfield_read(&bytes, bit_offset, bits, false);
         if bytes.len() < needed_bytes {
             bytes.resize(needed_bytes, 0);
         }
-
-        // Write the new value
         bitfield_write(&mut bytes, bit_offset, bits, value);
-
-        let signed = false;
-        if old_len != bytes.len() || old_value != bitfield_read(&bytes, bit_offset, bits, signed) {
-            self.dirty = self.dirty.saturating_add(1);
-        }
-
-        // Upstream bitops.c::bitfieldGeneric routes SET/INCRBY
-        // through dbUnshareStringValue / dbAdd which always store
-        // values with raw encoding. (br-frankenredis-bitfieldenc)
-        let mut entry = Entry::new(Value::String(bytes), expires_at_ms, now_ms);
+        let changed =
+            !bytes.is_empty() || old_value != bitfield_read(&bytes, bit_offset, bits, false);
+        let mut entry = Entry::new(Value::String(bytes), None, now_ms);
+        // Upstream bitops.c::bitfieldGeneric routes SET/INCRBY through
+        // dbUnshareStringValue / dbAdd which always store values with raw
+        // encoding. (br-frankenredis-bitfieldenc)
         entry.force_raw_encoding = true;
         self.internal_entries_insert(key.to_vec(), entry);
+        if changed {
+            self.dirty = self.dirty.saturating_add(1);
+        }
         Ok(old_value)
     }
 
@@ -17235,12 +17259,8 @@ fn hll_decode_dense_registers(payload: &[u8]) -> Result<Vec<u8>, StoreError> {
         return Err(StoreError::InvalidHllValue);
     }
     let mut registers = vec![0u8; HLL_REGISTERS];
-    for (regs, bytes) in registers
-        .chunks_exact_mut(4)
-        .zip(payload.chunks_exact(3))
-    {
-        let w =
-            u32::from(bytes[0]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[2]) << 16);
+    for (regs, bytes) in registers.chunks_exact_mut(4).zip(payload.chunks_exact(3)) {
+        let w = u32::from(bytes[0]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[2]) << 16);
         regs[0] = (w & 0x3f) as u8;
         regs[1] = ((w >> 6) & 0x3f) as u8;
         regs[2] = ((w >> 12) & 0x3f) as u8;
@@ -21115,17 +21135,15 @@ mod tests {
             for op in ["AND", "OR", "XOR"] {
                 assert_eq!(scalar(op, &vals), swar(op, &vals), "op={op} vals={vals:?}");
             }
-            assert_eq!(
-                scalar("NOT", &vals[..1]),
-                swar("NOT", &vals[..1]),
-                "op=NOT"
-            );
+            assert_eq!(scalar("NOT", &vals[..1]), swar("NOT", &vals[..1]), "op=NOT");
         }
 
         // A/B timing: XOR of two 16 MiB operands ×5 (run with `--release -- --nocapture`).
         let n = 16 * 1024 * 1024;
         let mk = |seed: u8| -> Vec<u8> {
-            (0..n).map(|i| (i as u8).wrapping_mul(seed).wrapping_add(seed)).collect()
+            (0..n)
+                .map(|i| (i as u8).wrapping_mul(seed).wrapping_add(seed))
+                .collect()
         };
         let a = mk(31);
         let b = mk(131);
@@ -25710,6 +25728,84 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bitfield_set_large_string_in_place_matches_clone_reference_and_reports_ab_ratio() {
+        fn clone_style_set(bytes: &mut Vec<u8>, bit_offset: u64, bits: u8, value: i64) -> i64 {
+            let mut cloned = bytes.clone();
+            let old = super::bitfield_read(&cloned, bit_offset, bits, false);
+            let needed_bytes = bit_offset.saturating_add(u64::from(bits)).div_ceil(8) as usize;
+            if cloned.len() < needed_bytes {
+                cloned.resize(needed_bytes, 0);
+            }
+            super::bitfield_write(&mut cloned, bit_offset, bits, value);
+            *bytes = cloned;
+            old
+        }
+
+        let mut seed = 0xB17F_13D5_9E37_79B9_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for len in 0..256usize {
+            let mut expected = vec![0u8; len];
+            for byte in &mut expected {
+                *byte = next() as u8;
+            }
+            let mut store = Store::new();
+            store.set(b"bf".to_vec(), expected.clone(), None, 0);
+            for step in 0..32_u64 {
+                let bit_offset = step.saturating_mul(11) % 2048;
+                let bits = [1, 2, 7, 8, 13, 16, 31, 64][step as usize % 8];
+                let value = i64::from_ne_bytes(next().to_ne_bytes());
+                let reference_old = clone_style_set(&mut expected, bit_offset, bits, value);
+                let optimized_old = store
+                    .bitfield_set(b"bf", bit_offset, bits, value, step + 1)
+                    .expect("optimized bitfield_set");
+                assert_eq!(
+                    optimized_old, reference_old,
+                    "old value mismatch len={len} step={step} bits={bits} offset={bit_offset}"
+                );
+            }
+            assert_eq!(
+                store.get(b"bf", 1000).unwrap().unwrap(),
+                expected,
+                "final bytes mismatch len={len}"
+            );
+        }
+
+        let n = 8 * 1024 * 1024;
+        let reps = 32;
+        let initial = vec![0u8; n];
+        let mut reference = initial.clone();
+        let t0 = std::time::Instant::now();
+        let mut ref_checksum = 0_i64;
+        for i in 0..reps {
+            ref_checksum ^= clone_style_set(&mut reference, 0, 8, i64::from(i & 1));
+        }
+        let clone_ns = t0.elapsed().as_nanos().max(1);
+
+        let mut store = Store::new();
+        store.set(b"bf".to_vec(), initial, None, 0);
+        let t1 = std::time::Instant::now();
+        let mut optimized_checksum = 0_i64;
+        for i in 0..reps {
+            optimized_checksum ^= store
+                .bitfield_set(b"bf", 0, 8, i64::from(i & 1), i as u64 + 1)
+                .expect("optimized bitfield_set");
+        }
+        let inplace_ns = t1.elapsed().as_nanos().max(1);
+
+        assert_eq!(optimized_checksum, ref_checksum);
+        assert_eq!(store.get(b"bf", 1000).unwrap().unwrap(), reference);
+        let ratio = clone_ns as f64 / inplace_ns as f64;
+        println!(
+            "BITFIELD SET large-string A/B over {n} bytes x{reps}: clone={clone_ns}ns inplace={inplace_ns}ns ratio={ratio:.2}x"
+        );
+    }
+
     // ── Extended List store tests ───────────────────────────────────────
 
     #[test]
@@ -26208,7 +26304,9 @@ mod tests {
         let ref_ns = t0.elapsed().as_nanos().max(1);
         let t1 = std::time::Instant::now();
         for _ in 0..reps {
-            std::hint::black_box(super::hll_encode_dense_registers(std::hint::black_box(&regs)));
+            std::hint::black_box(super::hll_encode_dense_registers(std::hint::black_box(
+                &regs,
+            )));
             std::hint::black_box(
                 super::hll_decode_dense_registers(std::hint::black_box(&payload)).unwrap(),
             );
