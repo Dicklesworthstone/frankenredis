@@ -938,6 +938,174 @@ impl From<std::collections::HashMap<Vec<u8>, f64>> for SortedSet {
     }
 }
 
+/// A set value using redis-style encoding. An integer-only set up to
+/// `set-max-intset-entries` is stored as a packed, sorted, de-duplicated
+/// `Vec<i64>` (the *intset* encoding — 8 bytes per member, vs a separate heap
+/// `Vec<u8>` per member in a hash set). The first non-canonical-integer member,
+/// or growth past the limit, promotes the set one-way to a hash-backed
+/// `IndexSet<Vec<u8>>` (the *generic* encoding). Matches `t_set.c`: intset
+/// members enumerate in ASCENDING numeric order; generic members keep insertion
+/// order. Canonical-integer membership uses `parse_i64` (redis `string2ll`: no
+/// leading zeros, no `+`, within i64 range), so e.g. `"007"` is a non-integer
+/// member that never lives in an intset.
+///
+/// This is the foundational storage type for the intset memory optimisation
+/// (frankenredis-hjob8); it is verified in isolation here and wired into
+/// `Value::Set` in a follow-up.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) enum SetValue {
+    /// Sorted-ascending, unique i64 members (intset encoding).
+    Int(Vec<i64>),
+    /// Insertion-ordered byte-string members (generic encoding).
+    Generic(IndexSet<Vec<u8>>),
+}
+
+/// Canonical decimal bytes for `n` (round-trips through `parse_i64`).
+#[allow(dead_code)]
+fn set_int_to_bytes(n: i64) -> Vec<u8> {
+    n.to_string().into_bytes()
+}
+
+/// Iterator over `SetValue` members yielding owned bytes for the intset
+/// encoding (each i64 formatted on demand) and borrowed bytes for the generic
+/// encoding. (frankenredis-hjob8)
+#[allow(dead_code)]
+pub(crate) enum SetValueIter<'a> {
+    Int(std::slice::Iter<'a, i64>),
+    Generic(indexmap::set::Iter<'a, Vec<u8>>),
+}
+
+impl<'a> Iterator for SetValueIter<'a> {
+    type Item = Cow<'a, [u8]>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            SetValueIter::Int(it) => it.next().map(|&n| Cow::Owned(set_int_to_bytes(n))),
+            SetValueIter::Generic(it) => it.next().map(|m| Cow::Borrowed(m.as_slice())),
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl SetValue {
+    /// A new empty set (starts in the intset encoding).
+    pub(crate) fn new() -> Self {
+        SetValue::Int(Vec::new())
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            SetValue::Int(v) => v.len(),
+            SetValue::Generic(s) => s.len(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Whether the set is currently in the intset encoding.
+    pub(crate) fn is_intset(&self) -> bool {
+        matches!(self, SetValue::Int(_))
+    }
+
+    /// The canonical i64 for `member`, or `None` if it is not a canonical
+    /// integer (and therefore can never live in an intset).
+    fn canonical_int(member: &[u8]) -> Option<i64> {
+        parse_i64(member).ok()
+    }
+
+    pub(crate) fn contains(&self, member: &[u8]) -> bool {
+        match self {
+            SetValue::Int(v) => match Self::canonical_int(member) {
+                Some(n) => v.binary_search(&n).is_ok(),
+                None => false,
+            },
+            SetValue::Generic(s) => s.contains(member),
+        }
+    }
+
+    fn promote_to_generic(&mut self) {
+        if let SetValue::Int(v) = self {
+            let mut set = IndexSet::with_capacity(v.len());
+            for &n in v.iter() {
+                set.insert(set_int_to_bytes(n));
+            }
+            *self = SetValue::Generic(set);
+        }
+    }
+
+    /// Insert `member`, returning true if it was newly added. Promotes to the
+    /// generic encoding when `member` is not a canonical integer or the intset
+    /// would exceed `max_intset_entries`.
+    pub(crate) fn insert(&mut self, member: Vec<u8>, max_intset_entries: usize) -> bool {
+        match self {
+            SetValue::Int(v) => match Self::canonical_int(&member) {
+                Some(n) => match v.binary_search(&n) {
+                    Ok(_) => false,
+                    Err(pos) => {
+                        if v.len() >= max_intset_entries {
+                            self.promote_to_generic();
+                            self.insert(member, max_intset_entries)
+                        } else {
+                            v.insert(pos, n);
+                            true
+                        }
+                    }
+                },
+                None => {
+                    self.promote_to_generic();
+                    self.insert(member, max_intset_entries)
+                }
+            },
+            SetValue::Generic(s) => s.insert(member),
+        }
+    }
+
+    /// Remove `member`, returning true if it was present. (Generic removal keeps
+    /// insertion order, matching `IndexSet::shift_remove`.)
+    pub(crate) fn shift_remove(&mut self, member: &[u8]) -> bool {
+        match self {
+            SetValue::Int(v) => match Self::canonical_int(member) {
+                Some(n) => match v.binary_search(&n) {
+                    Ok(pos) => {
+                        v.remove(pos);
+                        true
+                    }
+                    Err(_) => false,
+                },
+                None => false,
+            },
+            SetValue::Generic(s) => s.shift_remove(member),
+        }
+    }
+
+    pub(crate) fn iter(&self) -> SetValueIter<'_> {
+        match self {
+            SetValue::Int(v) => SetValueIter::Int(v.iter()),
+            SetValue::Generic(s) => SetValueIter::Generic(s.iter()),
+        }
+    }
+
+    /// The member at encoding index `idx` (ascending-numeric for intset,
+    /// insertion-order for generic), matching `iter().nth(idx)`.
+    pub(crate) fn get_index(&self, idx: usize) -> Option<Cow<'_, [u8]>> {
+        match self {
+            SetValue::Int(v) => v.get(idx).map(|&n| Cow::Owned(set_int_to_bytes(n))),
+            SetValue::Generic(s) => s.get_index(idx).map(|m| Cow::Borrowed(m.as_slice())),
+        }
+    }
+}
+
+impl PartialEq for SetValue {
+    /// Set equality (representation-independent): an `Int` and a `Generic`
+    /// holding the same members compare equal, matching `IndexSet`'s order-
+    /// independent `PartialEq`.
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().all(|m| other.contains(m.as_ref()))
+    }
+}
+
 /// The inner value held by a key in the store.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -23528,6 +23696,108 @@ mod tests {
             "Eviction-sampling A/B (n={n}, sample=10, x{reps}): clone-all={old_ns}ns sample-only={new_ns}ns ratio={ratio:.2}x"
         );
         assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
+    }
+
+    #[test]
+    fn setvalue_intset_semantics_and_fuzz_vs_reference() {
+        use super::{SetValue, parse_i64};
+        use std::collections::HashSet;
+        const LIMIT: usize = 512;
+
+        // Canonical-integer membership: "007" is NOT a canonical int (string2ll
+        // rejects leading zeros), so it never lives in an intset and inserting it
+        // promotes the set to the generic encoding.
+        let mut s = SetValue::new();
+        assert!(s.is_intset());
+        assert!(s.insert(b"7".to_vec(), LIMIT));
+        assert!(s.is_intset());
+        assert!(s.contains(b"7"));
+        assert!(!s.contains(b"007"));
+        assert!(s.insert(b"007".to_vec(), LIMIT));
+        assert!(!s.is_intset());
+        assert!(s.contains(b"007") && s.contains(b"7"));
+        assert_eq!(s.len(), 2);
+
+        // Intset iterates in ascending numeric order, de-duplicated.
+        let mut s = SetValue::new();
+        for v in [5i64, -3, 100, 5, 0, -3, 42] {
+            s.insert(v.to_string().into_bytes(), LIMIT);
+        }
+        assert!(s.is_intset());
+        let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
+        assert_eq!(
+            members,
+            vec![
+                b"-3".to_vec(),
+                b"0".to_vec(),
+                b"5".to_vec(),
+                b"42".to_vec(),
+                b"100".to_vec()
+            ]
+        );
+        for i in 0..s.len() {
+            assert_eq!(
+                s.get_index(i).map(|c| c.into_owned()),
+                s.iter().nth(i).map(|c| c.into_owned())
+            );
+        }
+
+        // Promotion exactly at the intset limit.
+        let mut s = SetValue::new();
+        for i in 0..LIMIT as i64 {
+            s.insert(i.to_string().into_bytes(), LIMIT);
+        }
+        assert!(s.is_intset() && s.len() == LIMIT);
+        assert!(s.insert((LIMIT as i64).to_string().into_bytes(), LIMIT));
+        assert!(!s.is_intset() && s.len() == LIMIT + 1);
+
+        // Representation-independent equality: an Int and a Generic holding the
+        // same members compare equal.
+        let mut a = SetValue::new();
+        for v in [3i64, 1, 2] {
+            a.insert(v.to_string().into_bytes(), LIMIT);
+        }
+        let mut b = SetValue::new();
+        b.insert(b"x".to_vec(), LIMIT); // force generic encoding
+        b.shift_remove(b"x");
+        for m in [b"2".to_vec(), b"1".to_vec(), b"3".to_vec()] {
+            b.insert(m, LIMIT);
+        }
+        assert!(a.is_intset() && !b.is_intset());
+        assert_eq!(a, b);
+        a.insert(b"4".to_vec(), LIMIT);
+        assert_ne!(a, b);
+
+        // Fuzz: every insert/remove/contains agrees with a HashSet reference, and
+        // the full member set matches regardless of encoding. A small limit (64)
+        // exercises promotion; the member mix covers canonical ints, leading-zero
+        // non-canonical strings, and plain strings.
+        let mut state: u64 = 0xA5A5_1234_DEAD_BEEF;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut sv = SetValue::new();
+        let mut model: HashSet<Vec<u8>> = HashSet::new();
+        for _ in 0..50_000 {
+            let member: Vec<u8> = match next() % 5 {
+                0 | 1 | 2 => (((next() % 2000) as i64) - 1000).to_string().into_bytes(),
+                3 => format!("0{}", next() % 100).into_bytes(),
+                _ => format!("s{}", next() % 200).into_bytes(),
+            };
+            if next() % 3 == 0 {
+                assert_eq!(sv.shift_remove(&member), model.remove(&member), "rm {member:?}");
+            } else {
+                assert_eq!(sv.insert(member.clone(), 64), model.insert(member.clone()), "ins {member:?}");
+            }
+            assert_eq!(sv.len(), model.len());
+            assert_eq!(sv.contains(&member), model.contains(&member));
+        }
+        let sv_members: HashSet<Vec<u8>> = sv.iter().map(|m| m.into_owned()).collect();
+        assert_eq!(sv_members, model);
+        assert!(parse_i64(b"7").is_ok() && parse_i64(b"007").is_err());
     }
 
     #[test]
