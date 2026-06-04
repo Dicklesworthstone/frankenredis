@@ -7104,14 +7104,25 @@ impl Runtime {
         fr_command::is_write_command(command)
     }
 
-    fn namespace_argv_for_selected_db(&self, argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    fn namespace_argv_for_selected_db<'a>(
+        &self,
+        argv: &'a [Vec<u8>],
+    ) -> std::borrow::Cow<'a, [Vec<u8>]> {
+        // db 0 needs no namespacing: encode_db_key(0, k) is the identity, so the
+        // rewrite below would reproduce argv byte-for-byte. Borrow it instead of
+        // cloning the whole argv AND re-deriving key indexes via the generic
+        // command_key_indexes scan on every command — both pure waste on the hot
+        // dispatch path for the overwhelmingly common selected_db == 0 case.
+        if self.session.selected_db == 0 {
+            return std::borrow::Cow::Borrowed(argv);
+        }
         let mut rewritten = argv.to_vec();
         for idx in fr_command::command_key_indexes(argv) {
             if let Some(arg) = rewritten.get_mut(idx) {
                 *arg = encode_db_key(self.session.selected_db, arg);
             }
         }
-        rewritten
+        std::borrow::Cow::Owned(rewritten)
     }
 
     fn refresh_current_dispatch_client_context(&mut self, now_ms: u64) {
