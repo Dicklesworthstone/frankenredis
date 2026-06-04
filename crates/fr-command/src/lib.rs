@@ -4879,6 +4879,21 @@ fn geo_distance_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
     2.0 * GEO_EARTH_RADIUS_IN_METERS * a.sqrt().asin()
 }
 
+/// GEOSEARCH BYBOX membership, a faithful port of upstream
+/// `geohashGetDistanceIfInRectangle` (geohash_helper.c). The N-S half-extent
+/// test uses the pure latitude distance; the E-W half-extent test measures the
+/// longitude distance AT THE POINT'S latitude (`geohashGetDistance(x2,y2,x1,y2)`).
+/// Because a degree of longitude shrinks by `cos(lat)` toward the poles,
+/// measuring at the search center's latitude (as the previous code did)
+/// mis-sized the box for any point off the center parallel. (frankenredis-f2g8h)
+fn geo_point_in_box(cx: f64, cy: f64, lon: f64, lat: f64, half_w: f64, half_h: f64) -> bool {
+    // Latitude check first (cheaper), matching upstream's early-out order.
+    if geo_lat_distance_m(cy, lat) > half_h {
+        return false;
+    }
+    geo_distance_m(lon, lat, cx, lat) <= half_w
+}
+
 #[inline]
 fn geo_distance_reply(distance: f64) -> RespFrame {
     let normalized = if distance == 0.0 { 0.0 } else { distance };
@@ -6473,10 +6488,7 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                 continue;
             };
             let dist = geo_distance_m(cx, cy, lon, lat);
-            // Approximate box check using lat/lon distance components
-            let lat_dist = geo_distance_m(cx, cy, cx, lat);
-            let lon_dist = geo_distance_m(cx, cy, lon, cy);
-            if lat_dist <= half_h && lon_dist <= half_w {
+            if geo_point_in_box(cx, cy, lon, lat, half_w, half_h) {
                 results.push((member, score, dist, lon, lat));
             }
         }
@@ -26404,6 +26416,49 @@ mod tests {
             "LCS-RECON A/B (m=64,n=2000 x{reps}): scalar={scalar_ns}ns bitpar={bitpar_ns}ns ratio={ratio:.2}x"
         );
         assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
+    }
+
+    #[test]
+    fn geosearch_bybox_measures_longitude_at_point_latitude() {
+        use super::{geo_distance_m, geo_lat_distance_m, geo_point_in_box};
+
+        // The previous predicate measured the E-W distance at the CENTER's
+        // latitude instead of the point's latitude.
+        fn old_buggy(cx: f64, cy: f64, lon: f64, lat: f64, half_w: f64, half_h: f64) -> bool {
+            let lat_dist = geo_distance_m(cx, cy, cx, lat);
+            let lon_dist = geo_distance_m(cx, cy, lon, cy);
+            lat_dist <= half_h && lon_dist <= half_w
+        }
+
+        // Concrete divergence: center on the equator, point at 80degN, a tall
+        // box narrow in width. A degree of longitude at 80degN is ~cos(80deg)
+        // = 0.17x its equatorial length, so the point lies inside the width
+        // when measured at its own latitude but outside when (wrongly) measured
+        // at the equator.
+        let (cx, cy, lon, lat) = (0.0, 0.0, 1.0, 80.0);
+        let (half_w, half_h) = (50_000.0, 10_000_000.0);
+        assert!(
+            geo_point_in_box(cx, cy, lon, lat, half_w, half_h),
+            "fixed predicate must include the point"
+        );
+        assert!(
+            !old_buggy(cx, cy, lon, lat, half_w, half_h),
+            "old predicate wrongly excluded the point"
+        );
+
+        // N-S gate equals the pure latitude distance, independent of longitude.
+        let lat1_dist = geo_lat_distance_m(0.0, 1.0);
+        assert!(!geo_point_in_box(0.0, 0.0, 0.0, 1.0, f64::INFINITY, lat1_dist - 1.0));
+        assert!(geo_point_in_box(0.0, 0.0, 0.0, 1.0, f64::INFINITY, lat1_dist + 1.0));
+
+        // Points on the center parallel are unchanged by the fix.
+        for &dlon in &[0.5f64, 1.0, 2.0] {
+            assert_eq!(
+                geo_point_in_box(10.0, 45.0, 10.0 + dlon, 45.0, 80_000.0, 80_000.0),
+                old_buggy(10.0, 45.0, 10.0 + dlon, 45.0, 80_000.0, 80_000.0),
+                "on-parallel membership must be unaffected (dlon={dlon})"
+            );
+        }
     }
 
     #[test]
