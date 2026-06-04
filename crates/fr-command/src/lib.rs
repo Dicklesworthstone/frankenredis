@@ -5587,21 +5587,16 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             }
             zrange_emit_with_resp(pairs, true, store.dispatch_client_ctx.resp_protocol_version)
         } else {
-            let mut members = store.zrangebylex(&argv[1], lo, hi, now_ms)?;
-            if rev {
-                members.reverse();
-            }
-            if let Some(offset) = limit_offset {
-                // In-place LIMIT. (frankenredis-5qwm6)
-                if offset > 0 && offset < members.len() {
-                    members.drain(0..offset);
-                } else if offset >= members.len() {
-                    members.clear();
-                }
-                if let Some(count) = limit_count {
-                    members.truncate(count);
-                }
-            }
+            // LIMIT/REV pushed into the lex walk — O(offset+count). (frankenredis-qchm7)
+            let members = store.zrangebylex_limited(
+                &argv[1],
+                lo,
+                hi,
+                rev,
+                limit_offset.unwrap_or(0),
+                limit_count,
+                now_ms,
+            )?;
             let frames = members
                 .into_iter()
                 .map(|m| RespFrame::BulkString(Some(m)))
@@ -12929,18 +12924,16 @@ fn zrangebylex(
             "ERR syntax error, WITHSCORES not supported in combination with BYLEX".to_string(),
         ));
     }
-    let mut members = store.zrangebylex(&argv[1], &argv[2], &argv[3], now_ms)?;
-    if let Some(offset) = limit_offset {
-        // In-place LIMIT. (frankenredis-5qwm6)
-        if offset > 0 && offset < members.len() {
-            members.drain(0..offset);
-        } else if offset >= members.len() {
-            members.clear();
-        }
-        if let Some(count) = limit_count {
-            members.truncate(count);
-        }
-    }
+    // LIMIT pushed into the lex walk — O(offset+count). (frankenredis-qchm7)
+    let members = store.zrangebylex_limited(
+        &argv[1],
+        &argv[2],
+        &argv[3],
+        false,
+        limit_offset.unwrap_or(0),
+        limit_count,
+        now_ms,
+    )?;
     let frames = members
         .into_iter()
         .map(|m| RespFrame::BulkString(Some(m)))
@@ -12966,18 +12959,17 @@ fn zrevrangebylex(
             "ERR syntax error, WITHSCORES not supported in combination with BYLEX".to_string(),
         ));
     }
-    let mut members = store.zrevrangebylex(&argv[1], &argv[2], &argv[3], now_ms)?;
-    if let Some(offset) = limit_offset {
-        // In-place LIMIT. (frankenredis-5qwm6)
-        if offset > 0 && offset < members.len() {
-            members.drain(0..offset);
-        } else if offset >= members.len() {
-            members.clear();
-        }
-        if let Some(count) = limit_count {
-            members.truncate(count);
-        }
-    }
+    // REV + LIMIT pushed into the lex walk: zrevrangebylex(key, max, min) is
+    // zrangebylex_limited(key, min, max, rev=true). (frankenredis-qchm7)
+    let members = store.zrangebylex_limited(
+        &argv[1],
+        &argv[3],
+        &argv[2],
+        true,
+        limit_offset.unwrap_or(0),
+        limit_count,
+        now_ms,
+    )?;
     let frames = members
         .into_iter()
         .map(|m| RespFrame::BulkString(Some(m)))
