@@ -1,7 +1,7 @@
 #![deny(unsafe_code)]
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Write as _,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -2587,6 +2587,8 @@ pub struct ServerState {
     pubsub_outbox: HashMap<u64, Vec<fr_store::PubSubMessage>>,
     /// Key → client IDs that should receive client-tracking invalidations.
     client_tracking_observed_keys: HashMap<Vec<u8>, HashSet<u64>>,
+    /// Client IDs with CLIENT TRACKING enabled in BCAST mode.
+    client_tracking_bcast_clients: BTreeSet<u64>,
     /// Inverse mapping: client_id → set of channels they are subscribed to.
     pubsub_client_channels: HashMap<u64, HashSet<Vec<u8>>>,
     /// Inverse mapping: client_id → set of patterns they are subscribed to.
@@ -2696,6 +2698,7 @@ impl Default for ServerState {
             pubsub_shard_subs: HashMap::new(),
             pubsub_outbox: HashMap::new(),
             client_tracking_observed_keys: HashMap::new(),
+            client_tracking_bcast_clients: BTreeSet::new(),
             pubsub_client_channels: HashMap::new(),
             pubsub_client_patterns: HashMap::new(),
             pubsub_client_shard_channels: HashMap::new(),
@@ -4047,6 +4050,7 @@ impl Runtime {
 
     /// Update or insert a session snapshot used by multi-client CLIENT LIST.
     pub fn record_client_session(&mut self, session: &ClientSession) {
+        self.refresh_client_tracking_bcast_membership(session.client_id, &session.client_tracking);
         self.server
             .client_sessions
             .insert(session.client_id, session.clone());
@@ -4108,6 +4112,7 @@ impl Runtime {
     /// Remove a disconnected session from the CLIENT LIST registry.
     pub fn remove_client_session(&mut self, client_id: u64) {
         self.server.client_sessions.remove(&client_id);
+        self.server.client_tracking_bcast_clients.remove(&client_id);
         self.remove_client_tracking_observer(client_id);
         // (frankenredis-zfu61) Re-sum live sessions so MEMORY STATS'
         // clients.normal / clients.slaves drop on disconnect.
@@ -4169,6 +4174,7 @@ impl Runtime {
     /// Clean up replication/monitor state for a disconnected client.
     pub fn cleanup_disconnected_client(&mut self, client_id: u64) {
         self.disable_monitor(client_id);
+        self.server.client_tracking_bcast_clients.remove(&client_id);
         self.remove_client_tracking_observer(client_id);
         if self
             .server
@@ -4614,6 +4620,18 @@ impl Runtime {
         }
     }
 
+    fn refresh_client_tracking_bcast_membership(
+        &mut self,
+        client_id: u64,
+        tracking: &ClientTrackingState,
+    ) {
+        if tracking.enabled && tracking.bcast {
+            self.server.client_tracking_bcast_clients.insert(client_id);
+        } else {
+            self.server.client_tracking_bcast_clients.remove(&client_id);
+        }
+    }
+
     fn queue_client_tracking_invalidations(&mut self, keys: &[Vec<u8>]) {
         if keys.is_empty() {
             return;
@@ -4632,29 +4650,36 @@ impl Runtime {
         // command into a SINGLE invalidate message per target (one flush per
         // command via trackingHandlePendingKeyInvalidations).
         let mut bcast_invalidations: BTreeMap<u64, Vec<Vec<u8>>> = BTreeMap::new();
-        for (owner_id, session) in self
-            .server
-            .client_sessions
-            .iter()
-            .filter(|(owner_id, _)| **owner_id != self.session.client_id)
-            .chain(std::iter::once((&self.session.client_id, &self.session)))
-        {
-            let tracking = &session.client_tracking;
-            if !tracking.enabled || !tracking.bcast {
-                continue;
-            }
-            if tracking.noloop && *owner_id == self.session.client_id {
-                continue;
-            }
+        if !self.server.client_tracking_bcast_clients.is_empty() {
+            let bcast_owner_ids: Vec<u64> = self
+                .server
+                .client_tracking_bcast_clients
+                .iter()
+                .copied()
+                .collect();
+            for owner_id in bcast_owner_ids {
+                let Some(session) = self.client_session_including_current(owner_id) else {
+                    self.server.client_tracking_bcast_clients.remove(&owner_id);
+                    continue;
+                };
+                let tracking = &session.client_tracking;
+                if !tracking.enabled || !tracking.bcast {
+                    self.server.client_tracking_bcast_clients.remove(&owner_id);
+                    continue;
+                }
+                if tracking.noloop && owner_id == self.session.client_id {
+                    continue;
+                }
 
-            let target_id = tracking.redirect.unwrap_or(*owner_id);
-            if !self.client_session_exists_including_current(target_id) {
-                continue;
-            }
+                let target_id = tracking.redirect.unwrap_or(owner_id);
+                if !self.client_session_exists_including_current(target_id) {
+                    continue;
+                }
 
-            for key in keys {
-                if Self::tracking_key_matches_prefixes(key, tracking) {
-                    Self::add_tracking_invalidation(&mut bcast_invalidations, target_id, key);
+                for key in keys {
+                    if Self::tracking_key_matches_prefixes(key, tracking) {
+                        Self::add_tracking_invalidation(&mut bcast_invalidations, target_id, key);
+                    }
                 }
             }
         }
@@ -11709,6 +11734,7 @@ impl Runtime {
             if !tracking.enabled || tracking.bcast {
                 self.remove_client_tracking_observer(self.session.client_id);
             }
+            self.refresh_client_tracking_bcast_membership(self.session.client_id, &tracking);
             self.session.client_tracking = tracking;
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("CACHING") {
@@ -11917,6 +11943,9 @@ impl Runtime {
         // monitor_clients and the broadcast at lib.rs:5337 keeps streaming
         // every dispatched command. (frankenredis-se9t5)
         self.server.monitor_clients.remove(&self.session.client_id);
+        self.server
+            .client_tracking_bcast_clients
+            .remove(&self.session.client_id);
         self.session.reset_connection_state(&self.server.auth_state);
         // Redis returns +RESET\r\n (a simple string "RESET")
         RespFrame::SimpleString("RESET".to_string())
@@ -17499,6 +17528,78 @@ mod tests {
                 keys: vec![b"foo:1".to_vec()],
             }]
         );
+    }
+
+    #[test]
+    fn client_tracking_bcast_registry_drops_off_reset_and_disconnect() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON", b"BCAST"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(
+            rt.server
+                .client_tracking_bcast_clients
+                .contains(&rt.client_id())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"OFF"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(
+            !rt.server
+                .client_tracking_bcast_clients
+                .contains(&rt.client_id())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON", b"BCAST"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(
+            rt.server
+                .client_tracking_bcast_clients
+                .contains(&rt.client_id())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"RESET"]), 3),
+            RespFrame::SimpleString("RESET".to_string())
+        );
+        assert!(
+            !rt.server
+                .client_tracking_bcast_clients
+                .contains(&rt.client_id())
+        );
+
+        let tracker = rt.new_session();
+        let writer = rt.new_session();
+        let previous = rt.swap_session(tracker);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON", b"BCAST"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let tracker = rt.swap_session(writer);
+        rt.record_client_session(&tracker);
+        assert!(
+            rt.server
+                .client_tracking_bcast_clients
+                .contains(&tracker.client_id)
+        );
+        rt.remove_client_session(tracker.client_id);
+        assert!(
+            !rt.server
+                .client_tracking_bcast_clients
+                .contains(&tracker.client_id)
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"foo", b"v"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(rt.drain_pubsub_for_client(tracker.client_id), Vec::new());
+
+        let _writer = rt.swap_session(previous);
     }
 
     #[test]

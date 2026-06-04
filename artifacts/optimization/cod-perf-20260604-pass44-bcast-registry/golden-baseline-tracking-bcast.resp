@@ -1,0 +1,12 @@
++OK
++OK
+>2
+$10
+invalidate
+*1
+$5
+foo:1
++OK
++OK
++OK
++RESET

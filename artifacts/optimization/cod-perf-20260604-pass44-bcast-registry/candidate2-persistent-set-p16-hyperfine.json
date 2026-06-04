@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "command": "\"target-cod-pass44-bcast-candidate2-rch/release-perf/fr-bench\" --host 127.0.0.1 --port 20580 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"artifacts/optimization/cod-perf-20260604-pass44-bcast-registry/candidate2-persistent-set-p16-last.json\" --key-prefix cod-pass44-candidate2p",
+      "mean": 1.5154577588149998,
+      "stddev": 0.060012161013381776,
+      "median": 1.49588807244,
+      "user": 0.395150565,
+      "system": 0.7755703549999999,
+      "min": 1.46355314994,
+      "max": 1.64354646294,
+      "times": [
+        1.64354646294,
+        1.46355314994,
+        1.55208202594,
+        1.47769627794,
+        1.50688110294,
+        1.4684365649400002,
+        1.52657144394,
+        1.4848950419400002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
