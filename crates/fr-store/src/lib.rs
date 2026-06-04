@@ -404,9 +404,12 @@ pub struct SortedSet {
     /// (score, member) -> ()
     /// We use ScoreMember wrapper to handle f64 comparison and lexicographical member tie-breaking.
     ordered: BTreeMap<ScoreMember, ()>,
-    /// Behavior-invisible order-stat caches for repeated ZRANK/ZREVRANK on stable zsets.
-    rank_cache_asc: Option<HashMap<Vec<u8>, usize>>,
-    rank_cache_desc: Option<HashMap<Vec<u8>, usize>>,
+    /// Lazily-built order-statistic index (treap) over `ordered`, giving
+    /// O(log n) ZRANK/ZREVRANK that survives mutations without an O(n) rebuild.
+    /// Behavior-invisible: built on first rank query, then kept in sync at every
+    /// mutation choke point; `None` means "not yet needed" so rank-free zsets
+    /// pay nothing. (frankenredis-oyhl7)
+    rank_tree: Option<ZRankTreap>,
 }
 
 impl PartialEq for SortedSet {
@@ -488,8 +491,7 @@ impl SortedSet {
         Self {
             dict: HashMap::new(),
             ordered: BTreeMap::new(),
-            rank_cache_asc: None,
-            rank_cache_desc: None,
+            rank_tree: None,
         }
     }
 
@@ -507,22 +509,31 @@ impl SortedSet {
             if old_score.total_cmp(&score).is_eq() {
                 return false;
             }
-            self.invalidate_rank_caches();
-            self.ordered
-                .remove(&ScoreMember::actual(old_score, member.clone()));
-            self.ordered.insert(ScoreMember::actual(score, member), ());
+            let old_sm = ScoreMember::actual(old_score, member.clone());
+            let new_sm = ScoreMember::actual(score, member);
+            self.ordered.remove(&old_sm);
+            self.ordered.insert(new_sm.clone(), ());
+            if let Some(tree) = &mut self.rank_tree {
+                tree.remove(&old_sm);
+                tree.insert(new_sm);
+            }
             return false;
         }
-        self.invalidate_rank_caches();
-        self.ordered.insert(ScoreMember::actual(score, member), ());
+        let new_sm = ScoreMember::actual(score, member);
+        self.ordered.insert(new_sm.clone(), ());
+        if let Some(tree) = &mut self.rank_tree {
+            tree.insert(new_sm);
+        }
         true
     }
 
     fn remove(&mut self, member: &[u8]) -> bool {
         if let Some(score) = self.dict.remove(member) {
-            self.invalidate_rank_caches();
-            self.ordered
-                .remove(&ScoreMember::actual(score, member.to_vec()));
+            let sm = ScoreMember::actual(score, member.to_vec());
+            self.ordered.remove(&sm);
+            if let Some(tree) = &mut self.rank_tree {
+                tree.remove(&sm);
+            }
             true
         } else {
             false
@@ -549,10 +560,12 @@ impl SortedSet {
     fn pop_min(&mut self) -> Option<(Vec<u8>, f64)> {
         while let Some(sm) = self.ordered.first_key_value().map(|(sm, _)| sm.clone()) {
             self.ordered.remove(&sm);
+            if let Some(tree) = &mut self.rank_tree {
+                tree.remove(&sm);
+            }
             if let Some(member) = sm.member.into_actual() {
                 let score = sm.score;
                 self.dict.remove(&member);
-                self.invalidate_rank_caches();
                 return Some((member, score));
             }
         }
@@ -562,10 +575,12 @@ impl SortedSet {
     fn pop_max(&mut self) -> Option<(Vec<u8>, f64)> {
         while let Some(sm) = self.ordered.last_key_value().map(|(sm, _)| sm.clone()) {
             self.ordered.remove(&sm);
+            if let Some(tree) = &mut self.rank_tree {
+                tree.remove(&sm);
+            }
             if let Some(member) = sm.member.into_actual() {
                 let score = sm.score;
                 self.dict.remove(&member);
-                self.invalidate_rank_caches();
                 return Some((member, score));
             }
         }
@@ -582,59 +597,255 @@ impl SortedSet {
         self.dict.keys()
     }
 
+    /// Ensure the order-statistic index exists, building it from `ordered`
+    /// (the source of truth) on first use. O(n log n) one-time; thereafter it
+    /// is maintained incrementally at the mutation choke points.
+    fn ensure_rank_tree(&mut self) -> &ZRankTreap {
+        if self.rank_tree.is_none() {
+            let mut tree = ZRankTreap::with_capacity(self.ordered.len());
+            for sm in self.ordered.keys() {
+                tree.insert(sm.clone());
+            }
+            self.rank_tree = Some(tree);
+        }
+        self.rank_tree.as_ref().expect("rank tree just built")
+    }
+
     fn rank(&mut self, member: &[u8]) -> Option<usize> {
         let score = self.get_score(member)?;
-        if self.rank_cache_asc.is_none() {
-            let mut cache = HashMap::with_capacity(self.dict.len());
-            for (rank, (ranked_member, _score)) in self.iter_asc().enumerate() {
-                cache.insert(ranked_member.clone(), rank);
-            }
-            self.rank_cache_asc = Some(cache);
-        }
-        if let Some(rank) = self
-            .rank_cache_asc
-            .as_ref()
-            .and_then(|cache| cache.get(member).copied())
-        {
-            return Some(rank);
-        }
-        Some(
-            self.iter_asc()
-                .take_while(|&(ranked_member, ranked_score)| {
-                    score_member_lt(*ranked_score, ranked_member, score, member)
-                })
-                .count(),
-        )
+        let target = ScoreMember::actual(score, member.to_vec());
+        // Ascending rank == number of members strictly less than `target`.
+        Some(self.ensure_rank_tree().rank_of(&target))
     }
 
     fn rev_rank(&mut self, member: &[u8]) -> Option<usize> {
         let score = self.get_score(member)?;
-        if self.rank_cache_desc.is_none() {
-            let mut cache = HashMap::with_capacity(self.dict.len());
-            for (rank, (ranked_member, _score)) in self.iter_desc().enumerate() {
-                cache.insert(ranked_member.clone(), rank);
-            }
-            self.rank_cache_desc = Some(cache);
+        // For an existing member in a totally-ordered set, the descending rank
+        // is len - 1 - (ascending rank): no separate index needed.
+        let len = self.dict.len();
+        let target = ScoreMember::actual(score, member.to_vec());
+        let asc = self.ensure_rank_tree().rank_of(&target);
+        Some(len - 1 - asc)
+    }
+}
+
+/// Order-statistic treap over `ScoreMember` keys: a randomized balanced BST
+/// (priority = a hash of the key, so the shape is a deterministic function of
+/// the contents) augmented with subtree sizes. Provides O(log n) expected
+/// insert / remove / rank-of-key, backing `SortedSet`'s ZRANK/ZREVRANK so rank
+/// queries survive mutations without the O(n) rebuild the prior member->rank
+/// cache paid. Index-based arena (no `unsafe`, no `Rc`); freed slots recycle.
+/// (frankenredis-oyhl7)
+#[derive(Debug, Clone)]
+struct ZRankTreap {
+    nodes: Vec<ZRankTreapNode>,
+    free: Vec<usize>,
+    root: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ZRankTreapNode {
+    key: ScoreMember,
+    prio: u64,
+    left: usize,
+    right: usize,
+    size: u32,
+}
+
+/// Sentinel "null" child/root link for [`ZRankTreap`].
+const ZRANK_TREAP_NIL: usize = usize::MAX;
+
+impl ZRankTreap {
+    fn with_capacity(cap: usize) -> Self {
+        Self {
+            nodes: Vec::with_capacity(cap),
+            free: Vec::new(),
+            root: ZRANK_TREAP_NIL,
         }
-        if let Some(rank) = self
-            .rank_cache_desc
-            .as_ref()
-            .and_then(|cache| cache.get(member).copied())
-        {
-            return Some(rank);
-        }
-        Some(
-            self.iter_desc()
-                .take_while(|&(ranked_member, ranked_score)| {
-                    score_member_lt(score, member, *ranked_score, ranked_member)
-                })
-                .count(),
-        )
     }
 
-    fn invalidate_rank_caches(&mut self) {
-        self.rank_cache_asc = None;
-        self.rank_cache_desc = None;
+    /// Deterministic "random" priority: FNV-1a over the canonicalized score
+    /// bits and member bytes. Well-distributed enough for treap balance; ties
+    /// (collisions) only mildly unbalance and never affect rank correctness.
+    fn key_prio(key: &ScoreMember) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut mix = |byte: u8| {
+            h ^= byte as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        for b in canonicalize_zero_score(key.score).to_bits().to_le_bytes() {
+            mix(b);
+        }
+        match &key.member {
+            MemberPart::Min => mix(0),
+            MemberPart::Actual(v) => {
+                mix(1);
+                for &b in v {
+                    mix(b);
+                }
+            }
+            MemberPart::Max => mix(2),
+        }
+        h
+    }
+
+    #[inline]
+    fn size(&self, n: usize) -> u32 {
+        if n == ZRANK_TREAP_NIL {
+            0
+        } else {
+            self.nodes[n].size
+        }
+    }
+
+    #[inline]
+    fn update_size(&mut self, n: usize) {
+        let (l, r) = (self.nodes[n].left, self.nodes[n].right);
+        self.nodes[n].size = 1 + self.size(l) + self.size(r);
+    }
+
+    fn alloc(&mut self, key: ScoreMember) -> usize {
+        let prio = Self::key_prio(&key);
+        let node = ZRankTreapNode {
+            key,
+            prio,
+            left: ZRANK_TREAP_NIL,
+            right: ZRANK_TREAP_NIL,
+            size: 1,
+        };
+        if let Some(idx) = self.free.pop() {
+            self.nodes[idx] = node;
+            idx
+        } else {
+            self.nodes.push(node);
+            self.nodes.len() - 1
+        }
+    }
+
+    fn rotate_right(&mut self, n: usize) -> usize {
+        let l = self.nodes[n].left;
+        self.nodes[n].left = self.nodes[l].right;
+        self.nodes[l].right = n;
+        self.update_size(n);
+        self.update_size(l);
+        l
+    }
+
+    fn rotate_left(&mut self, n: usize) -> usize {
+        let r = self.nodes[n].right;
+        self.nodes[n].right = self.nodes[r].left;
+        self.nodes[r].left = n;
+        self.update_size(n);
+        self.update_size(r);
+        r
+    }
+
+    fn insert(&mut self, key: ScoreMember) {
+        let new_idx = self.alloc(key);
+        let root = self.root;
+        self.root = self.insert_at(root, new_idx);
+    }
+
+    fn insert_at(&mut self, root: usize, new_idx: usize) -> usize {
+        if root == ZRANK_TREAP_NIL {
+            return new_idx;
+        }
+        match self.nodes[new_idx].key.cmp(&self.nodes[root].key) {
+            std::cmp::Ordering::Less => {
+                let l = self.insert_at(self.nodes[root].left, new_idx);
+                self.nodes[root].left = l;
+                self.update_size(root);
+                if self.nodes[l].prio > self.nodes[root].prio {
+                    return self.rotate_right(root);
+                }
+                root
+            }
+            std::cmp::Ordering::Greater => {
+                let r = self.insert_at(self.nodes[root].right, new_idx);
+                self.nodes[root].right = r;
+                self.update_size(root);
+                if self.nodes[r].prio > self.nodes[root].prio {
+                    return self.rotate_left(root);
+                }
+                root
+            }
+            std::cmp::Ordering::Equal => {
+                // Members are unique in a sorted set; an equal key is a stale
+                // duplicate insert. Recycle the freshly allocated node.
+                self.free.push(new_idx);
+                root
+            }
+        }
+    }
+
+    fn remove(&mut self, key: &ScoreMember) {
+        let root = self.root;
+        self.root = self.remove_at(root, key);
+    }
+
+    fn remove_at(&mut self, root: usize, key: &ScoreMember) -> usize {
+        if root == ZRANK_TREAP_NIL {
+            return ZRANK_TREAP_NIL;
+        }
+        match key.cmp(&self.nodes[root].key) {
+            std::cmp::Ordering::Less => {
+                let l = self.remove_at(self.nodes[root].left, key);
+                self.nodes[root].left = l;
+                self.update_size(root);
+                root
+            }
+            std::cmp::Ordering::Greater => {
+                let r = self.remove_at(self.nodes[root].right, key);
+                self.nodes[root].right = r;
+                self.update_size(root);
+                root
+            }
+            std::cmp::Ordering::Equal => {
+                let (l, r) = (self.nodes[root].left, self.nodes[root].right);
+                if l == ZRANK_TREAP_NIL {
+                    self.free.push(root);
+                    return r;
+                }
+                if r == ZRANK_TREAP_NIL {
+                    self.free.push(root);
+                    return l;
+                }
+                // Rotate the higher-priority child up and keep deleting below.
+                if self.nodes[l].prio > self.nodes[r].prio {
+                    let nr = self.rotate_right(root);
+                    let new_right = self.remove_at(self.nodes[nr].right, key);
+                    self.nodes[nr].right = new_right;
+                    self.update_size(nr);
+                    nr
+                } else {
+                    let nr = self.rotate_left(root);
+                    let new_left = self.remove_at(self.nodes[nr].left, key);
+                    self.nodes[nr].left = new_left;
+                    self.update_size(nr);
+                    nr
+                }
+            }
+        }
+    }
+
+    /// Number of stored keys strictly less than `key` (its ascending rank).
+    fn rank_of(&self, key: &ScoreMember) -> usize {
+        let mut n = self.root;
+        let mut acc: usize = 0;
+        while n != ZRANK_TREAP_NIL {
+            match key.cmp(&self.nodes[n].key) {
+                std::cmp::Ordering::Less => n = self.nodes[n].left,
+                std::cmp::Ordering::Greater => {
+                    acc += 1 + self.size(self.nodes[n].left) as usize;
+                    n = self.nodes[n].right;
+                }
+                std::cmp::Ordering::Equal => {
+                    acc += self.size(self.nodes[n].left) as usize;
+                    break;
+                }
+            }
+        }
+        acc
     }
 }
 
@@ -17087,19 +17298,6 @@ fn normalize_index(index: i64, len: i64) -> i64 {
     }
 }
 
-/// Compare (score, member) pairs for sorted set ordering.
-/// Redis sorts by score first, then by member lexicographically for ties.
-fn cmp_score_member(s1: f64, m1: &[u8], s2: f64, m2: &[u8]) -> std::cmp::Ordering {
-    canonicalize_zero_score(s1)
-        .total_cmp(&canonicalize_zero_score(s2))
-        .then_with(|| m1.cmp(m2))
-}
-
-/// Returns true if (s1, m1) < (s2, m2) in Redis sorted set ordering.
-fn score_member_lt(s1: f64, m1: &[u8], s2: f64, m2: &[u8]) -> bool {
-    cmp_score_member(s1, m1, s2, m2) == std::cmp::Ordering::Less
-}
-
 fn canonicalize_zero_score(score: f64) -> f64 {
     if score == 0.0 { 0.0 } else { score }
 }
@@ -22770,6 +22968,152 @@ mod tests {
             .unwrap();
         assert_eq!(n, 3);
         assert_eq!(store.zscore(b"z4", b"a", 0).unwrap(), Some(3.0));
+    }
+
+    #[test]
+    fn zset_rank_treap_matches_oracle_and_reports_ab_ratio() {
+        use super::{ScoreMember, SortedSet, canonicalize_zero_score};
+        use std::collections::BTreeMap;
+
+        // Ground-truth ascending rank: number of (score, member) pairs strictly
+        // less than the target by the sorted-set total order.
+        fn oracle_rank(model: &BTreeMap<Vec<u8>, f64>, member: &[u8]) -> Option<usize> {
+            let score = *model.get(member)?;
+            let target = ScoreMember::actual(canonicalize_zero_score(score), member.to_vec());
+            let mut keys: Vec<ScoreMember> = model
+                .iter()
+                .map(|(m, s)| ScoreMember::actual(canonicalize_zero_score(*s), m.clone()))
+                .collect();
+            keys.sort();
+            Some(keys.iter().take_while(|k| **k < target).count())
+        }
+
+        let mut state: u64 = 0x51ED_2718_2845_9045;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        // Fuzz zadd / re-score / remove / pop-min / pop-max against the oracle,
+        // probing rank + rev_rank after every mutation (covers the cold build,
+        // the incremental upkeep, and the post-mutation paths). Small score and
+        // member ranges force many score ties broken by member bytes.
+        let mut model: BTreeMap<Vec<u8>, f64> = BTreeMap::new();
+        let mut zs = SortedSet::new();
+        for _ in 0..20000 {
+            let op = next() % 10;
+            let m = format!("m{}", next() % 200).into_bytes();
+            if op < 6 {
+                let score = (next() % 50) as f64;
+                zs.insert(m.clone(), score);
+                model.insert(m, score);
+            } else if op < 8 {
+                zs.remove(&m);
+                model.remove(&m);
+            } else if op == 8 {
+                if let Some((mm, _)) = zs.pop_min() {
+                    model.remove(&mm);
+                }
+            } else if let Some((mm, _)) = zs.pop_max() {
+                model.remove(&mm);
+            }
+            for _ in 0..3 {
+                let q = format!("m{}", next() % 200).into_bytes();
+                let expect_asc = oracle_rank(&model, &q);
+                assert_eq!(zs.rank(&q), expect_asc, "rank q={q:?}");
+                let expect_rev = expect_asc.map(|asc| model.len() - 1 - asc);
+                assert_eq!(zs.rev_rank(&q), expect_rev, "rev_rank q={q:?}");
+            }
+        }
+
+        // Baseline replicating the prior strategy: a member->rank map rebuilt
+        // (O(n) + n clones) after every mutation, then O(1) lookups.
+        struct OldSim {
+            dict: std::collections::HashMap<Vec<u8>, f64>,
+            ordered: BTreeMap<ScoreMember, ()>,
+            cache: Option<std::collections::HashMap<Vec<u8>, usize>>,
+        }
+        impl OldSim {
+            fn insert(&mut self, m: Vec<u8>, s: f64) {
+                let s = canonicalize_zero_score(s);
+                if let Some(old) = self.dict.insert(m.clone(), s) {
+                    if old.total_cmp(&s).is_eq() {
+                        return;
+                    }
+                    self.cache = None;
+                    self.ordered.remove(&ScoreMember::actual(old, m.clone()));
+                    self.ordered.insert(ScoreMember::actual(s, m), ());
+                } else {
+                    self.cache = None;
+                    self.ordered.insert(ScoreMember::actual(s, m), ());
+                }
+            }
+            fn rank(&mut self, m: &[u8]) -> Option<usize> {
+                self.dict.get(m)?;
+                if self.cache.is_none() {
+                    let mut c = std::collections::HashMap::with_capacity(self.dict.len());
+                    for (r, sm) in self.ordered.keys().enumerate() {
+                        if let Some(mem) = sm.member.as_actual() {
+                            c.insert(mem.clone(), r);
+                        }
+                    }
+                    self.cache = Some(c);
+                }
+                self.cache.as_ref().unwrap().get(m).copied()
+            }
+        }
+
+        // A/B: leaderboard pattern — one re-score followed by a handful of rank
+        // queries, repeated. Treap upkeep is O(log n); the rebuild cache pays
+        // O(n) on the first rank after each mutation.
+        let n = 20000usize;
+        let members: Vec<Vec<u8>> = (0..n).map(|i| format!("k{i:06}").into_bytes()).collect();
+        let mut newz = SortedSet::new();
+        let mut oldz = OldSim {
+            dict: std::collections::HashMap::new(),
+            ordered: BTreeMap::new(),
+            cache: None,
+        };
+        for (i, mem) in members.iter().enumerate() {
+            let s = (next() % 100000) as f64;
+            newz.insert(mem.clone(), s);
+            oldz.insert(mem.clone(), s);
+        }
+        let probes: Vec<usize> = (0..50).map(|i| (i * 397) % n).collect();
+        let reps = 300usize;
+        let _ = newz.rank(&members[0]);
+        let _ = oldz.rank(&members[0]);
+        for &p in &probes {
+            assert_eq!(newz.rank(&members[p]), oldz.rank(&members[p]), "A/B agree");
+        }
+        let t_new = std::time::Instant::now();
+        let mut a_new = 0usize;
+        for r in 0..reps {
+            newz.insert(members[r % n].clone(), (r % 100000) as f64);
+            for &p in &probes {
+                a_new = a_new.wrapping_add(newz.rank(&members[p]).unwrap_or(0));
+            }
+        }
+        let new_ns = t_new.elapsed().as_nanos().max(1);
+        std::hint::black_box(a_new);
+        let t_old = std::time::Instant::now();
+        let mut a_old = 0usize;
+        for r in 0..reps {
+            oldz.insert(members[r % n].clone(), (r % 100000) as f64);
+            for &p in &probes {
+                a_old = a_old.wrapping_add(oldz.rank(&members[p]).unwrap_or(0));
+            }
+        }
+        let old_ns = t_old.elapsed().as_nanos().max(1);
+        std::hint::black_box(a_old);
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "ZRANK interleaved A/B (n={n}, {reps} re-scores x {} probes): old(rebuild)={old_ns}ns new(treap)={new_ns}ns ratio={ratio:.2}x",
+            probes.len()
+        );
+        assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
     }
 
     #[test]
