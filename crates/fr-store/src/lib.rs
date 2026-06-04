@@ -6359,8 +6359,11 @@ impl Store {
         } else {
             0
         };
-        let mut result_type = None;
-        if let Some(entry) = self.entries.get_mut(key) {
+        // (frankenredis-rndcnt) Apply LFU/touch + read the cardinality without
+        // cloning every field; draw the sample indices with the same next_rand()
+        // sequence as before, then clone only the chosen fields via O(1)
+        // IndexMap::get_index — O(count) clones instead of O(n).
+        let len = if let Some(entry) = self.entries.get_mut(key) {
             if lfu_tracking_enabled {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
             }
@@ -6370,52 +6373,53 @@ impl Store {
                     if m.is_empty() {
                         return Ok(Vec::new());
                     }
-                    let fields: Vec<(Vec<u8>, Vec<u8>)> =
-                        m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                    result_type = Some(fields);
+                    m.len()
                 }
                 _ => return Err(StoreError::WrongType),
             }
-        }
-
-        let fields = match result_type {
-            Some(f) if !f.is_empty() => f,
-            _ => return Ok(Vec::new()),
+        } else {
+            return Ok(Vec::new());
         };
 
-        if count >= 0 {
-            let n = (count as usize).min(fields.len());
-            // Use a more memory-efficient approach for small n
-            if n < fields.len() / 2 && n < 1024 {
-                let mut results = Vec::with_capacity(n);
+        let indices: Vec<usize> = if count >= 0 {
+            let n = (count as usize).min(len);
+            if n < len / 2 && n < 1024 {
+                let mut idxs = Vec::with_capacity(n);
                 let mut picked = HashSet::with_capacity(n);
-                while results.len() < n {
-                    let idx = (self.next_rand() as usize) % fields.len();
+                while idxs.len() < n {
+                    let idx = (self.next_rand() as usize) % len;
                     if picked.insert(idx) {
-                        results.push(fields[idx].clone());
+                        idxs.push(idx);
                     }
                 }
-                Ok(results)
+                idxs
             } else {
-                let mut indices: Vec<usize> = (0..fields.len()).collect();
+                let mut order: Vec<usize> = (0..len).collect();
                 for i in 0..n {
-                    let j = i + (self.next_rand() as usize % (fields.len() - i));
-                    indices.swap(i, j);
+                    let j = i + (self.next_rand() as usize % (len - i));
+                    order.swap(i, j);
                 }
-                Ok(indices[..n]
-                    .iter()
-                    .map(|&idx| fields[idx].clone())
-                    .collect())
+                order.truncate(n);
+                order
             }
         } else {
             let abs_count = count.unsigned_abs() as usize;
-            // Cap initial allocation to avoid DoS, but allow growth.
-            let mut result = Vec::with_capacity(abs_count.min(1024));
+            let mut idxs = Vec::with_capacity(abs_count.min(1024));
             for _ in 0..abs_count {
-                let idx = (self.next_rand() as usize) % fields.len();
-                result.push(fields[idx].clone());
+                idxs.push((self.next_rand() as usize) % len);
             }
-            Ok(result)
+            idxs
+        };
+
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Hash(m) => Ok(indices
+                    .iter()
+                    .filter_map(|&idx| m.get_index(idx).map(|(k, v)| (k.clone(), v.clone())))
+                    .collect()),
+                _ => Ok(Vec::new()),
+            },
+            None => Ok(Vec::new()),
         }
     }
 
@@ -8276,59 +8280,70 @@ impl Store {
         } else {
             0
         };
-        let mut result_data = None;
-        if let Some(entry) = self.entries.get_mut(key) {
-            match &entry.value {
+        // (frankenredis-rndcnt) Don't materialise every member to sample a few.
+        // Find the cardinality + apply the LFU/touch bookkeeping, then draw the
+        // sample indices with the SAME next_rand() sequence as before, and finally
+        // clone only the chosen members via O(1) get_index. For a small count over
+        // a large set this is O(count) clones instead of O(n).
+        let len = match self.entries.get_mut(key) {
+            Some(entry) => match &entry.value {
                 Value::Set(s) => {
-                    let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
+                    let len = s.len();
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
                     }
                     entry.touch(now_ms);
-                    result_data = Some(members);
+                    len
                 }
                 _ => return Err(StoreError::WrongType),
-            }
+            },
+            None => return Ok(Vec::new()),
+        };
+        if len == 0 {
+            return Ok(Vec::new());
         }
 
-        let members = match result_data {
-            Some(m) if !m.is_empty() => m,
-            _ => return Ok(Vec::new()),
-        };
-
-        if count >= 0 {
-            let n = (count as usize).min(members.len());
-            // Use a more memory-efficient approach for small n
-            if n < members.len() / 2 && n < 1024 {
-                let mut results = Vec::with_capacity(n);
+        let indices: Vec<usize> = if count >= 0 {
+            let n = (count as usize).min(len);
+            if n < len / 2 && n < 1024 {
+                // Rejection sampling for a small distinct subset.
+                let mut idxs = Vec::with_capacity(n);
                 let mut picked = HashSet::with_capacity(n);
-                while results.len() < n {
-                    let idx = (self.next_rand() as usize) % members.len();
+                while idxs.len() < n {
+                    let idx = (self.next_rand() as usize) % len;
                     if picked.insert(idx) {
-                        results.push(members[idx].clone());
+                        idxs.push(idx);
                     }
                 }
-                Ok(results)
+                idxs
             } else {
-                let mut indices: Vec<usize> = (0..members.len()).collect();
+                // Partial Fisher-Yates over the index space (cheap usize array).
+                let mut order: Vec<usize> = (0..len).collect();
                 for i in 0..n {
-                    let j = i + (self.next_rand() as usize % (members.len() - i));
-                    indices.swap(i, j);
+                    let j = i + (self.next_rand() as usize % (len - i));
+                    order.swap(i, j);
                 }
-                Ok(indices[..n]
-                    .iter()
-                    .map(|&idx| members[idx].clone())
-                    .collect())
+                order.truncate(n);
+                order
             }
         } else {
             let abs_count = count.unsigned_abs() as usize;
-            // Cap initial allocation to avoid DoS, but allow growth.
-            let mut result = Vec::with_capacity(abs_count.min(1024));
+            let mut idxs = Vec::with_capacity(abs_count.min(1024));
             for _ in 0..abs_count {
-                let idx = (self.next_rand() as usize) % members.len();
-                result.push(members[idx].clone());
+                idxs.push((self.next_rand() as usize) % len);
             }
-            Ok(result)
+            idxs
+        };
+
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Set(s) => Ok(indices
+                    .iter()
+                    .filter_map(|&idx| s.get_index(idx).map(|c| c.into_owned()))
+                    .collect()),
+                _ => Ok(Vec::new()),
+            },
+            None => Ok(Vec::new()),
         }
     }
 
@@ -24106,6 +24121,66 @@ mod tests {
         let ratio = old_ns as f64 / new_ns as f64;
         println!(
             "SUNION int A/B (n={n}, x{reps}): extend-insert={old_ns}ns i64-merge={new_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
+    }
+
+    #[test]
+    fn srandmember_count_avoids_materializing_whole_set_and_reports_ab_ratio() {
+        let key = b"s";
+        let n = 100_000i64;
+        let build = || {
+            let mut store = Store::new();
+            let adds: Vec<(f64, Vec<u8>)> = Vec::new();
+            let _ = adds;
+            for i in 0..n {
+                store.sadd(key, &[format!("m{i:06}").into_bytes()], 0).unwrap();
+            }
+            store
+        };
+
+        // Behaviour sanity: small positive and negative counts return the right
+        // sizes and (for distinct) unique members.
+        let mut store = build();
+        let pos = store.srandmember_count(key, 10, 0).unwrap();
+        assert_eq!(pos.len(), 10);
+        let uniq: std::collections::HashSet<_> = pos.iter().collect();
+        assert_eq!(uniq.len(), 10, "positive count must be distinct");
+        let neg = store.srandmember_count(key, -10, 0).unwrap();
+        assert_eq!(neg.len(), 10);
+        assert_eq!(store.srandmember_count(key, n + 50, 0).unwrap().len(), n as usize);
+
+        // A/B: small sample over a large set. Old path materialised every member;
+        // the new path clones only the sampled ones.
+        let old_ref = |store: &mut Store, abs_count: usize| -> usize {
+            let members = store.smembers(key, 0).unwrap(); // O(n) materialise (old behaviour)
+            let mut r = 0usize;
+            for _ in 0..abs_count {
+                let idx = (store.next_rand() as usize) % members.len();
+                r = r.wrapping_add(members[idx].len());
+            }
+            r
+        };
+        let reps = 500;
+        let mut a = build();
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            c0 = c0.wrapping_add(old_ref(&mut a, 10));
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        let mut b = build();
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            c1 = c1.wrapping_add(b.srandmember_count(key, -10, 0).unwrap().iter().map(Vec::len).sum::<usize>());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "SRANDMEMBER count A/B (n={n}, sample=10, x{reps}): materialise-all={old_ns}ns get_index-sample={new_ns}ns ratio={ratio:.2}x"
         );
         assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
     }
