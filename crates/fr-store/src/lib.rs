@@ -2150,7 +2150,15 @@ pub struct ScriptPropagationRecord {
 
 #[derive(Debug)]
 pub struct Store {
-    entries: HashMap<Vec<u8>, Entry>,
+    /// The keyspace dict. Uses `foldhash` (a fast, HashDoS-resistant, pure-
+    /// safe-Rust hasher) instead of std's SipHash: every command hashes its
+    /// key here, so this is the single hottest lookup in the server, and
+    /// SipHash's cryptographic strength is overkill — foldhash::quality keeps
+    /// per-instance random seeding (so crafted-key flooding is still
+    /// defeated) at a fraction of the cost. Iteration order is not an
+    /// observable: SCAN walks the sorted `ordered_keys`, and RANDOMKEY /
+    /// eviction sampling are already nondeterministic. (frankenredis-8kuy1)
+    entries: HashMap<Vec<u8>, Entry, foldhash::quality::RandomState>,
     ordered_keys: BTreeSet<Vec<u8>>,
     /// Db-encoded keys that currently carry a TTL (a subset of `ordered_keys`).
     /// The active-expire cycle samples from this set instead of every key, so
@@ -2581,7 +2589,7 @@ pub fn read_total_system_memory_bytes() -> Option<usize> {
 impl Default for Store {
     fn default() -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: HashMap::default(),
             ordered_keys: BTreeSet::new(),
             volatile_keys: BTreeSet::new(),
             running_digest: 0,
@@ -27093,6 +27101,59 @@ mod tests {
         let v = store.get(b"bm", 0).unwrap().unwrap();
         assert_eq!(v.len(), 3);
         assert!(store.getbit(b"bm", 20, 0).unwrap());
+    }
+
+    #[test]
+    fn foldhash_keyspace_lookup_beats_siphash_ab() {
+        // (frankenredis-8kuy1) The keyspace dict drives every command's key
+        // lookup. Replacing std SipHash with foldhash::quality (still
+        // per-instance seeded, so HashDoS-resistant) is a large constant-factor
+        // win on this hottest path. A/B over the exact operation that changed:
+        // identical contents, only the hasher differs.
+        use std::collections::HashMap as StdHashMap;
+        use std::time::Instant;
+
+        // Redis keys are commonly namespaced and 20-60 bytes; use a realistic
+        // ~44-byte key. SipHash's per-byte cost makes the gap widen with length.
+        let keys: Vec<Vec<u8>> = (0..20_000u32)
+            .map(|i| format!("myapp:user:{i:010}:session:{i:08}:token").into_bytes())
+            .collect();
+        let mut sip: StdHashMap<Vec<u8>, u64> = StdHashMap::default();
+        let mut fold: StdHashMap<Vec<u8>, u64, foldhash::quality::RandomState> =
+            StdHashMap::default();
+        for (i, k) in keys.iter().enumerate() {
+            sip.insert(k.clone(), i as u64);
+            fold.insert(k.clone(), i as u64);
+        }
+
+        let reps = 100u32;
+        let t0 = Instant::now();
+        let mut acc0 = 0u64;
+        for _ in 0..reps {
+            for k in &keys {
+                acc0 = acc0.wrapping_add(*sip.get(k.as_slice()).unwrap());
+            }
+        }
+        let sip_ns = t0.elapsed().as_nanos().max(1);
+
+        let t1 = Instant::now();
+        let mut acc1 = 0u64;
+        for _ in 0..reps {
+            for k in &keys {
+                acc1 = acc1.wrapping_add(*fold.get(k.as_slice()).unwrap());
+            }
+        }
+        let fold_ns = t1.elapsed().as_nanos().max(1);
+
+        assert_eq!(acc0, acc1, "lookup results must match across hashers");
+        let ratio = sip_ns as f64 / fold_ns as f64;
+        println!(
+            "keyspace lookup A/B ({} keys x{reps}): siphash {} ms -> foldhash {} ms = {ratio:.2}x",
+            keys.len(),
+            sip_ns / 1_000_000,
+            fold_ns / 1_000_000,
+        );
+        assert!(ratio > 2.0, "expected >2x keyspace-lookup speedup, got {ratio:.2}x");
     }
 
     #[test]

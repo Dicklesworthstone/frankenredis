@@ -300,6 +300,7 @@ dependencies = [
 name = "fr-store"
 version = "0.1.0"
 dependencies = [
+ "foldhash",
  "fr-expire",
  "fr-persist",
  "fr-protocol",

@@ -9,6 +9,7 @@ fr-protocol = { version = "0.1.0", path = "../fr-protocol" }
 fr-persist = { version = "0.1.0", path = "../fr-persist" }
 fr-sentinel = { version = "0.1.0", path = "../fr-sentinel" }
 indexmap = "2"
+foldhash = "0.1"
 libc.workspace = true
 
 [dev-dependencies]
