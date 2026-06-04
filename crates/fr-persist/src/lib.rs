@@ -2114,9 +2114,19 @@ fn lzf_decompress(input: &[u8], expected_len: usize) -> Option<Vec<u8>> {
         }
 
         let copy_start = output.len() - backref;
-        for idx in 0..copy_len {
-            let byte = *output.get(copy_start + idx)?;
-            output.push(byte);
+        // Replicate the back-reference as chunked memcpys instead of pushing one
+        // byte at a time. For overlapping runs (backref < copy_len, e.g. RLE),
+        // each `extend_from_within` reads the just-grown tail snapshot, so the
+        // available source doubles every iteration and the byte-by-byte
+        // propagation is reproduced exactly; for non-overlapping copies it is a
+        // single memcpy. Byte-identical to the scalar loop. (frankenredis-5boi9)
+        output.reserve(copy_len);
+        let mut remaining = copy_len;
+        while remaining > 0 {
+            let avail = output.len() - copy_start;
+            let chunk = remaining.min(avail);
+            output.extend_from_within(copy_start..copy_start + chunk);
+            remaining -= chunk;
         }
     }
 
@@ -3602,6 +3612,104 @@ mod tests {
         let compressed = [4, b'h', b'e', b'l', b'l', b'o'];
         let decompressed = lzf_decompress(&compressed, 5).expect("literal decode");
         assert_eq!(decompressed, b"hello");
+    }
+
+    #[test]
+    fn lzf_decompress_chunked_matches_bytewise_and_reports_ab_ratio() {
+        // Byte-at-a-time reference (the pre-chunk back-reference path), used as
+        // the equivalence oracle and A/B baseline. (frankenredis-5boi9)
+        fn ref_decompress(input: &[u8], expected_len: usize) -> Option<Vec<u8>> {
+            let mut output = Vec::with_capacity(expected_len.min(8192));
+            let mut cursor = 0usize;
+            while cursor < input.len() && output.len() < expected_len {
+                let ctrl = usize::from(*input.get(cursor)?);
+                cursor += 1;
+                if ctrl < 32 {
+                    let literal_len = ctrl + 1;
+                    let end = cursor.checked_add(literal_len)?;
+                    output.extend_from_slice(input.get(cursor..end)?);
+                    cursor = end;
+                    continue;
+                }
+                let mut copy_len = (ctrl >> 5) + 2;
+                if copy_len == 9 {
+                    copy_len = copy_len.checked_add(usize::from(*input.get(cursor)?))?;
+                    cursor += 1;
+                }
+                let backref_low = usize::from(*input.get(cursor)?);
+                cursor += 1;
+                let backref = (((ctrl & 0x1F) << 8) | backref_low) + 1;
+                if backref > output.len() {
+                    return None;
+                }
+                let copy_start = output.len() - backref;
+                for idx in 0..copy_len {
+                    let byte = *output.get(copy_start + idx)?;
+                    output.push(byte);
+                }
+            }
+            if cursor == input.len() && output.len() == expected_len {
+                Some(output)
+            } else {
+                None
+            }
+        }
+
+        // Backref-heavy + overlapping-run payloads: long repeats (RLE-like) and
+        // periodic patterns compress to many back-references.
+        let payloads: Vec<Vec<u8>> = vec![
+            vec![b'a'; 4096],
+            b"abcabcabcabc".iter().copied().cycle().take(8192).collect(),
+            b"the quick brown fox "
+                .iter()
+                .copied()
+                .cycle()
+                .take(16384)
+                .collect(),
+            {
+                let mut v = Vec::new();
+                for i in 0..4000u32 {
+                    v.extend_from_slice(&(i % 7).to_le_bytes());
+                }
+                v
+            },
+        ];
+        let mut compressed_set = Vec::new();
+        for p in &payloads {
+            let c = lzf_compress(p, p.len().saturating_sub(1)).expect("payload should compress");
+            // equivalence: chunked == bytewise == original
+            let chunked = lzf_decompress(&c, p.len()).expect("chunked decode");
+            let bytewise = ref_decompress(&c, p.len()).expect("bytewise decode");
+            assert_eq!(chunked, *p, "chunked round-trip");
+            assert_eq!(chunked, bytewise, "chunked != bytewise");
+            compressed_set.push((c, p.len()));
+        }
+
+        // A/B over the backref-heavy compressed set.
+        let reps = 20000;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            for (c, len) in &compressed_set {
+                acc = acc.wrapping_add(ref_decompress(std::hint::black_box(c), *len).unwrap().len());
+            }
+        }
+        let bytewise_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            for (c, len) in &compressed_set {
+                acc2 =
+                    acc2.wrapping_add(lzf_decompress(std::hint::black_box(c), *len).unwrap().len());
+            }
+        }
+        let chunked_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        let ratio = bytewise_ns as f64 / chunked_ns as f64;
+        println!(
+            "LZF decompress A/B (4 backref-heavy payloads x{reps}): bytewise={bytewise_ns}ns chunked={chunked_ns}ns ratio={ratio:.2}x"
+        );
     }
 
     #[test]
