@@ -302,6 +302,7 @@ version = "0.1.0"
 dependencies = [
  "fr-expire",
  "fr-persist",
+ "fr-protocol",
  "fr-sentinel",
  "indexmap",
  "libc",

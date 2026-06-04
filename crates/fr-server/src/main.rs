@@ -1421,6 +1421,15 @@ fn process_buffered_frames(
                     consumed_total += consumed;
                     continue;
                 }
+                if !command_frame_can_move_to_argv(&frame) {
+                    let response = runtime.execute_frame_with_unix_time_us(&frame, ts, ts_us);
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    encode_client_reply(&response, client_resp3, &mut conn.write_buf);
+                    consumed_total += consumed;
+                    continue;
+                }
+                let argv = fr_command::argv_from_frame(frame)
+                    .expect("command frame prevalidated for argv move");
                 // Subscription mode gate: reject most commands while subscribed.
                 // (frankenredis-j7nwu) Only RESP2 subscribers are restricted —
                 // upstream server.c::processCommand gates the allow-list on
@@ -1429,7 +1438,7 @@ fn process_buffered_frames(
                 // at lib.rs ~5426) must be skipped for them.
                 if runtime.is_in_subscription_mode()
                     && runtime.client_session().resp_protocol_version() != 3
-                    && let Some(reject) = check_subscription_mode_gate(&frame, true)
+                    && let Some(reject) = check_subscription_mode_gate(&argv, true)
                 {
                     reject.encode_into(&mut conn.write_buf);
                     consumed_total += consumed;
@@ -1446,7 +1455,6 @@ fn process_buffered_frames(
                 // pause IS active, behavior is identical: `is_command_paused`
                 // already re-checks `is_client_paused` internally.
                 if runtime.is_client_paused(ts)
-                    && let Ok(argv) = fr_command::frame_to_argv(&frame)
                     && runtime.is_command_paused(&argv, ts)
                     && !is_client_pause_exempt(&argv)
                 {
@@ -1455,10 +1463,11 @@ fn process_buffered_frames(
                     paused_tokens.insert(token);
                     break;
                 }
-                // Borrow for dispatch, then keep owning the parsed frame for
-                // post-dispatch quit/block/replication checks.
-                let response = runtime.execute_frame_with_unix_time_us(&frame, ts, ts_us);
-                let parsed_frame = frame;
+                // Dispatch on the argv moved out of the parsed frame, then
+                // reuse the same buffers for post-dispatch checks. This keeps
+                // the success path at one allocation per wire argument instead
+                // of rebuilding argv for each helper. (frankenredis-8yfmt)
+                let response = runtime.execute_argv_with_unix_time_us(&argv, ts, ts_us);
                 // (frankenredis-pgplm) Choose the RESP3 null encoding (`_`)
                 // when the client negotiated HELLO 3. Captured before the
                 // block-detection check below, which still compares the
@@ -1466,7 +1475,7 @@ fn process_buffered_frames(
                 let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
 
                 // Check for QUIT command.
-                if is_quit_frame(&parsed_frame) {
+                if is_quit_frame(&argv) {
                     encode_client_reply(&response, client_resp3, &mut conn.write_buf);
                     write_tokens.insert(token);
                     conn.closing = true;
@@ -1479,10 +1488,10 @@ fn process_buffered_frames(
                 // client instead of sending the nil response immediately.
                 let should_block = response == RespFrame::Array(None)
                     || response == RespFrame::BulkString(None)
-                    || waitaof_should_block(&parsed_frame, &response)
-                    || wait_should_block(&parsed_frame, &response);
+                    || waitaof_should_block(&argv, &response)
+                    || wait_should_block(&argv, &response);
                 if should_block
-                    && let Some(blocked) = try_build_blocked_state(&parsed_frame, ts).and_then(
+                    && let Some(blocked) = try_build_blocked_state(&argv, ts).and_then(
                         |BlockedState { op, deadline_ms }| {
                             Some(BlockedState {
                                 op: resolve_blocked_op(op, runtime, ts)?,
@@ -1503,14 +1512,14 @@ fn process_buffered_frames(
                         consumed_total += consumed;
                         break; // Stop processing — client is now blocked.
                     }
-                } else if suppress_client_network_reply(runtime, &parsed_frame, &response) {
+                } else if suppress_client_network_reply(runtime, &argv, &response) {
                     // Redis treats REPLCONF ACK/GETACK as internal control
                     // frames and does not send a direct reply on client links.
                 } else {
                     encode_client_reply(&response, client_resp3, &mut conn.write_buf);
                 }
                 if let Some(follow_up) =
-                    replication_follow_up_bytes(runtime, &parsed_frame, &response, ts)
+                    replication_follow_up_bytes(runtime, &argv, &response, ts)
                 {
                     conn.write_buf.extend_from_slice(&follow_up);
                     if runtime.is_replica(runtime.client_id()) {
@@ -2208,11 +2217,11 @@ fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState
 
 pub(crate) fn replication_follow_up_bytes(
     runtime: &mut Runtime,
-    frame: &RespFrame,
+    argv: &[Vec<u8>],
     response: &RespFrame,
     now_ms: u64,
 ) -> Option<Vec<u8>> {
-    if !is_replication_sync_frame(frame) {
+    if !is_replication_sync_frame(argv) {
         return None;
     }
     let RespFrame::SimpleString(line) = response else {
@@ -2226,28 +2235,19 @@ pub(crate) fn replication_follow_up_bytes(
         fr_repl::parse_psync_reply(line),
         Ok(fr_repl::PsyncReply::Continue { .. })
     ) {
-        let offset = psync_requested_offset(frame)?;
+        let offset = psync_requested_offset(argv)?;
         return Some(runtime.encoded_aof_stream_from_offset(offset));
     }
     None
 }
 
-pub(crate) fn is_replication_sync_frame(frame: &RespFrame) -> bool {
-    if let RespFrame::Array(Some(items)) = frame
-        && let Some(RespFrame::BulkString(Some(cmd))) = items.first()
-    {
-        return cmd.eq_ignore_ascii_case(b"PSYNC") || cmd.eq_ignore_ascii_case(b"SYNC");
-    }
-    false
+pub(crate) fn is_replication_sync_frame(argv: &[Vec<u8>]) -> bool {
+    argv.first()
+        .is_some_and(|cmd| cmd.eq_ignore_ascii_case(b"PSYNC") || cmd.eq_ignore_ascii_case(b"SYNC"))
 }
 
-fn psync_requested_offset(frame: &RespFrame) -> Option<u64> {
-    let RespFrame::Array(Some(items)) = frame else {
-        return None;
-    };
-    let RespFrame::BulkString(Some(offset_bytes)) = items.get(2)? else {
-        return None;
-    };
+fn psync_requested_offset(argv: &[Vec<u8>]) -> Option<u64> {
+    let offset_bytes = argv.get(2)?;
     let offset = std::str::from_utf8(offset_bytes)
         .ok()?
         .parse::<u64>()
@@ -2369,8 +2369,7 @@ fn resolve_blocked_op(op: BlockingOp, runtime: &mut Runtime, now_ms: u64) -> Opt
 
 /// Parse a blocking command frame and build `BlockedState` if the command
 /// is a blocking operation with a non-zero timeout.
-fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedState> {
-    let argv = fr_command::frame_to_argv(frame).ok()?;
+fn try_build_blocked_state(argv: &[Vec<u8>], now_ms: u64) -> Option<BlockedState> {
     let cmd = argv.first()?;
 
     if cmd.eq_ignore_ascii_case(b"BLPOP")
@@ -2444,29 +2443,41 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
         let timeout_bytes = &argv[1];
         let deadline_ms = parse_blocking_deadline(timeout_bytes, now_ms)?;
         let op = if cmd.eq_ignore_ascii_case(b"BLMPOP") {
-            BlockingOp::BLmpop { argv }
+            BlockingOp::BLmpop {
+                argv: argv.to_vec(),
+            }
         } else {
-            BlockingOp::BZmpop { argv }
+            BlockingOp::BZmpop {
+                argv: argv.to_vec(),
+            }
         };
         Some(BlockedState { op, deadline_ms })
     } else if cmd.eq_ignore_ascii_case(b"XREAD") || cmd.eq_ignore_ascii_case(b"XREADGROUP") {
         let deadline_ms = parse_xread_block_deadline_argv(&argv, now_ms)?;
         let op = if cmd.eq_ignore_ascii_case(b"XREAD") {
-            BlockingOp::BXread { argv }
+            BlockingOp::BXread {
+                argv: argv.to_vec(),
+            }
         } else {
-            BlockingOp::BXreadgroup { argv }
+            BlockingOp::BXreadgroup {
+                argv: argv.to_vec(),
+            }
         };
         Some(BlockedState { op, deadline_ms })
     } else if cmd.eq_ignore_ascii_case(b"WAITAOF") {
         let deadline_ms = parse_waitaof_deadline_argv(&argv, now_ms)?;
         Some(BlockedState {
-            op: BlockingOp::Waitaof { argv },
+            op: BlockingOp::Waitaof {
+                argv: argv.to_vec(),
+            },
             deadline_ms,
         })
     } else if cmd.eq_ignore_ascii_case(b"WAIT") {
         let deadline_ms = parse_wait_deadline_argv(&argv, now_ms)?;
         Some(BlockedState {
-            op: BlockingOp::Wait { argv },
+            op: BlockingOp::Wait {
+                argv: argv.to_vec(),
+            },
             deadline_ms,
         })
     } else {
@@ -2505,13 +2516,7 @@ fn waitaof_response_satisfies(argv: &[Vec<u8>], response: &RespFrame) -> bool {
     *local_ack >= required_local && *replica_acks >= required_replicas
 }
 
-fn waitaof_should_block(frame: &RespFrame, response: &RespFrame) -> bool {
-    if !frame_command_eq_ignore_ascii_case(frame, b"WAITAOF") {
-        return false;
-    }
-    let Ok(argv) = fr_command::frame_to_argv(frame) else {
-        return false;
-    };
+fn waitaof_should_block(argv: &[Vec<u8>], response: &RespFrame) -> bool {
     let Some(command) = argv.first() else {
         return false;
     };
@@ -2538,13 +2543,7 @@ fn wait_response_satisfies(argv: &[Vec<u8>], response: &RespFrame) -> bool {
     *acked_replicas >= required_replicas
 }
 
-fn wait_should_block(frame: &RespFrame, response: &RespFrame) -> bool {
-    if !frame_command_eq_ignore_ascii_case(frame, b"WAIT") {
-        return false;
-    }
-    let Ok(argv) = fr_command::frame_to_argv(frame) else {
-        return false;
-    };
+fn wait_should_block(argv: &[Vec<u8>], response: &RespFrame) -> bool {
     let Some(command) = argv.first() else {
         return false;
     };
@@ -2552,20 +2551,6 @@ fn wait_should_block(frame: &RespFrame, response: &RespFrame) -> bool {
         return false;
     }
     !wait_response_satisfies(&argv, response)
-}
-
-fn frame_command_eq_ignore_ascii_case(frame: &RespFrame, expected: &[u8]) -> bool {
-    let RespFrame::Array(Some(items)) = frame else {
-        return false;
-    };
-    let Some(command) = items.first() else {
-        return false;
-    };
-    match command {
-        RespFrame::BulkString(Some(bytes)) => bytes.eq_ignore_ascii_case(expected),
-        RespFrame::SimpleString(text) => text.as_bytes().eq_ignore_ascii_case(expected),
-        _ => false,
-    }
 }
 
 fn blocked_timeout_response(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> RespFrame {
@@ -3215,8 +3200,7 @@ fn deliver_pubsub_messages(
 }
 
 /// Check if a command is allowed in subscription mode. Returns Some(error) if rejected.
-fn check_subscription_mode_gate(frame: &RespFrame, _in_sub_mode: bool) -> Option<RespFrame> {
-    let argv = fr_command::frame_to_argv(frame).ok()?;
+fn check_subscription_mode_gate(argv: &[Vec<u8>], _in_sub_mode: bool) -> Option<RespFrame> {
     let cmd = argv.first()?;
     // Commands allowed in subscription mode per Redis behavior
     if cmd.eq_ignore_ascii_case(b"SUBSCRIBE")
@@ -3271,6 +3255,21 @@ fn check_subscription_mode_gate(frame: &RespFrame, _in_sub_mode: bool) -> Option
     )))
 }
 
+fn command_frame_can_move_to_argv(frame: &RespFrame) -> bool {
+    let RespFrame::Array(Some(items)) = frame else {
+        return false;
+    };
+    !items.is_empty()
+        && items.iter().all(|item| {
+            matches!(
+                item,
+                RespFrame::BulkString(Some(_))
+                    | RespFrame::SimpleString(_)
+                    | RespFrame::Integer(_)
+            )
+        })
+}
+
 fn is_client_pause_exempt(argv: &[Vec<u8>]) -> bool {
     matches!(
         argv,
@@ -3279,15 +3278,9 @@ fn is_client_pause_exempt(argv: &[Vec<u8>]) -> bool {
     )
 }
 
-fn is_quit_frame(frame: &RespFrame) -> bool {
-    let RespFrame::Array(Some(items)) = frame else {
-        return false;
-    };
-    match items.first() {
-        Some(RespFrame::BulkString(Some(command))) => command.eq_ignore_ascii_case(b"QUIT"),
-        Some(RespFrame::SimpleString(command)) => command.as_bytes().eq_ignore_ascii_case(b"QUIT"),
-        _ => false,
-    }
+fn is_quit_frame(argv: &[Vec<u8>]) -> bool {
+    argv.first()
+        .is_some_and(|command| command.eq_ignore_ascii_case(b"QUIT"))
 }
 
 /// Encode a command reply to a client, choosing the RESP3 null encoding
@@ -3305,7 +3298,7 @@ fn encode_client_reply(frame: &RespFrame, resp3: bool, out: &mut Vec<u8>) {
 
 fn suppress_client_network_reply(
     runtime: &Runtime,
-    frame: &RespFrame,
+    argv: &[Vec<u8>],
     response: &RespFrame,
 ) -> bool {
     if runtime.suppress_current_network_reply() {
@@ -3314,41 +3307,21 @@ fn suppress_client_network_reply(
     if matches!(response, RespFrame::Error(_)) {
         return false;
     }
-    frame_matches_suppressed_replication_reply(frame)
+    frame_matches_suppressed_replication_reply(argv)
 }
 
-fn frame_arg_bytes(frame: &RespFrame) -> Option<&[u8]> {
-    match frame {
-        RespFrame::BulkString(Some(bytes)) => Some(bytes.as_slice()),
-        RespFrame::SimpleString(text) => Some(text.as_bytes()),
-        _ => None,
-    }
-}
-
-fn frame_matches_suppressed_replication_reply(frame: &RespFrame) -> bool {
-    let RespFrame::Array(Some(items)) = frame else {
-        return false;
-    };
-    match items.as_slice() {
+fn frame_matches_suppressed_replication_reply(argv: &[Vec<u8>]) -> bool {
+    match argv {
         [command, subcommand, argument] => {
-            let Some(command) = frame_arg_bytes(command) else {
-                return false;
-            };
             if !command.eq_ignore_ascii_case(b"REPLCONF") {
                 return false;
             }
-            let Some(subcommand) = frame_arg_bytes(subcommand) else {
-                return false;
-            };
             if subcommand.eq_ignore_ascii_case(b"ACK") {
                 return true;
             }
-            subcommand.eq_ignore_ascii_case(b"GETACK")
-                && frame_arg_bytes(argument).is_some_and(|argument| argument == b"*")
+            subcommand.eq_ignore_ascii_case(b"GETACK") && argument == b"*"
         }
-        [command] => {
-            frame_arg_bytes(command).is_some_and(|command| command.eq_ignore_ascii_case(b"SYNC"))
-        }
+        [command] => command.eq_ignore_ascii_case(b"SYNC"),
         _ => false,
     }
 }
@@ -3392,7 +3365,8 @@ mod tests {
         BlockingOp, CheckBlockedClientsContext, InlineParseResult, PendingClientUnblocksContext,
         REPLICA_ACK_INTERVAL_MS, REPLICA_RECONNECT_BACKOFF_MS, ReplicaPrimaryConnection,
         ReplicaSyncState, StartupConfig, apply_pending_client_unblocks, check_blocked_clients,
-        consume_complete_replication_prefix, drain_replica_stream, drive_replica_sync,
+        command_frame_can_move_to_argv, consume_complete_replication_prefix, drain_replica_stream,
+        drive_replica_sync,
         encode_eof_marked_replication_snapshot, encode_replication_snapshot, find_crlf,
         frame_matches_suppressed_replication_reply, is_quit_frame, parse_blocking_deadline,
         parse_xread_block_deadline_argv, process_buffered_frames, read_frame_from_stream,
@@ -3408,6 +3382,10 @@ mod tests {
     use std::io::{ErrorKind, Write};
     use std::net::{TcpListener as StdTcpListener, TcpStream as StdTcpStream};
     use std::thread;
+
+    fn test_argv(frame: RespFrame) -> Vec<Vec<u8>> {
+        fr_command::frame_to_argv(&frame).expect("test command frame should produce argv")
+    }
 
     #[test]
     fn server_bootstrap_creates_runtime() {
@@ -3425,43 +3403,43 @@ mod tests {
             RespFrame::Array(Some(items))
         }
 
-        assert!(frame_matches_suppressed_replication_reply(&array(vec![
+        assert!(frame_matches_suppressed_replication_reply(&test_argv(array(vec![
             bulk(b"REPLCONF"),
             bulk(b"ACK"),
             bulk(b"123"),
-        ])));
-        assert!(frame_matches_suppressed_replication_reply(&array(vec![
+        ]))));
+        assert!(frame_matches_suppressed_replication_reply(&test_argv(array(vec![
             bulk(b"replconf"),
             bulk(b"getack"),
             RespFrame::SimpleString("*".to_string()),
-        ])));
-        assert!(frame_matches_suppressed_replication_reply(&array(vec![
+        ]))));
+        assert!(frame_matches_suppressed_replication_reply(&test_argv(array(vec![
             RespFrame::SimpleString("sync".to_string()),
-        ])));
+        ]))));
 
-        assert!(!frame_matches_suppressed_replication_reply(&array(vec![
+        assert!(!frame_matches_suppressed_replication_reply(&test_argv(array(vec![
             bulk(b"HGET"),
             bulk(b"hash"),
             bulk(b"field"),
-        ])));
-        assert!(!frame_matches_suppressed_replication_reply(&array(vec![
+        ]))));
+        assert!(!frame_matches_suppressed_replication_reply(&test_argv(array(vec![
             bulk(b"REPLCONF"),
             bulk(b"GETACK"),
             bulk(b"1"),
-        ])));
-        assert!(!frame_matches_suppressed_replication_reply(&array(vec![
+        ]))));
+        assert!(!frame_matches_suppressed_replication_reply(&test_argv(array(vec![
             bulk(b"REPLCONF"),
             bulk(b"ACK"),
-        ])));
-        assert!(!frame_matches_suppressed_replication_reply(&array(vec![
+        ]))));
+        assert!(!frame_matches_suppressed_replication_reply(&test_argv(array(vec![
             bulk(b"REPLCONF"),
             bulk(b"ACK"),
             bulk(b"1"),
             bulk(b"extra"),
-        ])));
-        assert!(!frame_matches_suppressed_replication_reply(&array(vec![
+        ]))));
+        assert!(!frame_matches_suppressed_replication_reply(&test_argv(array(vec![
             RespFrame::Integer(0),
-        ])));
+        ]))));
     }
 
     #[test]
@@ -3474,19 +3452,21 @@ mod tests {
             RespFrame::Array(Some(items))
         }
 
-        assert!(is_quit_frame(&array(vec![bulk(b"QUIT")])));
-        assert!(is_quit_frame(&array(vec![bulk(b"quit")])));
-        assert!(is_quit_frame(&array(vec![RespFrame::SimpleString(
+        assert!(is_quit_frame(&test_argv(array(vec![bulk(b"QUIT")]))));
+        assert!(is_quit_frame(&test_argv(array(vec![bulk(b"quit")]))));
+        assert!(is_quit_frame(&test_argv(array(vec![RespFrame::SimpleString(
             "QuIt".to_string(),
-        )])));
+        )]))));
 
-        assert!(!is_quit_frame(&array(vec![bulk(b"HGET")])));
-        assert!(!is_quit_frame(&array(Vec::new())));
-        assert!(!is_quit_frame(&RespFrame::BulkString(Some(
+        assert!(!is_quit_frame(&test_argv(array(vec![bulk(b"HGET")]))));
+        assert!(!command_frame_can_move_to_argv(&array(Vec::new())));
+        assert!(!command_frame_can_move_to_argv(&RespFrame::BulkString(Some(
             b"QUIT".to_vec()
         ))));
-        assert!(!is_quit_frame(&array(vec![RespFrame::Integer(0)])));
-        assert!(!is_quit_frame(&array(vec![RespFrame::BulkString(None)])));
+        assert!(!is_quit_frame(&test_argv(array(vec![RespFrame::Integer(0)]))));
+        assert!(!command_frame_can_move_to_argv(&array(vec![
+            RespFrame::BulkString(None)
+        ])));
     }
 
     #[test]
@@ -3499,18 +3479,23 @@ mod tests {
             RespFrame::Array(Some(items))
         }
 
-        let non_wait = array(vec![bulk(b"HGET"), RespFrame::Array(None)]);
+        let non_wait = test_argv(array(vec![bulk(b"HGET"), bulk(b"key")]));
         assert!(!wait_should_block(&non_wait, &RespFrame::Integer(0)));
         assert!(!waitaof_should_block(
             &non_wait,
             &RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)])),
         ));
 
-        let wait = array(vec![bulk(b"WAIT"), bulk(b"2"), bulk(b"100")]);
+        let wait = test_argv(array(vec![bulk(b"WAIT"), bulk(b"2"), bulk(b"100")]));
         assert!(wait_should_block(&wait, &RespFrame::Integer(1)));
         assert!(!wait_should_block(&wait, &RespFrame::Integer(2)));
 
-        let waitaof = array(vec![bulk(b"WAITAOF"), bulk(b"1"), bulk(b"2"), bulk(b"100")]);
+        let waitaof = test_argv(array(vec![
+            bulk(b"WAITAOF"),
+            bulk(b"1"),
+            bulk(b"2"),
+            bulk(b"100"),
+        ]));
         assert!(waitaof_should_block(
             &waitaof,
             &RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(1)])),
@@ -3520,11 +3505,11 @@ mod tests {
             &RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(2)])),
         ));
 
-        let simple_wait = array(vec![
+        let simple_wait = test_argv(array(vec![
             RespFrame::SimpleString("wait".to_string()),
             bulk(b"1"),
             bulk(b"0"),
-        ]);
+        ]));
         assert!(wait_should_block(&simple_wait, &RespFrame::Integer(0)));
     }
 
@@ -3686,8 +3671,9 @@ mod tests {
         let response = RespFrame::SimpleString(
             "FULLRESYNC 0000000000000000000000000000000000000000 0".to_string(),
         );
+        let argv = test_argv(frame);
 
-        let follow_up = replication_follow_up_bytes(&mut runtime, &frame, &response, 2)
+        let follow_up = replication_follow_up_bytes(&mut runtime, &argv, &response, 2)
             .expect("psync should emit snapshot");
         let preamble_end = find_crlf(&follow_up).expect("snapshot preamble terminator");
         let preamble = std::str::from_utf8(&follow_up[..preamble_end]).expect("utf8 preamble");
@@ -3726,9 +3712,10 @@ mod tests {
             b"REPLCONF".to_vec(),
         ))]));
         let response = RespFrame::SimpleString("OK".to_string());
+        let argv = test_argv(frame);
 
         assert_eq!(
-            replication_follow_up_bytes(&mut runtime, &frame, &response, 0),
+            replication_follow_up_bytes(&mut runtime, &argv, &response, 0),
             None
         );
     }
@@ -3742,9 +3729,10 @@ mod tests {
             RespFrame::BulkString(Some(b"-1".to_vec())),
         ]));
         let response = RespFrame::Error("ERR fallback".to_string());
+        let argv = test_argv(frame);
 
         assert_eq!(
-            replication_follow_up_bytes(&mut runtime, &frame, &response, 0),
+            replication_follow_up_bytes(&mut runtime, &argv, &response, 0),
             None
         );
     }
@@ -3803,14 +3791,15 @@ mod tests {
             RespFrame::BulkString(Some(first_cmd_bytes.to_string().into_bytes())),
         ]));
         let response = RespFrame::SimpleString("CONTINUE".to_string());
+        let argv = test_argv(frame);
 
-        let follow_up = replication_follow_up_bytes(&mut runtime, &frame, &response, 3)
+        let follow_up = replication_follow_up_bytes(&mut runtime, &argv, &response, 3)
             .expect("psync continue should emit backlog");
         let psync2_response = RespFrame::SimpleString(
             "CONTINUE 0000000000000000000000000000000000000000".to_string(),
         );
         assert_eq!(
-            replication_follow_up_bytes(&mut runtime, &frame, &psync2_response, 3),
+            replication_follow_up_bytes(&mut runtime, &argv, &psync2_response, 3),
             Some(follow_up.clone())
         );
         let mut replica = fr_runtime::Runtime::default_strict();
@@ -4959,7 +4948,8 @@ mod tests {
             RespFrame::BulkString(Some(b"queue".to_vec())),
             RespFrame::BulkString(Some(b"inf".to_vec())),
         ]));
-        assert!(try_build_blocked_state(&frame, 1_000).is_none());
+        let argv = test_argv(frame);
+        assert!(try_build_blocked_state(&argv, 1_000).is_none());
     }
 
     #[test]
@@ -4969,7 +4959,8 @@ mod tests {
             RespFrame::BulkString(Some(b"queue".to_vec())),
             RespFrame::BulkString(Some(b"0.0001".to_vec())),
         ]));
-        let blocked = try_build_blocked_state(&frame, 1_000).expect("must block");
+        let argv = test_argv(frame);
+        let blocked = try_build_blocked_state(&argv, 1_000).expect("must block");
         assert_eq!(blocked.deadline_ms, 1_001);
     }
 
@@ -5383,7 +5374,8 @@ mod tests {
             RespFrame::BulkString(Some(b"stream".to_vec())),
             RespFrame::BulkString(Some(b"0-0".to_vec())),
         ]));
-        assert!(try_build_blocked_state(&frame, 1_000).is_none());
+        let argv = test_argv(frame);
+        assert!(try_build_blocked_state(&argv, 1_000).is_none());
     }
 
     #[test]
@@ -5393,7 +5385,8 @@ mod tests {
             RespFrame::BulkString(Some(b"list".to_vec())),
             RespFrame::Integer(0),
         ]));
-        let blocked = try_build_blocked_state(&frame, 1_000).expect("must block");
+        let argv = test_argv(frame);
+        let blocked = try_build_blocked_state(&argv, 1_000).expect("must block");
         assert!(matches!(blocked.op, BlockingOp::BLpop { .. }));
         let BlockingOp::BLpop { keys } = blocked.op else {
             return;
@@ -5504,9 +5497,10 @@ mod tests {
 
         let prev = runtime.swap_session(std::mem::take(&mut replica_conn.session));
         let response = runtime.execute_frame(psync_frame.clone(), ts);
+        let psync_argv = test_argv(psync_frame);
 
         if let Some(follow_up) =
-            replication_follow_up_bytes(&mut runtime, &psync_frame, &response, ts)
+            replication_follow_up_bytes(&mut runtime, &psync_argv, &response, ts)
         {
             replica_conn.write_buf.extend_from_slice(&follow_up);
             if runtime.is_replica(replica_id) {
@@ -5593,9 +5587,10 @@ mod tests {
 
         let prev = primary.swap_session(std::mem::take(&mut replica_conn.session));
         let response = primary.execute_frame(psync_frame.clone(), ts);
+        let psync_argv = test_argv(psync_frame.clone());
 
         if let Some(follow_up) =
-            replication_follow_up_bytes(&mut primary, &psync_frame, &response, ts)
+            replication_follow_up_bytes(&mut primary, &psync_argv, &response, ts)
         {
             replica_conn.write_buf.extend_from_slice(&follow_up);
             if primary.is_replica(replica_id) {
@@ -5636,9 +5631,10 @@ mod tests {
 
         let prev = replica_rt.swap_session(std::mem::take(&mut sub_replica_conn.session));
         let response_sub = replica_rt.execute_frame(psync_frame.clone(), ts);
+        let psync_argv = test_argv(psync_frame);
 
         if let Some(follow_up) =
-            replication_follow_up_bytes(&mut replica_rt, &psync_frame, &response_sub, ts)
+            replication_follow_up_bytes(&mut replica_rt, &psync_argv, &response_sub, ts)
         {
             sub_replica_conn.write_buf.extend_from_slice(&follow_up);
             if replica_rt.is_replica(sub_replica_id) {

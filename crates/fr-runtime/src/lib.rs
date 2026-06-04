@@ -5138,10 +5138,17 @@ impl Runtime {
     }
 
     pub fn execute_frame(&mut self, frame: RespFrame, now_ms: u64) -> RespFrame {
-        // The dispatch chain only reads the frame while it materializes argv, so
-        // borrow it. The network hot path keeps owning the parsed frame for
-        // post-dispatch checks without deep-cloning it.
-        self.execute_frame_with_optional_unix_time_us(&frame, now_ms, None)
+        // Owned-frame callers (conformance, internal) keep passing the frame so
+        // its exact wire structure feeds the threat-evidence digests verbatim.
+        let argv_result = frame_to_argv(&frame);
+        self.execute_dispatch(
+            Some(&frame),
+            argv_result
+                .as_deref()
+                .map_err(|_| CommandError::InvalidCommandFrame),
+            now_ms,
+            None,
+        )
     }
 
     pub fn execute_frame_with_unix_time_us(
@@ -5150,12 +5157,39 @@ impl Runtime {
         now_ms: u64,
         unix_time_us: u64,
     ) -> RespFrame {
-        self.execute_frame_with_optional_unix_time_us(frame, now_ms, Some(unix_time_us))
+        let argv_result = frame_to_argv(frame);
+        self.execute_dispatch(
+            Some(frame),
+            argv_result
+                .as_deref()
+                .map_err(|_| CommandError::InvalidCommandFrame),
+            now_ms,
+            Some(unix_time_us),
+        )
     }
 
-    fn execute_frame_with_optional_unix_time_us(
+    /// Hot-path entry for the network server. `argv` has already been MOVED out
+    /// of the parsed command frame (one allocation per argument total, vs the
+    /// frame-based path which clones every argument a second time). The original
+    /// frame is not retained; the cold preflight/threat-evidence paths
+    /// reconstruct a byte-identical `RespFrame::Array(BulkString)` from argv on
+    /// demand, so digests stay exact while the hot success path never
+    /// materializes a frame. Wire commands are always multibulk-of-bulkstrings,
+    /// so the reconstruction is the exact inverse of the parse.
+    /// (frankenredis-8yfmt)
+    pub fn execute_argv_with_unix_time_us(
         &mut self,
-        frame: &RespFrame,
+        argv: &[Vec<u8>],
+        now_ms: u64,
+        unix_time_us: u64,
+    ) -> RespFrame {
+        self.execute_dispatch(None, Ok(argv), now_ms, Some(unix_time_us))
+    }
+
+    fn execute_dispatch(
+        &mut self,
+        frame: Option<&RespFrame>,
+        argv_result: Result<&[Vec<u8>], CommandError>,
         now_ms: u64,
         unix_time_us: Option<u64>,
     ) -> RespFrame {
@@ -5165,8 +5199,9 @@ impl Runtime {
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.refresh_store_runtime_info_context();
-        // Parse once, reuse for both stats and execution (eliminates double parse).
-        let argv_result = frame_to_argv(frame);
+        // argv was materialized once by the caller (cloned from a borrowed frame
+        // on the owned/conformance path, or moved out of the parsed frame on the
+        // server hot path) and reused for both stats and execution.
         if let Ok(argv) = &argv_result {
             self.session.last_command_name = client_info_command_name(argv);
         }
@@ -5422,24 +5457,37 @@ impl Runtime {
 
     fn execute_frame_internal(
         &mut self,
-        frame: &RespFrame,
-        argv_result: Result<Vec<Vec<u8>>, CommandError>,
+        frame: Option<&RespFrame>,
+        argv_result: Result<&[Vec<u8>], CommandError>,
         now_ms: u64,
         packet_id: u64,
         unix_time_us: Option<u64>,
     ) -> RespFrame {
-        if let Some(reply) = self.preflight_gate(frame, now_ms, packet_id) {
-            return reply;
-        }
-
         // Use pre-parsed argv if available, avoiding duplicate parsing.
         let argv = match argv_result {
             Ok(argv) => {
+                // Compatibility/threat gate first (gate.max_array_len /
+                // max_bulk_len), preserving the original error-precedence over
+                // the MAX_COMMAND_ARITY check below. Evaluated on argv so the
+                // server hot path never needs the frame. (frankenredis-8yfmt)
+                if let Some(reply) = self.preflight_gate(frame, &argv, now_ms, packet_id) {
+                    return reply;
+                }
                 if argv.len() > MAX_COMMAND_ARITY {
                     let reply = RespFrame::Error(format!(
                         "ERR Protocol error: too many arguments (limit: {})",
                         MAX_COMMAND_ARITY
                     ));
+                    // Cold path: hash the original frame when present, else a
+                    // byte-identical reconstruction from argv. (frankenredis-8yfmt)
+                    let recon;
+                    let digest_frame: &RespFrame = match frame {
+                        Some(f) => f,
+                        None => {
+                            recon = fr_command::argv_to_command_frame(&argv);
+                            &recon
+                        }
+                    };
                     self.record_threat_event(ThreatEventInput {
                         now_ms,
                         packet_id,
@@ -5453,7 +5501,7 @@ impl Runtime {
                             argv.len(),
                             MAX_COMMAND_ARITY
                         ),
-                        input_source: ThreatInputDigestSource::Frame(frame),
+                        input_source: ThreatInputDigestSource::Frame(digest_frame),
                         output: &reply,
                     });
                     return reply;
@@ -5461,8 +5509,19 @@ impl Runtime {
                 argv
             }
             Err(_) => {
+                // Only reachable from owned/conformance callers (the server
+                // pre-validates and always passes Ok), so `frame` is Some here;
+                // reconstruct an empty frame defensively otherwise.
                 let reply =
                     RespFrame::Error("ERR Protocol error: invalid command frame".to_string());
+                let recon;
+                let digest_frame: &RespFrame = match frame {
+                    Some(f) => f,
+                    None => {
+                        recon = RespFrame::Array(Some(Vec::new()));
+                        &recon
+                    }
+                };
                 self.record_threat_event(ThreatEventInput {
                     now_ms,
                     packet_id,
@@ -5472,7 +5531,7 @@ impl Runtime {
                     action: "reject_frame",
                     reason_code: "invalid_command_frame",
                     reason: "invalid command frame".to_string(),
-                    input_source: ThreatInputDigestSource::Frame(frame),
+                    input_source: ThreatInputDigestSource::Frame(digest_frame),
                     output: &reply,
                 });
                 return reply;
@@ -6834,7 +6893,15 @@ impl Runtime {
         match fr_protocol::parse_frame_with_config(input, &parser_config) {
             Ok(parsed) => {
                 let argv_result = frame_to_argv(&parsed.frame);
-                self.execute_frame_internal(&parsed.frame, argv_result, now_ms, packet_id, None)
+                self.execute_frame_internal(
+                    Some(&parsed.frame),
+                    argv_result
+                        .as_deref()
+                        .map_err(|_| CommandError::InvalidCommandFrame),
+                    now_ms,
+                    packet_id,
+                    None,
+                )
                     .to_bytes()
             }
             Err(err) => {
@@ -14390,17 +14457,27 @@ replica_announced:1\r\n",
 
     fn preflight_gate(
         &mut self,
-        frame: &RespFrame,
+        frame: Option<&RespFrame>,
+        argv: &[Vec<u8>],
         now_ms: u64,
         packet_id: u64,
     ) -> Option<RespFrame> {
-        let RespFrame::Array(Some(items)) = frame else {
-            return None;
-        };
-        if items.len() > self.policy.gate.max_array_len {
+        // argv carries one entry per command-array element (1:1 with the frame's
+        // items), so the gate evaluates on argv and the server hot path never
+        // needs the frame. The threat digest hashes the original frame when
+        // present, else a byte-identical reconstruction. (frankenredis-8yfmt)
+        if argv.len() > self.policy.gate.max_array_len {
             let reply = RespFrame::Error(
                 "ERR Protocol error: command array exceeds compatibility gate".to_string(),
             );
+            let recon;
+            let digest_frame: &RespFrame = match frame {
+                Some(f) => f,
+                None => {
+                    recon = fr_command::argv_to_command_frame(argv);
+                    &recon
+                }
+            };
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -14411,40 +14488,54 @@ replica_announced:1\r\n",
                 reason_code: "compat_array_len_exceeded",
                 reason: format!(
                     "array length {} exceeded {}",
-                    items.len(),
+                    argv.len(),
                     self.policy.gate.max_array_len
                 ),
-                input_source: ThreatInputDigestSource::Frame(frame),
+                input_source: ThreatInputDigestSource::Frame(digest_frame),
                 output: &reply,
             });
             return Some(reply);
         }
 
-        for item in items {
-            if let RespFrame::BulkString(Some(bytes)) = item
-                && bytes.len() > self.policy.gate.max_bulk_len
-            {
-                let reply = RespFrame::Error(
-                    "ERR Protocol error: bulk payload exceeds compatibility gate".to_string(),
-                );
-                self.record_threat_event(ThreatEventInput {
-                    now_ms,
-                    packet_id,
-                    threat_class: ThreatClass::ResourceExhaustion,
-                    preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
-                    subsystem: "compatibility_gate",
-                    action: "fail_closed_bulk_len",
-                    reason_code: "compat_bulk_len_exceeded",
-                    reason: format!(
-                        "bulk len {} exceeded {}",
-                        bytes.len(),
-                        self.policy.gate.max_bulk_len
-                    ),
-                    input_source: ThreatInputDigestSource::Frame(frame),
-                    output: &reply,
-                });
-                return Some(reply);
-            }
+        // Bulk-length gate. With the structured frame in hand, honor the exact
+        // upstream rule that only BulkString items are length-gated; on the
+        // server path every element is a wire bulk string, so argv lengths are
+        // equivalent.
+        let max_bulk_len = self.policy.gate.max_bulk_len;
+        let offending: Option<usize> = match frame {
+            Some(RespFrame::Array(Some(items))) => items.iter().find_map(|item| match item {
+                RespFrame::BulkString(Some(bytes)) if bytes.len() > max_bulk_len => Some(bytes.len()),
+                _ => None,
+            }),
+            _ => argv
+                .iter()
+                .find_map(|bytes| (bytes.len() > max_bulk_len).then_some(bytes.len())),
+        };
+        if let Some(bulk_len) = offending {
+            let reply = RespFrame::Error(
+                "ERR Protocol error: bulk payload exceeds compatibility gate".to_string(),
+            );
+            let recon;
+            let digest_frame: &RespFrame = match frame {
+                Some(f) => f,
+                None => {
+                    recon = fr_command::argv_to_command_frame(argv);
+                    &recon
+                }
+            };
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "compatibility_gate",
+                action: "fail_closed_bulk_len",
+                reason_code: "compat_bulk_len_exceeded",
+                reason: format!("bulk len {} exceeded {}", bulk_len, max_bulk_len),
+                input_source: ThreatInputDigestSource::Frame(digest_frame),
+                output: &reply,
+            });
+            return Some(reply);
         }
         None
     }

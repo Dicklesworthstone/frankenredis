@@ -2190,6 +2190,54 @@ pub fn frame_to_argv(frame: &RespFrame) -> Result<Vec<Vec<u8>>, CommandError> {
     Ok(argv)
 }
 
+/// Consuming counterpart to [`frame_to_argv`] that MOVES each argument's
+/// bytes out of the parsed frame instead of cloning them.
+///
+/// The command dispatch hot path parses a client frame into
+/// `RespFrame::Array(Some(vec![BulkString(Some(Vec<u8>)), ...]))` — one heap
+/// allocation per argument — and then immediately needs the same bytes as an
+/// argv (`Vec<Vec<u8>>`). [`frame_to_argv`] clones every argument a second
+/// time because its caller still borrows the frame. When the caller owns the
+/// frame and no longer needs it as a `RespFrame`, this function reuses the
+/// already-allocated argument buffers verbatim (a `Vec` move is a pointer
+/// copy), eliminating the redundant per-argument allocation+memcpy that an
+/// in-tree gdb profile attributed to ~58% of on-CPU allocator samples in the
+/// dispatch hot path (fr-server frame_to_argv note). The produced argv is
+/// byte-for-byte identical to `frame_to_argv(&frame)`. (frankenredis-8yfmt)
+pub fn argv_from_frame(frame: RespFrame) -> Result<Vec<Vec<u8>>, CommandError> {
+    let RespFrame::Array(Some(items)) = frame else {
+        return Err(CommandError::InvalidCommandFrame);
+    };
+
+    let mut argv = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            RespFrame::BulkString(Some(bytes)) => argv.push(bytes),
+            RespFrame::SimpleString(text) => argv.push(text.into_bytes()),
+            RespFrame::Integer(n) => argv.push(n.to_string().into_bytes()),
+            _ => return Err(CommandError::InvalidCommandFrame),
+        }
+    }
+    if argv.is_empty() {
+        return Err(CommandError::InvalidCommandFrame);
+    }
+    Ok(argv)
+}
+
+/// Reconstruct the canonical command frame from an argv. Commands on the wire
+/// are always RESP multibulk arrays of bulk strings, so for any argv produced
+/// by [`argv_from_frame`]/[`frame_to_argv`] from such a frame this is the exact
+/// inverse: `argv_to_command_frame(argv_from_frame(f)) == f`. Used only on the
+/// cold preflight/threat-evidence paths that must hash the original frame, so
+/// the hot success path never pays for it. (frankenredis-8yfmt)
+pub fn argv_to_command_frame(argv: &[Vec<u8>]) -> RespFrame {
+    RespFrame::Array(Some(
+        argv.iter()
+            .map(|a| RespFrame::BulkString(Some(a.clone())))
+            .collect(),
+    ))
+}
+
 pub fn dispatch_argv(
     argv: &[Vec<u8>],
     store: &mut Store,
@@ -16411,17 +16459,13 @@ fn dispatch_acl_permission_error_for_argv(
     // error, not a command error, matching upstream's errpos.
     let mut best: Option<DispatchAclPermissionError> = None;
     for set in std::iter::once(permissions).chain(permissions.selectors.iter()) {
-        match dispatch_acl_permission_error_for_set(argv, set) {
-            None => return None,
-            Some(err) => {
-                let take = match &best {
-                    Some(prev) => dispatch_acl_error_depth(&err) > dispatch_acl_error_depth(prev),
-                    None => true,
-                };
-                if take {
-                    best = Some(err);
-                }
-            }
+        let err = dispatch_acl_permission_error_for_set(argv, set)?;
+        let take = match &best {
+            Some(prev) => dispatch_acl_error_depth(&err) > dispatch_acl_error_depth(prev),
+            None => true,
+        };
+        if take {
+            best = Some(err);
         }
     }
     best

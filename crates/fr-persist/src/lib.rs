@@ -1973,6 +1973,18 @@ pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
                 }
                 let enc = len - 2; // len -= 2 (octets - 1)
 
+                // Conservative budget guard, mirroring vendored lzf_c.c:
+                //   if (op+3+1 >= out_end) if (op - !lit + 3 + 1 >= out_end) return 0;
+                // redis bails to the raw encoding once the output comes within a
+                // few bytes of out_end, even when the match would technically
+                // still fit — this is what makes the compress-vs-raw DECISION
+                // byte-exact (e.g. "hello world hello world" stays raw). The
+                // inner test implies the outer, so collapse to the inner form.
+                // (frankenredis-wmh2p)
+                if out.len() - usize::from(lit == 0) + 4 >= out_budget {
+                    return None;
+                }
+
                 // Stop the open literal run (op[-lit-1] = lit-1; op -= !lit).
                 if lit > 0 {
                     out[lit_hdr_pos] = (lit - 1) as u8;
@@ -1988,17 +2000,11 @@ pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
                     out.push((enc - 7) as u8);
                 }
                 out.push((off & 0xFF) as u8);
-                if out.len() > out_budget {
-                    return None;
-                }
 
                 // Start a new literal run.
                 lit = 0;
                 lit_hdr_pos = out.len();
                 out.push(0);
-                if out.len() > out_budget {
-                    return None;
-                }
 
                 // ip advances by the full match length (C: ip++; ip += enc+1).
                 ip += len;
@@ -2023,10 +2029,11 @@ pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
         }
 
         if !emitted_match {
-            out.push(input[ip]);
-            if out.len() > out_budget {
+            // C: if (op >= out_end) return 0;  (before each literal byte)
+            if out.len() >= out_budget {
                 return None;
             }
+            out.push(input[ip]);
             lit += 1;
             ip += 1;
             if lit == MAX_LIT {
@@ -2034,19 +2041,18 @@ pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
                 lit = 0;
                 lit_hdr_pos = out.len();
                 out.push(0);
-                if out.len() > out_budget {
-                    return None;
-                }
             }
         }
     }
 
     // Tail: drain remaining 0..2 bytes as literals.
+    // C: if (op + 3 > out_end) return 0;  -- reserve room for the tail
+    // literals and the closing run header before flushing. (frankenredis-wmh2p)
+    if out.len() + 3 > out_budget {
+        return None;
+    }
     while ip < in_len {
         out.push(input[ip]);
-        if out.len() > out_budget {
-            return None;
-        }
         lit += 1;
         ip += 1;
         if lit == MAX_LIT {
@@ -2054,9 +2060,6 @@ pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
             lit = 0;
             lit_hdr_pos = out.len();
             out.push(0);
-            if out.len() > out_budget {
-                return None;
-            }
         }
     }
 
