@@ -4916,6 +4916,123 @@ fn geo_radius_bbox(clon: f64, clat: f64, radius_m: f64) -> (f64, f64, f64, f64, 
     (lat_min, lat_max, lon_min, lon_max, lon_wrap)
 }
 
+/// Largest geohash precision (1..=26) at which a single cell is at least
+/// `radius_m` across in BOTH dimensions — N-S, and E-W at the poleward edge of
+/// the search band (where a degree of longitude is shortest). At that precision
+/// the center cell plus its 8 neighbours provably cover the whole radius disk
+/// (the disk reaches at most `radius_m` beyond the center cell, i.e. at most one
+/// neighbour cell), so the scan can never miss an in-range point. Unlike
+/// upstream's `geohashEstimateStepsByRadius` heuristic this guarantees coverage,
+/// which fr's exact full scan requires. Returns 0 when even precision 1 is too
+/// fine (radius spans most of the globe) — the caller then does a full scan.
+/// (frankenredis-7hg0r)
+fn geo_radius_cover_steps(clat: f64, radius_m: f64) -> u8 {
+    if radius_m <= 0.0 {
+        return 26;
+    }
+    let m_per_deg = GEO_EARTH_RADIUS_IN_METERS * std::f64::consts::PI / 180.0;
+    let lat_span = GEO_LAT_MAX - GEO_LAT_MIN;
+    let lon_span = GEO_LONG_MAX - GEO_LONG_MIN;
+    let lat_delta_deg = (radius_m / GEO_EARTH_RADIUS_IN_METERS).to_degrees();
+    let worst_lat = (clat.abs() + lat_delta_deg).min(89.9);
+    let cos_worst = worst_lat.to_radians().cos();
+    let mut steps = 0u8;
+    for s in 1..=GEO_STEP_MAX {
+        let cells = (1u64 << s) as f64;
+        let cell_lat_m = (lat_span / cells) * m_per_deg;
+        let cell_lon_m = (lon_span / cells) * m_per_deg * cos_worst;
+        if cell_lat_m >= radius_m && cell_lon_m >= radius_m {
+            steps = s;
+        } else {
+            break; // cells only shrink as precision grows
+        }
+    }
+    steps
+}
+
+/// Disjoint geohash-score ranges covering the center cell and its 8 neighbours
+/// at the precision from `geo_radius_cover_steps` — the only score
+/// sub-intervals that can hold a point within `radius_m` of the center. Returns
+/// `None` when the precision is so coarse (very large radius) that the cells span
+/// most of the keyspace and a plain full scan is just as good. Longitude wraps
+/// modulo 2^steps; out-of-range latitude neighbours are dropped (they hold no
+/// points — stored latitudes are clamped to +/-85.05). Each returned cell maps
+/// to `[cell << shift, (cell << shift) | (2^shift - 1)]` because the stored score
+/// is the 52-bit interleave whose top `2*steps` bits identify the cell.
+/// (frankenredis-7hg0r)
+fn geo_radius_cell_ranges(clon: f64, clat: f64, radius_m: f64) -> Option<Vec<(f64, f64)>> {
+    if clat < GEO_LAT_MIN || clat > GEO_LAT_MAX || clon < GEO_LONG_MIN || clon > GEO_LONG_MAX {
+        return None;
+    }
+    let steps = geo_radius_cover_steps(clat, radius_m);
+    if steps < 3 {
+        return None; // cells already span ~the whole world; full scan is fine
+    }
+    let cells = 1i64 << steps;
+    let scale = cells as f64;
+    let lat_off = (((clat - GEO_LAT_MIN) / (GEO_LAT_MAX - GEO_LAT_MIN)) * scale) as i64;
+    let lon_off = (((clon - GEO_LONG_MIN) / (GEO_LONG_MAX - GEO_LONG_MIN)) * scale) as i64;
+    let max_idx = cells - 1;
+    let shift = 2 * (u32::from(GEO_STEP_MAX) - u32::from(steps));
+    let span = 1u64 << shift;
+    let mut seen: [u64; 9] = [0; 9];
+    let mut nseen = 0usize;
+    let mut ranges: Vec<(f64, f64)> = Vec::with_capacity(9);
+    for dlat in -1i64..=1 {
+        let la = lat_off + dlat;
+        if la < 0 || la > max_idx {
+            continue; // latitude does not wrap
+        }
+        for dlon in -1i64..=1 {
+            let mut lo = lon_off + dlon;
+            if lo < 0 {
+                lo += cells;
+            } else if lo > max_idx {
+                lo -= cells;
+            }
+            let cell = geo_interleave64(la as u32, lo as u32);
+            if seen[..nseen].contains(&cell) {
+                continue;
+            }
+            seen[nseen] = cell;
+            nseen += 1;
+            let score_min = cell << shift;
+            let score_max = score_min | (span - 1);
+            ranges.push((score_min as f64, score_max as f64));
+        }
+    }
+    Some(ranges)
+}
+
+/// Decode a stored geohash score, apply the radius bbox pre-filter, and on a hit
+/// push the exact (member, score, distance, lon, lat) tuple. Shared by both the
+/// neighbour-cell scan and the full bbox scan in `geo_search_core`. `bb` is
+/// (lat_min, lat_max, lon_min, lon_max, lon_wrap). (frankenredis-7hg0r)
+#[allow(clippy::too_many_arguments)]
+fn geo_collect_candidate(
+    member: &[u8],
+    score: f64,
+    clon: f64,
+    clat: f64,
+    radius_m: f64,
+    bb: (f64, f64, f64, f64, bool),
+    results: &mut Vec<(Vec<u8>, f64, f64, f64, f64)>,
+) {
+    let Some((lon, lat)) = geo_decode_score(score) else {
+        return;
+    };
+    if lat < bb.0 || lat > bb.1 {
+        return;
+    }
+    if !bb.4 && (lon < bb.2 || lon > bb.3) {
+        return;
+    }
+    let dist = geo_distance_m(clon, clat, lon, lat);
+    if dist <= radius_m {
+        results.push((member.to_vec(), score, dist, lon, lat));
+    }
+}
+
 /// Conservative lat/lon bounding box fully containing the GEOSEARCH BYBOX
 /// rectangle (`half_w` x `half_h` metres centred at (`cx`,`cy`)), returned as
 /// `(lat_min, lat_max, lon_min, lon_max, lon_wrap)`. A point passes
@@ -5897,24 +6014,33 @@ fn geo_search_core(
     // instead of every member. The box is a conservative superset, so the
     // surviving result set and its ascending-score order are identical to
     // scanning and distance-testing every member. (frankenredis-5nimj)
-    let (bb_lat_min, bb_lat_max, bb_lon_min, bb_lon_max, bb_lon_wrap) =
-        geo_radius_bbox(center_lon, center_lat, radius_m);
+    let bb = geo_radius_bbox(center_lon, center_lat, radius_m);
     let mut results: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
-    store.zset_for_each_asc(key, now_ms, |member, score| {
-        let Some((lon, lat)) = geo_decode_score(score) else {
-            return;
-        };
-        if lat < bb_lat_min || lat > bb_lat_max {
-            return;
+    // When the radius is small enough that the center geohash cell + its 8
+    // neighbours cover it, walk only those cells' score ranges (O(log n + k))
+    // instead of every member; otherwise fall back to the full bbox+borrow scan.
+    // Both apply the identical exact bbox+haversine candidate filter, so results
+    // are unchanged. (frankenredis-7hg0r)
+    match geo_radius_cell_ranges(center_lon, center_lat, radius_m) {
+        Some(ranges) => {
+            store.zset_for_each_in_score_ranges(key, &ranges, now_ms, |member, score| {
+                geo_collect_candidate(member, score, center_lon, center_lat, radius_m, bb, &mut results);
+            })?;
+            // Per-cell scan order is not global; restore ascending (score, member)
+            // order so SORT_NONE output and the stable ASC/DESC tie-breaks match
+            // the full scan byte-for-byte.
+            results.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
         }
-        if !bb_lon_wrap && (lon < bb_lon_min || lon > bb_lon_max) {
-            return;
+        None => {
+            store.zset_for_each_asc(key, now_ms, |member, score| {
+                geo_collect_candidate(member, score, center_lon, center_lat, radius_m, bb, &mut results);
+            })?;
         }
-        let dist = geo_distance_m(center_lon, center_lat, lon, lat);
-        if dist <= radius_m {
-            results.push((member.to_vec(), score, dist, lon, lat));
-        }
-    })?;
+    }
     // (frankenredis-1axne) Match upstream geo.c:714-718: if the
     // user supplied COUNT without explicit ordering and without ANY,
     // promote SORT_NONE → SORT_ASC. Otherwise SORT_NONE leaves the
@@ -26643,6 +26769,116 @@ mod tests {
         let ratio = full_ns as f64 / prune_ns as f64;
         println!(
             "GEO radius A/B (n={n}, r={radius}m, x{reps}): full-scan={full_ns}ns bbox-prune={prune_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
+    }
+
+    #[test]
+    fn geo_neighbor_cell_scan_matches_full_scan_and_speeds_up_radius() {
+        use super::{
+            GeoSort, geo_collect_candidate, geo_encode_wgs84, geo_radius_bbox, geo_search_core,
+        };
+
+        let key = b"geo";
+        let mut store = Store::new();
+        let mut state: u64 = 0x243F_6A88_85A3_08D3;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut unit = || (next() >> 11) as f64 / (1u64 << 53) as f64;
+
+        let n = 60_000usize;
+        let mut adds: Vec<(f64, Vec<u8>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let lon = (unit() * 360.0) - 180.0;
+            let lat = (unit() * 170.0) - 85.0;
+            if let Some(bits) = geo_encode_wgs84(lon, lat) {
+                adds.push((bits as f64, format!("m{i}").into_bytes()));
+            }
+        }
+        store.zadd(key, &adds, 0).unwrap();
+
+        // Oracle: the full bbox+borrow scan (ascending score,member order).
+        fn oracle(store: &mut Store, key: &[u8], clon: f64, clat: f64, radius: f64) -> Vec<(Vec<u8>, f64)> {
+            let bb = geo_radius_bbox(clon, clat, radius);
+            let mut r: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
+            store
+                .zset_for_each_asc(key, 0, |m, s| {
+                    geo_collect_candidate(m, s, clon, clat, radius, bb, &mut r)
+                })
+                .unwrap();
+            r.into_iter().map(|(m, _s, d, _lo, _la)| (m, d)).collect()
+        }
+
+        // Coverage + order: the neighbour-cell scan must match the full scan
+        // exactly, across small/medium/large radii, high latitudes, and the
+        // antimeridian (where longitude cells wrap).
+        let radii = [50.0, 1_000.0, 25_000.0, 200_000.0, 1_500_000.0, 9_000_000.0];
+        let centers = [
+            (0.0, 0.0),
+            (179.9, 0.0),
+            (-179.9, 12.0),
+            (0.0, 84.5),
+            (0.0, -84.5),
+            (45.0, 70.0),
+        ];
+        for &(clon, clat) in &centers {
+            for &radius in &radii {
+                let got = geo_search_core(
+                    &mut store, key, clon, clat, radius, None, GeoSort::Unspecified, false, 0,
+                )
+                .unwrap()
+                .into_iter()
+                .map(|(m, _s, d, _lo, _la)| (m, d))
+                .collect::<Vec<_>>();
+                let exp = oracle(&mut store, key, clon, clat, radius);
+                assert_eq!(got, exp, "neighbour scan mismatch at c=({clon},{clat}) r={radius}");
+            }
+        }
+        // Random fuzz over centers/radii.
+        for _ in 0..1500 {
+            let clon = (unit() * 360.0) - 180.0;
+            let clat = (unit() * 168.0) - 84.0;
+            let radius = 10f64.powf(1.0 + unit() * 6.0); // ~10m .. 10000km
+            let got = geo_search_core(
+                &mut store, key, clon, clat, radius, None, GeoSort::Unspecified, false, 0,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|(m, _s, d, _lo, _la)| (m, d))
+            .collect::<Vec<_>>();
+            let exp = oracle(&mut store, key, clon, clat, radius);
+            assert_eq!(got, exp, "neighbour scan fuzz mismatch c=({clon},{clat}) r={radius}");
+        }
+
+        // A/B: small radius over the whole set — neighbour scan touches only a
+        // few cells, the full scan decodes every member.
+        let (clon, clat, radius) = (10.0f64, 40.0f64, 30_000.0f64);
+        let reps = 300;
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            c0 = c0.wrapping_add(oracle(&mut store, key, clon, clat, radius).len());
+        }
+        let full_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            c1 = c1.wrapping_add(
+                geo_search_core(&mut store, key, clon, clat, radius, None, GeoSort::Unspecified, false, 0)
+                    .unwrap()
+                    .len(),
+            );
+        }
+        let nbr_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        let ratio = full_ns as f64 / nbr_ns as f64;
+        println!(
+            "GEO radius neighbour A/B (n={n}, r={radius}m, x{reps}): full-scan={full_ns}ns neighbour={nbr_ns}ns ratio={ratio:.2}x"
         );
         assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
     }

@@ -550,6 +550,19 @@ impl SortedSet {
             .filter_map(|sm| sm.member.as_actual().map(|member| (member, &sm.score)))
     }
 
+    /// Invoke `f` for each (member, score) whose score lies in the inclusive
+    /// range `[lo, hi]`, in ascending (score, member) order, borrowing members.
+    /// Uses the ordered index's range walk (O(log n + matched)). (frankenredis-7hg0r)
+    fn for_each_in_score_range(&self, lo: f64, hi: f64, mut f: impl FnMut(&[u8], f64)) {
+        let lo_bound = ScoreMember::min_for_score(canonicalize_zero_score(lo));
+        let hi_bound = ScoreMember::max_for_score(canonicalize_zero_score(hi));
+        for (sm, _) in self.ordered.range(lo_bound..=hi_bound) {
+            if let Some(member) = sm.member.as_actual() {
+                f(member, sm.score);
+            }
+        }
+    }
+
     fn iter_desc(&self) -> impl Iterator<Item = (&Vec<u8>, &f64)> {
         self.ordered
             .keys()
@@ -9131,6 +9144,51 @@ impl Store {
                     Value::SortedSet(zs) => {
                         for (member, &score) in zs.iter_asc() {
                             f(member, score);
+                        }
+                        entry.touch(now_ms);
+                        Ok(true)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Apply `f` to every (member, score) of the sorted set at `key` whose score
+    /// falls in any of the inclusive `ranges`, borrowing members. Each range is
+    /// walked in ascending order via the ordered index (O(ranges * log n + matched)).
+    /// Performs the SAME single expiry / LFU / touch bookkeeping as one
+    /// `zrange_withscores(key, 0, -1, now_ms)` (one lookup, one bump, one touch),
+    /// so a multi-range scan does not diverge from a single full scan on LFU or
+    /// keyspace stats. Returns Ok(true) when the key held a sorted set, Ok(false)
+    /// when missing/expired, WrongType otherwise. Caller must ensure ranges are
+    /// disjoint to avoid visiting a member twice. (frankenredis-7hg0r)
+    pub fn zset_for_each_in_score_ranges(
+        &mut self,
+        key: &[u8],
+        ranges: &[(f64, f64)],
+        now_ms: u64,
+        mut f: impl FnMut(&[u8], f64),
+    ) -> Result<bool, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        for &(lo, hi) in ranges {
+                            zs.for_each_in_score_range(lo, hi, &mut f);
                         }
                         entry.touch(now_ms);
                         Ok(true)
