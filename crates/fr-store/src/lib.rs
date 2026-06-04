@@ -13258,31 +13258,52 @@ impl Store {
         volatile_only: bool,
         sample_limit: usize,
     ) -> Vec<Vec<u8>> {
-        let candidates: Vec<Vec<u8>> = self
+        // (frankenredis-sa0uk) The previous implementation cloned EVERY eligible
+        // key into `candidates` on every call (O(n) heap allocations per
+        // eviction, O(n * evicted) when freeing memory under pressure) just to
+        // index a handful of random samples. Instead count the eligible keys
+        // (no clones), draw the SAME random indices the old loop would (identical
+        // `next_rand()` sequence and modulus, same distinct-index set), then
+        // clone ONLY the up-to-`sample_limit` sampled keys in a single pass.
+        let eligible_len = self
             .entries
-            .iter()
-            .filter_map(|(key, entry)| {
-                if !volatile_only || entry.expires_at_ms.is_some() {
-                    Some(key.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
+            .values()
+            .filter(|entry| !volatile_only || entry.expires_at_ms.is_some())
+            .count();
 
         let sample_limit = sample_limit.max(1);
-        if candidates.len() <= sample_limit {
-            return candidates;
+        if eligible_len <= sample_limit {
+            // Same as before: every eligible key, in iteration order.
+            return self
+                .entries
+                .iter()
+                .filter_map(|(key, entry)| {
+                    (!volatile_only || entry.expires_at_ms.is_some()).then(|| key.clone())
+                })
+                .collect();
         }
 
-        let mut sampled = Vec::with_capacity(sample_limit);
+        // Identical index draw to the prior loop: pull `next_rand() % eligible_len`
+        // until `sample_limit` DISTINCT indices have been chosen.
         let mut selected_indices = HashSet::with_capacity(sample_limit);
-        while sampled.len() < sample_limit {
-            let idx = self.next_rand() as usize % candidates.len();
-            if selected_indices.insert(idx)
-                && let Some(candidate) = candidates.get(idx)
-            {
-                sampled.push(candidate.clone());
+        while selected_indices.len() < sample_limit {
+            let idx = self.next_rand() as usize % eligible_len;
+            selected_indices.insert(idx);
+        }
+
+        // Single pass: clone only the keys at the selected eligible-indices. The
+        // resulting order differs from the old generation order, but the LRU/LFU/
+        // TTL scorers pick the victim by score with a key-value tie-break,
+        // independent of sample position — so the chosen victim is unchanged.
+        let mut sampled = Vec::with_capacity(sample_limit);
+        for (eligible_idx, (key, _entry)) in self
+            .entries
+            .iter()
+            .filter(|(_, entry)| !volatile_only || entry.expires_at_ms.is_some())
+            .enumerate()
+        {
+            if selected_indices.contains(&eligible_idx) {
+                sampled.push(key.clone());
             }
         }
         sampled
@@ -23417,6 +23438,94 @@ mod tests {
         let ratio = cold_ns as f64 / warm_ns as f64;
         println!(
             "ZREMRANGEBYRANK deep A/B (n={n}, rank={deep}, x{reps}): linear={cold_ns}ns treap={warm_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
+    }
+
+    #[test]
+    fn eviction_sampling_matches_old_clone_all_and_reports_ab_ratio() {
+        // Replica of the prior implementation (materialise every eligible key,
+        // then pick distinct random indices) for an apples-to-apples comparison.
+        fn old_sample(store: &mut Store, volatile_only: bool, sample_limit: usize) -> Vec<Vec<u8>> {
+            let candidates: Vec<Vec<u8>> = store
+                .entries
+                .iter()
+                .filter_map(|(k, e)| {
+                    (!volatile_only || e.expires_at_ms.is_some()).then(|| k.clone())
+                })
+                .collect();
+            let sample_limit = sample_limit.max(1);
+            if candidates.len() <= sample_limit {
+                return candidates;
+            }
+            let mut sampled = Vec::new();
+            let mut sel = std::collections::HashSet::new();
+            while sampled.len() < sample_limit {
+                let idx = store.next_rand() as usize % candidates.len();
+                if sel.insert(idx) {
+                    sampled.push(candidates[idx].clone());
+                }
+            }
+            sampled
+        }
+        let build = |n: usize| {
+            let mut s = Store::new();
+            for i in 0..n {
+                s.zadd(format!("k{i:06}").into_bytes().as_slice(), &[(1.0, b"m".to_vec())], 0)
+                    .unwrap();
+            }
+            s
+        };
+
+        // Equivalence: on the SAME store (one HashMap instance has a fixed
+        // iteration order; two instances would each pick a random RandomState
+        // seed and differ), resetting the deterministic RNG between calls, the
+        // new and old paths produce the same sample set. Covers the sampling
+        // branch (eligible > limit) and the take-all branch.
+        for &sl in &[1usize, 5, 10, 64] {
+            let mut s = build(3000);
+            let seed = s.rng_seed;
+            let mut ob = old_sample(&mut s, false, sl);
+            s.rng_seed = seed;
+            let mut na = s.sampled_eviction_candidate_keys(false, sl);
+            na.sort();
+            ob.sort();
+            assert_eq!(na, ob, "sampling mismatch at sample_limit={sl}");
+        }
+        {
+            let mut s = build(3);
+            let seed = s.rng_seed;
+            let mut ob = old_sample(&mut s, false, 10);
+            s.rng_seed = seed;
+            let mut na = s.sampled_eviction_candidate_keys(false, 10);
+            na.sort();
+            ob.sort();
+            assert_eq!(na, ob, "take-all branch mismatch");
+        }
+
+        // A/B: a large keyspace. Old clones every key on each call; new clones
+        // only the sampled ones.
+        let n = 100_000usize;
+        let mut a = build(n);
+        let mut b = build(n);
+        let reps = 200;
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            c0 = c0.wrapping_add(old_sample(&mut b, false, 10).len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            c1 = c1.wrapping_add(a.sampled_eviction_candidate_keys(false, 10).len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "Eviction-sampling A/B (n={n}, sample=10, x{reps}): clone-all={old_ns}ns sample-only={new_ns}ns ratio={ratio:.2}x"
         );
         assert!(ratio > 2.0, "expected >2x, got {ratio:.2}x");
     }
