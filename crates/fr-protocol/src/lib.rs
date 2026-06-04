@@ -392,7 +392,11 @@ pub fn format_redis_double(value: f64) -> String {
     let (mantissa, exp_str) = sci.split_once('e').expect("{:e} always emits 'e'");
     let scientific_exp: i32 = exp_str.parse().expect("{:e} exponent is an integer");
     let neg = mantissa.starts_with('-');
-    let digits: String = mantissa.bytes().filter(u8::is_ascii_digit).map(char::from).collect();
+    let digits: String = mantissa
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .map(char::from)
+        .collect();
     let ndigits = digits.len() as i32;
     let k = scientific_exp - (ndigits - 1);
     let exp_abs = scientific_exp.abs();
@@ -1759,7 +1763,11 @@ mod tests {
             (1.6e-19, "1.6e-19"),
         ];
         for (value, expected) in cases {
-            assert_eq!(&format_redis_double(*value), expected, "format_redis_double({value:?})");
+            assert_eq!(
+                &format_redis_double(*value),
+                expected,
+                "format_redis_double({value:?})"
+            );
             assert_eq!(
                 RespFrame::double_from_f64(*value),
                 RespFrame::Double((*expected).to_string()),

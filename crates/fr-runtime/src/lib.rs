@@ -14904,7 +14904,7 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
         };
         let (db, logical_key) = decode_db_key(&key).unwrap_or((0, key.as_slice()));
         let rdb_value = match value {
-            Value::String(v) => RdbValue::String(v.clone()),
+            Value::String(v) => RdbValue::String(v.to_vec()),
             Value::Integer(v) => RdbValue::String(v.to_string().into_bytes()),
             Value::List(l) => RdbValue::List(l.iter().cloned().collect()),
             Value::Set(s) => {
@@ -15284,9 +15284,23 @@ mod tests {
             };
             let uses_subcommand = matches!(
                 command.as_str(),
-                "acl" | "client" | "cluster" | "command" | "config" | "debug" | "function"
-                    | "latency" | "memory" | "module" | "object" | "pubsub" | "script"
-                    | "sentinel" | "slowlog" | "xgroup" | "xinfo"
+                "acl"
+                    | "client"
+                    | "cluster"
+                    | "command"
+                    | "config"
+                    | "debug"
+                    | "function"
+                    | "latency"
+                    | "memory"
+                    | "module"
+                    | "object"
+                    | "pubsub"
+                    | "script"
+                    | "sentinel"
+                    | "slowlog"
+                    | "xgroup"
+                    | "xinfo"
             );
             if !uses_subcommand {
                 return command;

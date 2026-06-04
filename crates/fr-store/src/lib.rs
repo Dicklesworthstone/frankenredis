@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::ops::{Deref, DerefMut};
 
 /// Hash-field map backing `Value::Hash`. Uses `foldhash` (fast, HashDoS-
 /// resistant, pure-safe-Rust) instead of std SipHash for HGET/HSET/HDEL field
@@ -1043,8 +1044,10 @@ impl SetValue {
 
     fn promote_to_generic(&mut self) {
         if let SetValue::Int(v) = self {
-            let mut set =
-                GenericSet::with_capacity_and_hasher(v.len(), foldhash::quality::RandomState::default());
+            let mut set = GenericSet::with_capacity_and_hasher(
+                v.len(),
+                foldhash::quality::RandomState::default(),
+            );
             for &n in v.iter() {
                 set.insert(set_int_to_bytes(n));
             }
@@ -1257,7 +1260,7 @@ impl PartialEq for SetValue {
 /// The inner value held by a key in the store.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
-    String(Vec<u8>),
+    String(SmallStr),
     Integer(i64),
     /// Hash: uses IndexMap to preserve insertion order like Redis listpack.
     /// Boxed (64B inner) so it doesn't size every `Value`/`Entry`. (w2t01)
@@ -1278,6 +1281,95 @@ pub enum Value {
     Stream(StreamEntries),
 }
 
+const SMALL_STR_INLINE_CAP: usize = 15;
+
+/// Small string payload for `Value::String`.
+///
+/// Values up to 15 bytes fit inside the `Value` payload instead of retaining a
+/// separate heap allocation. Larger strings keep the old `Vec<u8>` storage.
+#[derive(Debug, Clone)]
+pub enum SmallStr {
+    Inline {
+        len: u8,
+        bytes: [u8; SMALL_STR_INLINE_CAP],
+    },
+    Heap(Vec<u8>),
+}
+
+impl SmallStr {
+    fn from_vec(value: Vec<u8>) -> Self {
+        if value.len() <= SMALL_STR_INLINE_CAP {
+            let mut bytes = [0; SMALL_STR_INLINE_CAP];
+            bytes[..value.len()].copy_from_slice(&value);
+            Self::Inline {
+                len: value.len() as u8,
+                bytes,
+            }
+        } else {
+            Self::Heap(value)
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
+            Self::Heap(bytes) => bytes,
+        }
+    }
+
+    fn make_heap(&mut self) -> &mut Vec<u8> {
+        if let Self::Inline { .. } = self {
+            let bytes = self.as_slice().to_vec();
+            *self = Self::Heap(bytes);
+        }
+        match self {
+            Self::Heap(bytes) => bytes,
+            Self::Inline { .. } => unreachable!("inline value was materialized as heap"),
+        }
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        match self {
+            Self::Inline { len, bytes } => bytes[..usize::from(len)].to_vec(),
+            Self::Heap(bytes) => bytes,
+        }
+    }
+}
+
+impl Deref for SmallStr {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl DerefMut for SmallStr {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.make_heap().as_mut_slice()
+    }
+}
+
+impl From<Vec<u8>> for SmallStr {
+    fn from(value: Vec<u8>) -> Self {
+        Self::from_vec(value)
+    }
+}
+
+impl From<&[u8]> for SmallStr {
+    fn from(value: &[u8]) -> Self {
+        Self::from_vec(value.to_vec())
+    }
+}
+
+impl PartialEq for SmallStr {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for SmallStr {}
+
 impl Value {
     fn string_bytes(&self) -> Option<Cow<'_, [u8]>> {
         match self {
@@ -1289,7 +1381,7 @@ impl Value {
 
     fn string_owned(&self) -> Option<Vec<u8>> {
         match self {
-            Self::String(bytes) => Some(bytes.clone()),
+            Self::String(bytes) => Some(bytes.to_vec()),
             Self::Integer(value) => Some(value.to_string().into_bytes()),
             _ => None,
         }
@@ -1309,10 +1401,10 @@ impl Value {
 
     fn materialize_string(&mut self) -> Option<&mut Vec<u8>> {
         if let Self::Integer(value) = self {
-            *self = Self::String(value.to_string().into_bytes());
+            *self = Self::String(value.to_string().into_bytes().into());
         }
         match self {
-            Self::String(bytes) => Some(bytes),
+            Self::String(bytes) => Some(bytes.make_heap()),
             _ => None,
         }
     }
@@ -1321,7 +1413,7 @@ impl Value {
 fn canonical_string_value(value: Vec<u8>) -> Value {
     match parse_i64(value.as_slice()) {
         Ok(integer) => Value::Integer(integer),
-        Err(_) => Value::String(value),
+        Err(_) => Value::String(value.into()),
     }
 }
 
@@ -3388,7 +3480,9 @@ impl Store {
         match set.as_generic() {
             Some(generic) => {
                 generic.len() <= max_listpack_entries
-                    && generic.iter().all(|member| member.len() <= max_listpack_value)
+                    && generic
+                        .iter()
+                        .all(|member| member.len() <= max_listpack_value)
             }
             None => false, // an intset is never listpack-encoded
         }
@@ -3819,7 +3913,7 @@ impl Store {
             let len = value.len();
             self.internal_entries_insert(
                 key.to_vec(),
-                Entry::new(Value::String(value.to_vec()), None, now_ms),
+                Entry::new(Value::String(value.to_vec().into()), None, now_ms),
             );
             self.dirty = self.dirty.saturating_add(1);
             Ok(len)
@@ -3988,7 +4082,7 @@ impl Store {
         // never int. Even when the result text round-trips as an
         // integer (e.g. "1"), OBJECT ENCODING reports embstr.
         // (br-frankenredis-incrfloatenc)
-        let mut entry = Entry::new(Value::String(next.clone()), expires_at_ms, now_ms);
+        let mut entry = Entry::new(Value::String(next.clone().into()), expires_at_ms, now_ms);
         entry.force_string_encoding = true;
         self.internal_entries_insert(key.to_vec(), entry);
         self.dirty = self.dirty.saturating_add(1);
@@ -4014,7 +4108,7 @@ impl Store {
         self.stream_last_ids.remove(key);
         self.dirty = self.dirty.saturating_add(1);
         match entry.value {
-            Value::String(v) => Ok(Some(v)),
+            Value::String(v) => Ok(Some(v.into_vec())),
             Value::Integer(value) => Ok(Some(value.to_string().into_bytes())),
             _ => Err(StoreError::WrongType),
         }
@@ -4130,7 +4224,7 @@ impl Store {
                 let mut current = vec![0; needed];
                 current[offset..offset + value.len()].copy_from_slice(value);
                 let new_len = current.len();
-                let mut entry = Entry::new(Value::String(current), None, now_ms);
+                let mut entry = Entry::new(Value::String(current.into()), None, now_ms);
                 // (br-frankenredis-84bv)
                 entry.force_raw_encoding = true;
                 self.internal_entries_insert(key.to_vec(), entry);
@@ -4199,7 +4293,7 @@ impl Store {
                 if value {
                     v[byte_idx] |= 1 << bit_idx;
                 }
-                let mut entry = Entry::new(Value::String(v), None, now_ms);
+                let mut entry = Entry::new(Value::String(v.into()), None, now_ms);
                 // (br-frankenredis-setbitenc) — newly-created keys
                 // also use raw encoding via dbAdd in upstream.
                 entry.force_raw_encoding = true;
@@ -4354,7 +4448,7 @@ impl Store {
         bitfield_write(&mut bytes, bit_offset, bits, value);
         let changed =
             !bytes.is_empty() || old_value != bitfield_read(&bytes, bit_offset, bits, false);
-        let mut entry = Entry::new(Value::String(bytes), None, now_ms);
+        let mut entry = Entry::new(Value::String(bytes.into()), None, now_ms);
         // Upstream bitops.c::bitfieldGeneric routes SET/INCRBY through
         // dbUnshareStringValue / dbAdd which always store values with raw
         // encoding. (br-frankenredis-bitfieldenc)
@@ -5921,7 +6015,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(Box::new(HashFieldMap::default())), now_ms);
+        self.internal_entry(key.to_vec(), Value::Hash(Box::default()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let result = {
@@ -6228,7 +6322,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(Box::new(HashFieldMap::default())), now_ms);
+        self.internal_entry(key.to_vec(), Value::Hash(Box::default()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self
@@ -6287,7 +6381,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(Box::new(HashFieldMap::default())), now_ms);
+        self.internal_entry(key.to_vec(), Value::Hash(Box::default()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let result = self
@@ -6370,7 +6464,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(Box::new(HashFieldMap::default())), now_ms);
+        self.internal_entry(key.to_vec(), Value::Hash(Box::default()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self
@@ -7749,7 +7843,7 @@ impl Store {
                     Value::Set(s) => {
                         let mut removed = 0_u64;
                         for m in members {
-                            if s.shift_remove(*m) {
+                            if s.shift_remove(m) {
                                 removed += 1;
                             }
                         }
@@ -8682,8 +8776,11 @@ impl Store {
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
         let (added, changed, is_empty, touched) = {
-            let entry =
-                self.internal_entry(key.to_vec(), Value::SortedSet(Box::new(SortedSet::new())), now_ms);
+            let entry = self.internal_entry(
+                key.to_vec(),
+                Value::SortedSet(Box::new(SortedSet::new())),
+                now_ms,
+            );
             let Value::SortedSet(zs) = &mut entry.value else {
                 return Err(StoreError::WrongType);
             };
@@ -9216,7 +9313,10 @@ impl Store {
         }
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
-        self.internal_entries_insert(key, Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms));
+        self.internal_entries_insert(
+            key,
+            Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
+        );
         // (frankenredis-bhd3u) Writing the destination set is a keyspace
         // mutation — bump dirty so ZRANGESTORE is persisted to RDB/AOF,
         // replicated, and surfaces keyspace notifications (all gate on the
@@ -9325,8 +9425,11 @@ impl Store {
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
         let (res, is_empty, touched) = {
-            let entry =
-                self.internal_entry(key.to_vec(), Value::SortedSet(Box::new(SortedSet::new())), now_ms);
+            let entry = self.internal_entry(
+                key.to_vec(),
+                Value::SortedSet(Box::new(SortedSet::new())),
+                now_ms,
+            );
             if lfu_tracking_enabled && key_existed {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
@@ -11804,7 +11907,7 @@ impl Store {
                 }
             };
             let data = hll_encode(&registers, encoding);
-            let mut entry = Entry::new(Value::String(data), expires_at, now_ms);
+            let mut entry = Entry::new(Value::String(data.into()), expires_at, now_ms);
             // Upstream hyperloglog.c builds the HLL via createHLLObject /
             // createObject(OBJ_STRING,…), so OBJECT ENCODING reports `raw`
             // regardless of the payload size — a low-cardinality sparse HLL
@@ -11964,7 +12067,7 @@ impl Store {
                 HllEncoding::Sparse
             };
         let data = hll_encode(&merged, dest_encoding);
-        let mut entry = Entry::new(Value::String(data), existing_ttl, now_ms);
+        let mut entry = Entry::new(Value::String(data.into()), existing_ttl, now_ms);
         // PFMERGE's destination is a raw-encoded HLL string, same as pfadd.
         entry.force_raw_encoding = true;
         entry.touch_write(now_ms);
@@ -11991,7 +12094,8 @@ impl Store {
                 };
                 match encoding {
                     HllEncoding::Sparse => {
-                        entry.value = Value::String(hll_encode(&registers, HllEncoding::Dense));
+                        entry.value =
+                            Value::String(hll_encode(&registers, HllEncoding::Dense).into());
                         entry.touch_write(now_ms);
                         self.dirty = self.dirty.saturating_add(1);
                     }
@@ -12083,7 +12187,8 @@ impl Store {
                 };
                 match encoding {
                     HllEncoding::Sparse => {
-                        entry.value = Value::String(hll_encode(&registers, HllEncoding::Dense));
+                        entry.value =
+                            Value::String(hll_encode(&registers, HllEncoding::Dense).into());
                         entry.touch_write(now_ms);
                         self.dirty = self.dirty.saturating_add(1);
                         Ok(Some(true))
@@ -12415,7 +12520,7 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
-                    Value::String(v) => v.clone(),
+                    Value::String(v) => v.to_vec(),
                     _ => return Err(StoreError::WrongType),
                 }
             }
@@ -12571,7 +12676,7 @@ impl Store {
                                     "BITOP total input size exceeds limit".to_string(),
                                 ));
                             }
-                            values.push(v.clone());
+                            values.push(v.to_vec());
                         }
                         _ => return Err(StoreError::WrongType),
                     }
@@ -12636,7 +12741,7 @@ impl Store {
             // Upstream creates the destination via dbAdd which uses
             // raw encoding regardless of length.
             // (br-frankenredis-bitopenc)
-            let mut entry = Entry::new(Value::String(result), None, now_ms);
+            let mut entry = Entry::new(Value::String(result.into()), None, now_ms);
             entry.force_raw_encoding = true;
             self.internal_entries_insert(dest.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
@@ -12936,7 +13041,7 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
-                    let result: Vec<bool> = members.iter().map(|m| s.contains(*m)).collect();
+                    let result: Vec<bool> = members.iter().map(|m| s.contains(m)).collect();
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
@@ -13717,9 +13822,8 @@ impl Store {
             return self
                 .entries
                 .iter()
-                .filter_map(|(key, entry)| {
-                    (!volatile_only || entry.expires_at_ms.is_some()).then(|| key.clone())
-                })
+                .filter(|(_, entry)| !volatile_only || entry.expires_at_ms.is_some())
+                .map(|(key, _)| key.clone())
                 .collect();
         }
 
@@ -14743,8 +14847,10 @@ impl Store {
                 encode_dump_quicklist2(&mut buf, l, self.list_max_listpack_size)?;
             }
             Value::Set(s) => {
-                let integer_members: Option<Vec<i64>> =
-                    s.iter().map(|member| parse_i64(member.as_ref()).ok()).collect();
+                let integer_members: Option<Vec<i64>> = s
+                    .iter()
+                    .map(|member| parse_i64(member.as_ref()).ok())
+                    .collect();
                 if entry.force_set_hashtable_encoding {
                     buf.push(RDB_TYPE_SET);
                     encode_length(&mut buf, s.len());
@@ -14918,7 +15024,7 @@ impl Store {
             RDB_TYPE_STRING => {
                 let (v, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                Value::String(v)
+                Value::String(v.into())
             }
             RDB_TYPE_LIST => {
                 // List
@@ -15280,7 +15386,7 @@ impl Store {
 
             match &entry.value {
                 Value::String(v) => {
-                    commands.push(vec![b"SET".to_vec(), logical_key.clone(), v.clone()]);
+                    commands.push(vec![b"SET".to_vec(), logical_key.clone(), v.to_vec()]);
                 }
                 Value::Integer(value) => {
                     commands.push(vec![
@@ -16826,7 +16932,11 @@ fn estimate_list_memory_usage_bytes(items: &VecDeque<Vec<u8>>) -> usize {
 }
 
 fn estimate_set_memory_usage_bytes(members: &SetValue) -> usize {
-    if members.len() <= 512 && members.iter().all(|member| parse_i64(member.as_ref()).is_ok()) {
+    if members.len() <= 512
+        && members
+            .iter()
+            .all(|member| parse_i64(member.as_ref()).is_ok())
+    {
         let payload = 8usize.saturating_add(members.len().saturating_mul(REDIS_SCORE_BYTES));
         return REDIS_OBJECT_OVERHEAD_BYTES.saturating_add(redis_allocation_size(payload));
     }
@@ -19941,7 +20051,12 @@ mod tests {
         // small sample_limit would almost never hit the handful of TTL keys.
         let mut store = Store::new();
         for i in 0..1000u32 {
-            store.set(format!("persist:{i:04}").into_bytes(), b"v".to_vec(), None, 0);
+            store.set(
+                format!("persist:{i:04}").into_bytes(),
+                b"v".to_vec(),
+                None,
+                0,
+            );
         }
         for i in 0..5u32 {
             store.set(format!("vol:{i}").into_bytes(), b"v".to_vec(), Some(100), 0);
@@ -20653,6 +20768,38 @@ mod tests {
     }
 
     #[test]
+    fn small_string_values_inline_without_changing_string_semantics() {
+        let mut store = Store::new();
+        store.set(b"s".to_vec(), b"abc".to_vec(), None, 0);
+
+        let entry = store.entries.get(b"s".as_slice()).expect("stored key");
+        match &entry.value {
+            Value::String(crate::SmallStr::Inline { len, bytes }) => {
+                assert_eq!(*len, 3);
+                assert_eq!(&bytes[..usize::from(*len)], b"abc");
+            }
+            other => panic!("small string should be inline, got {other:?}"),
+        }
+
+        assert_eq!(store.get(b"s", 0).unwrap(), Some(b"abc".to_vec()));
+        assert_eq!(store.getrange(b"s", 1, -1, 0).unwrap(), b"bc".to_vec());
+        assert_eq!(store.strlen(b"s", 0).unwrap(), 3);
+        assert_eq!(store.getdel(b"s", 0).unwrap(), Some(b"abc".to_vec()));
+
+        let large = vec![b'x'; crate::SMALL_STR_INLINE_CAP + 1];
+        store.set(b"large".to_vec(), large.clone(), None, 1);
+        let entry = store
+            .entries
+            .get(b"large".as_slice())
+            .expect("stored large key");
+        assert!(matches!(
+            &entry.value,
+            Value::String(crate::SmallStr::Heap(_))
+        ));
+        assert_eq!(store.get(b"large", 1).unwrap(), Some(large));
+    }
+
+    #[test]
     fn persist_removes_expiry() {
         let mut store = Store::new();
         store.set(b"k".to_vec(), b"v".to_vec(), Some(5000), 1000);
@@ -21358,7 +21505,9 @@ mod tests {
             // mirror the prior implementation (allocates every call)
             t.record_with_kind(&command.to_ascii_lowercase(), 1, CommandRecordKind::Success);
         }
-        let cmds = ["SET", "GET", "HSET", "INCR", "LPUSH", "ZADD", "EXPIRE", "MGET"];
+        let cmds = [
+            "SET", "GET", "HSET", "INCR", "LPUSH", "ZADD", "EXPIRE", "MGET",
+        ];
         let reps = 2_000_000usize;
         let mut t1 = CommandHistogramTracker::default();
         let t0 = std::time::Instant::now();
@@ -21370,7 +21519,11 @@ mod tests {
         let mut t2 = CommandHistogramTracker::default();
         let s0 = std::time::Instant::now();
         for i in 0..reps {
-            t2.record_with_kind(std::hint::black_box(cmds[i & 7]), 1, CommandRecordKind::Success);
+            t2.record_with_kind(
+                std::hint::black_box(cmds[i & 7]),
+                1,
+                CommandRecordKind::Success,
+            );
         }
         let new_ns = s0.elapsed().as_nanos().max(1);
         std::hint::black_box(&t2);
@@ -23771,7 +23924,7 @@ mod tests {
             ordered: BTreeMap::new(),
             cache: None,
         };
-        for (i, mem) in members.iter().enumerate() {
+        for mem in &members {
             let s = (next() % 100000) as f64;
             newz.insert(mem.clone(), s);
             oldz.insert(mem.clone(), s);
@@ -23838,20 +23991,38 @@ mod tests {
 
         // Cold path (order-statistic tree NOT yet built — zrange/zrevrange never
         // build it): capture results for every range + variant.
-        let cold_asc: Vec<_> = ranges.iter().map(|&(s, e)| store.zrange(key, s, e, 0).unwrap()).collect();
-        let cold_desc: Vec<_> = ranges.iter().map(|&(s, e)| store.zrevrange(key, s, e, 0).unwrap()).collect();
-        let cold_asc_ws: Vec<_> =
-            ranges.iter().map(|&(s, e)| store.zrange_withscores(key, s, e, 0).unwrap()).collect();
-        let cold_desc_ws: Vec<_> =
-            ranges.iter().map(|&(s, e)| store.zrevrange_withscores(key, s, e, 0).unwrap()).collect();
+        let cold_asc: Vec<_> = ranges
+            .iter()
+            .map(|&(s, e)| store.zrange(key, s, e, 0).unwrap())
+            .collect();
+        let cold_desc: Vec<_> = ranges
+            .iter()
+            .map(|&(s, e)| store.zrevrange(key, s, e, 0).unwrap())
+            .collect();
+        let cold_asc_ws: Vec<_> = ranges
+            .iter()
+            .map(|&(s, e)| store.zrange_withscores(key, s, e, 0).unwrap())
+            .collect();
+        let cold_desc_ws: Vec<_> = ranges
+            .iter()
+            .map(|&(s, e)| store.zrevrange_withscores(key, s, e, 0).unwrap())
+            .collect();
 
         // Warm the order-statistic tree via a ZRANK, then assert every by-index
         // read returns byte-identical results through the treap-select path.
         let _ = store.zrank(key, b"m050000", 0);
         let _ = store.zrevrank(key, b"m050000", 0);
         for (i, &(s, e)) in ranges.iter().enumerate() {
-            assert_eq!(store.zrange(key, s, e, 0).unwrap(), cold_asc[i], "zrange {s}..{e}");
-            assert_eq!(store.zrevrange(key, s, e, 0).unwrap(), cold_desc[i], "zrevrange {s}..{e}");
+            assert_eq!(
+                store.zrange(key, s, e, 0).unwrap(),
+                cold_asc[i],
+                "zrange {s}..{e}"
+            );
+            assert_eq!(
+                store.zrevrange(key, s, e, 0).unwrap(),
+                cold_desc[i],
+                "zrevrange {s}..{e}"
+            );
             assert_eq!(
                 store.zrange_withscores(key, s, e, 0).unwrap(),
                 cold_asc_ws[i],
@@ -23899,8 +24070,9 @@ mod tests {
         let n = 100_000usize;
         let build = || {
             let mut store = Store::new();
-            let adds: Vec<(f64, Vec<u8>)> =
-                (0..n).map(|i| ((i % 500) as f64, format!("m{i:06}").into_bytes())).collect();
+            let adds: Vec<(f64, Vec<u8>)> = (0..n)
+                .map(|i| ((i % 500) as f64, format!("m{i:06}").into_bytes()))
+                .collect();
             store.zadd(key, &adds, 0).unwrap();
             store
         };
@@ -23926,7 +24098,10 @@ mod tests {
             let remaining_warm = warm.zrange(key, 0, -1, 0).unwrap();
 
             assert_eq!(removed_cold, removed_warm, "removed count {start}..{stop}");
-            assert_eq!(remaining_cold, remaining_warm, "remaining set {start}..{stop}");
+            assert_eq!(
+                remaining_cold, remaining_warm,
+                "remaining set {start}..{stop}"
+            );
         }
 
         // A/B: remove one element at a fixed deep rank repeatedly. Cold pays an
@@ -23967,9 +24142,8 @@ mod tests {
             let candidates: Vec<Vec<u8>> = store
                 .entries
                 .iter()
-                .filter_map(|(k, e)| {
-                    (!volatile_only || e.expires_at_ms.is_some()).then(|| k.clone())
-                })
+                .filter(|(_, e)| !volatile_only || e.expires_at_ms.is_some())
+                .map(|(k, _)| k.clone())
                 .collect();
             let sample_limit = sample_limit.max(1);
             if candidates.len() <= sample_limit {
@@ -23988,8 +24162,12 @@ mod tests {
         let build = |n: usize| {
             let mut s = Store::new();
             for i in 0..n {
-                s.zadd(format!("k{i:06}").into_bytes().as_slice(), &[(1.0, b"m".to_vec())], 0)
-                    .unwrap();
+                s.zadd(
+                    format!("k{i:06}").into_bytes().as_slice(),
+                    &[(1.0, b"m".to_vec())],
+                    0,
+                )
+                .unwrap();
             }
             s
         };
@@ -24132,14 +24310,22 @@ mod tests {
         let mut model: HashSet<Vec<u8>> = HashSet::new();
         for _ in 0..50_000 {
             let member: Vec<u8> = match next() % 5 {
-                0 | 1 | 2 => (((next() % 2000) as i64) - 1000).to_string().into_bytes(),
+                0..=2 => (((next() % 2000) as i64) - 1000).to_string().into_bytes(),
                 3 => format!("0{}", next() % 100).into_bytes(),
                 _ => format!("s{}", next() % 200).into_bytes(),
             };
             if next() % 3 == 0 {
-                assert_eq!(sv.shift_remove(&member), model.remove(&member), "rm {member:?}");
+                assert_eq!(
+                    sv.shift_remove(&member),
+                    model.remove(&member),
+                    "rm {member:?}"
+                );
             } else {
-                assert_eq!(sv.insert(member.clone(), 64), model.insert(member.clone()), "ins {member:?}");
+                assert_eq!(
+                    sv.insert(member.clone(), 64),
+                    model.insert(member.clone()),
+                    "ins {member:?}"
+                );
             }
             assert_eq!(sv.len(), model.len());
             assert_eq!(sv.contains(&member), model.contains(&member));
@@ -24323,7 +24509,9 @@ mod tests {
             let adds: Vec<(f64, Vec<u8>)> = Vec::new();
             let _ = adds;
             for i in 0..n {
-                store.sadd(key, &[format!("m{i:06}").into_bytes()], 0).unwrap();
+                store
+                    .sadd(key, &[format!("m{i:06}").into_bytes()], 0)
+                    .unwrap();
             }
             store
         };
@@ -24337,7 +24525,10 @@ mod tests {
         assert_eq!(uniq.len(), 10, "positive count must be distinct");
         let neg = store.srandmember_count(key, -10, 0).unwrap();
         assert_eq!(neg.len(), 10);
-        assert_eq!(store.srandmember_count(key, n + 50, 0).unwrap().len(), n as usize);
+        assert_eq!(
+            store.srandmember_count(key, n + 50, 0).unwrap().len(),
+            n as usize
+        );
 
         // A/B: small sample over a large set. Old path materialised every member;
         // the new path clones only the sampled ones.
@@ -24363,7 +24554,13 @@ mod tests {
         let t1 = std::time::Instant::now();
         let mut c1 = 0usize;
         for _ in 0..reps {
-            c1 = c1.wrapping_add(b.srandmember_count(key, -10, 0).unwrap().iter().map(Vec::len).sum::<usize>());
+            c1 = c1.wrapping_add(
+                b.srandmember_count(key, -10, 0)
+                    .unwrap()
+                    .iter()
+                    .map(Vec::len)
+                    .sum::<usize>(),
+            );
         }
         let new_ns = t1.elapsed().as_nanos().max(1);
         std::hint::black_box(c1);
@@ -27227,7 +27424,10 @@ mod tests {
         );
         // Loose guard (de-flake convention): removing one of two keyspace
         // lookups per read; isolated ~1.6-1.9x, compresses under contention.
-        assert!(ratio > 1.2, "redundant-lookup elimination regressed: {ratio:.2}x");
+        assert!(
+            ratio > 1.2,
+            "redundant-lookup elimination regressed: {ratio:.2}x"
+        );
     }
 
     #[test]
@@ -27276,7 +27476,10 @@ mod tests {
             new_ns / 1_000_000,
             eliminated_ns / 1_000_000,
         );
-        assert!(ratio > 2.0, "expected >2x by dropping discarded digest hashing, got {ratio:.2}x");
+        assert!(
+            ratio > 2.0,
+            "expected >2x by dropping discarded digest hashing, got {ratio:.2}x"
+        );
     }
 
     #[test]
@@ -27321,7 +27524,10 @@ mod tests {
         assert_eq!(acc0, acc1, "membership results must match");
         let sip_order: Vec<&Vec<u8>> = sip.iter().collect();
         let fold_order: Vec<&Vec<u8>> = fold.iter().collect();
-        assert_eq!(sip_order, fold_order, "IndexSet iteration order must not depend on the hasher");
+        assert_eq!(
+            sip_order, fold_order,
+            "IndexSet iteration order must not depend on the hasher"
+        );
 
         let ratio = sip_ns as f64 / fold_ns as f64;
         println!(
@@ -27331,7 +27537,10 @@ mod tests {
             fold_ns / 1_000_000,
         );
         // Loose guard (isolated ~2.3x; compresses under parallel test contention).
-        assert!(ratio > 1.2, "foldhash generic-set membership regressed: {ratio:.2}x");
+        assert!(
+            ratio > 1.2,
+            "foldhash generic-set membership regressed: {ratio:.2}x"
+        );
     }
 
     #[test]
@@ -27348,8 +27557,7 @@ mod tests {
             .map(|i| format!("field:attribute:{i:010}:name").into_bytes())
             .collect();
         let mut sip: IndexMap<Vec<u8>, u64> = IndexMap::default();
-        let mut fold: IndexMap<Vec<u8>, u64, foldhash::quality::RandomState> =
-            IndexMap::default();
+        let mut fold: IndexMap<Vec<u8>, u64, foldhash::quality::RandomState> = IndexMap::default();
         for (i, f) in fields.iter().enumerate() {
             sip.insert(f.clone(), i as u64);
             fold.insert(f.clone(), i as u64);
@@ -27378,7 +27586,10 @@ mod tests {
         // Insertion order must be hasher-independent (the parity guarantee).
         let sip_order: Vec<&Vec<u8>> = sip.keys().collect();
         let fold_order: Vec<&Vec<u8>> = fold.keys().collect();
-        assert_eq!(sip_order, fold_order, "IndexMap iteration order must not depend on the hasher");
+        assert_eq!(
+            sip_order, fold_order,
+            "IndexMap iteration order must not depend on the hasher"
+        );
 
         let ratio = sip_ns as f64 / fold_ns as f64;
         println!(
@@ -27391,7 +27602,10 @@ mod tests {
         // ratio compresses, so the regression guard is loose to avoid flaking
         // (matches the popcount/CRC A/B convention — correctness is the hard
         // assert, the ratio is reported).
-        assert!(ratio > 1.2, "foldhash hash-field lookup regressed: {ratio:.2}x");
+        assert!(
+            ratio > 1.2,
+            "foldhash hash-field lookup regressed: {ratio:.2}x"
+        );
     }
 
     #[test]
@@ -27475,7 +27689,10 @@ mod tests {
         );
         // Loose regression guard (isolated ~2.3x; compresses under parallel
         // `cargo test` contention) — see hash-field A/B for rationale.
-        assert!(ratio > 1.2, "foldhash keyspace lookup regressed: {ratio:.2}x");
+        assert!(
+            ratio > 1.2,
+            "foldhash keyspace lookup regressed: {ratio:.2}x"
+        );
     }
 
     #[test]
@@ -33185,7 +33402,7 @@ mod tests {
                             .get(&physical_key)
                             .expect("all_keys entries must exist");
                         let value = match &entry.value {
-                            crate::Value::String(bytes) => AofValueSnapshot::String(bytes.clone()),
+                            crate::Value::String(bytes) => AofValueSnapshot::String(bytes.to_vec()),
                             crate::Value::Integer(value) => {
                                 AofValueSnapshot::String(value.to_string().into_bytes())
                             }

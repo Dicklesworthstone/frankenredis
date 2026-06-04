@@ -3492,7 +3492,6 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
     }
 }
 
-#[inline]
 /// Pack up to 8 ASCII-uppercased bytes of a command name into a `u64`.
 /// Only ASCII lowercase letters are folded (matching `to_ascii_uppercase`
 /// / `eq_ignore_ascii_case` semantics exactly) so non-letter bytes never
@@ -6134,7 +6133,15 @@ fn geo_search_core(
     match geo_radius_cell_ranges(center_lon, center_lat, radius_m) {
         Some(ranges) => {
             store.zset_for_each_in_score_ranges(key, &ranges, now_ms, |member, score| {
-                geo_collect_candidate(member, score, center_lon, center_lat, radius_m, bb, &mut results);
+                geo_collect_candidate(
+                    member,
+                    score,
+                    center_lon,
+                    center_lat,
+                    radius_m,
+                    bb,
+                    &mut results,
+                );
             })?;
             // Per-cell scan order is not global; restore ascending (score, member)
             // order so SORT_NONE output and the stable ASC/DESC tie-breaks match
@@ -6147,7 +6154,15 @@ fn geo_search_core(
         }
         None => {
             store.zset_for_each_asc(key, now_ms, |member, score| {
-                geo_collect_candidate(member, score, center_lon, center_lat, radius_m, bb, &mut results);
+                geo_collect_candidate(
+                    member,
+                    score,
+                    center_lon,
+                    center_lat,
+                    radius_m,
+                    bb,
+                    &mut results,
+                );
             })?;
         }
     }
@@ -6822,9 +6837,23 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // are unchanged. (frankenredis-b9utp)
         match geo_box_cell_ranges(cx, cy, half_w, half_h) {
             Some(ranges) => {
-                store.zset_for_each_in_score_ranges(&argv[1], &ranges, now_ms, |member, score| {
-                    geo_collect_box_candidate(member, score, cx, cy, half_w, half_h, bb, &mut results);
-                })?;
+                store.zset_for_each_in_score_ranges(
+                    &argv[1],
+                    &ranges,
+                    now_ms,
+                    |member, score| {
+                        geo_collect_box_candidate(
+                            member,
+                            score,
+                            cx,
+                            cy,
+                            half_w,
+                            half_h,
+                            bb,
+                            &mut results,
+                        );
+                    },
+                )?;
                 // Restore ascending (score, member) order to match the full scan.
                 results.sort_by(|a, b| {
                     a.1.partial_cmp(&b.1)
@@ -6834,7 +6863,16 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             }
             None => {
                 store.zset_for_each_asc(&argv[1], now_ms, |member, score| {
-                    geo_collect_box_candidate(member, score, cx, cy, half_w, half_h, bb, &mut results);
+                    geo_collect_box_candidate(
+                        member,
+                        score,
+                        cx,
+                        cy,
+                        half_w,
+                        half_h,
+                        bb,
+                        &mut results,
+                    );
                 })?;
             }
         }
@@ -14293,11 +14331,7 @@ fn compute_lcs_len_scalar(a: &[u8], b: &[u8]) -> usize {
 
 /// Low-`k`-bits mask (`k <= 64`); `lcs_low_mask(64) == u64::MAX`. (frankenredis-mug2e)
 fn lcs_low_mask(k: usize) -> u64 {
-    if k >= 64 {
-        u64::MAX
-    } else {
-        (1u64 << k) - 1
-    }
+    if k >= 64 { u64::MAX } else { (1u64 << k) - 1 }
 }
 
 /// LCS dynamic-programming oracle shared by `compute_lcs` and
@@ -24234,8 +24268,8 @@ fn mix_debug_object_digest(store: &mut Store, key: &[u8], now_ms: u64, digest: &
         Value::Hash(fields) => {
             for (field, value) in fields.iter() {
                 let mut element_digest = [0u8; 20];
-                mix_digest(&mut element_digest, &field);
-                mix_digest(&mut element_digest, &value);
+                mix_digest(&mut element_digest, field);
+                mix_digest(&mut element_digest, value);
                 xor_digest(digest, &element_digest);
             }
         }
@@ -26575,7 +26609,11 @@ mod tests {
             let nb = 1 + (next() % 4) as usize;
             let a: Vec<u8> = (0..la).map(|_| b'a' + (next() % na as u64) as u8).collect();
             let b: Vec<u8> = (0..lb).map(|_| b'a' + (next() % nb as u64) as u8).collect();
-            let (s, l) = if a.len() < b.len() { (&a, &b) } else { (&b, &a) };
+            let (s, l) = if a.len() < b.len() {
+                (&a, &b)
+            } else {
+                (&b, &a)
+            };
             assert_eq!(
                 compute_lcs_len(&a, &b),
                 compute_lcs_len_scalar(s, l),
@@ -26596,14 +26634,20 @@ mod tests {
         let t0 = std::time::Instant::now();
         let mut acc = 0usize;
         for _ in 0..reps {
-            acc = acc.wrapping_add(compute_lcs_len_scalar(std::hint::black_box(s), std::hint::black_box(l)));
+            acc = acc.wrapping_add(compute_lcs_len_scalar(
+                std::hint::black_box(s),
+                std::hint::black_box(l),
+            ));
         }
         let scalar_ns = t0.elapsed().as_nanos().max(1);
         std::hint::black_box(acc);
         let t1 = std::time::Instant::now();
         let mut acc2 = 0usize;
         for _ in 0..reps {
-            acc2 = acc2.wrapping_add(compute_lcs_len(std::hint::black_box(&a), std::hint::black_box(&b)));
+            acc2 = acc2.wrapping_add(compute_lcs_len(
+                std::hint::black_box(&a),
+                std::hint::black_box(&b),
+            ));
         }
         let bitpar_ns = t1.elapsed().as_nanos().max(1);
         std::hint::black_box(acc2);
@@ -26710,8 +26754,8 @@ mod tests {
         for _ in 0..6000 {
             let la = lens[(next() as usize) % lens.len()];
             let lb = lens[(next() as usize) % lens.len()];
-            let na = 1 + (next() % 4) as u64;
-            let nb = 1 + (next() % 4) as u64;
+            let na = 1 + (next() % 4);
+            let nb = 1 + (next() % 4);
             let a: Vec<u8> = (0..la).map(|_| b'a' + (next() % na) as u8).collect();
             let b: Vec<u8> = (0..lb).map(|_| b'a' + (next() % nb) as u8).collect();
             assert_eq!(
@@ -26725,7 +26769,11 @@ mod tests {
                     .into_iter()
                     .map(|m| (m.a_start, m.a_end, m.b_start, m.b_end, m.len))
                     .collect();
-                assert_eq!(got, full_matches(&a, &b, mml), "matches a={a:?} b={b:?} mml={mml}");
+                assert_eq!(
+                    got,
+                    full_matches(&a, &b, mml),
+                    "matches a={a:?} b={b:?} mml={mml}"
+                );
             }
         }
 
@@ -26851,7 +26899,10 @@ mod tests {
         .collect();
         ref_set.sort_by(|a, b| a.0.cmp(&b.0));
         got.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(got, ref_set, "pruned search must match the full scan exactly");
+        assert_eq!(
+            got, ref_set,
+            "pruned search must match the full scan exactly"
+        );
 
         let reps = 200;
         let t0 = std::time::Instant::now();
@@ -26918,7 +26969,13 @@ mod tests {
         store.zadd(key, &adds, 0).unwrap();
 
         // Oracle: the full bbox+borrow scan (ascending score,member order).
-        fn oracle(store: &mut Store, key: &[u8], clon: f64, clat: f64, radius: f64) -> Vec<(Vec<u8>, f64)> {
+        fn oracle(
+            store: &mut Store,
+            key: &[u8],
+            clon: f64,
+            clat: f64,
+            radius: f64,
+        ) -> Vec<(Vec<u8>, f64)> {
             let bb = geo_radius_bbox(clon, clat, radius);
             let mut r: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
             store
@@ -26944,14 +27001,25 @@ mod tests {
         for &(clon, clat) in &centers {
             for &radius in &radii {
                 let got = geo_search_core(
-                    &mut store, key, clon, clat, radius, None, GeoSort::Unspecified, false, 0,
+                    &mut store,
+                    key,
+                    clon,
+                    clat,
+                    radius,
+                    None,
+                    GeoSort::Unspecified,
+                    false,
+                    0,
                 )
                 .unwrap()
                 .into_iter()
                 .map(|(m, _s, d, _lo, _la)| (m, d))
                 .collect::<Vec<_>>();
                 let exp = oracle(&mut store, key, clon, clat, radius);
-                assert_eq!(got, exp, "neighbour scan mismatch at c=({clon},{clat}) r={radius}");
+                assert_eq!(
+                    got, exp,
+                    "neighbour scan mismatch at c=({clon},{clat}) r={radius}"
+                );
             }
         }
         // Random fuzz over centers/radii.
@@ -26960,14 +27028,25 @@ mod tests {
             let clat = (unit() * 168.0) - 84.0;
             let radius = 10f64.powf(1.0 + unit() * 6.0); // ~10m .. 10000km
             let got = geo_search_core(
-                &mut store, key, clon, clat, radius, None, GeoSort::Unspecified, false, 0,
+                &mut store,
+                key,
+                clon,
+                clat,
+                radius,
+                None,
+                GeoSort::Unspecified,
+                false,
+                0,
             )
             .unwrap()
             .into_iter()
             .map(|(m, _s, d, _lo, _la)| (m, d))
             .collect::<Vec<_>>();
             let exp = oracle(&mut store, key, clon, clat, radius);
-            assert_eq!(got, exp, "neighbour scan fuzz mismatch c=({clon},{clat}) r={radius}");
+            assert_eq!(
+                got, exp,
+                "neighbour scan fuzz mismatch c=({clon},{clat}) r={radius}"
+            );
         }
 
         // A/B: small radius over the whole set — neighbour scan touches only a
@@ -26985,9 +27064,19 @@ mod tests {
         let mut c1 = 0usize;
         for _ in 0..reps {
             c1 = c1.wrapping_add(
-                geo_search_core(&mut store, key, clon, clat, radius, None, GeoSort::Unspecified, false, 0)
-                    .unwrap()
-                    .len(),
+                geo_search_core(
+                    &mut store,
+                    key,
+                    clon,
+                    clat,
+                    radius,
+                    None,
+                    GeoSort::Unspecified,
+                    false,
+                    0,
+                )
+                .unwrap()
+                .len(),
             );
         }
         let nbr_ns = t1.elapsed().as_nanos().max(1);
@@ -27001,7 +27090,9 @@ mod tests {
 
     #[test]
     fn geo_box_neighbor_cell_scan_matches_full_scan_and_speeds_up_bybox() {
-        use super::{geo_box_bbox, geo_box_cell_ranges, geo_collect_box_candidate, geo_encode_wgs84};
+        use super::{
+            geo_box_bbox, geo_box_cell_ranges, geo_collect_box_candidate, geo_encode_wgs84,
+        };
 
         let key = b"geo";
         let mut store = Store::new();
@@ -27025,15 +27116,31 @@ mod tests {
         }
         store.zadd(key, &adds, 0).unwrap();
 
-        fn oracle(store: &mut Store, key: &[u8], cx: f64, cy: f64, hw: f64, hh: f64) -> Vec<(Vec<u8>, f64)> {
+        fn oracle(
+            store: &mut Store,
+            key: &[u8],
+            cx: f64,
+            cy: f64,
+            hw: f64,
+            hh: f64,
+        ) -> Vec<(Vec<u8>, f64)> {
             let bb = geo_box_bbox(cx, cy, hw, hh);
             let mut r: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
             store
-                .zset_for_each_asc(key, 0, |m, s| geo_collect_box_candidate(m, s, cx, cy, hw, hh, bb, &mut r))
+                .zset_for_each_asc(key, 0, |m, s| {
+                    geo_collect_box_candidate(m, s, cx, cy, hw, hh, bb, &mut r)
+                })
                 .unwrap();
             r.into_iter().map(|(m, _s, d, _lo, _la)| (m, d)).collect()
         }
-        fn neighbor(store: &mut Store, key: &[u8], cx: f64, cy: f64, hw: f64, hh: f64) -> Vec<(Vec<u8>, f64)> {
+        fn neighbor(
+            store: &mut Store,
+            key: &[u8],
+            cx: f64,
+            cy: f64,
+            hw: f64,
+            hh: f64,
+        ) -> Vec<(Vec<u8>, f64)> {
             let bb = geo_box_bbox(cx, cy, hw, hh);
             let mut r: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
             match geo_box_cell_ranges(cx, cy, hw, hh) {
@@ -27044,12 +27151,16 @@ mod tests {
                         })
                         .unwrap();
                     r.sort_by(|a, b| {
-                        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.0.cmp(&b.0))
+                        a.1.partial_cmp(&b.1)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| a.0.cmp(&b.0))
                     });
                 }
                 None => {
                     store
-                        .zset_for_each_asc(key, 0, |m, s| geo_collect_box_candidate(m, s, cx, cy, hw, hh, bb, &mut r))
+                        .zset_for_each_asc(key, 0, |m, s| {
+                            geo_collect_box_candidate(m, s, cx, cy, hw, hh, bb, &mut r)
+                        })
                         .unwrap();
                 }
             }
@@ -27057,13 +27168,22 @@ mod tests {
         }
 
         let halfs = [25.0, 1_000.0, 30_000.0, 400_000.0, 2_000_000.0, 9_000_000.0];
-        let centers = [(0.0, 0.0), (179.8, 0.0), (-179.8, 10.0), (0.0, 84.0), (30.0, 72.0)];
+        let centers = [
+            (0.0, 0.0),
+            (179.8, 0.0),
+            (-179.8, 10.0),
+            (0.0, 84.0),
+            (30.0, 72.0),
+        ];
         for &(cx, cy) in &centers {
             for &hw in &halfs {
                 for &hh in &halfs {
                     let got = neighbor(&mut store, key, cx, cy, hw, hh);
                     let exp = oracle(&mut store, key, cx, cy, hw, hh);
-                    assert_eq!(got, exp, "box neighbour mismatch c=({cx},{cy}) hw={hw} hh={hh}");
+                    assert_eq!(
+                        got, exp,
+                        "box neighbour mismatch c=({cx},{cy}) hw={hw} hh={hh}"
+                    );
                 }
             }
         }
@@ -27074,7 +27194,10 @@ mod tests {
             let hh = 10f64.powf(1.0 + unit() * 6.0);
             let got = neighbor(&mut store, key, cx, cy, hw, hh);
             let exp = oracle(&mut store, key, cx, cy, hw, hh);
-            assert_eq!(got, exp, "box neighbour fuzz mismatch c=({cx},{cy}) hw={hw} hh={hh}");
+            assert_eq!(
+                got, exp,
+                "box neighbour fuzz mismatch c=({cx},{cy}) hw={hw} hh={hh}"
+            );
         }
 
         // A/B: small box over the whole set.
@@ -27103,7 +27226,9 @@ mod tests {
 
     #[test]
     fn geo_box_bbox_is_a_superset_and_speeds_up_bybox() {
-        use super::{geo_box_bbox, geo_decode_score, geo_distance_m, geo_encode_wgs84, geo_point_in_box};
+        use super::{
+            geo_box_bbox, geo_decode_score, geo_distance_m, geo_encode_wgs84, geo_point_in_box,
+        };
 
         let mut state: u64 = 0xD1B5_4A32_D192_ED03;
         let mut next = || {
@@ -27192,7 +27317,10 @@ mod tests {
         let mut b = new_scan(&mut store);
         a.sort_by(|x, y| x.0.cmp(&y.0));
         b.sort_by(|x, y| x.0.cmp(&y.0));
-        assert_eq!(a, b, "bbox+borrow BYBOX scan must match the full scan exactly");
+        assert_eq!(
+            a, b,
+            "bbox+borrow BYBOX scan must match the full scan exactly"
+        );
 
         let reps = 200;
         let t0 = std::time::Instant::now();
@@ -27246,8 +27374,22 @@ mod tests {
 
         // N-S gate equals the pure latitude distance, independent of longitude.
         let lat1_dist = geo_lat_distance_m(0.0, 1.0);
-        assert!(!geo_point_in_box(0.0, 0.0, 0.0, 1.0, f64::INFINITY, lat1_dist - 1.0));
-        assert!(geo_point_in_box(0.0, 0.0, 0.0, 1.0, f64::INFINITY, lat1_dist + 1.0));
+        assert!(!geo_point_in_box(
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            f64::INFINITY,
+            lat1_dist - 1.0
+        ));
+        assert!(geo_point_in_box(
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            f64::INFINITY,
+            lat1_dist + 1.0
+        ));
 
         // Points on the center parallel are unchanged by the fix.
         for &dlon in &[0.5f64, 1.0, 2.0] {
@@ -27599,22 +27741,69 @@ mod tests {
     #[inline(never)]
     fn classify6_byte_fold(cmd: &[u8]) -> u32 {
         let e = eq_ascii_command_byte_fold;
-        if e(cmd, b"EXPIRE") { 1 } else if e(cmd, b"EXISTS") { 2 }
-        else if e(cmd, b"GETSET") { 3 } else if e(cmd, b"LPUSHX") { 4 }
-        else if e(cmd, b"RPUSHX") { 5 } else if e(cmd, b"INCRBY") { 6 }
-        else if e(cmd, b"DECRBY") { 7 } else if e(cmd, b"APPEND") { 8 }
-        else if e(cmd, b"STRLEN") { 9 } else if e(cmd, b"RENAME") { 10 }
-        else if e(cmd, b"GETDEL") { 11 } else if e(cmd, b"SUBSTR") { 12 }
-        else if e(cmd, b"LRANGE") { 13 } else if e(cmd, b"LINDEX") { 14 }
-        else if e(cmd, b"SINTER") { 15 } else if e(cmd, b"SUNION") { 16 }
-        else if e(cmd, b"ZSCORE") { 17 } else if e(cmd, b"ZRANGE") { 18 }
-        else if e(cmd, b"ZCOUNT") { 19 } else if e(cmd, b"HSETNX") { 20 }
-        else if e(cmd, b"BITPOS") { 21 } else if e(cmd, b"DBSIZE") { 22 }
-        else if e(cmd, b"MEMORY") { 23 } else if e(cmd, b"UNLINK") { 24 }
-        else if e(cmd, b"PSETEX") { 25 } else if e(cmd, b"SETBIT") { 26 }
-        else if e(cmd, b"GETBIT") { 27 } else if e(cmd, b"LOLWUT") { 28 }
-        else if e(cmd, b"SCRIPT") { 29 } else if e(cmd, b"PUBSUB") { 30 }
-        else { 0 }
+        if e(cmd, b"EXPIRE") {
+            1
+        } else if e(cmd, b"EXISTS") {
+            2
+        } else if e(cmd, b"GETSET") {
+            3
+        } else if e(cmd, b"LPUSHX") {
+            4
+        } else if e(cmd, b"RPUSHX") {
+            5
+        } else if e(cmd, b"INCRBY") {
+            6
+        } else if e(cmd, b"DECRBY") {
+            7
+        } else if e(cmd, b"APPEND") {
+            8
+        } else if e(cmd, b"STRLEN") {
+            9
+        } else if e(cmd, b"RENAME") {
+            10
+        } else if e(cmd, b"GETDEL") {
+            11
+        } else if e(cmd, b"SUBSTR") {
+            12
+        } else if e(cmd, b"LRANGE") {
+            13
+        } else if e(cmd, b"LINDEX") {
+            14
+        } else if e(cmd, b"SINTER") {
+            15
+        } else if e(cmd, b"SUNION") {
+            16
+        } else if e(cmd, b"ZSCORE") {
+            17
+        } else if e(cmd, b"ZRANGE") {
+            18
+        } else if e(cmd, b"ZCOUNT") {
+            19
+        } else if e(cmd, b"HSETNX") {
+            20
+        } else if e(cmd, b"BITPOS") {
+            21
+        } else if e(cmd, b"DBSIZE") {
+            22
+        } else if e(cmd, b"MEMORY") {
+            23
+        } else if e(cmd, b"UNLINK") {
+            24
+        } else if e(cmd, b"PSETEX") {
+            25
+        } else if e(cmd, b"SETBIT") {
+            26
+        } else if e(cmd, b"GETBIT") {
+            27
+        } else if e(cmd, b"LOLWUT") {
+            28
+        } else if e(cmd, b"SCRIPT") {
+            29
+        } else if e(cmd, b"PUBSUB") {
+            30
+        } else {
+            0
+        }
     }
 
     // New dispatch shape: identical chain but each compare is the packed-u64
@@ -27624,22 +27813,69 @@ mod tests {
     #[inline(never)]
     fn classify6_packed(cmd: &[u8]) -> u32 {
         let e = super::eq_ascii_command;
-        if e(cmd, b"EXPIRE") { 1 } else if e(cmd, b"EXISTS") { 2 }
-        else if e(cmd, b"GETSET") { 3 } else if e(cmd, b"LPUSHX") { 4 }
-        else if e(cmd, b"RPUSHX") { 5 } else if e(cmd, b"INCRBY") { 6 }
-        else if e(cmd, b"DECRBY") { 7 } else if e(cmd, b"APPEND") { 8 }
-        else if e(cmd, b"STRLEN") { 9 } else if e(cmd, b"RENAME") { 10 }
-        else if e(cmd, b"GETDEL") { 11 } else if e(cmd, b"SUBSTR") { 12 }
-        else if e(cmd, b"LRANGE") { 13 } else if e(cmd, b"LINDEX") { 14 }
-        else if e(cmd, b"SINTER") { 15 } else if e(cmd, b"SUNION") { 16 }
-        else if e(cmd, b"ZSCORE") { 17 } else if e(cmd, b"ZRANGE") { 18 }
-        else if e(cmd, b"ZCOUNT") { 19 } else if e(cmd, b"HSETNX") { 20 }
-        else if e(cmd, b"BITPOS") { 21 } else if e(cmd, b"DBSIZE") { 22 }
-        else if e(cmd, b"MEMORY") { 23 } else if e(cmd, b"UNLINK") { 24 }
-        else if e(cmd, b"PSETEX") { 25 } else if e(cmd, b"SETBIT") { 26 }
-        else if e(cmd, b"GETBIT") { 27 } else if e(cmd, b"LOLWUT") { 28 }
-        else if e(cmd, b"SCRIPT") { 29 } else if e(cmd, b"PUBSUB") { 30 }
-        else { 0 }
+        if e(cmd, b"EXPIRE") {
+            1
+        } else if e(cmd, b"EXISTS") {
+            2
+        } else if e(cmd, b"GETSET") {
+            3
+        } else if e(cmd, b"LPUSHX") {
+            4
+        } else if e(cmd, b"RPUSHX") {
+            5
+        } else if e(cmd, b"INCRBY") {
+            6
+        } else if e(cmd, b"DECRBY") {
+            7
+        } else if e(cmd, b"APPEND") {
+            8
+        } else if e(cmd, b"STRLEN") {
+            9
+        } else if e(cmd, b"RENAME") {
+            10
+        } else if e(cmd, b"GETDEL") {
+            11
+        } else if e(cmd, b"SUBSTR") {
+            12
+        } else if e(cmd, b"LRANGE") {
+            13
+        } else if e(cmd, b"LINDEX") {
+            14
+        } else if e(cmd, b"SINTER") {
+            15
+        } else if e(cmd, b"SUNION") {
+            16
+        } else if e(cmd, b"ZSCORE") {
+            17
+        } else if e(cmd, b"ZRANGE") {
+            18
+        } else if e(cmd, b"ZCOUNT") {
+            19
+        } else if e(cmd, b"HSETNX") {
+            20
+        } else if e(cmd, b"BITPOS") {
+            21
+        } else if e(cmd, b"DBSIZE") {
+            22
+        } else if e(cmd, b"MEMORY") {
+            23
+        } else if e(cmd, b"UNLINK") {
+            24
+        } else if e(cmd, b"PSETEX") {
+            25
+        } else if e(cmd, b"SETBIT") {
+            26
+        } else if e(cmd, b"GETBIT") {
+            27
+        } else if e(cmd, b"LOLWUT") {
+            28
+        } else if e(cmd, b"SCRIPT") {
+            29
+        } else if e(cmd, b"PUBSUB") {
+            30
+        } else {
+            0
+        }
     }
 
     #[test]
@@ -27648,16 +27884,55 @@ mod tests {
         // (input, literal) pair — including non-letter bytes that a naive
         // `& !0x20` fold would mishandle (e.g. '_' (0x5F) -> 'O' (0x4F)).
         let literals: &[&[u8]] = &[
-            b"GET", b"SET", b"DEL", b"TTL", b"LCS", b"PING", b"HSET",
-            b"ZADD", b"EXPIRE", b"EXISTS", b"GETSET", b"LPUSH", b"INCRBY",
-            b"CONFIG", b"BZPOPMAX", b"SMEMBERS", b"GETRANGE", b"SINTERCARD",
+            b"GET",
+            b"SET",
+            b"DEL",
+            b"TTL",
+            b"LCS",
+            b"PING",
+            b"HSET",
+            b"ZADD",
+            b"EXPIRE",
+            b"EXISTS",
+            b"GETSET",
+            b"LPUSH",
+            b"INCRBY",
+            b"CONFIG",
+            b"BZPOPMAX",
+            b"SMEMBERS",
+            b"GETRANGE",
+            b"SINTERCARD",
         ];
         let inputs: &[&[u8]] = &[
-            b"get", b"GET", b"GeT", b"gett", b"ge", b"zzz", b"set", b"SET",
-            b"expire", b"EXPIRE", b"ExPiRe", b"c_nfig", b"CONFIG", b"config",
-            b"_____", b"GETSE_", b"hset", b"HSET", b"\x00\x00\x00", b"ZADD",
-            b"smembers", b"GETRANGE", b"getrang", b"bzpopmax", b"[\\]^_`",
-            b"SINTERCARD", b"sintercard", b"SINTERCAR", b"",
+            b"get",
+            b"GET",
+            b"GeT",
+            b"gett",
+            b"ge",
+            b"zzz",
+            b"set",
+            b"SET",
+            b"expire",
+            b"EXPIRE",
+            b"ExPiRe",
+            b"c_nfig",
+            b"CONFIG",
+            b"config",
+            b"_____",
+            b"GETSE_",
+            b"hset",
+            b"HSET",
+            b"\x00\x00\x00",
+            b"ZADD",
+            b"smembers",
+            b"GETRANGE",
+            b"getrang",
+            b"bzpopmax",
+            b"[\\]^_`",
+            b"SINTERCARD",
+            b"sintercard",
+            b"SINTERCAR",
+            b"",
         ];
         for lit in literals {
             for inp in inputs {
@@ -27728,7 +28003,10 @@ mod tests {
             old_ns / 1_000_000,
             new_ns / 1_000_000,
         );
-        assert!(ratio > 2.0, "expected >2x dispatch speedup, got {ratio:.2}x");
+        assert!(
+            ratio > 2.0,
+            "expected >2x dispatch speedup, got {ratio:.2}x"
+        );
     }
 
     #[test]
