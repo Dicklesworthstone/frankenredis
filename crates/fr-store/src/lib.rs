@@ -1290,6 +1290,35 @@ impl CommandHistogramTracker {
         // to send commands uppercase, breaking grep parity with
         // vendored. INFO Commandstats already lowercased on emission,
         // masking the bug for that one path.
+        //
+        // (frankenredis-igx7w) This runs on every command, so avoid the
+        // per-command heap allocation of `to_ascii_lowercase()`: lowercase the
+        // name into a stack buffer and probe the existing entry (the common
+        // case) without allocating, paying the owned-key allocation only on the
+        // first occurrence of each command. Command names are short ASCII; the
+        // rare longer name (e.g. an attacker's unknown command) takes the heap
+        // path. Byte-identical canonical key in all cases.
+        let bytes = command.as_bytes();
+        if bytes.len() <= 40 {
+            let mut buf = [0u8; 40];
+            let lower = &mut buf[..bytes.len()];
+            for (dst, &src) in lower.iter_mut().zip(bytes) {
+                *dst = src.to_ascii_lowercase();
+            }
+            // ASCII-lowercasing valid UTF-8 yields valid UTF-8 (only A-Z change,
+            // both ASCII), so this never fails.
+            if let Ok(key) = std::str::from_utf8(lower) {
+                if let Some(hist) = self.histograms.get_mut(key) {
+                    hist.record_with_kind(latency_us, kind);
+                    return;
+                }
+                self.histograms
+                    .entry(key.to_string())
+                    .or_default()
+                    .record_with_kind(latency_us, kind);
+                return;
+            }
+        }
         self.histograms
             .entry(command.to_ascii_lowercase())
             .or_default()
@@ -20404,6 +20433,57 @@ mod tests {
                 .hash_field_expires
                 .contains_key(&(b"db0:h".to_vec(), b"f".to_vec())),
             "old (db0:h, f) row must be gone"
+        );
+    }
+
+    #[test]
+    fn command_histogram_record_canonicalizes_and_reports_ab_ratio() {
+        use super::{CommandHistogramTracker, CommandRecordKind};
+        // Case-insensitive canonicalization: SET/set/Set all land on "set", and
+        // the count aggregates (byte-identical to the to_ascii_lowercase path).
+        // (frankenredis-igx7w)
+        let mut t = CommandHistogramTracker::default();
+        t.record_with_kind("SET", 10, CommandRecordKind::Success);
+        t.record_with_kind("set", 20, CommandRecordKind::Success);
+        t.record_with_kind("Set", 30, CommandRecordKind::Success);
+        t.record_with_kind("GET", 5, CommandRecordKind::Success);
+        let all = t.all();
+        let keys: Vec<&str> = all.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, vec!["get", "set"], "canonical lowercase keys");
+        // Long-name (>40 bytes) fallback path stays correct.
+        let long = "x".repeat(60);
+        let long_upper = long.to_uppercase();
+        t.record_with_kind(&long_upper, 1, CommandRecordKind::Success);
+        assert!(t.get(&long).is_some(), "long-name fallback canonicalizes");
+        // Container subcommand fullnames ("config|get") canonicalize too.
+        t.record_with_kind("CONFIG|GET", 1, CommandRecordKind::Success);
+        assert!(t.get("config|get").is_some());
+
+        // A/B: per-command record() — stack-buffer probe vs the old
+        // entry(to_ascii_lowercase()) heap-allocating path.
+        fn old_record(t: &mut CommandHistogramTracker, command: &str) {
+            // mirror the prior implementation (allocates every call)
+            t.record_with_kind(&command.to_ascii_lowercase(), 1, CommandRecordKind::Success);
+        }
+        let cmds = ["SET", "GET", "HSET", "INCR", "LPUSH", "ZADD", "EXPIRE", "MGET"];
+        let reps = 2_000_000usize;
+        let mut t1 = CommandHistogramTracker::default();
+        let t0 = std::time::Instant::now();
+        for i in 0..reps {
+            old_record(&mut t1, std::hint::black_box(cmds[i & 7]));
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(&t1);
+        let mut t2 = CommandHistogramTracker::default();
+        let s0 = std::time::Instant::now();
+        for i in 0..reps {
+            t2.record_with_kind(std::hint::black_box(cmds[i & 7]), 1, CommandRecordKind::Success);
+        }
+        let new_ns = s0.elapsed().as_nanos().max(1);
+        std::hint::black_box(&t2);
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "command-stats record A/B (x{reps}): old(alloc)={old_ns}ns new(stackbuf)={new_ns}ns ratio={ratio:.2}x"
         );
     }
 
