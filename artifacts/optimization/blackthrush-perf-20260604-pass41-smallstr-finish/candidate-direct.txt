@@ -1,0 +1,5 @@
+keys=300000
+set_ns=261011484
+get_ns=1078403
+logical_memory=19200000
+checksum=12059077148044926219

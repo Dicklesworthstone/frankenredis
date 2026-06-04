@@ -4934,21 +4934,25 @@ impl Store {
             return None;
         }
         let entry = self.entries.get(key)?;
-        let Value::String(v) = &entry.value else {
-            return Some(1);
-        };
         if entry.force_raw_encoding || entry.force_string_encoding {
             return Some(1);
         }
-        let Ok(s) = std::str::from_utf8(v) else {
-            return Some(1);
+        let n = match &entry.value {
+            Value::Integer(value) => *value,
+            Value::String(v) => {
+                let Ok(s) = std::str::from_utf8(v) else {
+                    return Some(1);
+                };
+                let Ok(n) = s.parse::<i64>() else {
+                    return Some(1);
+                };
+                if n.to_string() != s {
+                    return Some(1);
+                }
+                n
+            }
+            _ => return Some(1),
         };
-        let Ok(n) = s.parse::<i64>() else {
-            return Some(1);
-        };
-        if n.to_string() != s {
-            return Some(1);
-        }
         const OBJ_SHARED_INTEGERS: i64 = 10000;
         if !(0..OBJ_SHARED_INTEGERS).contains(&n) {
             return Some(1);
