@@ -248,16 +248,40 @@ fn wrong_arity_error(command: &'static str) -> RespFrame {
     ))
 }
 
-fn client_info_command_name(argv: &[Vec<u8>]) -> String {
+/// Append `bytes` to `out`, ASCII-lowercased, with the same result as
+/// `out.push_str(&String::from_utf8_lossy(bytes).to_ascii_lowercase())` but
+/// without an intermediate allocation for the common valid-UTF-8 case (char-wise
+/// `to_ascii_lowercase` equals byte-wise for ASCII; multi-byte chars unchanged).
+/// (frankenredis-hackk)
+fn push_ascii_lowercase_lossy(out: &mut String, bytes: &[u8]) {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => {
+            for ch in s.chars() {
+                out.push(ch.to_ascii_lowercase());
+            }
+        }
+        Err(_) => out.push_str(&String::from_utf8_lossy(bytes).to_ascii_lowercase()),
+    }
+}
+
+/// Write the canonical lowercase command name (with `parent|sub` for container
+/// commands) into `out`, reusing its buffer instead of allocating a fresh String
+/// each command — this runs on every command via `execute_dispatch`. Byte-
+/// identical to the prior `client_info_command_name` return value.
+/// (frankenredis-hackk)
+fn write_client_info_command_name(out: &mut String, argv: &[Vec<u8>]) {
+    out.clear();
     let Some(command) = argv.first() else {
-        return "NULL".to_string();
+        out.push_str("NULL");
+        return;
     };
-    let command = String::from_utf8_lossy(command).to_ascii_lowercase();
+    push_ascii_lowercase_lossy(out, command);
     let Some(sub) = argv.get(1) else {
-        return command;
+        return;
     };
+    // `out` currently holds exactly the lowercased command name.
     let uses_subcommand = matches!(
-        command.as_str(),
+        out.as_str(),
         "acl"
             | "client"
             | "cluster"
@@ -277,10 +301,10 @@ fn client_info_command_name(argv: &[Vec<u8>]) -> String {
             | "xinfo"
     );
     if !uses_subcommand {
-        return command;
+        return;
     }
-    let sub = String::from_utf8_lossy(sub).to_ascii_lowercase();
-    format!("{command}|{sub}")
+    out.push('|');
+    push_ascii_lowercase_lossy(out, sub);
 }
 
 fn acl_log_age_seconds(now_ms: u64, timestamp_ms: u64) -> String {
@@ -5203,7 +5227,7 @@ impl Runtime {
         // on the owned/conformance path, or moved out of the parsed frame on the
         // server hot path) and reused for both stats and execution.
         if let Ok(argv) = &argv_result {
-            self.session.last_command_name = client_info_command_name(argv);
+            write_client_info_command_name(&mut self.session.last_command_name, argv);
         }
         // (frankenredis-2prp1) Inline the record_client_session call to
         // avoid the redundant clone — the BTreeMap insert below already
@@ -15244,6 +15268,81 @@ mod tests {
 
     fn argv(parts: &[&[u8]]) -> Vec<Vec<u8>> {
         parts.iter().map(|part| (*part).to_vec()).collect()
+    }
+
+    #[test]
+    fn last_command_name_buffer_reuse_matches_reference_and_reports_ab_ratio() {
+        use super::write_client_info_command_name;
+        // Reference = the prior allocating implementation. (frankenredis-hackk)
+        fn old_ref(argv: &[Vec<u8>]) -> String {
+            let Some(command) = argv.first() else {
+                return "NULL".to_string();
+            };
+            let command = String::from_utf8_lossy(command).to_ascii_lowercase();
+            let Some(sub) = argv.get(1) else {
+                return command;
+            };
+            let uses_subcommand = matches!(
+                command.as_str(),
+                "acl" | "client" | "cluster" | "command" | "config" | "debug" | "function"
+                    | "latency" | "memory" | "module" | "object" | "pubsub" | "script"
+                    | "sentinel" | "slowlog" | "xgroup" | "xinfo"
+            );
+            if !uses_subcommand {
+                return command;
+            }
+            let sub = String::from_utf8_lossy(sub).to_ascii_lowercase();
+            format!("{command}|{sub}")
+        }
+        let cases: Vec<Vec<Vec<u8>>> = vec![
+            vec![],
+            vec![b"GET".to_vec()],
+            vec![b"set".to_vec(), b"k".to_vec()],
+            vec![b"CONFIG".to_vec(), b"GET".to_vec()],
+            vec![b"config".to_vec(), b"SET".to_vec(), b"x".to_vec()],
+            vec![b"Client".to_vec(), b"SetName".to_vec()],
+            vec![b"OBJECT".to_vec(), b"ENCODING".to_vec()],
+            vec![b"XINFO".to_vec(), b"STREAM".to_vec()],
+            vec![b"GET".to_vec(), b"k".to_vec()], // GET with arg: not a container
+            vec![vec![0xff, 0xfe, b'A']],         // invalid UTF-8 fallback
+            vec![b"acl".to_vec()],                // container without sub
+            vec![b"MEMORY".to_vec(), vec![0xff, b'B']], // sub invalid UTF-8
+        ];
+        let mut buf = String::new();
+        for argv in &cases {
+            write_client_info_command_name(&mut buf, argv);
+            assert_eq!(buf, old_ref(argv), "argv={argv:?}");
+        }
+        // Reuse keeps producing correct results across calls on the same buffer.
+        for argv in &cases {
+            write_client_info_command_name(&mut buf, argv);
+            assert_eq!(buf, old_ref(argv));
+        }
+
+        // A/B: per-command name materialization — buffer reuse vs fresh String.
+        let argv = vec![b"CONFIG".to_vec(), b"GET".to_vec()];
+        let reps = 3_000_000usize;
+        let t0 = std::time::Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..reps {
+            let s = old_ref(std::hint::black_box(&argv));
+            sink = sink.wrapping_add(s.len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(sink);
+        let mut b = String::new();
+        let t1 = std::time::Instant::now();
+        let mut sink2 = 0usize;
+        for _ in 0..reps {
+            write_client_info_command_name(&mut b, std::hint::black_box(&argv));
+            sink2 = sink2.wrapping_add(b.len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(sink2);
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "last_command_name A/B (x{reps}): old(alloc)={old_ns}ns new(reuse)={new_ns}ns ratio={ratio:.2}x"
+        );
     }
 
     #[test]
