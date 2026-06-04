@@ -14,6 +14,12 @@ use std::ops::Bound::{Excluded, Included, Unbounded};
 /// the internal field-index probe. (frankenredis-rqdxh, extends 8kuy1)
 type HashFieldMap = IndexMap<Vec<u8>, Vec<u8>, foldhash::quality::RandomState>;
 
+/// Generic (hash-backed) set encoding behind `SetValue::Generic` — the non-int
+/// string set. foldhash (not SipHash) for fast SADD/SREM/SISMEMBER membership;
+/// `IndexSet` iterates in INSERTION order regardless of hasher, so
+/// SMEMBERS/SSCAN/SPOP output is byte-identical. (frankenredis-rqdxh follow-up)
+type GenericSet = IndexSet<Vec<u8>, foldhash::quality::RandomState>;
+
 /// Redis-compatible version string. Single source of truth for all version reporting.
 pub const REDIS_COMPAT_VERSION: &str = "7.2.4";
 
@@ -968,7 +974,7 @@ pub enum SetValue {
     /// Sorted-ascending, unique i64 members (intset encoding).
     Int(Vec<i64>),
     /// Insertion-ordered byte-string members (generic encoding).
-    Generic(IndexSet<Vec<u8>>),
+    Generic(GenericSet),
 }
 
 /// Canonical decimal bytes for `n` (round-trips through `parse_i64`).
@@ -1037,7 +1043,8 @@ impl SetValue {
 
     fn promote_to_generic(&mut self) {
         if let SetValue::Int(v) = self {
-            let mut set = IndexSet::with_capacity(v.len());
+            let mut set =
+                GenericSet::with_capacity_and_hasher(v.len(), foldhash::quality::RandomState::default());
             for &n in v.iter() {
                 set.insert(set_int_to_bytes(n));
             }
@@ -1108,7 +1115,7 @@ impl SetValue {
 
     /// The underlying `IndexSet` for the generic encoding (used by the
     /// listpack-vs-hashtable encoding helpers); `None` for an intset.
-    pub(crate) fn as_generic(&self) -> Option<&IndexSet<Vec<u8>>> {
+    pub(crate) fn as_generic(&self) -> Option<&GenericSet> {
         match self {
             SetValue::Generic(s) => Some(s),
             SetValue::Int(_) => None,
@@ -1141,7 +1148,7 @@ impl SetValue {
 
     /// Build the optimal encoding (intset when all members are canonical
     /// integers within the limit) from an existing `IndexSet`.
-    pub(crate) fn from_index_set(set: IndexSet<Vec<u8>>, max_intset_entries: usize) -> Self {
+    pub(crate) fn from_index_set(set: GenericSet, max_intset_entries: usize) -> Self {
         let mut sv = SetValue::new();
         sv.extend(set, max_intset_entries);
         sv
@@ -1193,7 +1200,10 @@ impl SetValue {
         };
         if let Some(merged) = merged {
             if merged.len() > max_intset_entries {
-                let mut generic = IndexSet::with_capacity(merged.len());
+                let mut generic = GenericSet::with_capacity_and_hasher(
+                    merged.len(),
+                    foldhash::quality::RandomState::default(),
+                );
                 for n in merged {
                     generic.insert(set_int_to_bytes(n));
                 }
@@ -3429,7 +3439,7 @@ impl Store {
         }
     }
 
-    fn set_entry(&self, set: IndexSet<Vec<u8>>, expires_at_ms: Option<u64>, now_ms: u64) -> Entry {
+    fn set_entry(&self, set: GenericSet, expires_at_ms: Option<u64>, now_ms: u64) -> Entry {
         let set = SetValue::from_index_set(set, self.set_max_intset_entries);
         let mut entry = Entry::new(Value::Set(set), expires_at_ms, now_ms);
         Self::refresh_set_encoding_flags(
@@ -7654,7 +7664,7 @@ impl Store {
                 }
             }
             None => {
-                let mut s = IndexSet::new();
+                let mut s = GenericSet::default();
                 let mut added = 0_u64;
                 for m in members {
                     if s.insert(m.clone()) {
@@ -8533,7 +8543,7 @@ impl Store {
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
-            let set: IndexSet<Vec<u8>> = result.into_iter().collect();
+            let set: GenericSet = result.into_iter().collect();
             let entry = self.set_entry(set, None, now_ms);
             self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
@@ -8555,7 +8565,7 @@ impl Store {
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
-            let set: IndexSet<Vec<u8>> = result.into_iter().collect();
+            let set: GenericSet = result.into_iter().collect();
             let entry = self.set_entry(set, None, now_ms);
             self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
@@ -8577,7 +8587,7 @@ impl Store {
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
-            let set: IndexSet<Vec<u8>> = result.into_iter().collect();
+            let set: GenericSet = result.into_iter().collect();
             let entry = self.set_entry(set, None, now_ms);
             self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
@@ -14876,7 +14886,7 @@ impl Store {
                 if count == 0 {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                let mut set = IndexSet::new();
+                let mut set = GenericSet::default();
                 for _ in 0..count {
                     let (member, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += consumed;
@@ -15063,7 +15073,7 @@ impl Store {
             RDB_TYPE_SET_INTSET => {
                 let (intset, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                let mut set = IndexSet::new();
+                let mut set = GenericSet::default();
                 for member in decode_intset_members(&intset)? {
                     set.insert(member);
                 }
@@ -15078,7 +15088,7 @@ impl Store {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
                 let members = decode_listpack_strings(&listpack)?;
-                let mut set = IndexSet::new();
+                let mut set = GenericSet::default();
                 for member in members {
                     if !set.insert(member) {
                         return Err(StoreError::InvalidDumpPayload);
@@ -27111,6 +27121,61 @@ mod tests {
         let v = store.get(b"bm", 0).unwrap().unwrap();
         assert_eq!(v.len(), 3);
         assert!(store.getbit(b"bm", 20, 0).unwrap());
+    }
+
+    #[test]
+    fn foldhash_generic_set_membership_beats_siphash_ab() {
+        // (frankenredis-rqdxh follow-up) SetValue::Generic (non-int string set)
+        // now uses foldhash for SADD/SREM/SISMEMBER membership. IndexSet iterates
+        // in insertion order regardless of hasher, so SMEMBERS/SSCAN/SPOP output
+        // is unchanged — a test asserts order-invariance; the A/B measures the
+        // membership probe.
+        use indexmap::IndexSet;
+        use std::time::Instant;
+
+        let members: Vec<Vec<u8>> = (0..20_000u32)
+            .map(|i| format!("set:member:{i:010}:value").into_bytes())
+            .collect();
+        let mut sip: IndexSet<Vec<u8>> = IndexSet::default();
+        let mut fold: IndexSet<Vec<u8>, foldhash::quality::RandomState> = IndexSet::default();
+        for m in &members {
+            sip.insert(m.clone());
+            fold.insert(m.clone());
+        }
+
+        let reps = 100u32;
+        let t0 = Instant::now();
+        let mut acc0 = 0u64;
+        for _ in 0..reps {
+            for m in &members {
+                acc0 += u64::from(sip.contains(m.as_slice()));
+            }
+        }
+        let sip_ns = t0.elapsed().as_nanos().max(1);
+
+        let t1 = Instant::now();
+        let mut acc1 = 0u64;
+        for _ in 0..reps {
+            for m in &members {
+                acc1 += u64::from(fold.contains(m.as_slice()));
+            }
+        }
+        let fold_ns = t1.elapsed().as_nanos().max(1);
+
+        assert_eq!(acc0, acc1, "membership results must match");
+        let sip_order: Vec<&Vec<u8>> = sip.iter().collect();
+        let fold_order: Vec<&Vec<u8>> = fold.iter().collect();
+        assert_eq!(sip_order, fold_order, "IndexSet iteration order must not depend on the hasher");
+
+        let ratio = sip_ns as f64 / fold_ns as f64;
+        println!(
+            "generic-set membership A/B ({} members x{reps}): siphash {} ms -> foldhash {} ms = {ratio:.2}x",
+            members.len(),
+            sip_ns / 1_000_000,
+            fold_ns / 1_000_000,
+        );
+        // Loose guard (isolated ~2.3x; compresses under parallel test contention).
+        assert!(ratio > 1.2, "foldhash generic-set membership regressed: {ratio:.2}x");
     }
 
     #[test]
