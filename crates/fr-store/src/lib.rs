@@ -2,6 +2,7 @@
 
 use fr_expire::evaluate_expiry;
 use indexmap::{IndexMap, IndexSet};
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
@@ -580,6 +581,7 @@ impl From<std::collections::HashMap<Vec<u8>, f64>> for SortedSet {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     String(Vec<u8>),
+    Integer(i64),
     /// Hash: uses IndexMap to preserve insertion order like Redis listpack.
     Hash(IndexMap<Vec<u8>, Vec<u8>>),
     List(VecDeque<Vec<u8>>),
@@ -589,6 +591,66 @@ pub enum Value {
     SortedSet(SortedSet),
     /// Stream entries keyed by `(milliseconds, sequence)` stream IDs.
     Stream(StreamEntries),
+}
+
+impl Value {
+    fn string_bytes(&self) -> Option<Cow<'_, [u8]>> {
+        match self {
+            Self::String(bytes) => Some(Cow::Borrowed(bytes.as_slice())),
+            Self::Integer(value) => Some(Cow::Owned(value.to_string().into_bytes())),
+            _ => None,
+        }
+    }
+
+    fn string_owned(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::String(bytes) => Some(bytes.clone()),
+            Self::Integer(value) => Some(value.to_string().into_bytes()),
+            _ => None,
+        }
+    }
+
+    fn string_len(&self) -> Option<usize> {
+        match self {
+            Self::String(bytes) => Some(bytes.len()),
+            Self::Integer(value) => Some(i64_text_len(*value)),
+            _ => None,
+        }
+    }
+
+    fn is_string_like(&self) -> bool {
+        matches!(self, Self::String(_) | Self::Integer(_))
+    }
+
+    fn materialize_string(&mut self) -> Option<&mut Vec<u8>> {
+        if let Self::Integer(value) = self {
+            *self = Self::String(value.to_string().into_bytes());
+        }
+        match self {
+            Self::String(bytes) => Some(bytes),
+            _ => None,
+        }
+    }
+}
+
+fn canonical_string_value(value: Vec<u8>) -> Value {
+    match parse_i64(value.as_slice()) {
+        Ok(integer) => Value::Integer(integer),
+        Err(_) => Value::String(value),
+    }
+}
+
+fn i64_text_len(value: i64) -> usize {
+    if value == 0 {
+        return 1;
+    }
+    let mut digits = usize::from(value.is_negative());
+    let mut n = value.unsigned_abs();
+    while n != 0 {
+        digits += 1;
+        n /= 10;
+    }
+    digits
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2671,17 +2733,16 @@ impl Store {
             0
         };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::String(v) => {
-                    let v = v.clone();
-                    if lfu_tracking_enabled {
-                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                    }
-                    entry.touch(now_ms);
-                    Ok(Some(v))
+            Some(entry) => {
+                let Some(v) = entry.value.string_owned() else {
+                    return Err(StoreError::WrongType);
+                };
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                entry.touch(now_ms);
+                Ok(Some(v))
+            }
             None => Ok(None),
         }
     }
@@ -2709,7 +2770,7 @@ impl Store {
         };
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
-        let mut entry = Entry::new(Value::String(value), expires_at_ms, now_ms);
+        let mut entry = Entry::new(canonical_string_value(value), expires_at_ms, now_ms);
         entry.lfu_freq = next_lfu_freq;
         entry.lfu_last_touch_min = now_ms / 60_000;
         self.internal_entries_insert(key, entry);
@@ -2745,7 +2806,7 @@ impl Store {
         };
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
-        let mut entry = Entry::new(Value::String(value), expires_at_ms, now_ms);
+        let mut entry = Entry::new(canonical_string_value(value), expires_at_ms, now_ms);
         entry.lfu_freq = next_lfu_freq;
         entry.lfu_last_touch_min = now_ms / 60_000;
         self.internal_entries_insert(key, entry);
@@ -2827,6 +2888,7 @@ impl Store {
         let (current, expires_at_ms) = match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::String(v) => (parse_i64(v)?, entry.expires_at_ms),
+                Value::Integer(value) => (*value, entry.expires_at_ms),
                 _ => return Err(StoreError::WrongType),
             },
             None => (0_i64, None),
@@ -2834,11 +2896,7 @@ impl Store {
         let next = current.checked_add(1).ok_or(StoreError::IntegerOverflow)?;
         self.internal_entries_insert(
             key.to_vec(),
-            Entry::new(
-                Value::String(next.to_string().into_bytes()),
-                expires_at_ms,
-                now_ms,
-            ),
+            Entry::new(Value::Integer(next), expires_at_ms, now_ms),
         );
         self.dirty = self.dirty.saturating_add(1);
         Ok(next)
@@ -2978,17 +3036,15 @@ impl Store {
             if lfu_tracking_enabled {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
-            match &mut entry.value {
-                Value::String(v) => {
-                    v.extend_from_slice(value);
-                    let len = v.len();
-                    entry.touch_write(now_ms);
-                    // (br-frankenredis-84bv)
-                    entry.force_raw_encoding = true;
-                    Ok(len)
-                }
-                _ => Err(StoreError::WrongType),
-            }
+            let Some(v) = entry.value.materialize_string() else {
+                return Err(StoreError::WrongType);
+            };
+            v.extend_from_slice(value);
+            let len = v.len();
+            entry.touch_write(now_ms);
+            // (br-frankenredis-84bv)
+            entry.force_raw_encoding = true;
+            Ok(len)
         }) {
             if result.is_ok() {
                 self.dirty = self.dirty.saturating_add(1);
@@ -3022,14 +3078,11 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
-                    Value::String(v) => {
-                        let len = v.len();
-                        entry.touch(now_ms);
-                        Ok(len)
-                    }
-                    _ => Err(StoreError::WrongType),
-                }
+                let Some(len) = entry.value.string_len() else {
+                    return Err(StoreError::WrongType);
+                };
+                entry.touch(now_ms);
+                Ok(len)
             }
             None => Ok(0),
         }
@@ -3057,14 +3110,11 @@ impl Store {
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
-                    match &entry.value {
-                        Value::String(v) => {
-                            let v = v.clone();
-                            entry.touch(now_ms);
-                            Some(v)
-                        }
-                        _ => None,
+                    let v = entry.value.string_owned();
+                    if v.is_some() {
+                        entry.touch(now_ms);
                     }
+                    v
                 }
                 None => None,
             };
@@ -3078,7 +3128,7 @@ impl Store {
         if self.entries.contains_key(&key) {
             return false;
         }
-        self.internal_entries_insert(key, Entry::new(Value::String(value), None, now_ms));
+        self.internal_entries_insert(key, Entry::new(canonical_string_value(value), None, now_ms));
         self.dirty = self.dirty.saturating_add(1);
         true
     }
@@ -3104,14 +3154,14 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 let lfu = (entry.lfu_freq, entry.lfu_last_touch_min);
-                match &entry.value {
-                    Value::String(v) => (Some(v.clone()), Some(lfu)),
-                    _ => return Err(StoreError::WrongType),
-                }
+                let Some(v) = entry.value.string_owned() else {
+                    return Err(StoreError::WrongType);
+                };
+                (Some(v), Some(lfu))
             }
             None => (None, None),
         };
-        let mut new_entry = Entry::new(Value::String(value), None, now_ms);
+        let mut new_entry = Entry::new(canonical_string_value(value), None, now_ms);
         if let Some((freq, last_touch)) = lfu_state {
             new_entry.lfu_freq = freq;
             new_entry.lfu_last_touch_min = last_touch;
@@ -3126,6 +3176,7 @@ impl Store {
         let (current, expires_at_ms) = match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::String(v) => (parse_i64(v)?, entry.expires_at_ms),
+                Value::Integer(value) => (*value, entry.expires_at_ms),
                 _ => return Err(StoreError::WrongType),
             },
             None => (0_i64, None),
@@ -3135,11 +3186,7 @@ impl Store {
             .ok_or(StoreError::IntegerOverflow)?;
         self.internal_entries_insert(
             key.to_vec(),
-            Entry::new(
-                Value::String(next.to_string().into_bytes()),
-                expires_at_ms,
-                now_ms,
-            ),
+            Entry::new(Value::Integer(next), expires_at_ms, now_ms),
         );
         self.dirty = self.dirty.saturating_add(1);
         Ok(next)
@@ -3161,12 +3208,16 @@ impl Store {
         self.drop_if_expired(key, now_ms);
         let (current, expires_at_ms) = match self.entries.get(key) {
             Some(entry) => match &entry.value {
-                Value::String(v) => (v.as_slice(), entry.expires_at_ms),
+                Value::String(v) => (Cow::Borrowed(v.as_slice()), entry.expires_at_ms),
+                Value::Integer(value) => (
+                    Cow::Owned(value.to_string().into_bytes()),
+                    entry.expires_at_ms,
+                ),
                 _ => return Err(StoreError::WrongType),
             },
-            None => (b"0".as_slice(), None),
+            None => (Cow::Borrowed(b"0".as_slice()), None),
         };
-        let next = add_float_text(current, delta_text, delta)?;
+        let next = add_float_text(current.as_ref(), delta_text, delta)?;
         // Upstream t_string.c::incrbyfloatCommand stores the result
         // via createStringObject which always produces embstr/raw,
         // never int. Even when the result text round-trips as an
@@ -3184,10 +3235,11 @@ impl Store {
             return Ok(None);
         }
         match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::String(_) => {}
-                _ => return Err(StoreError::WrongType),
-            },
+            Some(entry) => {
+                if !entry.value.is_string_like() {
+                    return Err(StoreError::WrongType);
+                }
+            }
             None => return Ok(None),
         }
         let Some(entry) = self.internal_entries_remove(key) else {
@@ -3198,6 +3250,7 @@ impl Store {
         self.dirty = self.dirty.saturating_add(1);
         match entry.value {
             Value::String(v) => Ok(Some(v)),
+            Value::Integer(value) => Ok(Some(value.to_string().into_bytes())),
             _ => Err(StoreError::WrongType),
         }
     }
@@ -3226,33 +3279,31 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 entry.touch(now_ms);
-                match &entry.value {
-                    Value::String(v) => {
-                        let len = v.len() as i64;
-                        // Upstream t_string.c::getrangeCommand normalizes
-                        // negative offsets relative to length and clamps
-                        // BOTH start and end at 0 — fr previously only
-                        // clamped start, so a fully-negative range like
-                        // (-100, -90) on a length-6 string left end=-84
-                        // and the 's > e' guard wrongly returned empty
-                        // instead of the clamped slice [0..=0].
-                        // (br-frankenredis-grangneg)
-                        let mut s = if start < 0 { len + start } else { start };
-                        let mut e = if end < 0 { len + end } else { end };
-                        if s < 0 {
-                            s = 0;
-                        }
-                        if e < 0 {
-                            e = 0;
-                        }
-                        if s > e || len == 0 || s >= len {
-                            Ok(Vec::new())
-                        } else {
-                            let e_idx = e.min(len - 1) as usize;
-                            Ok(v[s as usize..e_idx + 1].to_vec())
-                        }
-                    }
-                    _ => Err(StoreError::WrongType),
+                let Some(v) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                let len = v.len() as i64;
+                // Upstream t_string.c::getrangeCommand normalizes
+                // negative offsets relative to length and clamps
+                // BOTH start and end at 0 — fr previously only
+                // clamped start, so a fully-negative range like
+                // (-100, -90) on a length-6 string left end=-84
+                // and the 's > e' guard wrongly returned empty
+                // instead of the clamped slice [0..=0].
+                // (br-frankenredis-grangneg)
+                let mut s = if start < 0 { len + start } else { start };
+                let mut e = if end < 0 { len + end } else { end };
+                if s < 0 {
+                    s = 0;
+                }
+                if e < 0 {
+                    e = 0;
+                }
+                if s > e || len == 0 || s >= len {
+                    Ok(Vec::new())
+                } else {
+                    let e_idx = e.min(len - 1) as usize;
+                    Ok(v[s as usize..e_idx + 1].to_vec())
                 }
             }
             None => Ok(Vec::new()),
@@ -3281,10 +3332,7 @@ impl Store {
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
-                    match &entry.value {
-                        Value::String(v) => Ok(v.len()),
-                        _ => Err(StoreError::WrongType),
-                    }
+                    entry.value.string_len().ok_or(StoreError::WrongType)
                 }
                 None => Ok(0),
             };
@@ -3294,16 +3342,14 @@ impl Store {
             if lfu_tracking_enabled {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
-            let len = match &mut entry.value {
-                Value::String(v) => {
-                    if v.len() < needed {
-                        v.resize(needed, 0);
-                    }
-                    v[offset..offset + value.len()].copy_from_slice(value);
-                    v.len()
-                }
-                _ => return Err(StoreError::WrongType),
+            let Some(v) = entry.value.materialize_string() else {
+                return Err(StoreError::WrongType);
             };
+            if v.len() < needed {
+                v.resize(needed, 0);
+            }
+            v[offset..offset + value.len()].copy_from_slice(value);
+            let len = v.len();
             entry.touch_write(now_ms);
             // (br-frankenredis-84bv)
             entry.force_raw_encoding = true;
@@ -3353,29 +3399,27 @@ impl Store {
             if lfu_tracking_enabled {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
-            match &mut entry.value {
-                Value::String(v) => {
-                    let old_len = v.len();
-                    if v.len() <= byte_idx {
-                        v.resize(byte_idx + 1, 0);
-                    }
-                    let old_bit = (v[byte_idx] >> bit_idx) & 1 == 1;
-                    if value {
-                        v[byte_idx] |= 1 << bit_idx;
-                    } else {
-                        v[byte_idx] &= !(1 << bit_idx);
-                    }
-                    let changed = old_len != v.len() || old_bit != value;
-                    entry.touch_write(now_ms);
-                    // Upstream bitops.c::setbitCommand calls
-                    // dbUnshareStringValue which always converts the
-                    // value to raw, regardless of length.
-                    // (br-frankenredis-setbitenc)
-                    entry.force_raw_encoding = true;
-                    Ok((old_bit, changed))
-                }
-                _ => Err(StoreError::WrongType),
+            let Some(v) = entry.value.materialize_string() else {
+                return Err(StoreError::WrongType);
+            };
+            let old_len = v.len();
+            if v.len() <= byte_idx {
+                v.resize(byte_idx + 1, 0);
             }
+            let old_bit = (v[byte_idx] >> bit_idx) & 1 == 1;
+            if value {
+                v[byte_idx] |= 1 << bit_idx;
+            } else {
+                v[byte_idx] &= !(1 << bit_idx);
+            }
+            let changed = old_len != v.len() || old_bit != value;
+            entry.touch_write(now_ms);
+            // Upstream bitops.c::setbitCommand calls
+            // dbUnshareStringValue which always converts the
+            // value to raw, regardless of length.
+            // (br-frankenredis-setbitenc)
+            entry.force_raw_encoding = true;
+            Ok((old_bit, changed))
         }) {
             Some(result) => {
                 let (old_bit, changed) = result?;
@@ -3418,21 +3462,18 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                let is_string = matches!(&entry.value, Value::String(_));
-                if is_string {
+                if entry.value.is_string_like() {
                     entry.touch(now_ms);
                 }
-                match &entry.value {
-                    Value::String(v) => {
-                        let byte_idx = offset / 8;
-                        let bit_idx = 7 - (offset % 8);
-                        if byte_idx >= v.len() {
-                            Ok(false)
-                        } else {
-                            Ok((v[byte_idx] >> bit_idx) & 1 == 1)
-                        }
-                    }
-                    _ => Err(StoreError::WrongType),
+                let Some(v) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                let byte_idx = offset / 8;
+                let bit_idx = 7 - (offset % 8);
+                if byte_idx >= v.len() {
+                    Ok(false)
+                } else {
+                    Ok((v[byte_idx] >> bit_idx) & 1 == 1)
                 }
             }
             None => Ok(false),
@@ -3468,18 +3509,14 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                let is_string = matches!(&entry.value, Value::String(_));
-                if is_string {
+                if entry.value.is_string_like() {
                     entry.touch(now_ms);
                 }
-                match &entry.value {
-                    Value::String(v) => v.as_slice(),
-                    _ => return Err(StoreError::WrongType),
-                }
+                entry.value.string_bytes().ok_or(StoreError::WrongType)?
             }
-            None => &[],
+            None => Cow::Borrowed(&[][..]),
         };
-        Ok(bitfield_read(bytes, bit_offset, bits, signed))
+        Ok(bitfield_read(bytes.as_ref(), bit_offset, bits, signed))
     }
 
     /// Write an arbitrary-width integer field to the string at `key`.
@@ -3507,7 +3544,7 @@ impl Store {
         }
 
         if let Some(entry) = self.entries.get_mut(key) {
-            let Value::String(bytes) = &mut entry.value else {
+            let Some(bytes) = entry.value.materialize_string() else {
                 return Err(StoreError::WrongType);
             };
             let old_value = bitfield_read(bytes, bit_offset, bits, false);
@@ -3650,87 +3687,82 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                let is_string = matches!(&entry.value, Value::String(_));
-                if is_string {
+                if entry.value.is_string_like() {
                     entry.touch(now_ms);
                 }
-                match &entry.value {
-                    Value::String(v) => {
-                        let len = i64::try_from(v.len()).unwrap_or(i64::MAX);
-                        let total_len = match unit {
-                            BitRangeUnit::Byte => len,
-                            BitRangeUnit::Bit => len.saturating_mul(8),
-                        };
-                        if total_len == 0 {
-                            return Ok(0);
-                        }
+                let Some(v) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                let len = i64::try_from(v.len()).unwrap_or(i64::MAX);
+                let total_len = match unit {
+                    BitRangeUnit::Byte => len,
+                    BitRangeUnit::Bit => len.saturating_mul(8),
+                };
+                if total_len == 0 {
+                    return Ok(0);
+                }
 
-                        let mut range_start = start.unwrap_or(0);
-                        let mut range_end = end.unwrap_or(total_len - 1);
+                let mut range_start = start.unwrap_or(0);
+                let mut range_end = end.unwrap_or(total_len - 1);
 
-                        if start.is_some_and(|s| s < 0)
-                            && end.is_some_and(|e| e < 0)
-                            && range_start > range_end
-                        {
-                            return Ok(0);
-                        }
+                if start.is_some_and(|s| s < 0)
+                    && end.is_some_and(|e| e < 0)
+                    && range_start > range_end
+                {
+                    return Ok(0);
+                }
 
-                        if range_start < 0 {
-                            range_start += total_len;
-                        }
-                        if range_end < 0 {
-                            range_end += total_len;
-                        }
-                        if range_start < 0 {
-                            range_start = 0;
-                        }
-                        if range_end < 0 {
-                            range_end = 0;
-                        }
-                        if range_end >= total_len {
-                            range_end = total_len - 1;
-                        }
-                        if range_start > range_end {
-                            return Ok(0);
-                        }
+                if range_start < 0 {
+                    range_start += total_len;
+                }
+                if range_end < 0 {
+                    range_end += total_len;
+                }
+                if range_start < 0 {
+                    range_start = 0;
+                }
+                if range_end < 0 {
+                    range_end = 0;
+                }
+                if range_end >= total_len {
+                    range_end = total_len - 1;
+                }
+                if range_start > range_end {
+                    return Ok(0);
+                }
 
-                        match unit {
-                            BitRangeUnit::Byte => {
-                                let start_idx = usize::try_from(range_start)
-                                    .expect("non-negative byte range start");
-                                let end_idx = usize::try_from(range_end)
-                                    .expect("non-negative byte range end");
-                                let end_idx_excl = end_idx + 1;
-                                Ok(Self::popcount_bytes(&v[start_idx..end_idx_excl]))
-                            }
-                            BitRangeUnit::Bit => {
-                                let start_byte = usize::try_from(range_start >> 3)
-                                    .expect("non-negative bit range start byte");
-                                let end_byte = usize::try_from(range_end >> 3)
-                                    .expect("non-negative bit range end byte");
-                                let mut count: usize =
-                                    Self::popcount_bytes(&v[start_byte..=end_byte]);
-
-                                let first_byte_neg_mask =
-                                    (!((1_u16 << (8 - ((range_start & 7) as u32))) - 1) & 0xFF)
-                                        as u8;
-                                let last_byte_neg_mask =
-                                    ((1_u16 << (7 - ((range_end & 7) as u32))) - 1) as u8;
-                                if first_byte_neg_mask != 0 || last_byte_neg_mask != 0 {
-                                    let masked_edges = [
-                                        v[start_byte] & first_byte_neg_mask,
-                                        v[end_byte] & last_byte_neg_mask,
-                                    ];
-                                    count -= masked_edges
-                                        .iter()
-                                        .map(|b| b.count_ones() as usize)
-                                        .sum::<usize>();
-                                }
-                                Ok(count)
-                            }
-                        }
+                match unit {
+                    BitRangeUnit::Byte => {
+                        let start_idx =
+                            usize::try_from(range_start).expect("non-negative byte range start");
+                        let end_idx =
+                            usize::try_from(range_end).expect("non-negative byte range end");
+                        let end_idx_excl = end_idx + 1;
+                        Ok(Self::popcount_bytes(&v[start_idx..end_idx_excl]))
                     }
-                    _ => Err(StoreError::WrongType),
+                    BitRangeUnit::Bit => {
+                        let start_byte = usize::try_from(range_start >> 3)
+                            .expect("non-negative bit range start byte");
+                        let end_byte = usize::try_from(range_end >> 3)
+                            .expect("non-negative bit range end byte");
+                        let mut count: usize = Self::popcount_bytes(&v[start_byte..=end_byte]);
+
+                        let first_byte_neg_mask =
+                            (!((1_u16 << (8 - ((range_start & 7) as u32))) - 1) & 0xFF) as u8;
+                        let last_byte_neg_mask =
+                            ((1_u16 << (7 - ((range_end & 7) as u32))) - 1) as u8;
+                        if first_byte_neg_mask != 0 || last_byte_neg_mask != 0 {
+                            let masked_edges = [
+                                v[start_byte] & first_byte_neg_mask,
+                                v[end_byte] & last_byte_neg_mask,
+                            ];
+                            count -= masked_edges
+                                .iter()
+                                .map(|b| b.count_ones() as usize)
+                                .sum::<usize>();
+                        }
+                        Ok(count)
+                    }
                 }
             }
             None => Ok(0),
@@ -3762,14 +3794,10 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                let is_string = matches!(&entry.value, Value::String(_));
-                if is_string {
+                if entry.value.is_string_like() {
                     entry.touch(now_ms);
                 }
-                match &entry.value {
-                    Value::String(v) => v.as_slice(),
-                    _ => return Err(StoreError::WrongType),
-                }
+                entry.value.string_bytes().ok_or(StoreError::WrongType)?
             }
             None => return if bit { Ok(-1) } else { Ok(0) },
         };
@@ -3891,6 +3919,7 @@ impl Store {
         let entry = self.entries.get(key)?;
         Some(match &entry.value {
             Value::String(_) => ValueType::String,
+            Value::Integer(_) => ValueType::String,
             Value::Hash(_) => ValueType::Hash,
             Value::List(_) => ValueType::List,
             Value::Set(_) => ValueType::Set,
@@ -3936,6 +3965,7 @@ impl Store {
                     "raw"
                 }
             }
+            Value::Integer(_) => "int",
             Value::Hash(m) => {
                 // (frankenredis-yp503) Sticky hashtable encoding: once a
                 // hash crosses the listpack threshold, vendored keeps it
@@ -10846,13 +10876,13 @@ impl Store {
     ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
         let (mut registers, encoding, existed) = match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::String(data) => {
-                    let (encoding, registers) = hll_parse(data)?;
-                    (registers, encoding, true)
-                }
-                _ => return Err(StoreError::WrongType),
-            },
+            Some(entry) => {
+                let Some(data) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                let (encoding, registers) = hll_parse(data.as_ref())?;
+                (registers, encoding, true)
+            }
             None => (vec![0u8; HLL_REGISTERS], HllEncoding::Sparse, false),
         };
 
@@ -10934,26 +10964,31 @@ impl Store {
                 Hit(u64),
                 Recomputed(u64, bool),
             }
-            let outcome = {
-                let Value::String(data) = &mut entry.value else {
-                    return Err(StoreError::WrongType);
-                };
-                // (frankenredis-hllval) Upstream pfcountCommand validates the
-                // object via isHLLObjectOrReply BEFORE consulting the cardinality
-                // cache. A string carrying the `HYLL` cache-header shape but a
-                // malformed encoding/length must surface WRONGTYPE, not the stale
-                // bytes that happen to sit in the cache slot.
-                if hll_has_redis_cache_header(data) && !hll_redis_header_is_valid(data) {
-                    return Err(StoreError::InvalidHllValue);
+            let outcome = match &mut entry.value {
+                Value::String(data) => {
+                    // (frankenredis-hllval) Upstream pfcountCommand validates the
+                    // object via isHLLObjectOrReply BEFORE consulting the cardinality
+                    // cache. A string carrying the `HYLL` cache-header shape but a
+                    // malformed encoding/length must surface WRONGTYPE, not the stale
+                    // bytes that happen to sit in the cache slot.
+                    if hll_has_redis_cache_header(data) && !hll_redis_header_is_valid(data) {
+                        return Err(StoreError::InvalidHllValue);
+                    }
+                    if let Some(card) = hll_cache_read(data) {
+                        Outcome::Hit(card)
+                    } else {
+                        let registers = hll_parse_registers(data)?;
+                        let card = hll_estimate(&registers);
+                        let wrote = hll_cache_write(data, card);
+                        Outcome::Recomputed(card, wrote)
+                    }
                 }
-                if let Some(card) = hll_cache_read(data) {
-                    Outcome::Hit(card)
-                } else {
-                    let registers = hll_parse_registers(data)?;
-                    let card = hll_estimate(&registers);
-                    let wrote = hll_cache_write(data, card);
-                    Outcome::Recomputed(card, wrote)
+                Value::Integer(value) => {
+                    let data = value.to_string();
+                    let registers = hll_parse_registers(data.as_bytes())?;
+                    Outcome::Recomputed(hll_estimate(&registers), false)
                 }
+                _ => return Err(StoreError::WrongType),
             };
             entry.touch(now_ms);
             return match outcome {
@@ -10983,16 +11018,14 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
-                    Value::String(data) => {
-                        let registers = hll_parse_registers(data)?;
-                        for i in 0..HLL_REGISTERS {
-                            merged[i] = merged[i].max(registers[i]);
-                        }
-                        entry.touch(now_ms);
-                    }
-                    _ => return Err(StoreError::WrongType),
+                let Some(data) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                let registers = hll_parse_registers(data.as_ref())?;
+                for i in 0..HLL_REGISTERS {
+                    merged[i] = merged[i].max(registers[i]);
                 }
+                entry.touch(now_ms);
             }
         }
         Ok(hll_estimate(&merged))
@@ -11013,15 +11046,13 @@ impl Store {
         self.drop_if_expired(dest, now_ms);
         let existing_ttl = self.entries.get(dest).and_then(|e| e.expires_at_ms);
         if let Some(entry) = self.entries.get(dest) {
-            match &entry.value {
-                Value::String(data) => {
-                    let (encoding, registers) = hll_parse(data)?;
-                    saw_dense_input |= encoding == HllEncoding::Dense;
-                    for i in 0..HLL_REGISTERS {
-                        merged[i] = merged[i].max(registers[i]);
-                    }
-                }
-                _ => return Err(StoreError::WrongType),
+            let Some(data) = entry.value.string_bytes() else {
+                return Err(StoreError::WrongType);
+            };
+            let (encoding, registers) = hll_parse(data.as_ref())?;
+            saw_dense_input |= encoding == HllEncoding::Dense;
+            for i in 0..HLL_REGISTERS {
+                merged[i] = merged[i].max(registers[i]);
             }
         }
 
@@ -11029,15 +11060,13 @@ impl Store {
         for &src in sources {
             self.drop_if_expired(src, now_ms);
             if let Some(entry) = self.entries.get(src) {
-                match &entry.value {
-                    Value::String(data) => {
-                        let (encoding, registers) = hll_parse(data)?;
-                        saw_dense_input |= encoding == HllEncoding::Dense;
-                        for i in 0..HLL_REGISTERS {
-                            merged[i] = merged[i].max(registers[i]);
-                        }
-                    }
-                    _ => return Err(StoreError::WrongType),
+                let Some(data) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                let (encoding, registers) = hll_parse(data.as_ref())?;
+                saw_dense_input |= encoding == HllEncoding::Dense;
+                for i in 0..HLL_REGISTERS {
+                    merged[i] = merged[i].max(registers[i]);
                 }
             }
         }
@@ -11068,6 +11097,10 @@ impl Store {
             Some(entry) => {
                 let (encoding, registers) = match &entry.value {
                     Value::String(data) => hll_parse(data)?,
+                    Value::Integer(value) => {
+                        let data = value.to_string();
+                        hll_parse(data.as_bytes())?
+                    }
                     _ => return Err(StoreError::WrongType),
                 };
                 match encoding {
@@ -11091,14 +11124,14 @@ impl Store {
     ) -> Result<Option<()>, StoreError> {
         self.drop_if_expired(key, now_ms);
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::String(data) => {
-                    hll_parse(data)?;
-                    entry.touch(now_ms);
-                    Ok(Some(()))
-                }
-                _ => Err(StoreError::WrongType),
-            },
+            Some(entry) => {
+                let Some(data) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                hll_parse(data.as_ref())?;
+                entry.touch(now_ms);
+                Ok(Some(()))
+            }
             None => Ok(None),
         }
     }
@@ -11110,19 +11143,19 @@ impl Store {
     ) -> Result<Option<String>, StoreError> {
         self.drop_if_expired(key, now_ms);
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::String(data) => {
-                    let (encoding, registers) = hll_parse(data)?;
-                    entry.touch(now_ms);
-                    match encoding {
-                        HllEncoding::Sparse => Ok(Some(hll_sparse_decode(&registers)?)),
-                        HllEncoding::Dense => Err(StoreError::GenericError(
-                            "ERR HLL encoding is not sparse".to_string(),
-                        )),
-                    }
+            Some(entry) => {
+                let Some(data) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                let (encoding, registers) = hll_parse(data.as_ref())?;
+                entry.touch(now_ms);
+                match encoding {
+                    HllEncoding::Sparse => Ok(Some(hll_sparse_decode(&registers)?)),
+                    HllEncoding::Dense => Err(StoreError::GenericError(
+                        "ERR HLL encoding is not sparse".to_string(),
+                    )),
                 }
-                _ => Err(StoreError::WrongType),
-            },
+            }
             None => Ok(None),
         }
     }
@@ -11134,14 +11167,14 @@ impl Store {
     ) -> Result<Option<&'static str>, StoreError> {
         self.drop_if_expired(key, now_ms);
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::String(data) => {
-                    let (encoding, _) = hll_parse(data)?;
-                    entry.touch(now_ms);
-                    Ok(Some(encoding.as_str()))
-                }
-                _ => Err(StoreError::WrongType),
-            },
+            Some(entry) => {
+                let Some(data) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                let (encoding, _) = hll_parse(data.as_ref())?;
+                entry.touch(now_ms);
+                Ok(Some(encoding.as_str()))
+            }
             None => Ok(None),
         }
     }
@@ -11156,6 +11189,10 @@ impl Store {
             Some(entry) => {
                 let (encoding, registers) = match &entry.value {
                     Value::String(data) => hll_parse(data)?,
+                    Value::Integer(value) => {
+                        let data = value.to_string();
+                        hll_parse(data.as_bytes())?
+                    }
                     _ => return Err(StoreError::WrongType),
                 };
                 match encoding {
@@ -12593,6 +12630,11 @@ impl Store {
                 hash = fnv1a_update(hash, b"S");
                 hash = fnv1a_update(hash, v);
             }
+            Value::Integer(value) => {
+                let bytes = value.to_string();
+                hash = fnv1a_update(hash, b"S");
+                hash = fnv1a_update(hash, bytes.as_bytes());
+            }
             Value::Hash(m) => {
                 hash = fnv1a_update(hash, b"H");
                 for (k, v) in m {
@@ -13775,6 +13817,10 @@ impl Store {
                 buf.push(RDB_TYPE_STRING);
                 encode_rdb_string(&mut buf, v);
             }
+            Value::Integer(value) => {
+                buf.push(RDB_TYPE_STRING);
+                encode_rdb_string(&mut buf, value.to_string().as_bytes());
+            }
             Value::List(l) => {
                 buf.push(RDB_TYPE_LIST_QUICKLIST_2);
                 encode_dump_quicklist2(&mut buf, l, self.list_max_listpack_size)?;
@@ -14313,6 +14359,13 @@ impl Store {
             match &entry.value {
                 Value::String(v) => {
                     commands.push(vec![b"SET".to_vec(), logical_key.clone(), v.clone()]);
+                }
+                Value::Integer(value) => {
+                    commands.push(vec![
+                        b"SET".to_vec(),
+                        logical_key.clone(),
+                        value.to_string().into_bytes(),
+                    ]);
                 }
                 Value::Hash(h) => {
                     if !h.is_empty() {
@@ -15770,6 +15823,7 @@ fn estimate_expiry_memory_usage_bytes(entry: &Entry) -> usize {
 fn estimate_value_memory_usage_bytes(entry: &Entry) -> usize {
     match &entry.value {
         Value::String(bytes) => estimate_string_value_memory_usage_bytes(bytes, entry),
+        Value::Integer(_) => REDIS_OBJECT_OVERHEAD_BYTES,
         Value::Hash(fields) => estimate_hash_memory_usage_bytes(fields),
         Value::List(items) => estimate_list_memory_usage_bytes(items),
         Value::Set(members) => estimate_set_memory_usage_bytes(members),
@@ -19595,6 +19649,26 @@ mod tests {
         assert_eq!(store.incrby(b"n", 5, 0).expect("incrby"), 5);
         assert_eq!(store.incrby(b"n", -3, 0).expect("incrby"), 2);
         assert_eq!(store.incrby(b"n", -10, 0).expect("incrby"), -8);
+    }
+
+    #[test]
+    fn integer_string_values_keep_string_semantics_without_vec_payload() {
+        let mut store = Store::new();
+        store.set(b"n".to_vec(), b"123".to_vec(), None, 0);
+
+        assert_eq!(store.get(b"n", 0).unwrap(), Some(b"123".to_vec()));
+        assert_eq!(store.value_type(b"n", 0), Some(ValueType::String));
+        assert_eq!(store.object_encoding(b"n", 0), Some("int"));
+        assert_eq!(store.strlen(b"n", 0).unwrap(), 3);
+        assert_eq!(store.memory_usage_for_key(b"n", 0), Some(48));
+
+        assert_eq!(store.incrby(b"n", -100, 1).unwrap(), 23);
+        assert_eq!(store.get(b"n", 1).unwrap(), Some(b"23".to_vec()));
+        assert_eq!(store.object_encoding(b"n", 1), Some("int"));
+
+        assert_eq!(store.append(b"n", b"x", 2).unwrap(), 3);
+        assert_eq!(store.get(b"n", 2).unwrap(), Some(b"23x".to_vec()));
+        assert_eq!(store.object_encoding(b"n", 2), Some("raw"));
     }
 
     #[test]
@@ -26094,6 +26168,26 @@ mod tests {
     }
 
     #[test]
+    fn hll_commands_validate_integer_encoded_strings_as_string_bytes() {
+        let mut store = Store::new();
+        store.set(b"hll".to_vec(), b"1".to_vec(), None, 0);
+
+        assert_eq!(store.object_encoding(b"hll", 0), Some("int"));
+        assert_eq!(
+            store.pfcount(&[b"hll"], 0),
+            Err(StoreError::InvalidHllValue)
+        );
+        assert_eq!(
+            store.pfadd(b"hll", &[b"x".to_vec()], 0),
+            Err(StoreError::InvalidHllValue)
+        );
+        assert_eq!(
+            store.pfmerge(b"dst", &[b"hll"], 0),
+            Err(StoreError::InvalidHllValue)
+        );
+    }
+
+    #[test]
     fn pfcount_validates_redis_header_before_reading_cache() {
         // (frankenredis-hllval) Single-key PFCOUNT consults the HLL cardinality
         // cache (bytes 8..16 of the Redis header). A string carrying the `HYLL`
@@ -31018,6 +31112,9 @@ mod tests {
                             .expect("all_keys entries must exist");
                         let value = match &entry.value {
                             crate::Value::String(bytes) => AofValueSnapshot::String(bytes.clone()),
+                            crate::Value::Integer(value) => {
+                                AofValueSnapshot::String(value.to_string().into_bytes())
+                            }
                             crate::Value::List(list) => {
                                 AofValueSnapshot::List(list.iter().cloned().collect())
                             }

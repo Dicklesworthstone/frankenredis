@@ -14881,6 +14881,7 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
         let (db, logical_key) = decode_db_key(&key).unwrap_or((0, key.as_slice()));
         let rdb_value = match value {
             Value::String(v) => RdbValue::String(v.clone()),
+            Value::Integer(v) => RdbValue::String(v.to_string().into_bytes()),
             Value::List(l) => RdbValue::List(l.iter().cloned().collect()),
             Value::Set(s) => {
                 let mut members: Vec<Vec<u8>> = s.iter().cloned().collect();

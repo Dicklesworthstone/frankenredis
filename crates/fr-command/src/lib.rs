@@ -23749,6 +23749,7 @@ fn mix_debug_object_digest(store: &mut Store, key: &[u8], now_ms: u64, digest: &
     mix_digest(digest, &debug_object_type_code(&value).to_be_bytes());
     match value {
         Value::String(bytes) => mix_digest(digest, &bytes),
+        Value::Integer(value) => mix_digest(digest, value.to_string().as_bytes()),
         Value::List(items) => {
             for item in items {
                 mix_digest(digest, &item);
@@ -23797,7 +23798,7 @@ fn mix_debug_object_digest(store: &mut Store, key: &[u8], now_ms: u64, digest: &
 
 fn debug_object_type_code(value: &Value) -> u32 {
     match value {
-        Value::String(_) => 0,
+        Value::String(_) | Value::Integer(_) => 0,
         Value::List(_) => 1,
         Value::Set(_) => 2,
         Value::SortedSet(_) => 3,

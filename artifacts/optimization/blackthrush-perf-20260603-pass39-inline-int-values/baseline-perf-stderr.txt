@@ -1,0 +1,6 @@
+599148878,,cycles,122961932,83.00,,
+2127895159,,instructions,122956508,83.00,3.55,insn per cycle
+626158,,cache-references,122880757,83.00,,
+143063,,cache-misses,123726236,83.00,22.85,of all cache refs
+318700678,,branches,123029241,83.00,,
+138644,,branch-misses,123821061,83.00,0.04,of all branches
