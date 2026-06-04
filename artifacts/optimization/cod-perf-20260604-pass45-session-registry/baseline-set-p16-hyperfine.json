@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "\"target-cod-pass45-session-baseline-rch/release-perf/fr-bench\" --host 127.0.0.1 --port 20590 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"artifacts/optimization/cod-perf-20260604-pass45-session-registry/baseline-set-p16-last.json\" --key-prefix cod-pass45-baseline",
+      "mean": 2.24568577656,
+      "stddev": 0.278253986063152,
+      "median": 2.2863288731599996,
+      "user": 0.5971751399999998,
+      "system": 1.05765606,
+      "min": 1.77145375566,
+      "max": 2.55489229666,
+      "times": [
+        1.77145375566,
+        2.1869519606599996,
+        2.27159032366,
+        2.55489229666,
+        2.3010674226599996,
+        2.49946988566,
+        2.39173608066,
+        2.2197529226599997,
+        2.48770461066,
+        1.7722385066600002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

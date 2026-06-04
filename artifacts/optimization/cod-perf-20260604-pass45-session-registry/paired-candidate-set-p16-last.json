@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780611119868,
+  "host": "127.0.0.1",
+  "port": 20593,
+  "workload": "set",
+  "clients": 50,
+  "requests": 500000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "cod-pass45-paired-cand",
+  "total_time_ms": 2638,
+  "ops_per_sec": 189492.6507094552,
+  "bytes_sent": 31894304,
+  "bytes_received": 2500000,
+  "latency_us": {
+    "min": 89,
+    "p50": 3587,
+    "p95": 6139,
+    "p99": 11255,
+    "p999": 36383,
+    "max": 113343,
+    "mean": 4034.4054780000006,
+    "samples": 500000
+  }
+}

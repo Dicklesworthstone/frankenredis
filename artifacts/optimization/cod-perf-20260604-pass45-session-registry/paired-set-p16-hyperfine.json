@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "\"target-cod-pass45-session-candidate-rch/release-perf/fr-bench\" --host 127.0.0.1 --port 20592 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"artifacts/optimization/cod-perf-20260604-pass45-session-registry/paired-baseline-set-p16-last.json\" --key-prefix cod-pass45-paired-base",
+      "mean": 2.8146088413685715,
+      "stddev": 0.17393202441547564,
+      "median": 2.82488793594,
+      "user": 0.41771773428571424,
+      "system": 0.7356128742857143,
+      "min": 2.6351496759399997,
+      "max": 3.1325252239399997,
+      "times": [
+        2.65956074194,
+        2.6351496759399997,
+        2.6900153209399997,
+        2.87958283294,
+        2.88054015794,
+        3.1325252239399997,
+        2.82488793594
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "\"target-cod-pass45-session-candidate-rch/release-perf/fr-bench\" --host 127.0.0.1 --port 20593 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"artifacts/optimization/cod-perf-20260604-pass45-session-registry/paired-candidate-set-p16-last.json\" --key-prefix cod-pass45-paired-cand",
+      "mean": 2.73106784194,
+      "stddev": 0.2210613065661542,
+      "median": 2.64643544094,
+      "user": 0.4235208771428571,
+      "system": 0.7209427314285712,
+      "min": 2.55648699894,
+      "max": 3.18920003194,
+      "times": [
+        2.8211513399399997,
+        2.61710655994,
+        3.18920003194,
+        2.71159311094,
+        2.57550141094,
+        2.55648699894,
+        2.64643544094
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

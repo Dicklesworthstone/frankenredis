@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "\"target-cod-pass45-session-candidate-rch/release-perf/fr-bench\" --host 127.0.0.1 --port 20590 --clients 50 --requests 500000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"artifacts/optimization/cod-perf-20260604-pass45-session-registry/candidate-set-p16-last.json\" --key-prefix cod-pass45-candidate",
+      "mean": 2.66967266752,
+      "stddev": 0.2509597577899252,
+      "median": 2.67035952722,
+      "user": 0.47381949999999995,
+      "system": 0.7723764599999998,
+      "min": 2.2776255137200003,
+      "max": 3.1947536597200004,
+      "times": [
+        2.55475286472,
+        2.49976346672,
+        2.65135595272,
+        2.44978320972,
+        2.2776255137200003,
+        2.68936310172,
+        2.7757767757200003,
+        2.80902856372,
+        3.1947536597200004,
+        2.79452356672
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
