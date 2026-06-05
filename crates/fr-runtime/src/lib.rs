@@ -3197,6 +3197,11 @@ pub struct ClientSession {
     pub last_interaction_ms: u64,
     /// Most recent command recorded for CLIENT LIST/INFO `cmd=`.
     last_command_name: String,
+    /// Sum of the byte-lengths of the most recent command's argv elements,
+    /// mirroring upstream `client->argv_len_sum`. Surfaced as CLIENT INFO/LIST
+    /// `argv-mem` for the currently-executing client only (idle clients report
+    /// 0, since upstream frees argv after each command). (frankenredis-clargvmem)
+    last_argv_len_sum: usize,
 }
 
 impl Default for ClientSession {
@@ -3223,6 +3228,7 @@ impl Default for ClientSession {
             connected_at_ms: 0,
             last_interaction_ms: 0,
             last_command_name: "NULL".to_string(),
+            last_argv_len_sum: 0,
         }
     }
 }
@@ -3302,6 +3308,7 @@ impl ClientSession {
         self.client_tracking = ClientTrackingState::default();
         self.client_reply = ClientReplyState::default();
         self.last_command_name = String::new();
+        self.last_argv_len_sum = 0;
         self.refresh_authentication_for_server(auth_state, false);
     }
 }
@@ -5361,6 +5368,9 @@ impl Runtime {
         // server hot path) and reused for both stats and execution.
         if let Ok(argv) = &argv_result {
             write_client_info_command_name(&mut self.session.last_command_name, argv);
+            // Upstream `argv_len_sum` (CLIENT INFO `argv-mem`): byte-length sum
+            // of the live command's args. (frankenredis-clargvmem)
+            self.session.last_argv_len_sum = argv.iter().map(Vec::len).sum();
         }
         // (frankenredis-2prp1) Inline the record_client_session call to
         // avoid the redundant clone — the BTreeMap insert below already
@@ -7427,6 +7437,30 @@ impl Runtime {
         } else {
             -1
         };
+        // `argv-mem` mirrors upstream `argv_len_sum` — non-zero ONLY for the
+        // client whose command is currently executing (fr is single-threaded,
+        // so that is `self.session`); idle clients report 0 because upstream
+        // frees argv between commands. `multi-mem` is the byte-length sum of
+        // every queued MULTI command's args (`mstate.argv_len_sums`).
+        // (frankenredis-clargvmem)
+        let argv_mem = if session.client_id == self.session.client_id {
+            session.last_argv_len_sum
+        } else {
+            0
+        };
+        // Upstream `queueMultiCommand` accumulates `argv_len_sum +
+        // sizeof(robj*)*argc` per queued command, i.e. the arg bytes plus the
+        // 8-byte pointer-array overhead per argument. (`argv-mem` above is the
+        // bare byte sum with no pointer overhead — they differ deliberately.)
+        let multi_mem: usize = session
+            .transaction_state
+            .command_queue
+            .iter()
+            .map(|cmd| {
+                let arg_bytes: usize = cmd.iter().map(Vec::len).sum();
+                arg_bytes.saturating_add(8usize.saturating_mul(cmd.len()))
+            })
+            .sum();
         let lib_name = session.client_lib_name.as_deref().unwrap_or("");
         let lib_ver = session.client_lib_ver.as_deref().unwrap_or("");
         let redir = client_tracking_getredir_value(&session.client_tracking);
@@ -7451,7 +7485,7 @@ impl Runtime {
             // single LF). Earlier versions emitted CRLF here, leaving
             // a stray 0x0d byte in the bulk-string payload that broke
             // raw-byte parsers diffing against vendored.
-            "id={} addr={} laddr=127.0.0.1:{} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf={} qbuf-free={} argv-mem=0 multi-mem=0 rbs=16384 rbp=16384 obl={} oll=0 omem=0 tot-mem={} events=r cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\n",
+            "id={} addr={} laddr=127.0.0.1:{} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf={} qbuf-free={} argv-mem={} multi-mem={} rbs=16384 rbp=16384 obl={} oll=0 omem=0 tot-mem={} events=r cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\n",
             session.client_id,
             peer,
             self.server.store.server_port,
@@ -7470,6 +7504,8 @@ impl Runtime {
             multi_count,
             session.qbuf_bytes,
             session.qbuf_free_bytes,
+            argv_mem,
+            multi_mem,
             session.output_buffer_bytes,
             // (frankenredis-tepuj) Approximate upstream's c->tot_mem
             // accounting: per-client struct overhead (~432B baseline) +
@@ -20520,6 +20556,27 @@ mod tests {
     }
 
     #[test]
+    fn client_info_reports_argv_mem_and_multi_mem_like_upstream() {
+        // (frankenredis-clargvmem) `argv-mem` = byte-length sum of the live
+        // command's args (no pointer overhead); `multi-mem` = per queued MULTI
+        // command (arg bytes + 8*argc). Mirrors upstream catClientInfoString /
+        // queueMultiCommand.
+        let mut rt = Runtime::default_strict();
+
+        // CLIENT INFO: the executing command is ["CLIENT","INFO"] -> 6+4 = 10.
+        let info = match rt.execute_frame(command(&[b"CLIENT", b"INFO"]), 1) {
+            RespFrame::BulkString(Some(info)) => String::from_utf8(info).expect("utf8"),
+            other => unreachable!("unexpected CLIENT INFO: {other:?}"),
+        };
+        assert!(info.contains("argv-mem=10 "), "argv-mem mismatch: {info}");
+        assert!(info.contains("multi-mem=0 "), "multi-mem should be 0 idle: {info}");
+        // multi-mem (per queued MULTI command: arg bytes + 8*argc) is observed
+        // cross-connection — `SET k vvvvv` (9+8*3) + `GET k` (4+8*2) = 53, verified
+        // e2e vs redis 7.2.4 (it can't be read by the MULTI client itself, since
+        // CLIENT LIST is queued in a transaction).
+    }
+
+    #[test]
     fn client_list_field_order_matches_upstream_redis_72() {
         // Pins the exact field order emitted by client_info_line_for_session.
         // Upstream networking.c::catClientInfoString format string at
@@ -20629,9 +20686,23 @@ mod tests {
         let list_id_match = rt.execute_frame(command(&[b"CLIENT", b"LIST", b"ID", &id_bytes]), 4);
         let list_id_miss = rt.execute_frame(command(&[b"CLIENT", b"LIST", b"ID", b"999999999"]), 5);
 
-        assert_eq!(list_normal, list_all);
+        // `argv-mem` legitimately differs between these CLIENT LIST variants
+        // (different command argv → different argv_len_sum, like upstream), so
+        // compare with that one field normalised; the client set is identical.
+        // (frankenredis-clargvmem)
+        let without_argv_mem = |f: &RespFrame| -> String {
+            let RespFrame::BulkString(Some(b)) = f else {
+                return format!("{f:?}");
+            };
+            String::from_utf8_lossy(b)
+                .split(' ')
+                .filter(|t| !t.starts_with("argv-mem="))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert_eq!(without_argv_mem(&list_normal), without_argv_mem(&list_all));
         assert_eq!(list_replica, RespFrame::BulkString(Some(Vec::new())));
-        assert_eq!(list_id_match, list_all);
+        assert_eq!(without_argv_mem(&list_id_match), without_argv_mem(&list_all));
         assert_eq!(list_id_miss, RespFrame::BulkString(Some(Vec::new())));
     }
 
