@@ -4536,6 +4536,17 @@ impl Store {
                 let Some(v) = entry.value.string_bytes() else {
                     return Err(StoreError::WrongType);
                 };
+                // (frankenredis-getrangewt) Upstream t_string.c::getrangeCommand
+                // applies this both-negative-inverted short-circuit AFTER the
+                // type check but BEFORE resolving negatives against strlen — it
+                // returns empty even when the resolved range would be non-empty
+                // (e.g. GETRANGE "a" -1 -2 -> ""). The command-layer previously
+                // ran this short-circuit BEFORE the type check, so a wrong-type
+                // key with an inverted range wrongly returned "" instead of
+                // WRONGTYPE; keeping it here preserves both behaviours.
+                if start < 0 && end < 0 && start > end {
+                    return Ok(Vec::new());
+                }
                 let len = v.len() as i64;
                 // Upstream t_string.c::getrangeCommand normalizes
                 // negative offsets relative to length and clamps

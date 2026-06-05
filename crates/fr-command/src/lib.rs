@@ -12063,12 +12063,13 @@ fn getrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     }
     let start = parse_i64_arg(&argv[2])?;
     let end = parse_i64_arg(&argv[3])?;
-    // Upstream t_string.c::getrangeCommand short-circuits to empty
-    // when both bounds are negative and start > end, BEFORE
-    // resolving the negatives against strlen. (br-frankenredis-getrangeneg)
-    if start < 0 && end < 0 && start > end {
-        return Ok(RespFrame::BulkString(Some(Vec::new())));
-    }
+    // (frankenredis-getrangewt) No pre-lookup empty short-circuit: upstream
+    // t_string.c::getrangeCommand does lookupKeyReadOrReply + checkType(STRING)
+    // BEFORE deciding the range is empty, so a wrong-type key reports WRONGTYPE
+    // even for an inverted range like `GETRANGE listk -1 -2`. Store::getrange
+    // performs the type check then the identical resolve-clamp-`start>end`
+    // emptiness logic, so the previous handler-level short-circuit was both
+    // redundant and skipped the type check (returned "" instead of WRONGTYPE).
     let result = store.getrange(&argv[1], start, end, now_ms)?;
     Ok(RespFrame::BulkString(Some(result)))
 }
@@ -12083,10 +12084,7 @@ fn substr(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     }
     let start = parse_i64_arg(&argv[2])?;
     let end = parse_i64_arg(&argv[3])?;
-    // (br-frankenredis-getrangeneg) — same upstream short-circuit.
-    if start < 0 && end < 0 && start > end {
-        return Ok(RespFrame::BulkString(Some(Vec::new())));
-    }
+    // (frankenredis-getrangewt) Type check precedes emptiness — see getrange.
     let result = store.getrange(&argv[1], start, end, now_ms)?;
     Ok(RespFrame::BulkString(Some(result)))
 }
@@ -68417,6 +68415,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r, RespFrame::BulkString(Some(b"o".to_vec())));
+    }
+
+    #[test]
+    fn getrange_wrongtype_precedes_empty_range_getrangewt() {
+        // (frankenredis-getrangewt) Upstream checks key type BEFORE deciding the
+        // range is empty: GETRANGE/SUBSTR on a non-string with an inverted range
+        // returns WRONGTYPE, not "". (Found via randomized differential fuzz.)
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"RPUSH".to_vec(), b"lst".to_vec(), b"a".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        for cmd in [b"GETRANGE".as_slice(), b"SUBSTR".as_slice()] {
+            let err = dispatch_argv(
+                &[cmd.to_vec(), b"lst".to_vec(), b"-1".to_vec(), b"-2".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect_err("wrong-type inverted range must error");
+            assert!(
+                matches!(err, CommandError::Store(fr_store::StoreError::WrongType)),
+                "{cmd:?} got {err:?}"
+            );
+        }
+        // Inverted range on an actual string is still empty (not an error).
+        dispatch_argv(
+            &[b"SET".to_vec(), b"s".to_vec(), b"hello".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            dispatch_argv(
+                &[b"GETRANGE".to_vec(), b"s".to_vec(), b"-1".to_vec(), b"-2".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::BulkString(Some(Vec::new()))
+        );
     }
 
     #[test]
