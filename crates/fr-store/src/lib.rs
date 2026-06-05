@@ -10476,6 +10476,64 @@ impl Store {
         }
     }
 
+    /// `zrangebylex_limited` variant for callers that must preserve scores
+    /// (notably ZRANGESTORE). This mirrors `zrangebylex_withscores` followed by
+    /// optional reverse + LIMIT slicing, but applies the window before cloning.
+    /// (frankenredis-qchm7)
+    #[allow(clippy::too_many_arguments)]
+    pub fn zrangebylex_withscores_limited(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        offset: usize,
+        count: Option<usize>,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        validate_lex_range_bounds(min, max)?;
+        self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        let take = count.unwrap_or(usize::MAX);
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let result: Vec<(Vec<u8>, f64)> = if rev {
+                            zs.iter_desc()
+                                .filter(|(m, _)| lex_in_range(m, min, max))
+                                .skip(offset)
+                                .take(take)
+                                .map(|(m, s)| (m.to_vec(), s))
+                                .collect()
+                        } else {
+                            zs.iter_asc()
+                                .filter(|(m, _)| lex_in_range(m, min, max))
+                                .skip(offset)
+                                .take(take)
+                                .map(|(m, s)| (m.to_vec(), s))
+                                .collect()
+                        };
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub fn zrevrangebyscore_withscores(
         &mut self,
         key: &[u8],
@@ -25577,6 +25635,58 @@ mod tests {
                     for count in [None, Some(0usize), Some(4), Some(500)] {
                         let got = store
                             .zrangebylex_limited(b"z", min, max, rev, offset, count, 0)
+                            .unwrap();
+                        let want = reference(min, max, rev, offset, count);
+                        assert_eq!(
+                            got, want,
+                            "mismatch min={min:?} max={max:?} rev={rev} offset={offset} count={count:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zrangebylex_withscores_limited_matches_full_collect_then_slice() {
+        // ZRANGESTORE needs scores too; prove the pair-returning windowed walk is
+        // exactly the old full collect + optional reverse + LIMIT slice.
+        let mut store = Store::new();
+        let members: Vec<(f64, Vec<u8>)> = (0..40u32)
+            .map(|i| (f64::from(i % 7), format!("e{i:03}").into_bytes()))
+            .collect();
+        store.zadd(b"z", &members, 0).unwrap();
+
+        let reference = |min: &[u8], max: &[u8], rev: bool, offset: usize, count: Option<usize>| {
+            let mut s2 = Store::new();
+            s2.zadd(b"z", &members, 0).unwrap();
+            let mut pairs = s2.zrangebylex_withscores(b"z", min, max, 0).unwrap();
+            if rev {
+                pairs.reverse();
+            }
+            if offset > 0 && offset < pairs.len() {
+                pairs.drain(0..offset);
+            } else if offset >= pairs.len() {
+                pairs.clear();
+            }
+            if let Some(c) = count {
+                pairs.truncate(c);
+            }
+            pairs
+        };
+
+        let bounds: [(&[u8], &[u8]); 4] = [
+            (b"-", b"+"),
+            (b"[e005", b"[e030"),
+            (b"(e005", b"(e030"),
+            (b"[e010", b"(e010"),
+        ];
+        for &(min, max) in &bounds {
+            for rev in [false, true] {
+                for offset in [0usize, 1, 5, 39, 40, 500, usize::MAX] {
+                    for count in [None, Some(0usize), Some(4), Some(500)] {
+                        let got = store
+                            .zrangebylex_withscores_limited(b"z", min, max, rev, offset, count, 0)
                             .unwrap();
                         let want = reference(min, max, rev, offset, count);
                         assert_eq!(

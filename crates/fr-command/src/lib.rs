@@ -11000,17 +11000,15 @@ fn zrangestore_cmd(
         } else {
             (min_lex.as_slice(), max_lex.as_slice())
         };
-        let mut members = store.zrangebylex(src, lo, hi, now_ms)?;
-        if rev {
-            members.reverse();
-        }
-        // Look up scores for each member
-        let mut result = Vec::with_capacity(members.len());
-        for m in members {
-            let score = store.zscore(src, &m, now_ms)?.unwrap_or(0.0);
-            result.push((m, score));
-        }
-        result
+        store.zrangebylex_withscores_limited(
+            src,
+            lo,
+            hi,
+            rev,
+            limit_offset.unwrap_or(0),
+            limit_count,
+            now_ms,
+        )?
     } else {
         // Default: by rank (index)
         let start = parse_i64_arg(&argv[3])?;
@@ -11031,9 +11029,7 @@ fn zrangestore_cmd(
     // paths). Mirroring that here means `LIMIT 1 -1` doesn't drop
     // the first element from a rank-mode ZRANGESTORE.
     // In-place LIMIT avoids second allocation. (frankenredis-5qwm6)
-    if (byscore || bylex)
-        && let Some(offset) = limit_offset
-    {
+    if byscore && let Some(offset) = limit_offset {
         if offset > 0 && offset < pairs.len() {
             pairs.drain(0..offset);
         } else if offset >= pairs.len() {
