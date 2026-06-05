@@ -8894,6 +8894,24 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             }
         }
 
+        // (frankenredis-a6nkn, sibling of b7jra) Upstream xgroupCommand resolves
+        // the key BEFORE parsing the id, so an existing wrong-type key reports
+        // WRONGTYPE and a missing key (without MKSTREAM) reports "requires the
+        // key to exist" — rather than "Invalid stream ID". Use the no-stat
+        // precheck and ignore the group result: id parsing still precedes the
+        // BUSYGROUP check (verified vs vendored: `XGROUP CREATE s <existing> bad`
+        // returns "Invalid stream ID", not BUSYGROUP), and MKSTREAM only waives
+        // the missing-key error, never the wrong-type one.
+        match store.stream_group_precheck(&argv[2], &argv[3], now_ms) {
+            Err(StoreError::WrongType) => {
+                return Err(CommandError::Store(StoreError::WrongType));
+            }
+            Err(StoreError::KeyNotFound) if !mkstream => {
+                return Ok(xgroup_key_required_error());
+            }
+            _ => {}
+        }
+
         let start_id = if eq_ascii_command(&argv[4], b"$") {
             store.xlast_id(&argv[2], now_ms)?.unwrap_or((0, 0))
         } else {
@@ -39400,6 +39418,79 @@ mod tests {
         )
         .expect("xgroup create mkstream+entriesread");
         assert_eq!(combined, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn xgroup_create_resolves_key_before_parsing_id_a6nkn() {
+        // (frankenredis-a6nkn, sibling of b7jra) Upstream xgroupCommand resolves
+        // the key BEFORE parsing the id: a missing key (no MKSTREAM) and an
+        // existing wrong-type key report their own errors, not "Invalid stream
+        // ID". The id is still parsed before the BUSYGROUP check.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"XADD".to_vec(), b"s".to_vec(), b"1-0".to_vec(), b"f".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        store.set(b"str".to_vec(), b"hello".to_vec(), None, 0);
+        dispatch_argv(
+            &[b"XGROUP".to_vec(), b"CREATE".to_vec(), b"s".to_vec(), b"gexists".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        // Missing key + bad id (no MKSTREAM) -> key-required, not Invalid id.
+        assert_eq!(
+            dispatch_argv(
+                &[b"XGROUP".to_vec(), b"CREATE".to_vec(), b"nokey".to_vec(), b"g1".to_vec(), b"bad-id".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("missing key bad id"),
+            RespFrame::Error("ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.".to_string())
+        );
+        // Wrong-type key + bad id -> WRONGTYPE (even with MKSTREAM).
+        for extra in [Vec::new(), vec![b"MKSTREAM".to_vec()]] {
+            let mut argv = vec![b"XGROUP".to_vec(), b"CREATE".to_vec(), b"str".to_vec(), b"g1".to_vec(), b"bad-id".to_vec()];
+            argv.extend(extra);
+            assert!(matches!(
+                dispatch_argv(&argv, &mut store, 0).expect_err("wrongtype bad id"),
+                CommandError::Store(fr_store::StoreError::WrongType)
+            ));
+        }
+        // Existing group + bad id -> id parse precedes BUSYGROUP (Invalid id).
+        assert_eq!(
+            dispatch_argv(
+                &[b"XGROUP".to_vec(), b"CREATE".to_vec(), b"s".to_vec(), b"gexists".to_vec(), b"bad-id".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("busygroup bad id"),
+            RespFrame::Error("ERR Invalid stream ID specified as stream command argument".to_string())
+        );
+        // Existing group + good id -> BUSYGROUP.
+        assert_eq!(
+            dispatch_argv(
+                &[b"XGROUP".to_vec(), b"CREATE".to_vec(), b"s".to_vec(), b"gexists".to_vec(), b"0".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("busygroup good id"),
+            RespFrame::Error("BUSYGROUP Consumer Group name already exists".to_string())
+        );
+        // MKSTREAM + missing key + bad id -> Invalid id, no key created.
+        assert_eq!(
+            dispatch_argv(
+                &[b"XGROUP".to_vec(), b"CREATE".to_vec(), b"newk".to_vec(), b"g1".to_vec(), b"bad-id".to_vec(), b"MKSTREAM".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("mkstream bad id"),
+            RespFrame::Error("ERR Invalid stream ID specified as stream command argument".to_string())
+        );
+        assert_eq!(store.key_type(b"newk", 0), None, "MKSTREAM must not create the key on a bad id");
     }
 
     #[test]
