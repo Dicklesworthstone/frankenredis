@@ -16066,9 +16066,19 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
 /// table with duplicate names. Lookups lowercase into a stack buffer to avoid a
 /// per-call heap allocation (command names are short ASCII tokens).
 fn command_table_index(name: &[u8]) -> Option<usize> {
-    static INDEX: OnceLock<HashMap<Vec<u8>, usize>> = OnceLock::new();
+    // foldhash (not SipHash) for this per-command command-name lookup: it is
+    // hit several times per dispatched command (key extraction, ACL, metadata),
+    // and Rust's default SipHash showed up as ~3% of CPU in a pipelined GET
+    // profile. The key set is the fixed command table, so a fast hash is safe.
+    // (frankenredis-cmdidxhash)
+    static INDEX: OnceLock<HashMap<Vec<u8>, usize, foldhash::quality::RandomState>> =
+        OnceLock::new();
     let index = INDEX.get_or_init(|| {
-        let mut map: HashMap<Vec<u8>, usize> = HashMap::with_capacity(COMMAND_TABLE.len() * 2);
+        let mut map: HashMap<Vec<u8>, usize, foldhash::quality::RandomState> =
+            HashMap::with_capacity_and_hasher(
+                COMMAND_TABLE.len() * 2,
+                foldhash::quality::RandomState::default(),
+            );
         for (i, &(table_name, ..)) in COMMAND_TABLE.iter().enumerate() {
             // keep the first occurrence — matches `.find()` semantics
             map.entry(table_name.as_bytes().to_ascii_lowercase())
