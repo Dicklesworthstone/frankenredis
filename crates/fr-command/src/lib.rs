@@ -8406,7 +8406,18 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
 
         let mut entry_frames = Vec::with_capacity(records.len());
         for (id, fields) in records {
-            entry_frames.push(stream_record_to_frame(id, fields));
+            // (frankenredis-s0614) A history read may return PEL entries whose
+            // stream entry was XDEL'd (tombstones); the store marks them with an
+            // empty field list (a live entry always has >=1 field), and upstream
+            // renders them as `[id, nil]` rather than `[id, []]`.
+            if fields.is_empty() {
+                entry_frames.push(RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(format_stream_id(id))),
+                    RespFrame::Array(None),
+                ])));
+            } else {
+                entry_frames.push(stream_record_to_frame(id, fields));
+            }
         }
 
         out.push((
@@ -36069,6 +36080,72 @@ mod tests {
         )
         .expect("QUIT extras outside script must succeed");
         assert_eq!(r, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn xreadgroup_history_returns_deleted_pel_entries_as_nil_s0614() {
+        // (frankenredis-s0614) A history read (explicit id) returns every PEL
+        // entry for the consumer, including ones whose stream entry was XDEL'd —
+        // upstream emits those tombstones as `[id, nil]`, not omitted.
+        let mut store = Store::new();
+        for id in [b"1-0".as_slice(), b"2-0", b"3-0"] {
+            dispatch_argv(
+                &[b"XADD".to_vec(), b"st".to_vec(), id.to_vec(), b"f".to_vec(), b"v".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+        }
+        dispatch_argv(
+            &[b"XGROUP".to_vec(), b"CREATE".to_vec(), b"st".to_vec(), b"g1".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // deliver all 3 to c1 (now pending)
+        dispatch_argv(
+            &[b"XREADGROUP".to_vec(), b"GROUP".to_vec(), b"g1".to_vec(), b"c1".to_vec(), b"STREAMS".to_vec(), b"st".to_vec(), b">".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // delete the middle entry; it stays in the PEL as a tombstone
+        dispatch_argv(
+            &[b"XDEL".to_vec(), b"st".to_vec(), b"2-0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let hist = dispatch_argv(
+            &[b"XREADGROUP".to_vec(), b"GROUP".to_vec(), b"g1".to_vec(), b"c1".to_vec(), b"STREAMS".to_vec(), b"st".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let nil_fields = || RespFrame::Array(None);
+        let live = |id: &[u8]| {
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(id.to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"f".to_vec())),
+                    RespFrame::BulkString(Some(b"v".to_vec())),
+                ])),
+            ]))
+        };
+        assert_eq!(
+            hist,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"st".to_vec())),
+                RespFrame::Array(Some(vec![
+                    live(b"1-0"),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"2-0".to_vec())),
+                        nil_fields(),
+                    ])),
+                    live(b"3-0"),
+                ])),
+            ]))]))
+        );
     }
 
     #[test]

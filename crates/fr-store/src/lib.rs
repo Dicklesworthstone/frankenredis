@@ -11478,8 +11478,17 @@ impl Store {
                                     if pending_entry.consumer.as_slice() != consumer {
                                         continue;
                                     }
-                                    if let Some(fields) = entries.get(id) {
-                                        out.push((*id, fields.clone()));
+                                    // (frankenredis-s0614) A history read returns
+                                    // every PEL entry for the consumer, INCLUDING
+                                    // ones whose underlying stream entry was XDEL'd
+                                    // (tombstones) — upstream emits them as
+                                    // `[id, nil]`. An empty field list is the
+                                    // tombstone sentinel (a live entry always has
+                                    // >=1 field by XADD arity); the command layer
+                                    // renders it as a nil value array.
+                                    match entries.get(id) {
+                                        Some(fields) => out.push((*id, fields.clone())),
+                                        None => out.push((*id, Vec::new())),
                                     }
                                     if out.len() >= limit {
                                         break;
