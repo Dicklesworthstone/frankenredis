@@ -3536,9 +3536,14 @@ impl Runtime {
             Some(path) => path.clone(),
             None => return Ok(0),
         };
-        let (entries, _aux) = read_rdb_file(&path)?;
+        let (entries, _aux, functions) = fr_persist::read_rdb_file_with_functions(&path)?;
         let mut store = Store::new();
         let counts = apply_rdb_entries_to_store(&mut store, &entries, now_ms)?;
+        // Re-register FUNCTION libraries carried in the dump so FUNCTION LIST /
+        // FCALL survive a restart, matching redis. (frankenredis-tm139)
+        for code in &functions {
+            let _ = store.function_load(code, true);
+        }
         store.stat_rdb_last_load_keys_expired = u64::try_from(counts.expired).unwrap_or(u64::MAX);
         store.stat_rdb_last_load_keys_loaded = u64::try_from(counts.loaded).unwrap_or(u64::MAX);
         preserve_store_load_context(&mut store, &self.server.store);
@@ -27228,6 +27233,42 @@ mod tests {
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains("rdb_last_load_keys_expired:1\r\n"), "{info}");
         assert!(info.contains("rdb_last_load_keys_loaded:1\r\n"), "{info}");
+    }
+
+    #[test]
+    fn load_rdb_reregisters_function_libraries() {
+        // Regression (frankenredis-tm139): a dump carrying FUNCTION libraries
+        // must restore them into the engine so FUNCTION LIST / FCALL survive a
+        // restart, not just the keyspace.
+        let dir = std::env::temp_dir().join("fr_runtime_rdb_function_reload_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let rdb_path = dir.join("functions.rdb");
+        let lib =
+            b"#!lua name=mylib\nredis.register_function('myfunc', function() return 'hello' end)";
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"k1".to_vec(),
+            value: RdbValue::String(b"v1".to_vec()),
+            expire_ms: None,
+        }];
+        let bytes = fr_persist::encode_rdb_with_functions(&entries, &[], &[lib.as_slice()]);
+        std::fs::write(&rdb_path, &bytes).expect("write function rdb");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_rdb_path(rdb_path);
+        let loaded = rt.load_rdb(50).expect("load should succeed");
+        assert_eq!(loaded, 1, "the key must load alongside the function");
+
+        // FUNCTION LIST now reports exactly the one restored library.
+        let listing = rt.execute_frame(command(&[b"FUNCTION", b"LIST"]), 100);
+        let RespFrame::Array(Some(libs)) = &listing else {
+            panic!("FUNCTION LIST should be an array: {listing:?}");
+        };
+        assert_eq!(libs.len(), 1, "exactly one library expected: {listing:?}");
+
+        // And the function is callable (definitive proof it was re-registered).
+        let called = rt.execute_frame(command(&[b"FCALL", b"myfunc", b"0"]), 101);
+        assert_eq!(called, RespFrame::BulkString(Some(b"hello".to_vec())), "{called:?}");
     }
 
     #[test]

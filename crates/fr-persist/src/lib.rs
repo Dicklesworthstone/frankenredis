@@ -1148,7 +1148,29 @@ pub fn encode_rdb_with_options(
     aux: &[(&str, &str)],
     options: RdbEncodeOptions,
 ) -> Vec<u8> {
-    encode_rdb_internal(entries, aux, options)
+    encode_rdb_internal(entries, aux, &[], options)
+}
+
+/// Encode a complete RDB file including FUNCTION library payloads.
+///
+/// Each entry of `functions` is a library's source code, emitted as a
+/// `RDB_OPCODE_FUNCTION2` record at the head of the file (after aux, before the
+/// keyspace) exactly as redis writes it, so the libraries survive a save/load
+/// round-trip. (frankenredis-tm139)
+#[must_use]
+pub fn encode_rdb_with_functions(
+    entries: &[RdbEntry],
+    aux: &[(&str, &str)],
+    functions: &[&[u8]],
+) -> Vec<u8> {
+    encode_rdb_internal(
+        entries,
+        aux,
+        functions,
+        RdbEncodeOptions {
+            compact: Some(CompactRdbThresholds::default()),
+        },
+    )
 }
 
 /// Encode a complete RDB file from a set of entries.
@@ -1164,6 +1186,7 @@ pub fn encode_rdb(entries: &[RdbEntry], aux: &[(&str, &str)]) -> Vec<u8> {
     encode_rdb_internal(
         entries,
         aux,
+        &[],
         RdbEncodeOptions {
             compact: Some(CompactRdbThresholds::default()),
         },
@@ -1173,6 +1196,7 @@ pub fn encode_rdb(entries: &[RdbEntry], aux: &[(&str, &str)]) -> Vec<u8> {
 fn encode_rdb_internal(
     entries: &[RdbEntry],
     aux: &[(&str, &str)],
+    functions: &[&[u8]],
     options: RdbEncodeOptions,
 ) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -1187,6 +1211,13 @@ fn encode_rdb_internal(
         buf.push(RDB_OPCODE_AUX);
         rdb_encode_string(&mut buf, key.as_bytes());
         rdb_encode_string(&mut buf, value.as_bytes());
+    }
+
+    // FUNCTION libraries are written after aux and before the keyspace, one
+    // RDB_OPCODE_FUNCTION2 record (the library source) each.
+    for code in functions {
+        buf.push(RDB_OPCODE_FUNCTION2);
+        rdb_encode_string(&mut buf, code);
     }
 
     let mut sorted_entries: Vec<&RdbEntry> = entries.iter().collect();
@@ -3031,6 +3062,31 @@ pub fn read_rdb_file(
     }
 }
 
+/// Like [`read_rdb_file`] but also returns the `FUNCTION2` library payloads
+/// captured from the dump, so the caller can re-register them into the function
+/// engine. A missing file yields empty collections. (frankenredis-tm139)
+#[allow(clippy::type_complexity)]
+pub fn read_rdb_file_with_functions(
+    path: &Path,
+) -> Result<(Vec<RdbEntry>, BTreeMap<String, String>, Vec<Vec<u8>>), PersistError> {
+    match std::fs::read(path) {
+        Ok(data) => {
+            if data.is_empty() {
+                return Err(PersistError::InvalidFrame);
+            }
+            let decoded = decode_rdb_prefix(&data)?;
+            if decoded.consumed != data.len() {
+                return Err(PersistError::InvalidFrame);
+            }
+            Ok((decoded.entries, decoded.aux, decoded.functions))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok((Vec::new(), BTreeMap::new(), Vec::new()))
+        }
+        Err(e) => Err(PersistError::Io(e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use fr_protocol::{RespFrame, RespParseError};
@@ -3754,7 +3810,8 @@ mod tests {
         RDB_TYPE_ZSET_LISTPACK, RdbEncodeOptions, RdbEntry, RdbStreamConsumerGroup,
         RdbStreamMetadata, RdbStreamPendingEntry, RdbValue, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3,
         crc64_redis, decode_intset_members, decode_rdb, decode_rdb_prefix,
-        encode_listpack_strings_blob, encode_rdb, encode_rdb_with_options, lzf_compress,
+        encode_listpack_strings_blob, encode_rdb, encode_rdb_with_functions,
+        encode_rdb_with_options, lzf_compress,
         lzf_decompress, rdb_decode_string, rdb_encode_length, rdb_encode_string,
     };
 
@@ -4125,6 +4182,25 @@ mod tests {
             }],
             "keys following the function payloads must survive the load"
         );
+    }
+
+    #[test]
+    fn encode_rdb_with_functions_round_trips_through_decode() {
+        // The FUNCTION2 records the encoder emits must decode back to the same
+        // library payloads (and the keyspace must be intact) — the basis for
+        // persisting functions across a save/load cycle.
+        let lib = b"#!lua name=rt\nredis.register_function('g', function() return 9 end)";
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"k".to_vec(),
+            value: RdbValue::String(b"v".to_vec()),
+            expire_ms: None,
+        }];
+        let encoded = encode_rdb_with_functions(&entries, &[], &[lib.as_slice()]);
+        let decoded = decode_rdb_prefix(&encoded).expect("round-trip decode");
+        assert_eq!(decoded.consumed, encoded.len());
+        assert_eq!(decoded.functions, vec![lib.to_vec()]);
+        assert_eq!(decoded.entries, entries);
     }
 
     #[test]
