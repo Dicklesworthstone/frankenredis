@@ -11574,9 +11574,24 @@ impl Store {
             // are returned — even zero. Match it so rdb_changes_since_last_save
             // agrees. ('>' reads only reach the bump above when new entries exist.)
             self.dirty = self.dirty.saturating_add(1);
+            // Upstream streamReplyWithRangeFromConsumerPEL bumps delivery_count
+            // and refreshes delivery_time for every served PEL entry whose
+            // underlying stream entry STILL EXISTS (`nack->delivery_count++`,
+            // `nack->delivery_time = now`). Tombstoned entries — emitted as
+            // `[id, nil]` and carried here as an empty field list (s0614) — take
+            // the `[id, NULL]` branch upstream and are NOT touched. fr previously
+            // left the counter unchanged on every history read, so XPENDING
+            // delivery counts drifted below redis after re-reads.
+            for (id, fields) in &records {
+                if fields.is_empty() {
+                    continue; // tombstone: redis emits [id, nil], no bump
+                }
+                if let Some(pending_entry) = group_state.pending.get_mut(id) {
+                    pending_entry.deliveries = pending_entry.deliveries.saturating_add(1);
+                    pending_entry.last_delivered_ms = now_ms;
+                }
+            }
         }
-        // Note: when reading pending entries (cursor is Id), Redis does NOT
-        // increment delivery count - it's a non-destructive replay.
 
         if consumer_created {
             // (frankenredis-hqj0t) Implicit consumer creation fires the
@@ -26730,8 +26745,13 @@ mod tests {
         assert_eq!(
             all_entries,
             vec![
-                // Pending replay does not increment delivery count or update idle
-                ((1000, 0), b"c1".to_vec(), 25, 1),
+                // The history replay (Id cursor) at t=20 re-served the live PEL
+                // entry 1000-0, so — matching upstream
+                // streamReplyWithRangeFromConsumerPEL — its delivery count was
+                // bumped to 2 and its delivery time refreshed to 20 (idle now
+                // 30-20=10). 1000-1 was only delivered once by the second '>'
+                // read at t=25 (idle 30-25=5, deliveries 1).
+                ((1000, 0), b"c1".to_vec(), 10, 2),
                 ((1000, 1), b"c1".to_vec(), 5, 1),
             ]
         );

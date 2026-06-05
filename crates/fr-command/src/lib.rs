@@ -36553,18 +36553,22 @@ mod tests {
         assert_eq!(
             detail,
             RespFrame::Array(Some(vec![
-                // Pending replay does NOT increment delivery count or update idle time
+                // The c1 '0' history replay at t=20 re-served the live PEL
+                // entries 1000-0/1000-1, so — matching upstream
+                // streamReplyWithRangeFromConsumerPEL — their delivery counts
+                // bumped to 2 and delivery times refreshed to 20 (idle now
+                // 40-20=20). 1000-2 was delivered once to c2 at t=30 (idle 10).
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"1000-0".to_vec())),
                     RespFrame::BulkString(Some(b"c1".to_vec())),
-                    RespFrame::Integer(30), // idle since initial delivery at t=10
-                    RespFrame::Integer(1),  // delivery count stays at 1
+                    RespFrame::Integer(20), // idle since the t=20 replay refresh
+                    RespFrame::Integer(2),  // delivered once + one history re-read
                 ])),
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"1000-1".to_vec())),
                     RespFrame::BulkString(Some(b"c1".to_vec())),
-                    RespFrame::Integer(30),
-                    RespFrame::Integer(1),
+                    RespFrame::Integer(20),
+                    RespFrame::Integer(2),
                 ])),
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"1000-2".to_vec())),
@@ -36595,14 +36599,14 @@ mod tests {
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"1000-0".to_vec())),
                     RespFrame::BulkString(Some(b"c1".to_vec())),
-                    RespFrame::Integer(30),
-                    RespFrame::Integer(1),
+                    RespFrame::Integer(20),
+                    RespFrame::Integer(2),
                 ])),
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"1000-1".to_vec())),
                     RespFrame::BulkString(Some(b"c1".to_vec())),
-                    RespFrame::Integer(30),
-                    RespFrame::Integer(1),
+                    RespFrame::Integer(20),
+                    RespFrame::Integer(2),
                 ])),
             ]))
         );
