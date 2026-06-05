@@ -596,7 +596,7 @@ pub fn parse_command_frame(
             Some(&b'$') => {}
             Some(&other) => return Err(RespParseError::ExpectedBulk(other)),
         }
-        let (item, consumed) = parse_bulk(input, cursor + 1, config)?;
+        let (item, consumed) = parse_bulk(input, cursor + 1, config, false)?;
         // A `$-1` null bulk is a valid *reply* but never a command argument.
         if matches!(item, RespFrame::BulkString(None)) {
             return Err(RespParseError::InvalidBulkLength);
@@ -751,7 +751,7 @@ fn parse_frame_internal(
             let n = parse_i64_strict(line)?;
             Ok((RespFrame::Integer(n), consumed))
         }
-        b'$' => parse_bulk(input, next, config),
+        b'$' => parse_bulk(input, next, config, true),
         b'*' => parse_array(input, next, depth, config),
         // RESP3 type prefixes. Without `config.allow_resp3`, hard-reject
         // every RESP3 prefix to preserve the fail-closed posture
@@ -937,6 +937,7 @@ fn parse_bulk(
     input: &[u8],
     start: usize,
     config: &ParserConfig,
+    validate_terminator: bool,
 ) -> Result<(RespFrame, usize), RespParseError> {
     let (line, consumed) = read_line(input, start)?;
     let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidBulkLength)?;
@@ -957,7 +958,14 @@ fn parse_bulk(
     if input.len() < end {
         return Err(RespParseError::Incomplete);
     }
-    if input[consumed + data_len] != b'\r' || input[consumed + data_len + 1] != b'\n' {
+    // Command parsing does NOT validate the 2 bytes after the payload:
+    // upstream `processMultibulkBuffer` advances `qb_pos += bulklen+2`
+    // unconditionally, so a length-mismatched bulk is re-split into the next
+    // command rather than rejected. Reply parsing keeps the strict check.
+    // (frankenredis-v4cl4)
+    if validate_terminator
+        && (input[consumed + data_len] != b'\r' || input[consumed + data_len + 1] != b'\n')
+    {
         return Err(RespParseError::InvalidBulkLength);
     }
     let bytes = input[consumed..consumed + data_len].to_vec();
@@ -988,9 +996,8 @@ fn parse_bulk_slice<'a>(
     if input.len() < end {
         return Err(RespParseError::Incomplete);
     }
-    if input[consumed + data_len] != b'\r' || input[consumed + data_len + 1] != b'\n' {
-        return Err(RespParseError::InvalidBulkLength);
-    }
+    // Command path: do NOT validate the trailing 2 bytes (see `parse_bulk`) —
+    // upstream advances past them unconditionally. (frankenredis-v4cl4)
     Ok((Some(&input[consumed..consumed + data_len]), end))
 }
 
@@ -1246,6 +1253,54 @@ mod tests {
     }
 
     #[test]
+    fn command_bulk_arg_skips_mismatched_terminator_like_upstream() {
+        // (frankenredis-v4cl4) A multibulk bulk arg whose declared length does
+        // not match its content must NOT be rejected: upstream advances
+        // `qb_pos += bulklen+2` blindly, so `$3\r\nPING\r\n` reads "PIN" and the
+        // trailing "G\r" is consumed as the (unvalidated) terminator, leaving
+        // "\n" for the next frame. Both command parsers must agree, and reply
+        // parsing must stay strict.
+        let cfg = ParserConfig::default();
+
+        // Owned command parser: reads 3 bytes "PIN", consumes 3+2 more.
+        let parsed = parse_command_frame(b"*1\r\n$3\r\nPING\r\n", &cfg).expect("lenient command");
+        assert_eq!(
+            parsed.frame,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"PIN".to_vec()))]))
+        );
+        assert_eq!(parsed.consumed, b"*1\r\n$3\r\nPING\r".len()); // up to but not incl trailing "\n"
+
+        // Borrowed command parser agrees (same arg, same consumed offset).
+        let mut args = Vec::new();
+        let borrowed = parse_command_args_borrowed_into(b"*1\r\n$3\r\nPING\r\n", &cfg, &mut args)
+            .expect("lenient borrowed command");
+        assert_eq!(args, vec![&b"PIN"[..]]);
+        assert_eq!(borrowed.consumed, parsed.consumed);
+
+        // Two args: `$2 key` reads "ke" and skips "y\r".
+        let parsed = parse_command_frame(b"*2\r\n$3\r\nGET\r\n$2\r\nkey\r\n", &cfg).expect("ok");
+        assert_eq!(
+            parsed.frame,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"GET".to_vec())),
+                RespFrame::BulkString(Some(b"ke".to_vec())),
+            ]))
+        );
+
+        // Reply parsing stays STRICT: the generic parser still rejects it.
+        assert_eq!(
+            parse_frame_with_config(b"$3\r\nPING\r\n", &cfg).unwrap_err(),
+            RespParseError::InvalidBulkLength
+        );
+
+        // Still need bulklen+2 bytes available, else Incomplete.
+        assert_eq!(
+            parse_command_frame(b"*1\r\n$3\r\nfoo\r", &cfg).unwrap_err(),
+            RespParseError::Incomplete
+        );
+    }
+
+    #[test]
     fn parse_command_args_borrowed_into_preserves_multibulk_error_semantics() {
         let cfg = ParserConfig::default();
         let allow_resp3 = ParserConfig {
@@ -1262,7 +1317,6 @@ mod tests {
             &b"*-2\r\n"[..],
             &b"*x\r\n"[..],
             &b"*1\r\n$3\r\nfo"[..],
-            &b"*1\r\n$3\r\nfoo\rx"[..],
             &b"*1\r\n$01\r\nx\r\n"[..],
             &b"*1\r\n$-0\r\n"[..],
         ];

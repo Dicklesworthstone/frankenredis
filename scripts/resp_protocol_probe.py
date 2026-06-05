@@ -15,12 +15,10 @@ SETUP (oracle config-less so compiled defaults align; fr in strict mode):
     $CARGO_TARGET_DIR/debug/frankenredis --port 16400 --mode strict &
     scripts/resp_protocol_probe.py 16399 16400
 
-KNOWN divergence (reported, not a hard fail — bead frankenredis-v4cl4):
-  - A multibulk bulk arg whose declared length mismatches its content: redis
-    blindly advances `qb_pos += bulklen+2` (no terminator check) and re-splits
-    the bytes into the next command; fr validates the trailing CRLF and returns
-    a protocol error. fr is strictly MORE validating. Tracked for the parser
-    refactor; normalised out here.
+Includes the bulk-arg terminator-leniency cases (frankenredis-v4cl4, FIXED): a
+multibulk bulk arg whose declared length mismatches its content — redis advances
+`qb_pos += bulklen+2` (no terminator check) and re-splits the bytes into the next
+command; fr now matches (command path lenient, reply path strict).
 """
 import socket
 import sys
@@ -75,10 +73,9 @@ CASES = [
     ("bulk incomplete (no data)", b"*1\r\n$4\r\nPING"),
     ("null byte in arg", b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$2\r\n\x00\x01\r\n"),
     ("well-formed pipelined", b"*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n"),
-]
-
-# Inputs hitting the known v4cl4 leniency gap (bulklen != content length).
-KNOWN_V4CL4 = [
+    # ── bulk-arg terminator leniency (frankenredis-v4cl4, FIXED) ──────────
+    # A bulk arg whose declared length mismatches content: redis skips the 2
+    # trailing bytes and re-splits into the next command. fr now matches.
     ("bulk len<content $3 PING", b"*1\r\n$3\r\nPING\r\n"),
     ("bulk len<content $2 PING", b"*1\r\n$2\r\nPING\r\n"),
     ("two-elem len mismatch", b"*2\r\n$3\r\nGET\r\n$2\r\nkey\r\n"),
@@ -90,7 +87,6 @@ def main() -> int:
     op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
     fails = 0
-    known = 0
 
     for label, raw in CASES:
         o = probe(op, raw).decode("latin1")
@@ -101,17 +97,8 @@ def main() -> int:
             print(f"    fr    : {f!r}")
             fails += 1
 
-    for label, raw in KNOWN_V4CL4:
-        o = probe(op, raw).decode("latin1")
-        f = probe(fp, raw).decode("latin1")
-        if o != f:
-            known += 1  # expected divergence; see bead v4cl4
-        else:
-            # fr started matching redis — the bead is fixed; promote to a real check.
-            print(f"NOTE [{label}] now matches oracle — v4cl4 likely fixed, tighten this gate")
-
     print("------------------------------------------------------------")
-    print(f"hard divergences: {fails} | known (v4cl4): {known}")
+    print(f"hard divergences: {fails}")
     if fails == 0:
         print("PASS — fr matches redis 7.2.4 across the probed RESP protocol surface")
         return 0
