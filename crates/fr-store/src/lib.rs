@@ -7936,7 +7936,13 @@ impl Store {
         } else {
             0
         };
-        match self.entries.get_mut(key) {
+        // Set when the command was a valid LTRIM on an existing list that
+        // removed NOTHING (range covered the whole list). Upstream ltrimCommand
+        // still fires "ltrim" + signalModifiedKey unconditionally in that case
+        // (server.dirty is NOT bumped, so the dirty-gated keyspace dispatcher
+        // would miss it); fire the event here after the entry borrow ends.
+        let mut noop_ltrim_on_list = false;
+        let result = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -7970,6 +7976,8 @@ impl Store {
                                 &mut self.digest_mutations,
                             );
                             entry.touch_write(now_ms);
+                        } else {
+                            noop_ltrim_on_list = true;
                         }
                         if removed > 0 {
                             self.dirty = self.dirty.saturating_add(removed as u64);
@@ -7980,7 +7988,15 @@ impl Store {
                 }
             }
             None => Ok(()),
+        };
+        if noop_ltrim_on_list {
+            let (db, logical_key) = match decode_db_key(key) {
+                Some((db, lk)) => (db, lk.to_vec()),
+                None => (0, key.to_vec()),
+            };
+            self.notify_keyspace_event(NOTIFY_LIST, "ltrim", &logical_key, db);
         }
+        result
     }
 
     pub fn lpushx(
