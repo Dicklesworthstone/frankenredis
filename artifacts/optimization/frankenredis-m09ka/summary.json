@@ -1,0 +1,26 @@
+{
+  "bead": "frankenredis-m09ka",
+  "decision": "rejected",
+  "lever": "inline small borrowed RESP argv result returned by parse_command_frame_borrowed",
+  "source_retained": false,
+  "baseline": {
+    "artifact": "paired-clean-head-vs-inline-small-hyperfine.json",
+    "mean_ms": 133.5,
+    "stddev_ms": 6.4
+  },
+  "candidate": {
+    "artifact": "paired-clean-head-vs-inline-small-hyperfine.json",
+    "mean_ms": 161.3,
+    "stddev_ms": 9.7
+  },
+  "speedup": 0.8277,
+  "score": 0.0,
+  "golden_sha256": "468764ce7e7bcc2d2bcf29672fe3f5a2848eac2fa5972f769c58f8def1916d56",
+  "isomorphism": {
+    "ordering": "RESP argv order preserved in canonical golden outputs",
+    "tie_breaking": "not touched",
+    "floating_point": "not touched",
+    "rng": "not touched"
+  },
+  "next_primitive": "wire caller-reused parse_command_args_borrowed_into storage into runtime session state, or pivot to event-loop batching/zero-copy framing if runtime remains peer-owned"
+}
