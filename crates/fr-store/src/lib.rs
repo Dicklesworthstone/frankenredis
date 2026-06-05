@@ -11558,17 +11558,25 @@ impl Store {
             group_state.last_delivered_id = last_seen_id;
             if !noack {
                 for (id, _) in &records {
+                    // A '>' read is always a FIRST delivery (to this consumer).
+                    // Upstream streamReplyWithRange creates a fresh NACK with
+                    // delivery_count = 1; and if the ID was already pending for
+                    // another consumer (the admin lowered the group ID via XGROUP
+                    // SETID so '>' re-serves it), it reassigns the NACK and RESETS
+                    // `nack->delivery_count = 1` (t_stream.c) rather than bumping.
+                    // So set the counter to 1 in both cases — re-delivery tracking
+                    // belongs to XCLAIM/XAUTOCLAIM and history reads, not '>'.
                     let pending_entry =
                         group_state
                             .pending
                             .entry(*id)
                             .or_insert_with(|| StreamPendingEntry {
                                 consumer: consumer.clone(),
-                                deliveries: 0,
+                                deliveries: 1,
                                 last_delivered_ms: now_ms,
                             });
                     pending_entry.consumer = consumer.clone();
-                    pending_entry.deliveries = pending_entry.deliveries.saturating_add(1);
+                    pending_entry.deliveries = 1;
                     pending_entry.last_delivered_ms = now_ms;
                 }
             }
