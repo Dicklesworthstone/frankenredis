@@ -774,6 +774,13 @@ const RDB_OPCODE_SELECTDB: u8 = 0xFE;
 const RDB_OPCODE_RESIZEDB: u8 = 0xFB;
 const RDB_OPCODE_EXPIRETIME_MS: u8 = 0xFC;
 const RDB_OPCODE_EOF: u8 = 0xFF;
+/// RDB_OPCODE_FUNCTION2 (245): a function-library payload written by redis
+/// 7.0+ at the head of the RDB (one opcode per registered library), each
+/// followed by a single raw string holding the library source code. We must
+/// consume it — failing here discarded the ENTIRE dump (every key after the
+/// functions was lost) whenever `FUNCTION LOAD` had been used.
+/// (br-frankenredis-rdb-function2)
+const RDB_OPCODE_FUNCTION2: u8 = 0xF5;
 
 /// RDB value type tags.
 const RDB_TYPE_STRING: u8 = 0;
@@ -832,6 +839,11 @@ pub struct RdbDecodeResult {
     pub entries: Vec<RdbEntry>,
     pub aux: BTreeMap<String, String>,
     pub consumed: usize,
+    /// Function-library source payloads (RDB_OPCODE_FUNCTION2), in file
+    /// order. Empty unless the dump registered `FUNCTION`/`FCALL` libraries.
+    /// Captured so the runtime can re-register them; their presence no longer
+    /// aborts the whole load.
+    pub functions: Vec<Vec<u8>>,
 }
 
 /// Stream entry: (ms, seq, fields).
@@ -2269,6 +2281,7 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
     let mut cursor = 9; // Skip "REDIS" + 4-digit version
     let mut entries = Vec::new();
     let mut aux = BTreeMap::new();
+    let mut functions: Vec<Vec<u8>> = Vec::new();
     let mut pending_expire_ms: Option<u64> = None;
     let mut current_db = 0usize;
     let mut saw_eof = false;
@@ -2391,6 +2404,17 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                     return Err(PersistError::InvalidFrame);
                 }
                 cursor += 1;
+            }
+            RDB_OPCODE_FUNCTION2 => {
+                // Function-library payload: a single raw string (the library
+                // source). Capture it and continue so the keyspace that
+                // follows still loads. Re-registering the library into the
+                // function engine is the runtime's responsibility; dropping
+                // the whole RDB here was a data-loss bug.
+                let (code, consumed) =
+                    rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
+                cursor += consumed;
+                functions.push(code);
             }
             type_byte @ (RDB_TYPE_STRING
             | RDB_TYPE_LIST
@@ -2810,6 +2834,7 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
         entries,
         aux,
         consumed: cursor,
+        functions,
     })
 }
 
@@ -3572,7 +3597,8 @@ mod tests {
 
     use super::{
         CompactRdbThresholds, RDB_CHECKSUM_LEN, RDB_OPCODE_AUX, RDB_OPCODE_EOF,
-        RDB_OPCODE_EXPIRETIME_MS, RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_HASH,
+        RDB_OPCODE_EXPIRETIME_MS, RDB_OPCODE_FUNCTION2, RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB,
+        RDB_TYPE_HASH,
         RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_WITH_TTLS, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST_2,
         RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STRING, RDB_TYPE_ZSET_2,
         RDB_TYPE_ZSET_LISTPACK, RdbEncodeOptions, RdbEntry, RdbStreamConsumerGroup,
@@ -3904,6 +3930,50 @@ mod tests {
         assert_eq!(
             decoded.aux.get("future-aux-field").map(String::as_str),
             Some("ignored-safely")
+        );
+    }
+
+    #[test]
+    fn rdb_function2_opcode_is_captured_and_keys_still_load() {
+        // Regression: a dump containing a FUNCTION library (RDB_OPCODE_FUNCTION2,
+        // emitted by redis 7.0+ at the head of the file) used to fall through to
+        // the fail-closed arm and discard the ENTIRE keyspace. The library
+        // payload must be captured and the keys that follow must still decode.
+        let lib_a = b"#!lua name=liba\nredis.register_function('fa', function() return 1 end)";
+        let lib_b = b"#!lua name=libb\nredis.register_function('fb', function() return 2 end)";
+
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"REDIS0011");
+        // Functions are written before any SELECTDB / keys, one opcode each.
+        encoded.push(RDB_OPCODE_FUNCTION2);
+        rdb_encode_string(&mut encoded, lib_a);
+        encoded.push(RDB_OPCODE_FUNCTION2);
+        rdb_encode_string(&mut encoded, lib_b);
+        // A normal key after the function payloads.
+        encoded.push(RDB_OPCODE_SELECTDB);
+        rdb_encode_length(&mut encoded, 0);
+        encoded.push(RDB_TYPE_STRING);
+        rdb_encode_string(&mut encoded, b"survivor");
+        rdb_encode_string(&mut encoded, b"value");
+        encoded.push(RDB_OPCODE_EOF);
+        append_rdb_checksum(&mut encoded);
+
+        let decoded = decode_rdb_prefix(&encoded).expect("FUNCTION2 dump must load, not abort");
+        assert_eq!(decoded.consumed, encoded.len());
+        assert_eq!(
+            decoded.functions,
+            vec![lib_a.to_vec(), lib_b.to_vec()],
+            "both library payloads must be captured in file order"
+        );
+        assert_eq!(
+            decoded.entries,
+            vec![RdbEntry {
+                db: 0,
+                key: b"survivor".to_vec(),
+                value: RdbValue::String(b"value".to_vec()),
+                expire_ms: None,
+            }],
+            "keys following the function payloads must survive the load"
         );
     }
 
