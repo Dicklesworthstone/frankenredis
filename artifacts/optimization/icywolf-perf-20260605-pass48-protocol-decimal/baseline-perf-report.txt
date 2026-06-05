@@ -1,0 +1,109 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cycles:P'
+# Event count (approx.): 4618449077
+#
+# Overhead  Command          Shared Object                  Symbol
+# ........  ...............  .............................  .................................................
+#
+    98.85%  bench_protocol_  bench_protocol_parse_baseline  [.] fr_protocol::parse_command_args_borrowed_into
+            |
+            |--97.02%--fr_protocol::parse_command_args_borrowed_into
+            |          |
+            |          |--32.85%--0xa0d39240a0d5445
+            |          |
+            |          |--23.09%--0x71
+            |          |
+            |           --2.35%--0x100000
+            |
+             --1.68%--bench_protocol_parse::main
+                       0x100000
+
+     0.27%  bench_protocol_  bench_protocol_parse_baseline  [.] bench_protocol_parse::main
+     0.14%  bench_protocol_  [unknown]                      [k] 0xffffffff85077b35
+     0.12%  bench_protocol_  [unknown]                      [k] 0xffffffff8583c3e6
+     0.11%  bench_protocol_  [unknown]                      [k] 0xffffffff850868f9
+     0.11%  bench_protocol_  [unknown]                      [k] 0xffffffff85300d68
+     0.09%  bench_protocol_  [unknown]                      [k] 0xffffffff850c03b5
+     0.09%  bench_protocol_  [unknown]                      [k] 0xffffffff86225225
+     0.09%  bench_protocol_  [unknown]                      [k] 0xffffffff8623a6aa
+     0.09%  bench_protocol_  [unknown]                      [k] 0xffffffff84c01192
+     0.04%  bench_protocol_  [unknown]                      [k] 0xffffffff85052903
+     0.01%  bench_protocol_  [unknown]                      [k] 0xffffffff861e5061
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff850a70bc
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff853b00de
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff84c0188e
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff84f8c9d1
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8621c6a9
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8530d2bc
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff862289ac
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8530d2c3
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8530d280
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff85314719
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff86228a46
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8532641b
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff84fdedcb
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8623a87e
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8508a42f
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff86224b76
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff85080f40
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff84f8c9c6
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff84f8c385
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8508a32d
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff84c01248
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff84fc01c9
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff862288d3
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff851624a6
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff850886c3
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff84fc01ce
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff85326b15
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff85078ef4
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff84f9100a
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8507e636
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff84c01830
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff85078fad
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff857bfc4e
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff84c01884
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff86227da0
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff852ff1c9
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff853134f7
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff85314705
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8506d57c
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff85312dac
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8531473a
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff852fe615
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff85312c49
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff86224c9d
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff84c0181e
+     0.00%  perf-exec        [unknown]                      [k] 0xffffffff8621ff13
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8530d285
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8530d286
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff85300b66
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8530d2cc
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff85300b80
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8530d289
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff84d04109
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff84f32f8e
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff84fdedcd
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff85300b69
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8530d28b
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff84f337e5
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff85104b41
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff85300b65
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff85300b78
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8530d2b7
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8530d2d0
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8530d2db
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff8620a0c7
+     0.00%  bench_protocol_  [unknown]                      [k] 0xffffffff862251d0
+     0.00%  perf-exec        [unknown]                      [k] 0xffffffff8530d280
+     0.00%  perf-exec        [unknown]                      [k] 0xffffffff8530d2bc
+     0.00%  perf-exec        [unknown]                      [k] 0xffffffff8530d2c3
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
