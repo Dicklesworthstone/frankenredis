@@ -20060,13 +20060,21 @@ fn eval_script_error_reply(script: &[u8], error: String) -> RespFrame {
         RespFrame::Error(format_eval_noscript_error(script))
     } else if error == READ_ONLY_SCRIPT_WRITE_ERROR {
         RespFrame::Error(format_eval_read_only_script_error(script))
-    } else if error.starts_with("unexpected symbol near ")
-        || error.starts_with("unexpected character ")
-        || error.contains("syntax error")
+    } else if !error_has_resp_code_prefix(&error)
+        && (error.starts_with("unexpected symbol near ")
+            || error.starts_with("unexpected character ")
+            || error.contains("syntax error"))
     {
         // Upstream script_lua.c uses
         // "Error compiling script (new function): user_script:1:
         //  <lua-message>" for parse-time errors. (br-frankenredis-fo1s)
+        //
+        // Only BARE Lua parse messages take this branch. A `redis.call`
+        // command error that happens to read "ERR syntax error" (e.g.
+        // `SET k v badopt`) already carries a RESP code prefix and is a
+        // RUNTIME error — it must flow through the `<msg> script: <sha>,
+        // on @user_script:1.` envelope below, matching upstream
+        // luaCallFunction, not the compile-error wording. (frankenredis-evalsyn)
         RespFrame::Error(format!(
             "ERR Error compiling script (new function): user_script:1: {error}"
         ))
@@ -46862,6 +46870,44 @@ mod tests {
         )
         .expect("eval");
         assert_eq!(out, RespFrame::Integer(1));
+    }
+
+    #[test]
+    fn eval_redis_call_syntax_error_uses_runtime_envelope_not_compile() {
+        // (frankenredis-evalsyn) A redis.call command error that reads
+        // "ERR syntax error" (e.g. SET k v badopt) is a RUNTIME error and must
+        // use the `<msg> script: <sha>, on @user_script:1.` envelope, NOT the
+        // "Error compiling script" wording reserved for Lua parse failures.
+        let mut store = Store::new();
+        let script: &[u8] = b"return redis.call('set','k','v','badopt')";
+        let out = dispatch_argv(
+            &[b"EVAL".to_vec(), script.to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("eval dispatch");
+        let sha = fr_store::sha1_hex_public(script);
+        assert_eq!(
+            out,
+            RespFrame::Error(format!(
+                "ERR syntax error script: {sha}, on @user_script:1."
+            ))
+        );
+
+        // A genuine Lua parse error STILL uses the compile-error envelope.
+        let out2 = dispatch_argv(
+            &[b"EVAL".to_vec(), b"return 1 +".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("eval dispatch");
+        let RespFrame::Error(msg) = out2 else {
+            panic!("expected compile error, got {out2:?}");
+        };
+        assert!(
+            msg.starts_with("ERR Error compiling script (new function): user_script:1:"),
+            "compile-error wording lost: {msg}"
+        );
     }
 
     /// (frankenredis-j02x9) The Lua sandbox locks the globals table at
