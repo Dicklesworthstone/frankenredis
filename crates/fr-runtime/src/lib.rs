@@ -1,7 +1,7 @@
 #![deny(unsafe_code)]
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Write as _,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -30,7 +30,7 @@ use fr_eventloop::{
 };
 use fr_persist::{
     AofRecord, PersistError, RdbEntry, RdbValue, argv_to_aof_records, decode_aof_stream,
-    decode_rdb, encode_aof_stream, encode_rdb, read_rdb_file, write_aof_file, write_rdb_file,
+    decode_rdb, encode_aof_stream, read_rdb_file, write_aof_file,
 };
 use fr_protocol::{RespFrame, RespParseError};
 use fr_repl::{
@@ -40,9 +40,8 @@ use fr_repl::{
 use fr_store::{
     AclKeyPattern, ClientReplyState, ClientTrackingState, CommandHistogram, CommandRecordKind,
     DispatchAclLogContext, DispatchAclPermissionReason, DispatchAclPermissions,
-    DispatchClientContext, EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus,
-    EvictionSafetyGateState, MaxmemoryPolicy, PendingAclLogEvent, Store, decode_db_key,
-    encode_db_key, glob_match,
+    EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus, EvictionSafetyGateState,
+    MaxmemoryPolicy, PendingAclLogEvent, Store, decode_db_key, encode_db_key, glob_match,
 };
 use sha2::{Digest, Sha256};
 
@@ -140,6 +139,27 @@ fn acl_key_pattern_token(pat: &AclKeyPattern) -> String {
     format!("{prefix}{}", String::from_utf8_lossy(&pat.pattern))
 }
 
+/// True for ACL rules that configure user IDENTITY (auth/state) rather than
+/// permissions. These are NOT allowed inside a selector `( … )` group, which
+/// only carries command/key/channel grants. (frankenredis-d919b)
+fn acl_rule_is_identity(rule: &[u8]) -> bool {
+    let s = match std::str::from_utf8(rule) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    s.eq_ignore_ascii_case("on")
+        || s.eq_ignore_ascii_case("off")
+        || s.eq_ignore_ascii_case("nopass")
+        || s.eq_ignore_ascii_case("resetpass")
+        || s.eq_ignore_ascii_case("reset")
+        || s.eq_ignore_ascii_case("clearselectors")
+        || s.eq_ignore_ascii_case("sanitize-payload")
+        || s.eq_ignore_ascii_case("skip-sanitize-payload")
+        || s.starts_with('>')
+        || s.starts_with('<')
+        || s.starts_with('#')
+}
+
 /// Parse a `%`-prefixed ACL key selector modifier into
 /// `(pattern_bytes, read, write)`.
 ///
@@ -228,16 +248,40 @@ fn wrong_arity_error(command: &'static str) -> RespFrame {
     ))
 }
 
-fn client_info_command_name(argv: &[Vec<u8>]) -> String {
+/// Append `bytes` to `out`, ASCII-lowercased, with the same result as
+/// `out.push_str(&String::from_utf8_lossy(bytes).to_ascii_lowercase())` but
+/// without an intermediate allocation for the common valid-UTF-8 case (char-wise
+/// `to_ascii_lowercase` equals byte-wise for ASCII; multi-byte chars unchanged).
+/// (frankenredis-hackk)
+fn push_ascii_lowercase_lossy(out: &mut String, bytes: &[u8]) {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => {
+            for ch in s.chars() {
+                out.push(ch.to_ascii_lowercase());
+            }
+        }
+        Err(_) => out.push_str(&String::from_utf8_lossy(bytes).to_ascii_lowercase()),
+    }
+}
+
+/// Write the canonical lowercase command name (with `parent|sub` for container
+/// commands) into `out`, reusing its buffer instead of allocating a fresh String
+/// each command — this runs on every command via `execute_dispatch`. Byte-
+/// identical to the prior `client_info_command_name` return value.
+/// (frankenredis-hackk)
+fn write_client_info_command_name(out: &mut String, argv: &[Vec<u8>]) {
+    out.clear();
     let Some(command) = argv.first() else {
-        return "NULL".to_string();
+        out.push_str("NULL");
+        return;
     };
-    let command = String::from_utf8_lossy(command).to_ascii_lowercase();
+    push_ascii_lowercase_lossy(out, command);
     let Some(sub) = argv.get(1) else {
-        return command;
+        return;
     };
+    // `out` currently holds exactly the lowercased command name.
     let uses_subcommand = matches!(
-        command.as_str(),
+        out.as_str(),
         "acl"
             | "client"
             | "cluster"
@@ -257,10 +301,10 @@ fn client_info_command_name(argv: &[Vec<u8>]) -> String {
             | "xinfo"
     );
     if !uses_subcommand {
-        return command;
+        return;
     }
-    let sub = String::from_utf8_lossy(sub).to_ascii_lowercase();
-    format!("{command}|{sub}")
+    out.push('|');
+    push_ascii_lowercase_lossy(out, sub);
 }
 
 fn acl_log_age_seconds(now_ms: u64, timestamp_ms: u64) -> String {
@@ -706,6 +750,16 @@ struct AclUser {
     allowed_categories: HashSet<String>,
     /// Explicitly denied categories (lowercase).
     denied_categories: HashSet<String>,
+    /// (frankenredis-4kuad) Command-rule override tokens in the exact order they
+    /// were applied, e.g. `["+get", "+set", "+@read"]` or `["-@dangerous"]`.
+    /// Upstream acl.c stores the literal command-rule string and re-emits it in
+    /// insertion order; the `HashSet`s above answer membership/enforcement but
+    /// lose order. This list is the rendering source of truth for
+    /// `commands_string` (each token is `<+|->target`; `target` is `cmd`,
+    /// `cmd|sub`, or `@cat`). Cleared by `+@all`/`-@all`/`reset` (which reset
+    /// the baseline), and adding a token for an existing target replaces it
+    /// in place at the new position.
+    command_rule_tokens: Vec<String>,
     /// Explicitly allowed key glob patterns, each carrying the read/write
     /// access it grants (`~` / `%R~` / `%W~` / `%RW~`).
     key_patterns: Vec<AclKeyPattern>,
@@ -715,6 +769,15 @@ struct AclUser {
     channel_patterns: Vec<Vec<u8>>,
     /// Channel permissions. False means only `channel_patterns` are allowed.
     all_channels: bool,
+    /// (frankenredis-d919b) Redis 7 ACL selectors: additional permission sets
+    /// attached via `(commands keys channels)` groups. Each selector is itself
+    /// a permission-only `AclUser` (its identity fields — passwords/enabled/
+    /// nopass — are unused), so it reuses the exact same rule parser, command/
+    /// key/channel checks, and rendering. A request is permitted when the root
+    /// permission set OR any selector grants the command together with its keys
+    /// and channels (selectors are purely additive — a user with no selectors
+    /// behaves identically to before).
+    selectors: Vec<AclUser>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -748,10 +811,12 @@ impl AclUser {
             denied_commands: HashSet::new(),
             allowed_categories: HashSet::new(),
             denied_categories: HashSet::new(),
+            command_rule_tokens: Vec::new(),
             key_patterns: Vec::new(),
             all_keys: true,
             channel_patterns: Vec::new(),
             all_channels: true,
+            selectors: Vec::new(),
         }
     }
 
@@ -769,10 +834,12 @@ impl AclUser {
             denied_commands: HashSet::new(),
             allowed_categories: HashSet::new(),
             denied_categories: HashSet::new(),
+            command_rule_tokens: Vec::new(),
             key_patterns: Vec::new(),
             all_keys: false,
             channel_patterns: Vec::new(),
             all_channels: acl_pubsub_default.grants_all_channels(),
+            selectors: Vec::new(),
         }
     }
 
@@ -849,71 +916,40 @@ impl AclUser {
         self.all_commands
     }
 
+    /// Record a command-rule override token (`+cmd`/`-cmd`/`+@cat`/`-@cat`,
+    /// possibly `+cmd|sub`) in application order. (frankenredis-4kuad) A later
+    /// rule for an existing target replaces the earlier one in place at the new
+    /// position with the new sign, mirroring upstream acl.c.
+    fn record_command_rule(&mut self, token: String) {
+        let target = token[1..].to_string();
+        self.command_rule_tokens
+            .retain(|existing| existing.get(1..) != Some(target.as_str()));
+        self.command_rule_tokens.push(token);
+    }
+
     fn commands_string(&self) -> String {
-        // (frankenredis-23o12) Vendored acl.c::ACLDescribeUserCommandRules
-        // re-emits every explicit `+cmd`/`+@cat` even when `+@all` is
-        // already in effect, so a rule like `+@all -DEBUG +debug` round-
-        // trips as `+@all +debug`. The early-return shortcut here only
-        // applies when the user has ONLY `+@all` and no explicit allow
-        // or deny modifiers on top.
-        if self.all_commands
-            && self.allowed_commands.is_empty()
-            && self.allowed_categories.is_empty()
-            && self.denied_commands.is_empty()
-            && self.denied_categories.is_empty()
-        {
+        // (frankenredis-4kuad) Emit the override tokens in their original
+        // application order, mirroring upstream acl.c::ACLDescribeUserCommandRules
+        // (which re-emits the literal command-rule string). fr previously
+        // rebuilt the string from sorted HashSets, reordering rules like
+        // `+get +set +@read` into `+@read +get +set`.
+        //
+        // The baseline (`+@all`/`-@all`) leads. (frankenredis-23o12) `+@all`
+        // still re-emits later explicit grants because it clears the override
+        // list but subsequent `+cmd`/`+@cat` re-append. (frankenredis-dv0ve)
+        // a non-allcommands user opens with `-@all` even with positive grants
+        // so the rule string round-trips.
+        if self.all_commands && self.command_rule_tokens.is_empty() {
             return "+@all".to_string();
         }
-
-        let mut parts: Vec<String> = Vec::new();
-
-        if self.all_commands {
-            parts.push("+@all".to_string());
+        let mut parts: Vec<String> = Vec::with_capacity(self.command_rule_tokens.len() + 1);
+        parts.push(if self.all_commands {
+            "+@all".to_string()
         } else {
-            // (frankenredis-dv0ve) Mirror upstream
-            // acl.c::ACLDescribeUserCommandRules: when the user does NOT
-            // have allcommands, ACL LIST opens with the deny-all
-            // baseline ("-@all") even when explicit positive grants
-            // follow, so callers can re-apply the rule string to
-            // reproduce the exact permission set. fr previously emitted
-            // "-@all" only when zero explicit grants existed, making
-            // "+@read" round-trip as the wrong (broader) permission.
-            parts.push("-@all".to_string());
-        }
-
-        // Add allowed categories.
-        let mut sorted_cats: Vec<&String> = self.allowed_categories.iter().collect();
-        sorted_cats.sort();
-        for cat in sorted_cats {
-            parts.push(format!("+@{cat}"));
-        }
-
-        // Add denied categories.
-        let mut sorted_denied_cats: Vec<&String> = self.denied_categories.iter().collect();
-        sorted_denied_cats.sort();
-        for cat in sorted_denied_cats {
-            parts.push(format!("-@{cat}"));
-        }
-
-        // Add allowed commands.
-        let mut sorted_cmds: Vec<&String> = self.allowed_commands.iter().collect();
-        sorted_cmds.sort();
-        for cmd in sorted_cmds {
-            parts.push(format!("+{cmd}"));
-        }
-
-        // Add denied commands.
-        let mut sorted_denied: Vec<&String> = self.denied_commands.iter().collect();
-        sorted_denied.sort();
-        for cmd in sorted_denied {
-            parts.push(format!("-{cmd}"));
-        }
-
-        if parts.is_empty() {
             "-@all".to_string()
-        } else {
-            parts.join(" ")
-        }
+        });
+        parts.extend(self.command_rule_tokens.iter().cloned());
+        parts.join(" ")
     }
 
     fn keys_string(&self) -> String {
@@ -1021,7 +1057,10 @@ impl AclUser {
         None
     }
 
-    fn acl_permission_error_for_argv(&self, argv: &[Vec<u8>]) -> Option<AclCommandPermissionError> {
+    /// (frankenredis-d919b) Whether THIS single permission set (root or one
+    /// selector) grants `argv` — the command together with all its keys and
+    /// channels. Returns the first denial, or `None` when fully granted.
+    fn permission_error_for_set(&self, argv: &[Vec<u8>]) -> Option<AclCommandPermissionError> {
         let Some(cmd) = argv.first() else {
             return Some(AclCommandPermissionError::Command);
         };
@@ -1049,6 +1088,31 @@ impl AclUser {
         None
     }
 
+    /// (frankenredis-d919b) Upstream acl.c::ACLCheckAllPerm: a request is
+    /// permitted when the ROOT permission set OR ANY selector grants the command
+    /// together with its keys and channels (selectors are purely additive). When
+    /// every set denies, the root set's denial is reported.
+    fn acl_permission_error_for_argv(&self, argv: &[Vec<u8>]) -> Option<AclCommandPermissionError> {
+        // Permit when the root set OR any selector grants the command with its
+        // keys and channels; otherwise report the DEEPEST denial (a set that
+        // granted the command but failed a key/channel surfaces as a key/channel
+        // error). (frankenredis-d919b)
+        let depth = |e: &AclCommandPermissionError| match e {
+            AclCommandPermissionError::Command => 0u8,
+            AclCommandPermissionError::Key(_) => 1,
+            AclCommandPermissionError::Channel(_) => 2,
+        };
+        let mut best: Option<AclCommandPermissionError> = None;
+        for set in std::iter::once(self).chain(self.selectors.iter()) {
+            let err = set.permission_error_for_set(argv)?;
+            let take = best.as_ref().is_none_or(|prev| depth(&err) > depth(prev));
+            if take {
+                best = Some(err);
+            }
+        }
+        best
+    }
+
     fn to_dispatch_acl_permissions(&self) -> DispatchAclPermissions {
         DispatchAclPermissions {
             all_commands: self.all_commands,
@@ -1060,6 +1124,13 @@ impl AclUser {
             all_keys: self.all_keys,
             channel_patterns: self.channel_patterns.clone(),
             all_channels: self.all_channels,
+            // (frankenredis-d919b) Flatten selectors into the dispatch snapshot
+            // so the per-command dispatch gate honours them too.
+            selectors: self
+                .selectors
+                .iter()
+                .map(AclUser::to_dispatch_acl_permissions)
+                .collect(),
         }
     }
 
@@ -1071,29 +1142,14 @@ impl AclUser {
         }
     }
 
-    fn acl_list_line(&self, username: &[u8]) -> String {
-        let username_str = String::from_utf8_lossy(username);
-        let mut parts = vec!["user".to_string(), username_str.into_owned()];
-        parts.push(if self.enabled {
-            "on".to_string()
-        } else {
-            "off".to_string()
-        });
-        // Upstream acl.c::ACLDescribeUser emits
-        // `on nopass|#<hash>… <sanitize-payload>` — nopass / password
-        // hashes appear before the sanitize-payload flag.
-        // (br-frankenredis-faqe)
-        if self.nopass {
-            parts.push("nopass".to_string());
-        }
-        if !self.nopass {
-            parts.extend(self.passwords.iter().map(|_| "#<hidden>".to_string()));
-        }
-        parts.push(self.sanitize_payload_flag().to_string());
+    /// (frankenredis-d919b) Render this permission-only `AclUser` as a selector
+    /// group `(<keys> <channels> <commands>)`, matching upstream
+    /// acl.c::ACLDescribeSelector token order (used inside ACL LIST / ACL SAVE).
+    fn acl_selector_token(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
         if self.all_keys {
             parts.push("~*".to_string());
-        } else if !self.key_patterns.is_empty() {
-            parts.push("resetkeys".to_string());
+        } else {
             parts.extend(self.key_patterns.iter().map(acl_key_pattern_token));
         }
         if self.all_channels {
@@ -1111,6 +1167,61 @@ impl AclUser {
                 .split_whitespace()
                 .map(str::to_string),
         );
+        format!("({})", parts.join(" "))
+    }
+
+    fn acl_list_line(&self, username: &[u8]) -> String {
+        let username_str = String::from_utf8_lossy(username);
+        let mut parts = vec!["user".to_string(), username_str.into_owned()];
+        parts.push(if self.enabled {
+            "on".to_string()
+        } else {
+            "off".to_string()
+        });
+        // (frankenredis-fh7hn) Match upstream acl.c::ACLDescribeUser token
+        // order exactly: `<on|off> [nopass] sanitize-payload [#hash…]
+        // [~* | ~pat…] [&* | resetchannels &pat…] <commands>`. `nopass`
+        // precedes the sanitize-payload flag; password hashes follow it.
+        if self.nopass {
+            parts.push("nopass".to_string());
+        }
+        parts.push(self.sanitize_payload_flag().to_string());
+        if !self.nopass {
+            // Emit the real SHA-256 hash (already a one-way digest), matching
+            // upstream and fr's own acl_save_line. The prior `#<hidden>`
+            // placeholder broke ACL LIST/SAVE round-trip — a dumped config
+            // could not recreate the user.
+            parts.extend(
+                self.passwords
+                    .iter()
+                    .map(|password| format!("#{}", String::from_utf8_lossy(password))),
+            );
+        }
+        if self.all_keys {
+            parts.push("~*".to_string());
+        } else {
+            // Upstream ACL LIST does NOT prefix key patterns with `resetkeys`
+            // (unlike channels, which carry `resetchannels`). fr emitted a
+            // spurious `resetkeys` token here.
+            parts.extend(self.key_patterns.iter().map(acl_key_pattern_token));
+        }
+        if self.all_channels {
+            parts.push("&*".to_string());
+        } else {
+            parts.push("resetchannels".to_string());
+            parts.extend(
+                self.channel_patterns
+                    .iter()
+                    .map(|pattern| format!("&{}", String::from_utf8_lossy(pattern))),
+            );
+        }
+        parts.extend(
+            self.commands_string()
+                .split_whitespace()
+                .map(str::to_string),
+        );
+        // (frankenredis-d919b) Selector groups follow the root permission set.
+        parts.extend(self.selectors.iter().map(AclUser::acl_selector_token));
         parts.join(" ")
     }
 
@@ -1164,6 +1275,8 @@ impl AclUser {
                 .split_whitespace()
                 .map(str::to_string),
         );
+        // (frankenredis-d919b) Selector groups follow the root permission set.
+        parts.extend(self.selectors.iter().map(AclUser::acl_selector_token));
         parts.join(" ")
     }
 }
@@ -1173,6 +1286,7 @@ struct AuthState {
     requirepass: Option<Vec<u8>>,
     acl_pubsub_default: AclPubsubDefault,
     acl_users: BTreeMap<Vec<u8>, AclUser>,
+    dispatch_permissions_generation: u64,
 }
 
 impl Default for AuthState {
@@ -1189,11 +1303,13 @@ impl AuthState {
             requirepass: None,
             acl_pubsub_default,
             acl_users,
+            dispatch_permissions_generation: 0,
         }
     }
 
     fn set_acl_pubsub_default(&mut self, acl_pubsub_default: AclPubsubDefault) {
         self.acl_pubsub_default = acl_pubsub_default;
+        self.bump_dispatch_permissions_generation();
     }
 
     fn set_requirepass(&mut self, requirepass: Option<Vec<u8>>) {
@@ -1210,6 +1326,7 @@ impl AuthState {
             default_user.passwords.clear();
             default_user.nopass = true;
         }
+        self.bump_dispatch_permissions_generation();
     }
 
     fn add_user(&mut self, username: Vec<u8>, password: Vec<u8>) {
@@ -1219,6 +1336,7 @@ impl AuthState {
             .or_insert_with(AclUser::new_default);
         user.passwords = vec![sha256_hex_bytes(&password)];
         user.nopass = false;
+        self.bump_dispatch_permissions_generation();
     }
 
     fn auth_required(&self) -> bool {
@@ -1279,6 +1397,8 @@ impl AuthState {
             let rules: Vec<&[u8]> = parts[2..].iter().map(|part| part.as_bytes()).collect();
             loaded.set_user(username, &rules)?;
         }
+        loaded.dispatch_permissions_generation =
+            self.dispatch_permissions_generation.wrapping_add(1);
         *self = loaded;
         Ok(())
     }
@@ -1306,22 +1426,29 @@ impl AuthState {
                 }
             }
         }
+        if result.is_ok() {
+            self.bump_dispatch_permissions_generation();
+        }
         result
     }
 
-    fn apply_setuser_rules(&mut self, username: Vec<u8>, rules: &[&[u8]]) -> Result<(), String> {
-        let is_default = username == DEFAULT_AUTH_USER;
-        let acl_pubsub_default = self.acl_pubsub_default;
-        let user = self.acl_users.entry(username).or_insert_with(|| {
-            if is_default {
-                AclUser::new_default()
-            } else {
-                AclUser::new_restricted(acl_pubsub_default)
-            }
-        });
-        for rule in rules {
+    /// Apply ACL command/key/channel/identity rules to a user in place.
+    /// (frankenredis-d919b) Extracted from apply_setuser_rules so a selector
+    /// `(...)` group can reuse the exact same tested rule parser on a scratch
+    /// AclUser, and so apply_setuser_rules stays a thin map-entry wrapper.
+    fn apply_acl_rules_to_user(
+        user: &mut AclUser,
+        rules: &[&[u8]],
+        acl_pubsub_default: AclPubsubDefault,
+    ) -> Result<(), String> {
+        // (frankenredis-d919b) Merge `( … )` selector groups that span multiple
+        // arguments into single tokens before the per-rule walk.
+        let merged = Self::merge_acl_selector_tokens(rules)?;
+        for rule in &merged {
             let rule_str = std::str::from_utf8(rule).unwrap_or("");
-            if rule_str.eq_ignore_ascii_case("on") {
+            if rule_str.starts_with('(') && rule_str.ends_with(')') {
+                Self::apply_acl_selector_group(user, rule_str, acl_pubsub_default)?;
+            } else if rule_str.eq_ignore_ascii_case("on") {
                 user.enabled = true;
             } else if rule_str.eq_ignore_ascii_case("off") {
                 user.enabled = false;
@@ -1343,6 +1470,7 @@ impl AuthState {
                 user.denied_commands.clear();
                 user.allowed_categories.clear();
                 user.denied_categories.clear();
+                user.command_rule_tokens.clear();
             } else if rule_str.eq_ignore_ascii_case("allkeys") || rule_str == "~*" {
                 user.all_keys = true;
                 user.key_patterns.clear();
@@ -1358,17 +1486,16 @@ impl AuthState {
                 user.all_channels = false;
                 user.channel_patterns.clear();
             } else if rule_str.eq_ignore_ascii_case("clearselectors") {
-                // Upstream acl.c::ACLSetUser CLEARSELECTORS clears
-                // any selector blocks attached to the user. fr's
-                // ACL doesn't model selectors as a separate
-                // structure yet — treat as a no-op so clients can
-                // reset without errors. (br-frankenredis-aclclrsel)
+                // Upstream acl.c::ACLSetUser CLEARSELECTORS removes all selector
+                // blocks attached to the user. (frankenredis-d919b)
+                user.selectors.clear();
             } else if rule_str == "-@all" || rule_str.eq_ignore_ascii_case("nocommands") {
                 user.all_commands = false;
                 user.allowed_commands.clear();
                 user.denied_commands.clear();
                 user.allowed_categories.clear();
                 user.denied_categories.clear();
+                user.command_rule_tokens.clear();
             } else if let Some(cat) = rule_str.strip_prefix("+@") {
                 // +@category — allow all commands in this category.
                 // Upstream acl.c::ACLSetUser rejects unknown
@@ -1388,9 +1515,11 @@ impl AuthState {
                     user.denied_commands.clear();
                     user.allowed_categories.clear();
                     user.denied_categories.clear();
+                    user.command_rule_tokens.clear();
                 } else {
                     user.allowed_categories.insert(cat_lower.clone());
                     user.denied_categories.remove(&cat_lower);
+                    user.record_command_rule(format!("+@{cat_lower}"));
                 }
             } else if let Some(cat) = rule_str.strip_prefix("-@") {
                 // -@category — deny all commands in this category.
@@ -1409,9 +1538,11 @@ impl AuthState {
                     user.denied_commands.clear();
                     user.allowed_categories.clear();
                     user.denied_categories.clear();
+                    user.command_rule_tokens.clear();
                 } else {
                     user.denied_categories.insert(cat_lower.clone());
                     user.allowed_categories.remove(&cat_lower);
+                    user.record_command_rule(format!("-@{cat_lower}"));
                 }
             } else if let Some(cmd) = rule_str.strip_prefix('+') {
                 // +command — allow this specific command. Upstream
@@ -1456,6 +1587,7 @@ impl AuthState {
                 }
                 user.allowed_commands.insert(cmd_lower.clone());
                 user.denied_commands.remove(&cmd_lower);
+                user.record_command_rule(format!("+{cmd_lower}"));
             } else if let Some(cmd) = rule_str.strip_prefix('-') {
                 // -command — deny this specific command. (br-frankenredis-aclcmd)
                 // (frankenredis-6lgmx) Upstream asymmetry: while
@@ -1476,6 +1608,7 @@ impl AuthState {
                 }
                 user.denied_commands.insert(cmd_lower.clone());
                 user.allowed_commands.remove(&cmd_lower);
+                user.record_command_rule(format!("-{cmd_lower}"));
             } else if let Some(pass) = rule_str.strip_prefix('>') {
                 user.passwords.push(sha256_hex_bytes(pass.as_bytes()));
                 user.nopass = false; // adding a password disables nopass
@@ -1551,6 +1684,11 @@ impl AuthState {
                 user.all_channels = false;
             } else if rule_str.eq_ignore_ascii_case("reset") {
                 // Reset user to default state (no passwords, disabled, no commands).
+                // (frankenredis-3b1jc) Upstream acl.c::ACLResetUser sets
+                // USER_FLAG_DISABLED — the user must end up `off`. fr cleared
+                // every other field but left `enabled` at its prior value, so a
+                // previously-`on` user stayed enabled after `reset`.
+                user.enabled = false;
                 user.passwords.clear();
                 user.nopass = false;
                 user.sanitize_payload = true;
@@ -1559,10 +1697,13 @@ impl AuthState {
                 user.denied_commands.clear();
                 user.allowed_categories.clear();
                 user.denied_categories.clear();
+                user.command_rule_tokens.clear();
                 user.all_keys = false;
                 user.key_patterns.clear();
                 user.channel_patterns.clear();
                 user.all_channels = acl_pubsub_default.grants_all_channels();
+                // (frankenredis-d919b) `reset` also drops all selectors.
+                user.selectors.clear();
             } else {
                 // Note: the earlier `resetkeys` arm above already handles the
                 // standalone "resetkeys" modifier. The `reset` arm here is the
@@ -1577,17 +1718,104 @@ impl AuthState {
         Ok(())
     }
 
+    /// Merge `( … )` selector groups spanning multiple SETUSER arguments into
+    /// one token each, leaving non-selector rules untouched. Mirrors upstream
+    /// acl.c::ACLSetUser, which accumulates from a `(`-leading arg until a
+    /// `)`-trailing one. (frankenredis-d919b)
+    fn merge_acl_selector_tokens(rules: &[&[u8]]) -> Result<Vec<Vec<u8>>, String> {
+        let mut out: Vec<Vec<u8>> = Vec::with_capacity(rules.len());
+        let mut i = 0;
+        while i < rules.len() {
+            let r = rules[i];
+            if r.first() == Some(&b'(') && r.last() != Some(&b')') {
+                let mut acc = r.to_vec();
+                i += 1;
+                let mut closed = false;
+                while i < rules.len() {
+                    acc.push(b' ');
+                    acc.extend_from_slice(rules[i]);
+                    let ends = rules[i].last() == Some(&b')');
+                    i += 1;
+                    if ends {
+                        closed = true;
+                        break;
+                    }
+                }
+                if !closed {
+                    return Err("ERR Unmatched parenthesis in selector specification.".to_string());
+                }
+                out.push(acc);
+            } else {
+                out.push(r.to_vec());
+                i += 1;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Parse a single `( … )` selector group and attach it to `user`. The inner
+    /// text is a permission-only rule list (commands/keys/channels) — identity
+    /// rules (on/off/nopass/passwords/reset/sanitize/clearselectors) are not
+    /// allowed in a selector. The selector is stored as a permission-only
+    /// `AclUser`, reusing the same rule parser and check/render logic.
+    /// (frankenredis-d919b)
+    fn apply_acl_selector_group(
+        user: &mut AclUser,
+        token: &str,
+        acl_pubsub_default: AclPubsubDefault,
+    ) -> Result<(), String> {
+        let inner = token[1..token.len() - 1].trim();
+        let inner_rules: Vec<&[u8]> = inner.split_whitespace().map(str::as_bytes).collect();
+        for rule in &inner_rules {
+            if acl_rule_is_identity(rule) {
+                let bad = String::from_utf8_lossy(rule);
+                return Err(format!(
+                    "ERR Error in ACL SETUSER modifier '{bad}': Syntax error"
+                ));
+            }
+        }
+        let mut selector = AclUser::new_restricted(acl_pubsub_default);
+        Self::apply_acl_rules_to_user(&mut selector, &inner_rules, acl_pubsub_default)?;
+        user.selectors.push(selector);
+        Ok(())
+    }
+
+    fn apply_setuser_rules(&mut self, username: Vec<u8>, rules: &[&[u8]]) -> Result<(), String> {
+        let is_default = username == DEFAULT_AUTH_USER;
+        let acl_pubsub_default = self.acl_pubsub_default;
+        let user = self.acl_users.entry(username).or_insert_with(|| {
+            if is_default {
+                AclUser::new_default()
+            } else {
+                AclUser::new_restricted(acl_pubsub_default)
+            }
+        });
+        Self::apply_acl_rules_to_user(user, rules, acl_pubsub_default)
+    }
+
     fn del_user(&mut self, username: &[u8]) -> bool {
         if username == DEFAULT_AUTH_USER {
             return false;
         }
-        self.acl_users.remove(username).is_some()
+        let removed = self.acl_users.remove(username).is_some();
+        if removed {
+            self.bump_dispatch_permissions_generation();
+        }
+        removed
     }
 
     fn can_authenticate_as(&self, username: &[u8]) -> bool {
         self.acl_users
             .get(username)
             .is_some_and(|user| user.enabled)
+    }
+
+    fn dispatch_permissions_generation(&self) -> u64 {
+        self.dispatch_permissions_generation
+    }
+
+    fn bump_dispatch_permissions_generation(&mut self) {
+        self.dispatch_permissions_generation = self.dispatch_permissions_generation.wrapping_add(1);
     }
 }
 
@@ -2237,6 +2465,16 @@ pub struct ServerState {
     /// For a primary this is 0. For a replica after FULLRESYNC, this is the
     /// primary's offset at sync time.
     aof_base_offset: u64,
+    /// Count of `aof_records` already appended to the on-disk AOF file. The
+    /// incremental AOF flush (frankenredis-ol9tz) appends records beyond this
+    /// cursor once per event-loop iteration so writes made between full
+    /// rewrites are durable on restart. Reset to `aof_records.len()` after any
+    /// full rewrite/load that re-materializes the file from scratch, and to 0
+    /// whenever `aof_records` is cleared.
+    aof_disk_flushed_records: usize,
+    /// Wall-clock ms of the last AOF fsync, used to rate-limit the `everysec`
+    /// fsync policy to at most once per second.
+    aof_last_fsync_ms: u64,
     aof_selected_db: usize,
     replication_runtime_state: ReplicationRuntimeState,
     evidence: EvidenceLedger,
@@ -2349,6 +2587,8 @@ pub struct ServerState {
     pubsub_outbox: HashMap<u64, Vec<fr_store::PubSubMessage>>,
     /// Key → client IDs that should receive client-tracking invalidations.
     client_tracking_observed_keys: HashMap<Vec<u8>, HashSet<u64>>,
+    /// Client IDs with CLIENT TRACKING enabled in BCAST mode.
+    client_tracking_bcast_clients: BTreeSet<u64>,
     /// Inverse mapping: client_id → set of channels they are subscribed to.
     pubsub_client_channels: HashMap<u64, HashSet<Vec<u8>>>,
     /// Inverse mapping: client_id → set of patterns they are subscribed to.
@@ -2392,6 +2632,8 @@ impl Default for ServerState {
             store,
             aof_records: Vec::new(),
             aof_base_offset: 0,
+            aof_disk_flushed_records: 0,
+            aof_last_fsync_ms: 0,
             aof_selected_db: 0,
             evidence: EvidenceLedger::default(),
             auth_state: AuthState::default(),
@@ -2456,6 +2698,7 @@ impl Default for ServerState {
             pubsub_shard_subs: HashMap::new(),
             pubsub_outbox: HashMap::new(),
             client_tracking_observed_keys: HashMap::new(),
+            client_tracking_bcast_clients: BTreeSet::new(),
             pubsub_client_channels: HashMap::new(),
             pubsub_client_patterns: HashMap::new(),
             pubsub_client_shard_channels: HashMap::new(),
@@ -2571,6 +2814,8 @@ impl ServerState {
         preserve_store_load_context(&mut replayed_store, &self.store);
         self.store = replayed_store;
         self.aof_records = records;
+        // (frankenredis-ol9tz) Replayed records mirror the on-disk file.
+        self.aof_disk_flushed_records = self.aof_records.len();
         Ok(count)
     }
 
@@ -2610,6 +2855,10 @@ impl ServerState {
         );
         self.active_expire_db_cursor = plan.next_db_index;
         self.active_expire_key_cursor = cycle_result.next_cursor;
+        // (frankenredis-wqrb6) Propagate the active-expire deletions to replicas
+        // and the AOF, matching upstream's activeExpireCycle which DEL/UNLINK-
+        // propagates every key it reaps.
+        self.propagate_expired_key_deletions(&cycle_result.evicted_db_keys);
         let elapsed_ms = start.elapsed().as_millis() as u64;
         self.store.stat_expire_cycle_cpu_milliseconds = self
             .store
@@ -2628,6 +2877,51 @@ impl ServerState {
         };
         self.last_active_expire_cycle = Some(stats);
         stats
+    }
+
+    /// (frankenredis-wqrb6) Propagate expiry deletions to replicas + AOF, one
+    /// `DEL <key>` (`UNLINK` when lazyfree-lazy-expire is enabled) per evicted
+    /// key, in the key's own db. Mirrors upstream propagateDeletion. ONLY the
+    /// master generates these — a replica receives the master's DEL over the
+    /// replication stream and must not synthesize its own (it would leak a
+    /// spurious DEL to its sub-replicas).
+    fn propagate_expired_key_deletions(&mut self, evicted_db_keys: &[Vec<u8>]) {
+        if evicted_db_keys.is_empty() {
+            return;
+        }
+        if !matches!(
+            self.replication_runtime_state.role,
+            ReplicationRoleState::Master
+        ) {
+            return;
+        }
+        let op: &[u8] = if self.lazyfree_lazy_expire_enabled() {
+            b"UNLINK"
+        } else {
+            b"DEL"
+        };
+        for key in evicted_db_keys {
+            let (db, logical) = match fr_store::decode_db_key(key) {
+                Some((db, lk)) => (db, lk.to_vec()),
+                None => (0, key.clone()),
+            };
+            // The active-expire cycle is not bound to the session db, so emit an
+            // explicit SELECT for the evicted key's db when it differs from the
+            // last db written to the AOF/replication stream.
+            if self.aof_selected_db != db {
+                self.capture_aof_record(&[b"SELECT".to_vec(), db.to_string().into_bytes()]);
+                self.aof_selected_db = db;
+            }
+            self.capture_aof_record(&[op.to_vec(), logical]);
+        }
+    }
+
+    /// Whether `lazyfree-lazy-expire` is enabled (so expiry propagates UNLINK
+    /// instead of DEL). Defaults to disabled, matching upstream. (frankenredis-wqrb6)
+    fn lazyfree_lazy_expire_enabled(&self) -> bool {
+        self.config_overrides
+            .get("lazyfree-lazy-expire")
+            .is_some_and(|v| v.eq_ignore_ascii_case("yes"))
     }
 
     #[must_use]
@@ -3018,6 +3312,10 @@ pub struct Runtime {
     pub server: ServerState,
     session: ClientSession,
     execution_source: ExecutionSource,
+    dispatch_acl_snapshot_user: Option<Vec<u8>>,
+    dispatch_acl_snapshot_generation: u64,
+    dispatch_peer_addr_cache: String,
+    dispatch_peer_addr_cache_source: Option<std::net::SocketAddr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3117,6 +3415,10 @@ impl Runtime {
             server,
             session,
             execution_source: ExecutionSource::Client,
+            dispatch_acl_snapshot_user: None,
+            dispatch_acl_snapshot_generation: 0,
+            dispatch_peer_addr_cache: "127.0.0.1:0".to_string(),
+            dispatch_peer_addr_cache_source: None,
         }
     }
 
@@ -3215,6 +3517,9 @@ impl Runtime {
         }
 
         self.server.aof_records = records;
+        // (frankenredis-ol9tz) The replayed records are exactly the on-disk
+        // file contents, so the incremental flush starts from the tail.
+        self.server.aof_disk_flushed_records = self.server.aof_records.len();
         self.server.aof_selected_db = self.session.selected_db;
         self.session.selected_db = original_db;
         // Preserve server context that the boot path established on
@@ -3235,9 +3540,14 @@ impl Runtime {
             Some(path) => path.clone(),
             None => return Ok(0),
         };
-        let (entries, _aux) = read_rdb_file(&path)?;
+        let (entries, _aux, functions) = fr_persist::read_rdb_file_with_functions(&path)?;
         let mut store = Store::new();
         let counts = apply_rdb_entries_to_store(&mut store, &entries, now_ms)?;
+        // Re-register FUNCTION libraries carried in the dump so FUNCTION LIST /
+        // FCALL survive a restart, matching redis. (frankenredis-tm139)
+        for code in &functions {
+            let _ = store.function_load(code, true);
+        }
         store.stat_rdb_last_load_keys_expired = u64::try_from(counts.expired).unwrap_or(u64::MAX);
         store.stat_rdb_last_load_keys_loaded = u64::try_from(counts.loaded).unwrap_or(u64::MAX);
         preserve_store_load_context(&mut store, &self.server.store);
@@ -3246,7 +3556,7 @@ impl Runtime {
     }
 
     fn handle_debug_reload_requested(&mut self, now_ms: u64) -> RespFrame {
-        if let Err(reply) = self.persist_snapshot_to_disk(now_ms, false) {
+        if let Err(reply) = self.persist_snapshot_to_disk(now_ms, false, true) {
             return reply;
         }
 
@@ -3299,10 +3609,12 @@ impl Runtime {
         // back, then replace the store. This validates the
         // encoder/decoder pair without touching disk.
         let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
-        let bytes = encode_rdb(&entries, &[]);
-        let (decoded_entries, _aux) = match decode_rdb(&bytes) {
-            Ok(out) => out,
-            Err(_) => {
+        let fn_codes = self.rdb_function_codes();
+        let fn_refs: Vec<&[u8]> = fn_codes.iter().map(Vec::as_slice).collect();
+        let bytes = fr_persist::encode_rdb_with_functions(&entries, &[], &fn_refs);
+        let decoded = match fr_persist::decode_rdb_prefix(&bytes) {
+            Ok(out) if out.consumed == bytes.len() => out,
+            _ => {
                 return RespFrame::Error(
                     "ERR failed to reload dataset from in-memory RDB round-trip".to_string(),
                 );
@@ -3311,7 +3623,7 @@ impl Runtime {
         let mut store = Store::new();
         let counts = match apply_rdb_entries_to_store(
             &mut store,
-            &decoded_entries,
+            &decoded.entries,
             now_ms.saturating_add(1),
         ) {
             Ok(counts) => counts,
@@ -3321,6 +3633,10 @@ impl Runtime {
                 );
             }
         };
+        // Restore FUNCTION libraries through the round-trip too. (frankenredis-c0u9q)
+        for code in &decoded.functions {
+            let _ = store.function_load(code, true);
+        }
         store.stat_rdb_last_load_keys_expired = u64::try_from(counts.expired).unwrap_or(u64::MAX);
         store.stat_rdb_last_load_keys_loaded = u64::try_from(counts.loaded).unwrap_or(u64::MAX);
         self.server.store = store;
@@ -3499,15 +3815,30 @@ impl Runtime {
         stream.get(start..).unwrap_or(&[]).to_vec()
     }
 
+    /// Library source for every registered FUNCTION, name-sorted, for embedding
+    /// FUNCTION2 records into an RDB snapshot so they survive a save/load cycle.
+    /// (frankenredis-c0u9q)
+    fn rdb_function_codes(&self) -> Vec<Vec<u8>> {
+        self.server
+            .store
+            .function_list(None)
+            .iter()
+            .map(|lib| lib.code.clone())
+            .collect()
+    }
+
     #[must_use]
     pub fn encoded_rdb_snapshot(&mut self, now_ms: u64) -> Vec<u8> {
         let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
-        encode_rdb(
+        let fn_codes = self.rdb_function_codes();
+        let fn_refs: Vec<&[u8]> = fn_codes.iter().map(Vec::as_slice).collect();
+        fr_persist::encode_rdb_with_functions(
             &entries,
             &[
                 ("redis-ver", fr_store::REDIS_COMPAT_VERSION),
                 ("frankenredis", "true"),
             ],
+            &fn_refs,
         )
     }
 
@@ -3570,6 +3901,9 @@ impl Runtime {
                     u64::try_from(counts.loaded).unwrap_or(u64::MAX);
                 self.server.store = store;
                 self.server.aof_records.clear();
+                // (frankenredis-ol9tz) Buffer reset to empty; AOF flush cursor
+                // must follow so it doesn't index past the cleared buffer.
+                self.server.aof_disk_flushed_records = 0;
                 // Track the base offset where the local AOF buffer starts.
                 // New records will be indexed from 0, but they correspond to
                 // absolute offset starting at this value.
@@ -3746,6 +4080,7 @@ impl Runtime {
 
     /// Update or insert a session snapshot used by multi-client CLIENT LIST.
     pub fn record_client_session(&mut self, session: &ClientSession) {
+        self.refresh_client_tracking_bcast_membership(session.client_id, &session.client_tracking);
         self.server
             .client_sessions
             .insert(session.client_id, session.clone());
@@ -3807,6 +4142,7 @@ impl Runtime {
     /// Remove a disconnected session from the CLIENT LIST registry.
     pub fn remove_client_session(&mut self, client_id: u64) {
         self.server.client_sessions.remove(&client_id);
+        self.server.client_tracking_bcast_clients.remove(&client_id);
         self.remove_client_tracking_observer(client_id);
         // (frankenredis-zfu61) Re-sum live sessions so MEMORY STATS'
         // clients.normal / clients.slaves drop on disconnect.
@@ -3868,6 +4204,7 @@ impl Runtime {
     /// Clean up replication/monitor state for a disconnected client.
     pub fn cleanup_disconnected_client(&mut self, client_id: u64) {
         self.disable_monitor(client_id);
+        self.server.client_tracking_bcast_clients.remove(&client_id);
         self.remove_client_tracking_observer(client_id);
         if self
             .server
@@ -4313,6 +4650,18 @@ impl Runtime {
         }
     }
 
+    fn refresh_client_tracking_bcast_membership(
+        &mut self,
+        client_id: u64,
+        tracking: &ClientTrackingState,
+    ) {
+        if tracking.enabled && tracking.bcast {
+            self.server.client_tracking_bcast_clients.insert(client_id);
+        } else {
+            self.server.client_tracking_bcast_clients.remove(&client_id);
+        }
+    }
+
     fn queue_client_tracking_invalidations(&mut self, keys: &[Vec<u8>]) {
         if keys.is_empty() {
             return;
@@ -4327,31 +4676,62 @@ impl Runtime {
                     .map(|owners| (key.clone(), owners))
             })
             .collect();
-        let sessions = self.client_list_sessions();
-        let mut invalidations: BTreeMap<u64, Vec<Vec<u8>>> = BTreeMap::new();
-        for (owner_id, session) in &sessions {
-            let tracking = &session.client_tracking;
-            if !tracking.enabled || !tracking.bcast {
-                continue;
-            }
-            if tracking.noloop && *owner_id == self.session.client_id {
-                continue;
-            }
+        // BCAST clients: upstream batches every matching key modified by the
+        // command into a SINGLE invalidate message per target (one flush per
+        // command via trackingHandlePendingKeyInvalidations).
+        let mut bcast_invalidations: BTreeMap<u64, Vec<Vec<u8>>> = BTreeMap::new();
+        if !self.server.client_tracking_bcast_clients.is_empty() {
+            let bcast_owner_ids: Vec<u64> = self
+                .server
+                .client_tracking_bcast_clients
+                .iter()
+                .copied()
+                .collect();
+            for owner_id in bcast_owner_ids {
+                let Some(session) = self.client_session_including_current(owner_id) else {
+                    self.server.client_tracking_bcast_clients.remove(&owner_id);
+                    continue;
+                };
+                let tracking = &session.client_tracking;
+                if !tracking.enabled || !tracking.bcast {
+                    self.server.client_tracking_bcast_clients.remove(&owner_id);
+                    continue;
+                }
+                if tracking.noloop && owner_id == self.session.client_id {
+                    continue;
+                }
 
-            let target_id = tracking.redirect.unwrap_or(*owner_id);
-            if !sessions.contains_key(&target_id) {
-                continue;
-            }
+                let target_id = tracking.redirect.unwrap_or(owner_id);
+                if !self.client_session_exists_including_current(target_id) {
+                    continue;
+                }
 
-            for key in keys {
-                if Self::tracking_key_matches_prefixes(key, tracking) {
-                    Self::add_tracking_invalidation(&mut invalidations, target_id, key);
+                for key in keys {
+                    if Self::tracking_key_matches_prefixes(key, tracking) {
+                        Self::add_tracking_invalidation(&mut bcast_invalidations, target_id, key);
+                    }
                 }
             }
         }
+        for (target_id, keys) in bcast_invalidations {
+            if !keys.is_empty() {
+                self.server
+                    .pubsub_outbox
+                    .entry(target_id)
+                    .or_default()
+                    .push(fr_store::PubSubMessage::Invalidate { keys });
+            }
+        }
+
+        // Non-BCAST (default / OPTIN / OPTOUT) clients: upstream
+        // trackingInvalidateKey fires PER KEY as each key is modified, so every
+        // invalidated key produces its OWN invalidate push (a single-key
+        // message), in key-modification order — NOT one batched message.
+        // (frankenredis-8ypwc)
         for (key, owner_ids) in observed_keys {
+            let mut targets: Vec<u64> = Vec::new();
             for owner_id in owner_ids {
-                let Some(session) = sessions.get(&owner_id) else {
+                let Some(session) = self.client_session_including_current(owner_id) else {
                     continue;
                 };
                 let tracking = &session.client_tracking;
@@ -4362,20 +4742,81 @@ impl Runtime {
                     continue;
                 }
                 let target_id = tracking.redirect.unwrap_or(owner_id);
-                if sessions.contains_key(&target_id) {
-                    Self::add_tracking_invalidation(&mut invalidations, target_id, &key);
+                if self.client_session_exists_including_current(target_id) {
+                    targets.push(target_id);
                 }
             }
-        }
-
-        for (target_id, keys) in invalidations {
-            if !keys.is_empty() {
+            // The owner set's iteration order is unspecified; sort so multi-
+            // observer output is deterministic. One message per caching client,
+            // matching upstream's per-client send.
+            targets.sort_unstable();
+            for target_id in targets {
                 self.server
                     .pubsub_outbox
                     .entry(target_id)
                     .or_default()
-                    .push(fr_store::PubSubMessage::Invalidate { keys });
+                    .push(fr_store::PubSubMessage::Invalidate {
+                        keys: vec![key.clone()],
+                    });
             }
+        }
+    }
+
+    /// Send a flush-all client-tracking invalidation. Upstream
+    /// db.c::signalFlushedDb → trackingInvalidateKeysOnFlush emits a single
+    /// `invalidate` push carrying a NULL payload to every tracking client when
+    /// the keyspace is flushed (FLUSHALL/FLUSHDB), telling each one to evict
+    /// its entire client-side cache. fr previously emitted nothing, leaving a
+    /// tracking client with stale cached entries after a flush.
+    /// (frankenredis-o90ga)
+    ///
+    /// The NULL payload is carried as an `Invalidate` with an EMPTY key vector
+    /// — a value the per-key path never produces (it guards `!keys.is_empty()`)
+    /// — which the frame encoder renders as `invalidate` + RESP3 null.
+    fn queue_client_tracking_flush_invalidation(&mut self) {
+        let mut targets: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        for (owner_id, session) in self
+            .server
+            .client_sessions
+            .iter()
+            .filter(|(owner_id, _)| **owner_id != self.session.client_id)
+            .chain(std::iter::once((&self.session.client_id, &self.session)))
+        {
+            let tracking = &session.client_tracking;
+            if !tracking.enabled {
+                continue;
+            }
+            // A NOLOOP client that issued the flush does not get its own
+            // invalidation (mirrors trackingInvalidateKey's current_client skip).
+            if tracking.noloop && *owner_id == self.session.client_id {
+                continue;
+            }
+            let target_id = tracking.redirect.unwrap_or(*owner_id);
+            if self.client_session_exists_including_current(target_id) {
+                targets.insert(target_id);
+            }
+        }
+        for target_id in targets {
+            self.server
+                .pubsub_outbox
+                .entry(target_id)
+                .or_default()
+                .push(fr_store::PubSubMessage::Invalidate { keys: Vec::new() });
+        }
+        // Every key is gone; drop the observed-keys table so no stale per-key
+        // invalidation can later fire for a key that no longer exists.
+        self.server.client_tracking_observed_keys.clear();
+    }
+
+    fn client_session_exists_including_current(&self, client_id: u64) -> bool {
+        client_id == self.session.client_id || self.server.client_sessions.contains_key(&client_id)
+    }
+
+    fn client_session_including_current(&self, client_id: u64) -> Option<&ClientSession> {
+        if client_id == self.session.client_id {
+            Some(&self.session)
+        } else {
+            self.server.client_sessions.get(&client_id)
         }
     }
 
@@ -4798,21 +5239,58 @@ impl Runtime {
     }
 
     pub fn execute_frame(&mut self, frame: RespFrame, now_ms: u64) -> RespFrame {
-        self.execute_frame_with_optional_unix_time_us(frame, now_ms, None)
+        // Owned-frame callers (conformance, internal) keep passing the frame so
+        // its exact wire structure feeds the threat-evidence digests verbatim.
+        let argv_result = frame_to_argv(&frame);
+        self.execute_dispatch(
+            Some(&frame),
+            argv_result
+                .as_deref()
+                .map_err(|_| CommandError::InvalidCommandFrame),
+            now_ms,
+            None,
+        )
     }
 
     pub fn execute_frame_with_unix_time_us(
         &mut self,
-        frame: RespFrame,
+        frame: &RespFrame,
         now_ms: u64,
         unix_time_us: u64,
     ) -> RespFrame {
-        self.execute_frame_with_optional_unix_time_us(frame, now_ms, Some(unix_time_us))
+        let argv_result = frame_to_argv(frame);
+        self.execute_dispatch(
+            Some(frame),
+            argv_result
+                .as_deref()
+                .map_err(|_| CommandError::InvalidCommandFrame),
+            now_ms,
+            Some(unix_time_us),
+        )
     }
 
-    fn execute_frame_with_optional_unix_time_us(
+    /// Hot-path entry for the network server. `argv` has already been MOVED out
+    /// of the parsed command frame (one allocation per argument total, vs the
+    /// frame-based path which clones every argument a second time). The original
+    /// frame is not retained; the cold preflight/threat-evidence paths
+    /// reconstruct a byte-identical `RespFrame::Array(BulkString)` from argv on
+    /// demand, so digests stay exact while the hot success path never
+    /// materializes a frame. Wire commands are always multibulk-of-bulkstrings,
+    /// so the reconstruction is the exact inverse of the parse.
+    /// (frankenredis-8yfmt)
+    pub fn execute_argv_with_unix_time_us(
         &mut self,
-        frame: RespFrame,
+        argv: &[Vec<u8>],
+        now_ms: u64,
+        unix_time_us: u64,
+    ) -> RespFrame {
+        self.execute_dispatch(None, Ok(argv), now_ms, Some(unix_time_us))
+    }
+
+    fn execute_dispatch(
+        &mut self,
+        frame: Option<&RespFrame>,
+        argv_result: Result<&[Vec<u8>], CommandError>,
         now_ms: u64,
         unix_time_us: Option<u64>,
     ) -> RespFrame {
@@ -4822,10 +5300,11 @@ impl Runtime {
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.refresh_store_runtime_info_context();
-        // Parse once, reuse for both stats and execution (eliminates double parse).
-        let argv_result = frame_to_argv(&frame);
+        // argv was materialized once by the caller (cloned from a borrowed frame
+        // on the owned/conformance path, or moved out of the parsed frame on the
+        // server hot path) and reused for both stats and execution.
         if let Ok(argv) = &argv_result {
-            self.session.last_command_name = client_info_command_name(argv);
+            write_client_info_command_name(&mut self.session.last_command_name, argv);
         }
         // (frankenredis-2prp1) Inline the record_client_session call to
         // avoid the redundant clone — the BTreeMap insert below already
@@ -5079,24 +5558,37 @@ impl Runtime {
 
     fn execute_frame_internal(
         &mut self,
-        frame: RespFrame,
-        argv_result: Result<Vec<Vec<u8>>, CommandError>,
+        frame: Option<&RespFrame>,
+        argv_result: Result<&[Vec<u8>], CommandError>,
         now_ms: u64,
         packet_id: u64,
         unix_time_us: Option<u64>,
     ) -> RespFrame {
-        if let Some(reply) = self.preflight_gate(&frame, now_ms, packet_id) {
-            return reply;
-        }
-
         // Use pre-parsed argv if available, avoiding duplicate parsing.
         let argv = match argv_result {
             Ok(argv) => {
+                // Compatibility/threat gate first (gate.max_array_len /
+                // max_bulk_len), preserving the original error-precedence over
+                // the MAX_COMMAND_ARITY check below. Evaluated on argv so the
+                // server hot path never needs the frame. (frankenredis-8yfmt)
+                if let Some(reply) = self.preflight_gate(frame, argv, now_ms, packet_id) {
+                    return reply;
+                }
                 if argv.len() > MAX_COMMAND_ARITY {
                     let reply = RespFrame::Error(format!(
                         "ERR Protocol error: too many arguments (limit: {})",
                         MAX_COMMAND_ARITY
                     ));
+                    // Cold path: hash the original frame when present, else a
+                    // byte-identical reconstruction from argv. (frankenredis-8yfmt)
+                    let recon;
+                    let digest_frame: &RespFrame = match frame {
+                        Some(f) => f,
+                        None => {
+                            recon = fr_command::argv_to_command_frame(argv);
+                            &recon
+                        }
+                    };
                     self.record_threat_event(ThreatEventInput {
                         now_ms,
                         packet_id,
@@ -5110,7 +5602,7 @@ impl Runtime {
                             argv.len(),
                             MAX_COMMAND_ARITY
                         ),
-                        input_source: ThreatInputDigestSource::Frame(&frame),
+                        input_source: ThreatInputDigestSource::Frame(digest_frame),
                         output: &reply,
                     });
                     return reply;
@@ -5118,8 +5610,19 @@ impl Runtime {
                 argv
             }
             Err(_) => {
+                // Only reachable from owned/conformance callers (the server
+                // pre-validates and always passes Ok), so `frame` is Some here;
+                // reconstruct an empty frame defensively otherwise.
                 let reply =
                     RespFrame::Error("ERR Protocol error: invalid command frame".to_string());
+                let recon;
+                let digest_frame: &RespFrame = match frame {
+                    Some(f) => f,
+                    None => {
+                        recon = RespFrame::Array(Some(Vec::new()));
+                        &recon
+                    }
+                };
                 self.record_threat_event(ThreatEventInput {
                     now_ms,
                     packet_id,
@@ -5129,7 +5632,7 @@ impl Runtime {
                     action: "reject_frame",
                     reason_code: "invalid_command_frame",
                     reason: "invalid command frame".to_string(),
-                    input_source: ThreatInputDigestSource::Frame(&frame),
+                    input_source: ThreatInputDigestSource::Frame(digest_frame),
                     output: &reply,
                 });
                 return reply;
@@ -5143,30 +5646,30 @@ impl Runtime {
         match special_command {
             Some(RuntimeSpecialCommand::Auth) => {
                 let start = Instant::now();
-                let reply = self.handle_auth_command(&argv, now_ms);
-                let reply = match apply_client_reply_state(&argv, &mut self.session.client_reply) {
+                let reply = self.handle_auth_command(argv, now_ms);
+                let reply = match apply_client_reply_state(argv, &mut self.session.client_reply) {
                     Ok(()) => reply,
                     Err(err) => err.to_resp(),
                 };
                 let elapsed_us = start.elapsed().as_micros() as u64;
-                self.record_slowlog(&argv, elapsed_us, now_ms);
-                self.server.record_latency_sample(&argv, elapsed_us, now_ms);
+                self.record_slowlog(argv, elapsed_us, now_ms);
+                self.server.record_latency_sample(argv, elapsed_us, now_ms);
                 self.server
-                    .record_command_histogram(&argv, elapsed_us, &reply);
+                    .record_command_histogram(argv, elapsed_us, &reply);
                 return reply;
             }
             Some(RuntimeSpecialCommand::Hello) => {
                 let start = Instant::now();
-                let reply = self.handle_hello_command(&argv, now_ms);
-                let reply = match apply_client_reply_state(&argv, &mut self.session.client_reply) {
+                let reply = self.handle_hello_command(argv, now_ms);
+                let reply = match apply_client_reply_state(argv, &mut self.session.client_reply) {
                     Ok(()) => reply,
                     Err(err) => err.to_resp(),
                 };
                 let elapsed_us = start.elapsed().as_micros() as u64;
-                self.record_slowlog(&argv, elapsed_us, now_ms);
-                self.server.record_latency_sample(&argv, elapsed_us, now_ms);
+                self.record_slowlog(argv, elapsed_us, now_ms);
+                self.server.record_latency_sample(argv, elapsed_us, now_ms);
                 self.server
-                    .record_command_histogram(&argv, elapsed_us, &reply);
+                    .record_command_histogram(argv, elapsed_us, &reply);
                 return reply;
             }
             _ => {}
@@ -5188,7 +5691,7 @@ impl Runtime {
             // (frankenredis-infosections) NOAUTH gate is a pre-handler
             // rejection — bump cmdstat_<cmd>:rejected_calls without
             // touching calls/usec, mirroring upstream's call() path.
-            self.server.record_command_rejected(&argv);
+            self.server.record_command_rejected(argv);
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -5201,13 +5704,23 @@ impl Runtime {
                     "rejected '{}' prior to dispatch while unauthenticated",
                     command_name
                 ),
-                input_source: ThreatInputDigestSource::Argv(&argv),
+                input_source: ThreatInputDigestSource::Argv(argv),
                 output: &reply,
             });
             return reply;
         }
 
-        if let Some(permission_error) = self.acl_permission_error(&argv) {
+        if let Some(permission_error) = self.acl_permission_error(argv) {
+            // Upstream rejects a command-level ACL denial with the authenticated
+            // username and the command's canonical lowercase fullname (e.g.
+            // `User u has no permissions to run the 'config|get' command`).
+            // (frankenredis-1ktss)
+            let acl_denied_user =
+                String::from_utf8_lossy(self.session.current_user_name()).into_owned();
+            let acl_command_fullname = fr_command::acl_command_selectors_for_argv(argv)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| command_name.to_ascii_lowercase());
             let (acl_reason, log_reason, object, reason_code, threat_reason, reply) =
                 match permission_error {
                     AclCommandPermissionError::Command => (
@@ -5220,8 +5733,8 @@ impl Runtime {
                             command_name
                         ),
                         RespFrame::Error(format!(
-                            "NOPERM this user has no permissions to run the '{}' command",
-                            command_name
+                            "NOPERM User {acl_command_user} has no permissions to run the '{acl_command_fullname}' command",
+                            acl_command_user = acl_denied_user
                         )),
                     ),
                     AclCommandPermissionError::Key(key) => {
@@ -5258,7 +5771,7 @@ impl Runtime {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             // (frankenredis-infosections) NOPERM is a pre-handler
             // rejection — bump cmdstat_<cmd>:rejected_calls per upstream.
-            self.server.record_command_rejected(&argv);
+            self.server.record_command_rejected(argv);
             self.record_acl_access_denied(acl_reason);
             self.record_acl_log_event(
                 log_reason,
@@ -5275,7 +5788,7 @@ impl Runtime {
                 action: "reject_unauthorized_command",
                 reason_code,
                 reason: threat_reason,
-                input_source: ThreatInputDigestSource::Argv(&argv),
+                input_source: ThreatInputDigestSource::Argv(argv),
                 output: &reply,
             });
             return reply;
@@ -5293,10 +5806,10 @@ impl Runtime {
         if resp2
             && command_arity_ok
             && self.is_in_subscription_mode()
-            && !Self::pubsub_command_allowed_in_subscription_mode(special_command, &argv)
+            && !Self::pubsub_command_allowed_in_subscription_mode(special_command, argv)
         {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
-            return Self::pubsub_context_error(&Self::pubsub_blocked_command_name(&argv));
+            return Self::pubsub_context_error(&Self::pubsub_blocked_command_name(argv));
         }
         // Upstream networking.c::pingCommand emits a 2-element array
         // ["pong", optional-msg] when the client is in subscribe mode
@@ -5322,20 +5835,20 @@ impl Runtime {
         }
         if command_arity_ok
             && let Some(reply) =
-                self.reject_due_to_disk_write_error(&argv, special_command, now_ms, packet_id)
+                self.reject_due_to_disk_write_error(argv, special_command, now_ms, packet_id)
         {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return reply;
         }
         if command_arity_ok
             && let Some(reply) =
-                self.reject_due_to_replica_write_quorum(&argv, special_command, now_ms)
+                self.reject_due_to_replica_write_quorum(argv, special_command, now_ms)
         {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return reply;
         }
 
-        if let Some(reply) = self.reject_stale_replica_read_request(&argv, special_command) {
+        if let Some(reply) = self.reject_stale_replica_read_request(argv, special_command) {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return reply;
         }
@@ -5379,7 +5892,7 @@ impl Runtime {
                     self.apply_existing_client_reply_suppression_to_undispatched_reply();
                     return CommandError::UnknownCommand {
                         command: fr_command::trim_and_cap_string(cmd_str, 128),
-                        args_preview: build_unknown_args_preview(&argv),
+                        args_preview: build_unknown_args_preview(argv),
                     }
                     .to_resp();
                 }
@@ -5404,7 +5917,10 @@ impl Runtime {
                         "ERR Command not allowed inside a transaction".to_string(),
                     );
                 }
-                self.session.transaction_state.command_queue.push(argv);
+                self.session
+                    .transaction_state
+                    .command_queue
+                    .push(argv.to_vec());
                 self.apply_existing_client_reply_suppression_to_undispatched_reply();
                 return RespFrame::SimpleString("QUEUED".to_string());
             }
@@ -5416,12 +5932,12 @@ impl Runtime {
                 .is_some_and(|command| eq_ascii_token(command, b"TIME"))
         {
             let start = Instant::now();
-            let reply = Self::handle_time_command_with_unix_time_us(&argv, unix_time_us);
+            let reply = Self::handle_time_command_with_unix_time_us(argv, unix_time_us);
             let elapsed_us = start.elapsed().as_micros() as u64;
-            self.record_slowlog(&argv, elapsed_us, now_ms);
-            self.server.record_latency_sample(&argv, elapsed_us, now_ms);
+            self.record_slowlog(argv, elapsed_us, now_ms);
+            self.server.record_latency_sample(argv, elapsed_us, now_ms);
             self.server
-                .record_command_histogram(&argv, elapsed_us, &reply);
+                .record_command_histogram(argv, elapsed_us, &reply);
             return reply;
         }
 
@@ -5431,96 +5947,90 @@ impl Runtime {
         {
             let special_start = Instant::now();
             let special_reply = match special_command {
-                Some(RuntimeSpecialCommand::Acl) => Some(self.handle_acl_command(&argv, now_ms)),
-                Some(RuntimeSpecialCommand::Config) => Some(self.handle_config_command(&argv)),
+                Some(RuntimeSpecialCommand::Acl) => Some(self.handle_acl_command(argv, now_ms)),
+                Some(RuntimeSpecialCommand::Config) => Some(self.handle_config_command(argv)),
                 Some(RuntimeSpecialCommand::Client) => {
-                    Some(self.handle_client_command(&argv, now_ms))
+                    Some(self.handle_client_command(argv, now_ms))
                 }
-                Some(RuntimeSpecialCommand::Role) => Some(self.handle_role_command(&argv)),
+                Some(RuntimeSpecialCommand::Role) => Some(self.handle_role_command(argv)),
                 Some(RuntimeSpecialCommand::Replconf) => {
-                    Some(self.handle_replconf_command(&argv, now_ms))
+                    Some(self.handle_replconf_command(argv, now_ms))
                 }
                 Some(RuntimeSpecialCommand::Psync) | Some(RuntimeSpecialCommand::Sync) => {
-                    Some(self.handle_psync_command(&argv))
+                    Some(self.handle_psync_command(argv))
                 }
                 Some(RuntimeSpecialCommand::Replicaof) | Some(RuntimeSpecialCommand::Slaveof) => {
-                    Some(self.handle_replicaof_command(&argv))
+                    Some(self.handle_replicaof_command(argv))
                 }
-                Some(RuntimeSpecialCommand::Asking) => Some(self.handle_asking_command(&argv)),
-                Some(RuntimeSpecialCommand::Readonly) => Some(self.handle_readonly_command(&argv)),
-                Some(RuntimeSpecialCommand::Readwrite) => {
-                    Some(self.handle_readwrite_command(&argv))
-                }
+                Some(RuntimeSpecialCommand::Asking) => Some(self.handle_asking_command(argv)),
+                Some(RuntimeSpecialCommand::Readonly) => Some(self.handle_readonly_command(argv)),
+                Some(RuntimeSpecialCommand::Readwrite) => Some(self.handle_readwrite_command(argv)),
                 Some(RuntimeSpecialCommand::Cluster) => {
-                    Some(self.handle_cluster_command(&argv, now_ms))
+                    Some(self.handle_cluster_command(argv, now_ms))
                 }
-                Some(RuntimeSpecialCommand::Wait) => Some(self.handle_wait_command(&argv)),
-                Some(RuntimeSpecialCommand::Waitaof) => Some(self.handle_waitaof_command(&argv)),
-                Some(RuntimeSpecialCommand::Multi) => Some(self.handle_multi_command(&argv)),
+                Some(RuntimeSpecialCommand::Wait) => Some(self.handle_wait_command(argv)),
+                Some(RuntimeSpecialCommand::Waitaof) => Some(self.handle_waitaof_command(argv)),
+                Some(RuntimeSpecialCommand::Multi) => Some(self.handle_multi_command(argv)),
                 Some(RuntimeSpecialCommand::Exec) => {
-                    Some(self.handle_exec_command(&argv, now_ms, packet_id))
+                    Some(self.handle_exec_command(argv, now_ms, packet_id))
                 }
-                Some(RuntimeSpecialCommand::Discard) => Some(self.handle_discard_command(&argv)),
-                Some(RuntimeSpecialCommand::Watch) => {
-                    Some(self.handle_watch_command(&argv, now_ms))
-                }
-                Some(RuntimeSpecialCommand::Unwatch) => Some(self.handle_unwatch_command(&argv)),
+                Some(RuntimeSpecialCommand::Discard) => Some(self.handle_discard_command(argv)),
+                Some(RuntimeSpecialCommand::Watch) => Some(self.handle_watch_command(argv, now_ms)),
+                Some(RuntimeSpecialCommand::Unwatch) => Some(self.handle_unwatch_command(argv)),
                 Some(RuntimeSpecialCommand::Quit) => {
                     Some(RespFrame::SimpleString("OK".to_string()))
                 }
-                Some(RuntimeSpecialCommand::Reset) => Some(self.handle_reset_command(&argv)),
-                Some(RuntimeSpecialCommand::Slowlog) => Some(self.handle_slowlog_command(&argv)),
-                Some(RuntimeSpecialCommand::Debug) => self.handle_debug_command_gate(&argv),
-                Some(RuntimeSpecialCommand::Save) => Some(self.handle_save_command(&argv, now_ms)),
+                Some(RuntimeSpecialCommand::Reset) => Some(self.handle_reset_command(argv)),
+                Some(RuntimeSpecialCommand::Slowlog) => Some(self.handle_slowlog_command(argv)),
+                Some(RuntimeSpecialCommand::Debug) => self.handle_debug_command_gate(argv),
+                Some(RuntimeSpecialCommand::Save) => Some(self.handle_save_command(argv, now_ms)),
                 Some(RuntimeSpecialCommand::Bgsave) => {
-                    Some(self.handle_bgsave_command(&argv, now_ms))
+                    Some(self.handle_bgsave_command(argv, now_ms))
                 }
-                Some(RuntimeSpecialCommand::Lastsave) => Some(self.handle_lastsave_command(&argv)),
+                Some(RuntimeSpecialCommand::Lastsave) => Some(self.handle_lastsave_command(argv)),
                 Some(RuntimeSpecialCommand::Bgrewriteaof) => {
-                    Some(self.handle_bgrewriteaof_command(&argv, now_ms))
+                    Some(self.handle_bgrewriteaof_command(argv, now_ms))
                 }
-                Some(RuntimeSpecialCommand::Failover) => Some(self.handle_failover_command(&argv)),
-                Some(RuntimeSpecialCommand::Shutdown) => Some(self.handle_shutdown_command(&argv)),
-                Some(RuntimeSpecialCommand::Pubsub) => Some(self.handle_pubsub_command(&argv)),
-                Some(RuntimeSpecialCommand::Subscribe) => {
-                    Some(self.handle_subscribe_command(&argv))
-                }
+                Some(RuntimeSpecialCommand::Failover) => Some(self.handle_failover_command(argv)),
+                Some(RuntimeSpecialCommand::Shutdown) => Some(self.handle_shutdown_command(argv)),
+                Some(RuntimeSpecialCommand::Pubsub) => Some(self.handle_pubsub_command(argv)),
+                Some(RuntimeSpecialCommand::Subscribe) => Some(self.handle_subscribe_command(argv)),
                 Some(RuntimeSpecialCommand::Unsubscribe) => {
-                    Some(self.handle_unsubscribe_command(&argv))
+                    Some(self.handle_unsubscribe_command(argv))
                 }
                 Some(RuntimeSpecialCommand::Psubscribe) => {
-                    Some(self.handle_psubscribe_command(&argv))
+                    Some(self.handle_psubscribe_command(argv))
                 }
                 Some(RuntimeSpecialCommand::Punsubscribe) => {
-                    Some(self.handle_punsubscribe_command(&argv))
+                    Some(self.handle_punsubscribe_command(argv))
                 }
-                Some(RuntimeSpecialCommand::Publish) => Some(self.handle_publish_command(&argv)),
+                Some(RuntimeSpecialCommand::Publish) => Some(self.handle_publish_command(argv)),
                 Some(RuntimeSpecialCommand::Ssubscribe) => {
-                    Some(self.handle_ssubscribe_command(&argv))
+                    Some(self.handle_ssubscribe_command(argv))
                 }
                 Some(RuntimeSpecialCommand::Sunsubscribe) => {
-                    Some(self.handle_sunsubscribe_command(&argv))
+                    Some(self.handle_sunsubscribe_command(argv))
                 }
-                Some(RuntimeSpecialCommand::Spublish) => Some(self.handle_spublish_command(&argv)),
-                Some(RuntimeSpecialCommand::Select) => Some(self.handle_select_command(&argv)),
-                Some(RuntimeSpecialCommand::Swapdb) => Some(self.handle_swapdb_command(&argv)),
+                Some(RuntimeSpecialCommand::Spublish) => Some(self.handle_spublish_command(argv)),
+                Some(RuntimeSpecialCommand::Select) => Some(self.handle_select_command(argv)),
+                Some(RuntimeSpecialCommand::Swapdb) => Some(self.handle_swapdb_command(argv)),
                 _ => None,
             };
             if let Some(reply) = special_reply {
-                let reply = match apply_client_reply_state(&argv, &mut self.session.client_reply) {
+                let reply = match apply_client_reply_state(argv, &mut self.session.client_reply) {
                     Ok(()) => reply,
                     Err(err) => err.to_resp(),
                 };
                 let elapsed_us = special_start.elapsed().as_micros() as u64;
-                self.record_slowlog(&argv, elapsed_us, now_ms);
-                self.server.record_latency_sample(&argv, elapsed_us, now_ms);
+                self.record_slowlog(argv, elapsed_us, now_ms);
+                self.server.record_latency_sample(argv, elapsed_us, now_ms);
                 self.server
-                    .record_command_histogram(&argv, elapsed_us, &reply);
+                    .record_command_histogram(argv, elapsed_us, &reply);
                 return reply;
             }
         }
 
-        if let Some(reply) = self.enforce_maxmemory_before_dispatch(&argv, now_ms, packet_id) {
+        if let Some(reply) = self.enforce_maxmemory_before_dispatch(argv, now_ms, packet_id) {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return reply;
         }
@@ -5534,9 +6044,9 @@ impl Runtime {
             .first()
             .is_some_and(|cmd| eq_ascii_token(cmd, b"MIGRATE"));
         let result = if handled_migrate {
-            self.handle_migrate_command(&argv, now_ms)
+            self.handle_migrate_command(argv, now_ms)
         } else {
-            self.execute_db_scoped_command(&argv, now_ms)
+            self.execute_db_scoped_command(argv, now_ms)
         };
         let elapsed_us = start.elapsed().as_micros() as u64;
         let dirty_after = self.server.store.dirty;
@@ -5549,8 +6059,8 @@ impl Runtime {
         // total_error_replies are still updated via the rejection path.
         let unknown_command = matches!(&result, Err(CommandError::UnknownCommand { .. }));
         if !unknown_command {
-            self.record_slowlog(&argv, elapsed_us, now_ms);
-            self.server.record_latency_sample(&argv, elapsed_us, now_ms);
+            self.record_slowlog(argv, elapsed_us, now_ms);
+            self.server.record_latency_sample(argv, elapsed_us, now_ms);
             // (frankenredis-infosections) Classify the eventual reply so the
             // commandstats counters distinguish Success vs Failed without
             // cloning the (potentially large) reply frame.
@@ -5559,7 +6069,7 @@ impl Runtime {
                 Ok(_) => false,
             };
             self.server
-                .record_command_histogram_outcome(&argv, elapsed_us, failed);
+                .record_command_histogram_outcome(argv, elapsed_us, failed);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -5575,13 +6085,13 @@ impl Runtime {
                     "command '{}' took {}us, exceeding budget {}ms",
                     command_name, elapsed_us, self.server.command_time_budget_ms
                 ),
-                input_source: ThreatInputDigestSource::Argv(&argv),
+                input_source: ThreatInputDigestSource::Argv(argv),
                 output: &RespFrame::SimpleString("OK".to_string()), // Dummy for logging
             });
         }
 
         // Feed MONITOR clients before returning
-        self.feed_monitors(&argv, now_ms, self.session.selected_db);
+        self.feed_monitors(argv, now_ms, self.session.selected_db);
 
         // Check if this was a MONITOR command — flag the client
         if argv
@@ -5593,18 +6103,45 @@ impl Runtime {
 
         match result {
             Ok(reply) => {
-                let cmd_keys = fr_command::command_keys(&argv);
-                if dirty_after > dirty_before {
+                let cmd_keys = fr_command::command_keys(argv);
+                // (frankenredis-1d2xf) Propagate any lazy-expiry deletions this
+                // command triggered FIRST, before the command's own record, so a
+                // command that recreates the key (e.g. SET on an expired key)
+                // isn't undone by a late stale DEL on the replica. Each lazy
+                // eviction bumped `dirty`, so the command itself is considered to
+                // have modified data only if it dirtied BEYOND those evictions —
+                // this keeps a read (e.g. GET) that merely lazy-expired a key from
+                // propagating itself.
+                let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+                let lazy_count = lazy_evicted.len() as u64;
+                self.server.propagate_expired_key_deletions(&lazy_evicted);
+                if dirty_after.saturating_sub(dirty_before) > lazy_count {
                     // Record AOF only for non-special commands (special ones record themselves)
                     if special_command.is_none() && !handled_migrate {
                         if let Some(script_commands) =
-                            self.take_script_propagation_commands_for_capture(&argv)
+                            self.take_script_propagation_commands_for_capture(argv)
                         {
                             for script_argv in script_commands {
                                 self.capture_aof_record(&script_argv);
                             }
+                        } else if let Some(rewritten) =
+                            fr_command::rewrite_effect_command_for_propagation(
+                                argv,
+                                &reply,
+                                &self.server.store,
+                                now_ms,
+                            )
+                        {
+                            // (frankenredis-myegu / 9snkx) Single canonical rewrite
+                            // shared with the Lua (x1225) and MULTI/EXEC (n66hv)
+                            // paths: relative expire→absolute (mdrk8/dt3v0),
+                            // INCRBYFLOAT/HINCRBYFLOAT→SET/HSET + SPOP→SREM/DEL
+                            // (1uiql), XADD `*`→concrete id (f9byo), blocking pops/
+                            // *MPOP/GETDEL→resolved form (ybaw7). One source of truth
+                            // so the three entry points can't drift.
+                            self.capture_aof_record(&rewritten);
                         } else {
-                            self.capture_aof_record(&argv);
+                            self.capture_aof_record(argv);
                         }
                     }
 
@@ -5617,8 +6154,8 @@ impl Runtime {
                         self.queue_client_tracking_invalidations(&cmd_keys);
                         // Keyspace notifications: publish events for modified keys.
                         if self.server.store.notify_keyspace_events != 0 {
-                            let event = Self::command_to_keyspace_event(&argv);
-                            let event_type = Self::command_to_notify_type(&argv);
+                            let event = Self::command_to_keyspace_event(argv);
+                            let event_type = Self::command_to_notify_type(argv);
                             let db = self.session.selected_db;
                             let is_rename = argv
                                 .first()
@@ -5630,7 +6167,82 @@ impl Runtime {
                             let is_copy = argv
                                 .first()
                                 .is_some_and(|c| c.eq_ignore_ascii_case(b"COPY"));
-                            if is_rename && cmd_keys.len() >= 2 {
+                            // (frankenredis-uw80w) RPOPLPUSH / LMOVE (and the
+                            // blocking BRPOPLPUSH / BLMOVE) move an element
+                            // between two lists. Upstream lmoveGenericCommand
+                            // fires the DESTINATION push first, then the SOURCE
+                            // pop, then a "del" if the source emptied.
+                            let is_list_move = argv.first().is_some_and(|c| {
+                                c.eq_ignore_ascii_case(b"LMOVE")
+                                    || c.eq_ignore_ascii_case(b"BLMOVE")
+                                    || c.eq_ignore_ascii_case(b"RPOPLPUSH")
+                                    || c.eq_ignore_ascii_case(b"BRPOPLPUSH")
+                            });
+                            // (frankenredis-4ayjf) SMOVE emits its own
+                            // srem/del/sadd from Store::smove (it has the
+                            // add-signal the post-hoc dispatcher lacks), so the
+                            // generic path must not fire a "smove" for it.
+                            let is_smove = argv
+                                .first()
+                                .is_some_and(|c| c.eq_ignore_ascii_case(b"SMOVE"));
+                            // (frankenredis-5wz6g) EXPIRE/PEXPIRE/EXPIREAT/
+                            // PEXPIREAT already emit a precise "expire" event
+                            // from Store::expire_*_milliseconds (which fires
+                            // only when the TTL is actually applied, with the
+                            // correct db). The generic path must NOT fire a
+                            // second "expire".
+                            let is_expire_family = argv.first().is_some_and(|c| {
+                                c.eq_ignore_ascii_case(b"EXPIRE")
+                                    || c.eq_ignore_ascii_case(b"PEXPIRE")
+                                    || c.eq_ignore_ascii_case(b"EXPIREAT")
+                                    || c.eq_ignore_ascii_case(b"PEXPIREAT")
+                            });
+                            // (frankenredis-cx98g) GETEX emits its own keyspace
+                            // event from Store::getex — "del" when an EXAT/PXAT
+                            // deadline is already in the past, "expire" for a
+                            // future deadline, "persist" only when a TTL was
+                            // actually removed. The generic path must not fire a
+                            // second (and, for the past case, wrong) "expire".
+                            let is_getex = argv
+                                .first()
+                                .is_some_and(|c| c.eq_ignore_ascii_case(b"GETEX"));
+                            // (frankenredis-hqj0t) XREADGROUP / XCLAIM /
+                            // XAUTOCLAIM fire NO per-command keyspace event
+                            // upstream; their only notification is the
+                            // xgroup-createconsumer the Store now queues when a
+                            // consumer is implicitly created. The generic
+                            // fallback ("generic") this dispatcher would emit is
+                            // spurious, so suppress it for them.
+                            let is_stream_consumer_cmd = argv.first().is_some_and(|c| {
+                                c.eq_ignore_ascii_case(b"XREADGROUP")
+                                    || c.eq_ignore_ascii_case(b"XCLAIM")
+                                    || c.eq_ignore_ascii_case(b"XAUTOCLAIM")
+                            });
+                            if is_smove || is_expire_family || is_getex || is_stream_consumer_cmd {
+                                // Events already queued by the Store method.
+                            } else if is_list_move && cmd_keys.len() >= 2 {
+                                let (pop_ev, push_ev) = Self::list_move_events(argv);
+                                self.server.store.notify_keyspace_event(
+                                    fr_store::NOTIFY_LIST,
+                                    push_ev,
+                                    &cmd_keys[1],
+                                    db,
+                                );
+                                self.server.store.notify_keyspace_event(
+                                    fr_store::NOTIFY_LIST,
+                                    pop_ev,
+                                    &cmd_keys[0],
+                                    db,
+                                );
+                                if !self.server.store.key_is_present(&cmd_keys[0]) {
+                                    self.server.store.notify_keyspace_event(
+                                        fr_store::NOTIFY_GENERIC,
+                                        "del",
+                                        &cmd_keys[0],
+                                        db,
+                                    );
+                                }
+                            } else if is_rename && cmd_keys.len() >= 2 {
                                 // RENAME emits rename_from on source, rename_to on dest
                                 self.server.store.notify_keyspace_event(
                                     event_type,
@@ -5654,11 +6266,119 @@ impl Runtime {
                                     &cmd_keys[1],
                                     db,
                                 );
+                            } else if argv.first().is_some_and(|c| Self::is_store_command(c))
+                                && !cmd_keys.is_empty()
+                            {
+                                // (frankenredis-5wz6g) *STORE commands fire ONE
+                                // per-command event on the DESTINATION only (or
+                                // "del" on it when the result was empty and the
+                                // dest was deleted — reaching this dirty-gated
+                                // block means it existed). The generic loop would
+                                // wrongly fire on every source key too.
+                                let dest = if Self::store_command_dest_is_last(&argv[0]) {
+                                    &cmd_keys[cmd_keys.len() - 1]
+                                } else {
+                                    &cmd_keys[0]
+                                };
+                                if self.server.store.key_is_present(dest) {
+                                    self.server
+                                        .store
+                                        .notify_keyspace_event(event_type, event, dest, db);
+                                } else {
+                                    self.server.store.notify_keyspace_event(
+                                        fr_store::NOTIFY_GENERIC,
+                                        "del",
+                                        dest,
+                                        db,
+                                    );
+                                }
+                            } else if argv
+                                .first()
+                                .is_some_and(|c| c.eq_ignore_ascii_case(b"MOVE"))
+                                && !cmd_keys.is_empty()
+                            {
+                                // (frankenredis-5wz6g) MOVE fires "move_from" on
+                                // the key in the SOURCE db and "move_to" on the
+                                // key in the DESTINATION db (argv[2]). Only a
+                                // successful move reaches this dirty-gated path.
+                                self.server.store.notify_keyspace_event(
+                                    fr_store::NOTIFY_GENERIC,
+                                    "move_from",
+                                    &cmd_keys[0],
+                                    db,
+                                );
+                                if let Some(target_db) = argv
+                                    .get(2)
+                                    .and_then(|a| std::str::from_utf8(a).ok())
+                                    .and_then(|s| s.parse::<usize>().ok())
+                                {
+                                    self.server.store.notify_keyspace_event(
+                                        fr_store::NOTIFY_GENERIC,
+                                        "move_to",
+                                        &cmd_keys[0],
+                                        target_db,
+                                    );
+                                }
                             } else {
                                 for key in &cmd_keys {
                                     self.server
                                         .store
                                         .notify_keyspace_event(event_type, event, key, db);
+                                }
+                            }
+                            // (frankenredis-hm2as) SET ... EX|PX|EXAT|PXAT and
+                            // SETEX/PSETEX set a TTL as a side effect, so upstream
+                            // t_string.c::setGenericCommand fires a second
+                            // NOTIFY_GENERIC "expire" event after "set".
+                            if Self::command_sets_expire_as_side_effect(argv) {
+                                for key in &cmd_keys {
+                                    self.server.store.notify_keyspace_event(
+                                        fr_store::NOTIFY_GENERIC,
+                                        "expire",
+                                        key,
+                                        db,
+                                    );
+                                }
+                            }
+                            // (frankenredis-f7xy7) XADD with an inline MAXLEN/MINID
+                            // trim that actually removed entries fires a secondary
+                            // NOTIFY_STREAM "xtrim" event AFTER "xadd", matching
+                            // upstream xaddCommand. The command handler set
+                            // last_xadd_trimmed during dispatch; consume it here so
+                            // the ordering (xadd then xtrim) is preserved.
+                            if argv
+                                .first()
+                                .is_some_and(|c| c.eq_ignore_ascii_case(b"XADD"))
+                                && self.server.store.last_xadd_trimmed
+                            {
+                                for key in &cmd_keys {
+                                    self.server.store.notify_keyspace_event(
+                                        fr_store::NOTIFY_STREAM,
+                                        "xtrim",
+                                        key,
+                                        db,
+                                    );
+                                }
+                            }
+                            // (frankenredis-g0crt) An element-removal command that
+                            // empties an aggregate causes upstream to dbDelete the
+                            // key and fire a secondary NOTIFY_GENERIC "del" after
+                            // its own event. Detect it by checking key presence
+                            // after the command (the key was just mutated, so it
+                            // cannot be a stale-expired entry).
+                            if argv
+                                .first()
+                                .is_some_and(|c| Self::command_can_empty_collection(c))
+                            {
+                                for key in &cmd_keys {
+                                    if !self.server.store.key_is_present(key) {
+                                        self.server.store.notify_keyspace_event(
+                                            fr_store::NOTIFY_GENERIC,
+                                            "del",
+                                            key,
+                                            db,
+                                        );
+                                    }
                                 }
                             }
                             // Deliver queued keyspace notifications via pub/sub
@@ -5702,17 +6422,25 @@ impl Runtime {
             || cmd.eq_ignore_ascii_case(b"MSETNX")
             || cmd.eq_ignore_ascii_case(b"SETNX")
             || cmd.eq_ignore_ascii_case(b"GETSET")
-            || cmd.eq_ignore_ascii_case(b"SETRANGE")
         {
             "set"
+        } else if cmd.eq_ignore_ascii_case(b"SETRANGE") {
+            // Upstream t_string.c::setrangeCommand fires NOTIFY_STRING
+            // "setrange", not "set". (frankenredis-ylu1p)
+            "setrange"
         } else if cmd.eq_ignore_ascii_case(b"DEL") || cmd.eq_ignore_ascii_case(b"UNLINK") {
             "del"
         } else if cmd.eq_ignore_ascii_case(b"APPEND") {
             "append"
-        } else if cmd.eq_ignore_ascii_case(b"INCR") || cmd.eq_ignore_ascii_case(b"INCRBY") {
+        } else if cmd.eq_ignore_ascii_case(b"INCR")
+            || cmd.eq_ignore_ascii_case(b"INCRBY")
+            || cmd.eq_ignore_ascii_case(b"DECR")
+            || cmd.eq_ignore_ascii_case(b"DECRBY")
+        {
+            // (frankenredis-0gibs) Upstream t_string.c routes INCR/INCRBY/DECR/
+            // DECRBY all through incrDecrCommand, which fires NOTIFY_STRING
+            // "incrby" unconditionally — DECR/DECRBY do NOT get a "decrby" event.
             "incrby"
-        } else if cmd.eq_ignore_ascii_case(b"DECR") || cmd.eq_ignore_ascii_case(b"DECRBY") {
-            "decrby"
         } else if cmd.eq_ignore_ascii_case(b"INCRBYFLOAT") {
             "incrbyfloat"
         } else if cmd.eq_ignore_ascii_case(b"EXPIRE")
@@ -5760,12 +6488,46 @@ impl Runtime {
             "spop"
         } else if cmd.eq_ignore_ascii_case(b"SMOVE") {
             "smove"
-        } else if cmd.eq_ignore_ascii_case(b"ZADD") {
+        } else if cmd.eq_ignore_ascii_case(b"GEOADD") {
+            // (frankenredis-irbta) Upstream geo.c::geoaddCommand builds a ZADD
+            // argv and dispatches zaddGenericCommand, firing NOTIFY_ZSET "zadd".
             "zadd"
+        } else if cmd.eq_ignore_ascii_case(b"ZADD") {
+            // (frankenredis-msv0x) ZADD with the INCR flag fires NOTIFY_ZSET
+            // "zincr" (like ZINCRBY), not "zadd", per t_zset.c::zaddGenericCommand.
+            // Scan only the leading option tokens so a member literally named
+            // "INCR" (which appears after the first score) is not misread.
+            let mut incr = false;
+            for a in argv.iter().skip(2) {
+                if a.eq_ignore_ascii_case(b"INCR") {
+                    incr = true;
+                    break;
+                }
+                if a.eq_ignore_ascii_case(b"NX")
+                    || a.eq_ignore_ascii_case(b"XX")
+                    || a.eq_ignore_ascii_case(b"GT")
+                    || a.eq_ignore_ascii_case(b"LT")
+                    || a.eq_ignore_ascii_case(b"CH")
+                {
+                    continue;
+                }
+                break;
+            }
+            if incr { "zincr" } else { "zadd" }
         } else if cmd.eq_ignore_ascii_case(b"ZREM") {
             "zrem"
+        } else if cmd.eq_ignore_ascii_case(b"ZREMRANGEBYRANK") {
+            // Upstream t_zset.c::zremrangeGenericCommand fires the
+            // range-specific event names. (frankenredis-fytt4)
+            "zremrangebyrank"
+        } else if cmd.eq_ignore_ascii_case(b"ZREMRANGEBYSCORE") {
+            "zremrangebyscore"
+        } else if cmd.eq_ignore_ascii_case(b"ZREMRANGEBYLEX") {
+            "zremrangebylex"
         } else if cmd.eq_ignore_ascii_case(b"ZINCRBY") {
-            "zincrby"
+            // Upstream t_zset.c::zincrbyCommand fires NOTIFY_ZSET "zincr",
+            // not "zincrby". (frankenredis-ylu1p)
+            "zincr"
         } else if cmd.eq_ignore_ascii_case(b"ZPOPMIN") {
             "zpopmin"
         } else if cmd.eq_ignore_ascii_case(b"ZPOPMAX") {
@@ -5777,7 +6539,9 @@ impl Runtime {
         } else if cmd.eq_ignore_ascii_case(b"XTRIM") {
             "xtrim"
         } else if cmd.eq_ignore_ascii_case(b"GETDEL") {
-            "getdel"
+            // Upstream t_string.c::getdelCommand deletes the key and fires
+            // NOTIFY_GENERIC "del", not "getdel". (frankenredis-ylu1p)
+            "del"
         } else if cmd.eq_ignore_ascii_case(b"COPY") {
             "copy_to"
         } else if cmd.eq_ignore_ascii_case(b"RESTORE") {
@@ -5785,7 +6549,19 @@ impl Runtime {
         } else if cmd.eq_ignore_ascii_case(b"SETBIT") {
             "setbit"
         } else if cmd.eq_ignore_ascii_case(b"GETEX") {
-            "getex"
+            // Upstream t_string.c::getexCommand fires "persist" when the
+            // PERSIST option clears a TTL, otherwise "expire" when it sets
+            // one (EX/PX/EXAT/PXAT). A no-option GETEX makes no change and
+            // never reaches this dirty-gated path. (frankenredis-ylu1p)
+            if argv
+                .iter()
+                .skip(2)
+                .any(|a| a.eq_ignore_ascii_case(b"PERSIST"))
+            {
+                "persist"
+            } else {
+                "expire"
+            }
         } else if cmd.eq_ignore_ascii_case(b"BITOP") {
             // Upstream bitops.c::bitopCommand fires NOTIFY_STRING "set"
             // (or "del" if the result is empty + erased); we approximate
@@ -5798,16 +6574,21 @@ impl Runtime {
             "pfadd"
         } else if cmd.eq_ignore_ascii_case(b"PFMERGE") {
             "pfadd"
-        } else if cmd.eq_ignore_ascii_case(b"SINTERSTORE")
-            || cmd.eq_ignore_ascii_case(b"SUNIONSTORE")
-            || cmd.eq_ignore_ascii_case(b"SDIFFSTORE")
-        {
+        } else if cmd.eq_ignore_ascii_case(b"SINTERSTORE") {
+            // (frankenredis-5wz6g) Each *STORE command fires its OWN event
+            // name on the destination, not a shared one.
             "sinterstore"
-        } else if cmd.eq_ignore_ascii_case(b"ZUNIONSTORE")
-            || cmd.eq_ignore_ascii_case(b"ZINTERSTORE")
-            || cmd.eq_ignore_ascii_case(b"ZDIFFSTORE")
-            || cmd.eq_ignore_ascii_case(b"ZRANGESTORE")
-        {
+        } else if cmd.eq_ignore_ascii_case(b"SUNIONSTORE") {
+            "sunionstore"
+        } else if cmd.eq_ignore_ascii_case(b"SDIFFSTORE") {
+            "sdiffstore"
+        } else if cmd.eq_ignore_ascii_case(b"ZINTERSTORE") {
+            "zinterstore"
+        } else if cmd.eq_ignore_ascii_case(b"ZUNIONSTORE") {
+            "zunionstore"
+        } else if cmd.eq_ignore_ascii_case(b"ZDIFFSTORE") {
+            "zdiffstore"
+        } else if cmd.eq_ignore_ascii_case(b"ZRANGESTORE") {
             "zrangestore"
         } else if cmd.eq_ignore_ascii_case(b"SORT") || cmd.eq_ignore_ascii_case(b"SORT_RO") {
             "sortstore"
@@ -5845,6 +6626,116 @@ impl Runtime {
         } else {
             "generic"
         }
+    }
+
+    /// Whether a write command set a TTL as a side effect, which requires a
+    /// secondary NOTIFY_GENERIC "expire" event after its primary "set"
+    /// event (mirroring upstream t_string.c::setGenericCommand). SET fires
+    /// it only when an EX/PX/EXAT/PXAT option is present; SETEX and PSETEX
+    /// always set a TTL. (frankenredis-hm2as)
+    fn command_sets_expire_as_side_effect(argv: &[Vec<u8>]) -> bool {
+        let Some(cmd) = argv.first() else {
+            return false;
+        };
+        if cmd.eq_ignore_ascii_case(b"SETEX") || cmd.eq_ignore_ascii_case(b"PSETEX") {
+            return true;
+        }
+        if cmd.eq_ignore_ascii_case(b"SET") {
+            return argv.iter().skip(3).any(|a| {
+                a.eq_ignore_ascii_case(b"EX")
+                    || a.eq_ignore_ascii_case(b"PX")
+                    || a.eq_ignore_ascii_case(b"EXAT")
+                    || a.eq_ignore_ascii_case(b"PXAT")
+            });
+        }
+        false
+    }
+
+    /// Whether a command removes elements from an aggregate type and can
+    /// therefore leave the key empty. Upstream deletes an emptied key via
+    /// dbDelete and fires a secondary NOTIFY_GENERIC "del" after the
+    /// command's own event. We mirror that by checking key presence after
+    /// these commands. The delete-family (DEL/GETDEL/...) already fires
+    /// "del" as its primary event and is excluded. (frankenredis-g0crt)
+    fn command_can_empty_collection(cmd: &[u8]) -> bool {
+        const SHRINKERS: &[&[u8]] = &[
+            b"LPOP",
+            b"RPOP",
+            b"LREM",
+            b"LTRIM",
+            b"LMPOP",
+            b"BLPOP",
+            b"BRPOP",
+            b"BLMPOP",
+            // LMOVE/BLMOVE/RPOPLPUSH/BRPOPLPUSH are handled by the dedicated
+            // list-move branch (which fires push/pop/del in upstream order);
+            // they must NOT also go through the generic trailing-del loop.
+            b"SREM",
+            b"SPOP",
+            // SMOVE fires its own srem/del/sadd from Store::smove (it knows
+            // the dst add-signal); it must NOT also hit the generic
+            // trailing-del loop. (frankenredis-4ayjf)
+            b"HDEL",
+            b"ZREM",
+            b"ZPOPMIN",
+            b"ZPOPMAX",
+            b"ZREMRANGEBYRANK",
+            b"ZREMRANGEBYSCORE",
+            b"ZREMRANGEBYLEX",
+            b"ZMPOP",
+            b"BZPOPMIN",
+            b"BZPOPMAX",
+            b"BZMPOP",
+        ];
+        SHRINKERS.iter().any(|s| cmd.eq_ignore_ascii_case(s))
+    }
+
+    /// Returns `(pop_event_on_source, push_event_on_destination)` for a list
+    /// move command. RPOPLPUSH/BRPOPLPUSH are fixed rpop→lpush; LMOVE/BLMOVE
+    /// read the FROM (argv[3]) and TO (argv[4]) directions. (frankenredis-uw80w)
+    fn list_move_events(argv: &[Vec<u8>]) -> (&'static str, &'static str) {
+        let cmd = &argv[0];
+        if cmd.eq_ignore_ascii_case(b"RPOPLPUSH") || cmd.eq_ignore_ascii_case(b"BRPOPLPUSH") {
+            return ("rpop", "lpush");
+        }
+        // LMOVE / BLMOVE  src dst FROM TO [timeout]
+        let from_left = argv.get(3).is_some_and(|a| a.eq_ignore_ascii_case(b"LEFT"));
+        let to_left = argv.get(4).is_some_and(|a| a.eq_ignore_ascii_case(b"LEFT"));
+        let pop = if from_left { "lpop" } else { "rpop" };
+        let push = if to_left { "lpush" } else { "rpush" };
+        (pop, push)
+    }
+
+    /// Whether a command writes a single DESTINATION key from one or more
+    /// sources (`*STORE` family). Upstream fires ONE per-command-named event
+    /// on the destination only (or "del" on it when the result is empty),
+    /// never on the source keys. (frankenredis-5wz6g)
+    fn is_store_command(cmd: &[u8]) -> bool {
+        Self::store_command_dest_is_last(cmd)
+            || cmd.eq_ignore_ascii_case(b"SINTERSTORE")
+            || cmd.eq_ignore_ascii_case(b"SUNIONSTORE")
+            || cmd.eq_ignore_ascii_case(b"SDIFFSTORE")
+            || cmd.eq_ignore_ascii_case(b"ZINTERSTORE")
+            || cmd.eq_ignore_ascii_case(b"ZUNIONSTORE")
+            || cmd.eq_ignore_ascii_case(b"ZDIFFSTORE")
+            || cmd.eq_ignore_ascii_case(b"ZRANGESTORE")
+            || cmd.eq_ignore_ascii_case(b"GEOSEARCHSTORE")
+            // BITOP <op> dest src... fires "set" on the dest (or "del" when
+            // the result is empty); PFMERGE dest src... fires "pfadd" on the
+            // dest. Both put dest first. (frankenredis-5wz6g)
+            || cmd.eq_ignore_ascii_case(b"BITOP")
+            || cmd.eq_ignore_ascii_case(b"PFMERGE")
+    }
+
+    /// For the *STORE family, whether the destination key is the LAST key in
+    /// `cmd_keys` (SORT/GEORADIUS put `STORE dest` after the source) rather
+    /// than the FIRST (the set/zset/geosearch stores). SORT_RO/`*_RO` and a
+    /// store-less SORT/GEORADIUS are read-only and never reach the
+    /// dirty-gated emission path. (frankenredis-5wz6g)
+    fn store_command_dest_is_last(cmd: &[u8]) -> bool {
+        cmd.eq_ignore_ascii_case(b"SORT")
+            || cmd.eq_ignore_ascii_case(b"GEORADIUS")
+            || cmd.eq_ignore_ascii_case(b"GEORADIUSBYMEMBER")
     }
 
     fn xgroup_keyspace_event(argv: &[Vec<u8>]) -> &'static str {
@@ -6100,8 +6991,16 @@ impl Runtime {
         match fr_protocol::parse_frame_with_config(input, &parser_config) {
             Ok(parsed) => {
                 let argv_result = frame_to_argv(&parsed.frame);
-                self.execute_frame_internal(parsed.frame, argv_result, now_ms, packet_id, None)
-                    .to_bytes()
+                self.execute_frame_internal(
+                    Some(&parsed.frame),
+                    argv_result
+                        .as_deref()
+                        .map_err(|_| CommandError::InvalidCommandFrame),
+                    now_ms,
+                    packet_id,
+                    None,
+                )
+                .to_bytes()
             }
             Err(err) => {
                 let reason = err.to_string();
@@ -6260,90 +7159,116 @@ impl Runtime {
         fr_command::is_write_command(command)
     }
 
-    fn namespace_argv_for_selected_db(&self, argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    fn namespace_argv_for_selected_db<'a>(
+        &self,
+        argv: &'a [Vec<u8>],
+    ) -> std::borrow::Cow<'a, [Vec<u8>]> {
+        // db 0 needs no namespacing: encode_db_key(0, k) is the identity, so the
+        // rewrite below would reproduce argv byte-for-byte. Borrow it instead of
+        // cloning the whole argv AND re-deriving key indexes via the generic
+        // command_key_indexes scan on every command — both pure waste on the hot
+        // dispatch path for the overwhelmingly common selected_db == 0 case.
+        if self.session.selected_db == 0 {
+            return std::borrow::Cow::Borrowed(argv);
+        }
         let mut rewritten = argv.to_vec();
         for idx in fr_command::command_key_indexes(argv) {
             if let Some(arg) = rewritten.get_mut(idx) {
                 *arg = encode_db_key(self.session.selected_db, arg);
             }
         }
-        rewritten
+        std::borrow::Cow::Owned(rewritten)
     }
 
-    fn current_dispatch_client_context(&self, now_ms: u64) -> DispatchClientContext {
-        self.dispatch_client_context_for_session(&self.session, now_ms)
-    }
-
-    fn dispatch_client_context_for_session(
-        &self,
-        session: &ClientSession,
-        now_ms: u64,
-    ) -> DispatchClientContext {
+    fn refresh_current_dispatch_client_context(&mut self, now_ms: u64) {
+        let peer_addr = self.session.peer_addr;
+        self.refresh_dispatch_peer_addr_cache(peer_addr);
+        let session = &self.session;
         let client_id = session.client_id;
-        let is_pubsub = self.is_pubsub_client(client_id);
+        let channel_subscriptions = self
+            .server
+            .pubsub_client_channels
+            .get(&client_id)
+            .map_or(0, HashSet::len);
+        let pattern_subscriptions = self
+            .server
+            .pubsub_client_patterns
+            .get(&client_id)
+            .map_or(0, HashSet::len);
+        let shard_subscriptions = self
+            .server
+            .pubsub_client_shard_channels
+            .get(&client_id)
+            .map_or(0, HashSet::len);
+        let is_pubsub =
+            channel_subscriptions > 0 || pattern_subscriptions > 0 || shard_subscriptions > 0;
         let age_seconds = now_ms.saturating_sub(session.connected_at_ms) / 1000;
         let idle_seconds = now_ms.saturating_sub(session.last_interaction_ms) / 1000;
-        DispatchClientContext {
-            client_id,
-            client_name: session.client_name.clone(),
-            client_lib_name: session.client_lib_name.clone(),
-            client_lib_ver: session.client_lib_ver.clone(),
-            age_seconds,
-            idle_seconds,
-            db_index: session.selected_db,
-            flags: if session.transaction_state.in_transaction {
-                "x".to_string()
-            } else {
-                "N".to_string()
-            },
-            peer_addr: session
-                .peer_addr
-                .map(|addr| addr.to_string())
-                .unwrap_or_else(|| "127.0.0.1:0".to_string()),
-            // (frankenredis-lxccd) Mirror the real socket fd into the
-            // dispatch context so CLIENT INFO / CLIENT LIST emit it
-            // through fr-command's client_info_line wrapper too.
-            socket_fd: session.socket_fd,
-            // (frankenredis-tepuj) Mirror per-client read/write buffer
-            // metrics into the dispatch context so fr-command's
-            // client_info_line emits real qbuf/qbuf-free/obl/tot-mem.
-            qbuf_bytes: session.qbuf_bytes,
-            qbuf_free_bytes: session.qbuf_free_bytes,
-            output_buffer_bytes: session.output_buffer_bytes,
-            authenticated_user: session.current_user_name().to_vec(),
-            resp_protocol_version: session.resp_protocol_version,
-            channel_subscriptions: self
+        let multi_count = if session.transaction_state.in_transaction {
+            session.transaction_state.command_queue.len() as i64
+        } else {
+            -1
+        };
+        let acl_generation = self.server.auth_state.dispatch_permissions_generation();
+        let current_user = session.current_user_name();
+        if self.dispatch_acl_snapshot_generation != acl_generation
+            || self.dispatch_acl_snapshot_user.as_deref() != Some(current_user)
+            || self
                 .server
-                .pubsub_client_channels
-                .get(&client_id)
-                .map_or(0, HashSet::len),
-            pattern_subscriptions: self
-                .server
-                .pubsub_client_patterns
-                .get(&client_id)
-                .map_or(0, HashSet::len),
-            shard_subscriptions: self
-                .server
-                .pubsub_client_shard_channels
-                .get(&client_id)
-                .map_or(0, HashSet::len),
-            multi_count: if session.transaction_state.in_transaction {
-                session.transaction_state.command_queue.len() as i64
-            } else {
-                -1
-            },
-            watch_count: session.transaction_state.watched_keys.len(),
-            is_pubsub,
-            client_tracking: session.client_tracking.clone(),
-            client_reply: session.client_reply.clone(),
-            client_no_evict: session.client_no_evict,
-            client_no_touch: session.client_no_touch,
-            acl_permissions: self
+                .store
+                .dispatch_client_ctx
+                .acl_permissions
+                .is_none()
+        {
+            self.server.store.dispatch_client_ctx.acl_permissions = self
                 .server
                 .auth_state
-                .get_user(session.current_user_name())
-                .map(AclUser::to_dispatch_acl_permissions),
+                .get_user(current_user)
+                .map(AclUser::to_dispatch_acl_permissions);
+            self.dispatch_acl_snapshot_user = Some(current_user.to_vec());
+            self.dispatch_acl_snapshot_generation = acl_generation;
         }
+
+        let ctx = &mut self.server.store.dispatch_client_ctx;
+        ctx.client_id = client_id;
+        ctx.client_name.clone_from(&session.client_name);
+        ctx.client_lib_name.clone_from(&session.client_lib_name);
+        ctx.client_lib_ver.clone_from(&session.client_lib_ver);
+        ctx.age_seconds = age_seconds;
+        ctx.idle_seconds = idle_seconds;
+        ctx.db_index = session.selected_db;
+        ctx.flags.clear();
+        ctx.flags
+            .push_str(if session.transaction_state.in_transaction {
+                "x"
+            } else {
+                "N"
+            });
+        ctx.peer_addr.clone_from(&self.dispatch_peer_addr_cache);
+        // (frankenredis-lxccd) Mirror the real socket fd into the
+        // dispatch context so CLIENT INFO / CLIENT LIST emit it
+        // through fr-command's client_info_line wrapper too.
+        ctx.socket_fd = session.socket_fd;
+        // (frankenredis-tepuj) Mirror per-client read/write buffer
+        // metrics into the dispatch context so fr-command's
+        // client_info_line emits real qbuf/qbuf-free/obl/tot-mem.
+        ctx.qbuf_bytes = session.qbuf_bytes;
+        ctx.qbuf_free_bytes = session.qbuf_free_bytes;
+        ctx.output_buffer_bytes = session.output_buffer_bytes;
+        ctx.authenticated_user.clear();
+        ctx.authenticated_user
+            .extend_from_slice(session.current_user_name());
+        ctx.resp_protocol_version = session.resp_protocol_version;
+        ctx.channel_subscriptions = channel_subscriptions;
+        ctx.pattern_subscriptions = pattern_subscriptions;
+        ctx.shard_subscriptions = shard_subscriptions;
+        ctx.multi_count = multi_count;
+        ctx.watch_count = session.transaction_state.watched_keys.len();
+        ctx.is_pubsub = is_pubsub;
+        ctx.client_tracking.clone_from(&session.client_tracking);
+        ctx.client_reply.clone_from(&session.client_reply);
+        ctx.client_no_evict = session.client_no_evict;
+        ctx.client_no_touch = session.client_no_touch;
     }
 
     fn apply_existing_client_reply_suppression_to_undispatched_reply(&mut self) {
@@ -6570,21 +7495,21 @@ impl Runtime {
     }
 
     fn sync_dispatch_client_context_to_session(&mut self) {
-        self.session.client_name = self.server.store.dispatch_client_ctx.client_name.clone();
-        self.session.client_lib_name = self
-            .server
-            .store
-            .dispatch_client_ctx
+        self.session
+            .client_name
+            .clone_from(&self.server.store.dispatch_client_ctx.client_name);
+        self.session
             .client_lib_name
-            .clone();
-        self.session.client_lib_ver = self.server.store.dispatch_client_ctx.client_lib_ver.clone();
-        self.session.client_tracking = self
-            .server
-            .store
-            .dispatch_client_ctx
+            .clone_from(&self.server.store.dispatch_client_ctx.client_lib_name);
+        self.session
+            .client_lib_ver
+            .clone_from(&self.server.store.dispatch_client_ctx.client_lib_ver);
+        self.session
             .client_tracking
-            .clone();
-        self.session.client_reply = self.server.store.dispatch_client_ctx.client_reply.clone();
+            .clone_from(&self.server.store.dispatch_client_ctx.client_tracking);
+        self.session
+            .client_reply
+            .clone_from(&self.server.store.dispatch_client_ctx.client_reply);
         self.session.client_no_evict = self.server.store.dispatch_client_ctx.client_no_evict;
         self.session.client_no_touch = self.server.store.dispatch_client_ctx.client_no_touch;
     }
@@ -6594,7 +7519,7 @@ impl Runtime {
         argv: &[Vec<u8>],
         now_ms: u64,
     ) -> Result<RespFrame, CommandError> {
-        self.server.store.dispatch_client_ctx = self.current_dispatch_client_context(now_ms);
+        self.refresh_current_dispatch_client_context(now_ms);
         let mut result = dispatch_argv(argv, &mut self.server.store, now_ms);
         self.sync_dispatch_client_context_to_session();
         if result.is_ok()
@@ -6603,6 +7528,20 @@ impl Runtime {
             result = Ok(reply);
         }
         result
+    }
+
+    fn refresh_dispatch_peer_addr_cache(&mut self, peer_addr: Option<std::net::SocketAddr>) {
+        if self.dispatch_peer_addr_cache_source == peer_addr {
+            return;
+        }
+        self.dispatch_peer_addr_cache.clear();
+        if let Some(addr) = peer_addr {
+            write!(&mut self.dispatch_peer_addr_cache, "{addr}")
+                .expect("writing to String cannot fail");
+        } else {
+            self.dispatch_peer_addr_cache.push_str("127.0.0.1:0");
+        }
+        self.dispatch_peer_addr_cache_source = peer_addr;
     }
 
     fn handle_deferred_store_runtime_action(&mut self, now_ms: u64) -> Option<RespFrame> {
@@ -6655,6 +7594,9 @@ impl Runtime {
         }
         if eq_ascii_token(command, b"FLUSHDB") {
             return self.handle_flushdb_command(argv);
+        }
+        if eq_ascii_token(command, b"FLUSHALL") {
+            return self.handle_flushall_command(argv);
         }
         if eq_ascii_token(command, b"RANDOMKEY") {
             return self.handle_randomkey_command(argv, now_ms);
@@ -7228,16 +8170,49 @@ impl Runtime {
         let keys_str = user.keys_string();
         let channels_str = user.channels_string();
 
+        // (frankenredis-d919b) Render each selector as a {commands,keys,channels}
+        // group — a Map under RESP3, an alternating Array under RESP2 — reusing
+        // the selector's own permission-string renderers.
+        let resp3 = self.session.resp_protocol_version == 3;
+        let selector_frames: Vec<RespFrame> = user
+            .selectors
+            .iter()
+            .map(|sel| {
+                let c = RespFrame::BulkString(Some(sel.commands_string().into_bytes()));
+                let k = RespFrame::BulkString(Some(sel.keys_string().into_bytes()));
+                let ch = RespFrame::BulkString(Some(sel.channels_string().into_bytes()));
+                if resp3 {
+                    RespFrame::Map(Some(vec![
+                        (RespFrame::BulkString(Some(b"commands".to_vec())), c),
+                        (RespFrame::BulkString(Some(b"keys".to_vec())), k),
+                        (RespFrame::BulkString(Some(b"channels".to_vec())), ch),
+                    ]))
+                } else {
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"commands".to_vec())),
+                        c,
+                        RespFrame::BulkString(Some(b"keys".to_vec())),
+                        k,
+                        RespFrame::BulkString(Some(b"channels".to_vec())),
+                        ch,
+                    ]))
+                }
+            })
+            .collect();
+
         // Mirror upstream acl.c::aclCommand GETUSER which calls
         // addReplyMapLen(c, 6) — RESP3 wire shape is a Map of 6
         // (key, value) pairs; RESP2 stays the flat Array of
         // alternating k/v entries. Same shape pattern as
         // CLIENT TRACKINGINFO (i40x2). (frankenredis-e4njz)
         if self.session.resp_protocol_version == 3 {
+            // Upstream acl.c::aclCommand GETUSER emits the `flags` value via
+            // addReplySetLen, so under RESP3 it is a Set (~), not an Array.
+            // `passwords`/`selectors` stay Arrays. (frankenredis-42abp)
             RespFrame::Map(Some(vec![
                 (
                     RespFrame::BulkString(Some(b"flags".to_vec())),
-                    RespFrame::Array(Some(flags)),
+                    RespFrame::Set(Some(flags)),
                 ),
                 (
                     RespFrame::BulkString(Some(b"passwords".to_vec())),
@@ -7257,7 +8232,7 @@ impl Runtime {
                 ),
                 (
                     RespFrame::BulkString(Some(b"selectors".to_vec())),
-                    RespFrame::Array(Some(Vec::new())),
+                    RespFrame::Array(Some(selector_frames)),
                 ),
             ]))
         } else {
@@ -7273,7 +8248,7 @@ impl Runtime {
                 RespFrame::BulkString(Some(b"channels".to_vec())),
                 RespFrame::BulkString(Some(channels_str.as_bytes().to_vec())),
                 RespFrame::BulkString(Some(b"selectors".to_vec())),
-                RespFrame::Array(Some(Vec::new())),
+                RespFrame::Array(Some(selector_frames)),
             ]))
         }
     }
@@ -10800,6 +11775,7 @@ impl Runtime {
             if !tracking.enabled || tracking.bcast {
                 self.remove_client_tracking_observer(self.session.client_id);
             }
+            self.refresh_client_tracking_bcast_membership(self.session.client_id, &tracking);
             self.session.client_tracking = tracking;
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("CACHING") {
@@ -11008,6 +11984,9 @@ impl Runtime {
         // monitor_clients and the broadcast at lib.rs:5337 keeps streaming
         // every dispatched command. (frankenredis-se9t5)
         self.server.monitor_clients.remove(&self.session.client_id);
+        self.server
+            .client_tracking_bcast_clients
+            .remove(&self.session.client_id);
         self.session.reset_connection_state(&self.server.auth_state);
         // Redis returns +RESET\r\n (a simple string "RESET")
         RespFrame::SimpleString("RESET".to_string())
@@ -11131,11 +12110,12 @@ impl Runtime {
 
     /// Record a command execution in the slow log if it exceeded the threshold.
     fn record_slowlog(&mut self, argv: &[Vec<u8>], duration_us: u64, now_ms: u64) {
-        let client_address = self
-            .session
-            .peer_addr
-            .map(|addr| addr.to_string().into_bytes())
-            .unwrap_or_default();
+        let client_address = if self.session.peer_addr.is_some() {
+            self.refresh_dispatch_peer_addr_cache(self.session.peer_addr);
+            self.dispatch_peer_addr_cache.as_bytes().to_vec()
+        } else {
+            Vec::new()
+        };
         let client_name = self.session.client_name.clone().unwrap_or_default();
         self.server.store.record_slowlog_with_client(
             argv,
@@ -11187,7 +12167,7 @@ impl Runtime {
         if argv.len() != 1 {
             return CommandError::WrongArity("SAVE").to_resp();
         }
-        if let Err(reply) = self.persist_snapshot_to_disk(now_ms, true) {
+        if let Err(reply) = self.persist_snapshot_to_disk(now_ms, true, true) {
             return reply;
         }
         self.server.store.record_save(now_ms, false);
@@ -11221,7 +12201,9 @@ impl Runtime {
                     RespFrame::Error("ERR Can't bgsave: fork error".to_string())
                 }
                 0 => {
-                    let result = self.persist_snapshot_to_disk(now_ms, true);
+                    // Forked child: RDB only — see persist_snapshot_to_disk's
+                    // write_aof note (frankenredis-ol9tz).
+                    let result = self.persist_snapshot_to_disk(now_ms, true, false);
                     std::process::exit(if result.is_ok() { 0 } else { 1 });
                 }
                 pid => {
@@ -11236,7 +12218,7 @@ impl Runtime {
         }
         #[cfg(not(unix))]
         {
-            if let Err(reply) = self.persist_snapshot_to_disk(now_ms, true) {
+            if let Err(reply) = self.persist_snapshot_to_disk(now_ms, true, true) {
                 self.server.store.record_bgsave_status(false);
                 return reply;
             }
@@ -11251,8 +12233,15 @@ impl Runtime {
         &mut self,
         now_ms: u64,
         record_aof_write_status: bool,
+        write_aof: bool,
     ) -> Result<(), RespFrame> {
-        if let Some(path) = &self.server.aof_path {
+        // (frankenredis-ol9tz) `write_aof` is false only for the forked BGSAVE
+        // child, which must rewrite the RDB alone: it cannot advance the
+        // parent's `aof_disk_flushed_records` cursor, so letting it rename a
+        // fresh AOF base out from under the parent would make the parent's
+        // incremental tail duplicate the base on the next flush. The AOF stays
+        // current via the per-iteration incremental flush + BGREWRITEAOF.
+        if write_aof && let Some(path) = &self.server.aof_path {
             let commands = self.server.store.to_aof_commands(now_ms);
             let records = argv_to_aof_records(commands);
             if write_aof_file(path, &records).is_err() {
@@ -11263,18 +12252,29 @@ impl Runtime {
                     "ERR error saving dataset to disk".to_string(),
                 ));
             }
+            // The file now fully represents current state; the incremental
+            // flush must resume appending only records captured after this
+            // rewrite, so anchor the cursor at the current buffer length.
+            self.server.aof_disk_flushed_records = self.server.aof_records.len();
             if record_aof_write_status {
                 self.server.store.record_aof_write_status(true);
             }
         }
 
-        if let Some(path) = &self.server.rdb_path {
+        if self.server.rdb_path.is_some() {
             let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
+            let fn_codes = self.rdb_function_codes();
+            let fn_refs: Vec<&[u8]> = fn_codes.iter().map(Vec::as_slice).collect();
             let aux = [
                 ("redis-ver", fr_store::REDIS_COMPAT_VERSION),
                 ("frankenredis", "true"),
             ];
-            if write_rdb_file(path, &entries, &aux).is_err() {
+            let path = self
+                .server
+                .rdb_path
+                .as_ref()
+                .expect("rdb_path checked above");
+            if fr_persist::write_rdb_file_with_functions(path, &entries, &aux, &fn_refs).is_err() {
                 return Err(RespFrame::Error(
                     "ERR error saving RDB snapshot to disk".to_string(),
                 ));
@@ -11282,6 +12282,77 @@ impl Runtime {
         }
 
         Ok(())
+    }
+
+    /// Append AOF records captured since the last flush to the on-disk AOF
+    /// file and fsync per the configured `appendfsync` policy. Called once per
+    /// event-loop iteration (the `beforeSleep`/`flushAppendOnlyFile` analog).
+    /// (frankenredis-ol9tz)
+    ///
+    /// fr's AOF is a single command-log file that, before this, was only ever
+    /// rewritten wholesale from store state by SAVE/BGSAVE/BGREWRITEAOF — so
+    /// every write made between those snapshots was lost on restart (the file
+    /// was often never even created). This incremental tail makes ordinary
+    /// writes durable. Records beyond `aof_disk_flushed_records` are appended;
+    /// the snapshot rewriters anchor that cursor at `aof_records.len()` so a
+    /// freshly written base is never duplicated.
+    ///
+    /// The file is opened fresh each flush rather than held open: `write_aof_file`
+    /// replaces the path via atomic rename, so a long-lived handle would point
+    /// at the stale, unlinked inode after any rewrite. (A persistent fd guarded
+    /// against rewrite is a possible future perf lever.)
+    pub fn flush_aof_to_disk(&mut self, now_ms: u64) {
+        let path = match &self.server.aof_path {
+            Some(path) => path.clone(),
+            None => return,
+        };
+        // Respect a runtime `CONFIG SET appendonly no`: stop appending, but
+        // leave the file and cursor intact for a later re-enable/rewrite.
+        if !self.server.store.aof_enabled {
+            return;
+        }
+        let flushed = self
+            .server
+            .aof_disk_flushed_records
+            .min(self.server.aof_records.len());
+        let pending = &self.server.aof_records[flushed..];
+        let want_fsync = match self.server.appendfsync_mode {
+            AppendFsyncMode::Always => !pending.is_empty(),
+            AppendFsyncMode::Everysec => {
+                now_ms.saturating_sub(self.server.aof_last_fsync_ms) >= 1000
+            }
+            AppendFsyncMode::No => false,
+        };
+        if pending.is_empty() && !want_fsync {
+            return;
+        }
+        let mut file = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(_) => {
+                self.server.store.record_aof_write_status(false);
+                return;
+            }
+        };
+        if !pending.is_empty() {
+            let bytes = encode_aof_stream(pending);
+            if std::io::Write::write_all(&mut file, &bytes).is_err() {
+                self.server.store.record_aof_write_status(false);
+                return;
+            }
+            self.server.aof_disk_flushed_records = self.server.aof_records.len();
+            self.server.store.record_aof_write_status(true);
+        }
+        if want_fsync {
+            if file.sync_data().is_err() {
+                self.server.store.record_aof_write_status(false);
+                return;
+            }
+            self.server.aof_last_fsync_ms = now_ms;
+        }
     }
 
     fn handle_lastsave_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -11322,6 +12393,9 @@ impl Runtime {
             self.server.store.record_aof_bgrewrite_status(false);
             return RespFrame::Error("ERR error rewriting AOF file".to_string());
         }
+        // (frankenredis-ol9tz) The file now holds a fresh full base; the
+        // incremental flush must append only post-rewrite records.
+        self.server.aof_disk_flushed_records = self.server.aof_records.len();
         self.server.aof_rewrite_scheduled = false;
         self.server.replication_ack_state.local_fsync_offset =
             self.server.replication_ack_state.primary_offset;
@@ -11793,6 +12867,26 @@ impl Runtime {
             return Err(CommandError::SyntaxError);
         }
         self.server.store.flush_database(self.session.selected_db);
+        // (frankenredis-o90ga) Tell tracking clients to evict their cache.
+        self.queue_client_tracking_flush_invalidation();
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    }
+
+    /// FLUSHALL clears every database. Mirrors fr_command::flushall (same
+    /// ASYNC/SYNC arg validation + `store.flushdb()` all-DBs primitive) but is
+    /// intercepted at the runtime layer so it can emit the client-tracking
+    /// flush invalidation, which needs runtime/session state the store lacks.
+    /// (frankenredis-o90ga)
+    fn handle_flushall_command(&mut self, argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+        if argv.len() > 2
+            || (argv.len() == 2
+                && !argv[1].eq_ignore_ascii_case(b"ASYNC")
+                && !argv[1].eq_ignore_ascii_case(b"SYNC"))
+        {
+            return Err(CommandError::SyntaxError);
+        }
+        self.server.store.flushdb();
+        self.queue_client_tracking_flush_invalidation();
         Ok(RespFrame::SimpleString("OK".to_string()))
     }
 
@@ -11950,11 +13044,17 @@ impl Runtime {
         {
             return Ok(RespFrame::Integer(0));
         }
+        let dirty_before = self.server.store.dirty;
         self.server
             .store
             .copy(&source, &destination, false, now_ms)
             .map_err(CommandError::Store)?;
         self.server.store.del(&[source], now_ms);
+        // (frankenredis-movedirty) Upstream db.c::moveCommand does
+        // `server.dirty++` exactly once; the copy + del helpers each bump the
+        // counter, double-counting. Normalize to a single dirty unit so
+        // rdb_changes_since_last_save / the auto-save threshold match vendored.
+        self.server.store.dirty = dirty_before.saturating_add(1);
         Ok(RespFrame::Integer(1))
     }
 
@@ -12079,8 +13179,16 @@ impl Runtime {
                 let namespaced = this.namespace_argv_for_selected_db(&argv);
                 let mut reply = this.dispatch_with_client_context(&namespaced, now_ms)?;
                 this.strip_db_prefixes_from_frame(&mut reply);
-                if let RespFrame::BulkString(Some(bytes)) = reply {
-                    info.extend_from_slice(&bytes);
+                // The per-section sub-call runs under the same client context,
+                // so when the client negotiated RESP3 (HELLO 3) the INFO reply
+                // is a Verbatim string, not a BulkString. Extract the body from
+                // either so RESP3 clients still receive every section — matching
+                // only BulkString silently dropped server/clients/memory/stats/
+                // cpu/modules/errorstats/cluster under RESP3.
+                match reply {
+                    RespFrame::BulkString(Some(bytes)) => info.extend_from_slice(&bytes),
+                    RespFrame::Verbatim(text) => info.extend_from_slice(text.as_bytes()),
+                    _ => {}
                 }
                 Ok(())
             };
@@ -13261,16 +14369,38 @@ replica_announced:1\r\n",
         let mut transaction_aof = Vec::new();
         self.session.transaction_state.executing_exec = true;
 
+        // (frankenredis-wzs7l) A queued command can lazily expire a key; its
+        // DEL/UNLINK must be propagated INSIDE the transaction, before the
+        // command's own record, so a later queued command that recreates the key
+        // isn't undone by a stale DEL on the replica. (Only reachable with the
+        // active-expire cycle disabled — line below runs it before each command.)
+        let expiry_op: &[u8] = if self.server.lazyfree_lazy_expire_enabled() {
+            b"UNLINK"
+        } else {
+            b"DEL"
+        };
+        let exec_is_master = matches!(
+            self.server.replication_runtime_state.role,
+            ReplicationRoleState::Master
+        );
+
         for argv in &queued {
             if let Some(permission_error) = self.acl_permission_error(argv) {
                 let command_name = String::from_utf8_lossy(&argv[0]).into_owned();
+                // Command-level denial uses the username + canonical lowercase
+                // fullname, matching upstream. (frankenredis-1ktss)
+                let acl_denied_user =
+                    String::from_utf8_lossy(self.session.current_user_name()).into_owned();
+                let acl_command_fullname = fr_command::acl_command_selectors_for_argv(argv)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| command_name.to_ascii_lowercase());
                 let (log_reason, object, reply) = match permission_error {
                     AclCommandPermissionError::Command => (
                         "command",
                         command_name.to_ascii_uppercase(),
                         RespFrame::Error(format!(
-                            "NOPERM this user has no permissions to run the '{}' command",
-                            command_name
+                            "NOPERM User {acl_denied_user} has no permissions to run the '{acl_command_fullname}' command"
                         )),
                     ),
                     AclCommandPermissionError::Key(key) => {
@@ -13325,10 +14455,25 @@ replica_announced:1\r\n",
             self.server
                 .record_command_histogram_outcome(argv, elapsed_us, failed);
 
+            // (frankenredis-wzs7l) Emit any lazy-expiry deletions this queued
+            // command triggered, inside the transaction and before the command's
+            // own record. Each lazy eviction bumped `dirty`, so the command is
+            // treated as a write only if it dirtied BEYOND those evictions.
+            let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+            let lazy_count = lazy_evicted.len() as u64;
+            if exec_is_master {
+                for ekey in &lazy_evicted {
+                    let logical = fr_store::decode_db_key(ekey)
+                        .map(|(_, l)| l.to_vec())
+                        .unwrap_or_else(|| ekey.clone());
+                    transaction_dirty = true;
+                    transaction_aof.push(vec![expiry_op.to_vec(), logical]);
+                }
+            }
+
             match result {
                 Ok(mut reply) => {
-                    self.strip_db_prefixes_from_frame(&mut reply);
-                    if dirty_after > dirty_before {
+                    if dirty_after.saturating_sub(dirty_before) > lazy_count {
                         if let Some(script_commands) =
                             self.take_script_propagation_commands_for_capture(argv)
                         {
@@ -13338,7 +14483,21 @@ replica_announced:1\r\n",
                             }
                         } else {
                             transaction_dirty = true;
-                            transaction_aof.push(argv.clone());
+                            // (frankenredis-n66hv) Apply the same propagation
+                            // determinism rewrites the non-transactional path uses,
+                            // so XADD `*` / SPOP / INCRBYFLOAT (etc.) inside a
+                            // transaction propagate the concrete deterministic form
+                            // instead of diverging on a replica/AOF replay. The
+                            // sub-command reply (e.g. XADD's generated id) is read
+                            // before stripping db prefixes below.
+                            let effect = fr_command::rewrite_effect_command_for_propagation(
+                                argv,
+                                &reply,
+                                &self.server.store,
+                                now_ms,
+                            )
+                            .unwrap_or_else(|| argv.clone());
+                            transaction_aof.push(effect);
                         }
 
                         // Optimized blocking: track keys modified by write commands
@@ -13359,6 +14518,7 @@ replica_announced:1\r\n",
                             self.deliver_keyspace_notifications();
                         }
                     }
+                    self.strip_db_prefixes_from_frame(&mut reply);
                     results.push(reply);
                 }
                 Err(err) => results.push(err.to_resp()),
@@ -13429,17 +14589,27 @@ replica_announced:1\r\n",
 
     fn preflight_gate(
         &mut self,
-        frame: &RespFrame,
+        frame: Option<&RespFrame>,
+        argv: &[Vec<u8>],
         now_ms: u64,
         packet_id: u64,
     ) -> Option<RespFrame> {
-        let RespFrame::Array(Some(items)) = frame else {
-            return None;
-        };
-        if items.len() > self.policy.gate.max_array_len {
+        // argv carries one entry per command-array element (1:1 with the frame's
+        // items), so the gate evaluates on argv and the server hot path never
+        // needs the frame. The threat digest hashes the original frame when
+        // present, else a byte-identical reconstruction. (frankenredis-8yfmt)
+        if argv.len() > self.policy.gate.max_array_len {
             let reply = RespFrame::Error(
                 "ERR Protocol error: command array exceeds compatibility gate".to_string(),
             );
+            let recon;
+            let digest_frame: &RespFrame = match frame {
+                Some(f) => f,
+                None => {
+                    recon = fr_command::argv_to_command_frame(argv);
+                    &recon
+                }
+            };
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -13450,40 +14620,56 @@ replica_announced:1\r\n",
                 reason_code: "compat_array_len_exceeded",
                 reason: format!(
                     "array length {} exceeded {}",
-                    items.len(),
+                    argv.len(),
                     self.policy.gate.max_array_len
                 ),
-                input_source: ThreatInputDigestSource::Frame(frame),
+                input_source: ThreatInputDigestSource::Frame(digest_frame),
                 output: &reply,
             });
             return Some(reply);
         }
 
-        for item in items {
-            if let RespFrame::BulkString(Some(bytes)) = item
-                && bytes.len() > self.policy.gate.max_bulk_len
-            {
-                let reply = RespFrame::Error(
-                    "ERR Protocol error: bulk payload exceeds compatibility gate".to_string(),
-                );
-                self.record_threat_event(ThreatEventInput {
-                    now_ms,
-                    packet_id,
-                    threat_class: ThreatClass::ResourceExhaustion,
-                    preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
-                    subsystem: "compatibility_gate",
-                    action: "fail_closed_bulk_len",
-                    reason_code: "compat_bulk_len_exceeded",
-                    reason: format!(
-                        "bulk len {} exceeded {}",
-                        bytes.len(),
-                        self.policy.gate.max_bulk_len
-                    ),
-                    input_source: ThreatInputDigestSource::Frame(frame),
-                    output: &reply,
-                });
-                return Some(reply);
-            }
+        // Bulk-length gate. With the structured frame in hand, honor the exact
+        // upstream rule that only BulkString items are length-gated; on the
+        // server path every element is a wire bulk string, so argv lengths are
+        // equivalent.
+        let max_bulk_len = self.policy.gate.max_bulk_len;
+        let offending: Option<usize> = match frame {
+            Some(RespFrame::Array(Some(items))) => items.iter().find_map(|item| match item {
+                RespFrame::BulkString(Some(bytes)) if bytes.len() > max_bulk_len => {
+                    Some(bytes.len())
+                }
+                _ => None,
+            }),
+            _ => argv
+                .iter()
+                .find_map(|bytes| (bytes.len() > max_bulk_len).then_some(bytes.len())),
+        };
+        if let Some(bulk_len) = offending {
+            let reply = RespFrame::Error(
+                "ERR Protocol error: bulk payload exceeds compatibility gate".to_string(),
+            );
+            let recon;
+            let digest_frame: &RespFrame = match frame {
+                Some(f) => f,
+                None => {
+                    recon = fr_command::argv_to_command_frame(argv);
+                    &recon
+                }
+            };
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "compatibility_gate",
+                action: "fail_closed_bulk_len",
+                reason_code: "compat_bulk_len_exceeded",
+                reason: format!("bulk len {} exceeded {}", bulk_len, max_bulk_len),
+                input_source: ThreatInputDigestSource::Frame(digest_frame),
+                output: &reply,
+            });
+            return Some(reply);
         }
         None
     }
@@ -13829,10 +15015,11 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
         };
         let (db, logical_key) = decode_db_key(&key).unwrap_or((0, key.as_slice()));
         let rdb_value = match value {
-            Value::String(v) => RdbValue::String(v.clone()),
-            Value::List(l) => RdbValue::List(l.iter().cloned().collect()),
+            Value::String(v) => RdbValue::String(v.to_vec()),
+            Value::Integer(v) => RdbValue::String(v.to_string().into_bytes()),
+            Value::List(l) => RdbValue::List(l.iter().map(<[u8]>::to_vec).collect()),
             Value::Set(s) => {
-                let mut members: Vec<Vec<u8>> = s.iter().cloned().collect();
+                let mut members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
                 members.sort();
                 RdbValue::Set(members)
             }
@@ -13854,23 +15041,23 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
                         .map(|(k_, v_)| {
                             let ttl = store
                                 .hash_field_expires
-                                .get(&(physical.clone(), k_.clone()))
+                                .get(&(physical.clone(), k_.to_vec()))
                                 .copied();
-                            (k_.clone(), v_.clone(), ttl)
+                            (k_.to_vec(), v_.to_vec(), ttl)
                         })
                         .collect();
                     fields.sort_by(|a, b| a.0.cmp(&b.0));
                     RdbValue::HashWithTtls(fields)
                 } else {
                     let mut fields: Vec<(Vec<u8>, Vec<u8>)> =
-                        h.iter().map(|(k_, v_)| (k_.clone(), v_.clone())).collect();
+                        h.iter().map(|(k_, v_)| (k_.to_vec(), v_.to_vec())).collect();
                     fields.sort_by(|a, b| a.0.cmp(&b.0));
                     RdbValue::Hash(fields)
                 }
             }
             Value::SortedSet(zs) => {
                 let members: Vec<(Vec<u8>, f64)> =
-                    zs.iter_asc().map(|(m, s)| (m.clone(), *s)).collect();
+                    zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
                 RdbValue::SortedSet(members)
             }
             Value::Stream(entries_map) => {
@@ -14162,7 +15349,7 @@ mod tests {
         build_hello_response, canonical_static_config_param, canonicalize_acl_rules,
         classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
-        client_wrong_subcommand_arity, parse_acl_key_selector, sha256_hex_bytes,
+        client_wrong_subcommand_arity, digest_bytes, parse_acl_key_selector, sha256_hex_bytes,
         store_to_rdb_entries, wrong_arity_error,
     };
 
@@ -14192,6 +15379,95 @@ mod tests {
 
     fn argv(parts: &[&[u8]]) -> Vec<Vec<u8>> {
         parts.iter().map(|part| (*part).to_vec()).collect()
+    }
+
+    #[test]
+    fn last_command_name_buffer_reuse_matches_reference_and_reports_ab_ratio() {
+        use super::write_client_info_command_name;
+        // Reference = the prior allocating implementation. (frankenredis-hackk)
+        fn old_ref(argv: &[Vec<u8>]) -> String {
+            let Some(command) = argv.first() else {
+                return "NULL".to_string();
+            };
+            let command = String::from_utf8_lossy(command).to_ascii_lowercase();
+            let Some(sub) = argv.get(1) else {
+                return command;
+            };
+            let uses_subcommand = matches!(
+                command.as_str(),
+                "acl"
+                    | "client"
+                    | "cluster"
+                    | "command"
+                    | "config"
+                    | "debug"
+                    | "function"
+                    | "latency"
+                    | "memory"
+                    | "module"
+                    | "object"
+                    | "pubsub"
+                    | "script"
+                    | "sentinel"
+                    | "slowlog"
+                    | "xgroup"
+                    | "xinfo"
+            );
+            if !uses_subcommand {
+                return command;
+            }
+            let sub = String::from_utf8_lossy(sub).to_ascii_lowercase();
+            format!("{command}|{sub}")
+        }
+        let cases: Vec<Vec<Vec<u8>>> = vec![
+            vec![],
+            vec![b"GET".to_vec()],
+            vec![b"set".to_vec(), b"k".to_vec()],
+            vec![b"CONFIG".to_vec(), b"GET".to_vec()],
+            vec![b"config".to_vec(), b"SET".to_vec(), b"x".to_vec()],
+            vec![b"Client".to_vec(), b"SetName".to_vec()],
+            vec![b"OBJECT".to_vec(), b"ENCODING".to_vec()],
+            vec![b"XINFO".to_vec(), b"STREAM".to_vec()],
+            vec![b"GET".to_vec(), b"k".to_vec()], // GET with arg: not a container
+            vec![vec![0xff, 0xfe, b'A']],         // invalid UTF-8 fallback
+            vec![b"acl".to_vec()],                // container without sub
+            vec![b"MEMORY".to_vec(), vec![0xff, b'B']], // sub invalid UTF-8
+        ];
+        let mut buf = String::new();
+        for argv in &cases {
+            write_client_info_command_name(&mut buf, argv);
+            assert_eq!(buf, old_ref(argv), "argv={argv:?}");
+        }
+        // Reuse keeps producing correct results across calls on the same buffer.
+        for argv in &cases {
+            write_client_info_command_name(&mut buf, argv);
+            assert_eq!(buf, old_ref(argv));
+        }
+
+        // A/B: per-command name materialization — buffer reuse vs fresh String.
+        let argv = vec![b"CONFIG".to_vec(), b"GET".to_vec()];
+        let reps = 3_000_000usize;
+        let t0 = std::time::Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..reps {
+            let s = old_ref(std::hint::black_box(&argv));
+            sink = sink.wrapping_add(s.len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(sink);
+        let mut b = String::new();
+        let t1 = std::time::Instant::now();
+        let mut sink2 = 0usize;
+        for _ in 0..reps {
+            write_client_info_command_name(&mut b, std::hint::black_box(&argv));
+            sink2 = sink2.wrapping_add(b.len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(sink2);
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "last_command_name A/B (x{reps}): old(alloc)={old_ns}ns new(reuse)={new_ns}ns ratio={ratio:.2}x"
+        );
     }
 
     #[test]
@@ -14808,6 +16084,46 @@ mod tests {
         assert!(all_body.contains("# Commandstats"), "{all_body}");
     }
 
+    #[test]
+    fn info_under_resp3_includes_all_command_owned_sections() {
+        // Regression (frankenredis-ffqgl follow-up): the INFO aggregator
+        // delegates server/clients/memory/stats/cpu/modules/errorstats/
+        // cluster to per-section INFO sub-calls. Under HELLO 3 those
+        // sub-calls return a RESP3 Verbatim string, not a BulkString, so
+        // an extract that only matched BulkString silently dropped every
+        // fr-command-owned section — leaving RESP3 clients with just the
+        // runtime-owned persistence/replication/keyspace trio.
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"HELLO", b"3"]), 0);
+
+        let info = rt.execute_frame(command(&[b"INFO"]), 1);
+        let body = match info {
+            // RESP3 INFO is a Verbatim string.
+            RespFrame::Verbatim(text) => text,
+            other => panic!("expected verbatim info response under RESP3, got {other:?}"),
+        };
+
+        // Every default section, in upstream order, must be present.
+        for section in [
+            "# Server",
+            "# Clients",
+            "# Memory",
+            "# Persistence",
+            "# Stats",
+            "# Replication",
+            "# CPU",
+            "# Modules",
+            "# Errorstats",
+            "# Cluster",
+            "# Keyspace",
+        ] {
+            assert!(
+                body.contains(section),
+                "RESP3 default INFO missing {section}:\n{body}"
+            );
+        }
+    }
+
     /// (frankenredis-rot3d) Mirror upstream server.c::processCommand —
     /// unknown commands are rejected via commandCheckExistence before
     /// call() runs, so they never bump SLOWLOG, INFO commandstats, or
@@ -15043,7 +16359,7 @@ mod tests {
 
         assert_eq!(
             rt.execute_frame_with_unix_time_us(
-                command(&[b"TIME"]),
+                &command(&[b"TIME"]),
                 1_778_390_164_120,
                 1_778_390_164_118_366,
             ),
@@ -16099,6 +17415,82 @@ mod tests {
     }
 
     #[test]
+    fn flushall_sends_null_invalidation_to_tracking_clients() {
+        // (frankenredis-o90ga) FLUSHALL/FLUSHDB must emit an `invalidate` push
+        // carrying a NULL payload to every tracking client so it evicts its
+        // entire client-side cache. fr previously emitted nothing.
+        let mut rt = Runtime::default_strict();
+        let tracker = rt.new_session();
+        let mutator = rt.new_session();
+
+        // Tracker connection: RESP3, default tracking ON, observe a key.
+        let previous = rt.swap_session(tracker);
+        assert!(matches!(
+            rt.execute_frame(command(&[b"HELLO", b"3"]), 0),
+            RespFrame::Map(Some(_))
+        ));
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"ck", b"v1"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.execute_frame(command(&[b"GET", b"ck"]), 3);
+        let tracker = rt.swap_session(mutator);
+        rt.record_client_session(&tracker);
+
+        // A different connection flushes the keyspace.
+        assert_eq!(
+            rt.execute_frame(command(&[b"FLUSHALL"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let messages = rt.drain_pubsub_for_client(tracker.client_id);
+        assert_eq!(
+            messages,
+            vec![fr_store::PubSubMessage::Invalidate { keys: Vec::new() }],
+            "FLUSHALL must queue a flush invalidation for the tracking client"
+        );
+
+        // The flush invalidation encodes as `invalidate` + RESP3 null.
+        let frame = fr_command::pubsub_message_to_frame_for_protocol(
+            messages
+                .into_iter()
+                .next()
+                .expect("flush invalidation queued"),
+            3,
+        );
+        assert_eq!(
+            frame,
+            RespFrame::Push(vec![
+                RespFrame::BulkString(Some(b"invalidate".to_vec())),
+                RespFrame::BulkString(None),
+            ])
+        );
+        let mut bytes = Vec::new();
+        frame.encode_into_resp3(&mut bytes);
+        assert_eq!(bytes, b">2\r\n$10\r\ninvalidate\r\n_\r\n");
+
+        // FLUSHDB on the selected DB behaves the same way.
+        let fresh = rt.new_session();
+        let mutator2 = rt.swap_session(fresh);
+        rt.record_client_session(&mutator2);
+        assert_eq!(
+            rt.execute_frame(command(&[b"FLUSHDB"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.drain_pubsub_for_client(tracker.client_id),
+            vec![fr_store::PubSubMessage::Invalidate { keys: Vec::new() }],
+            "FLUSHDB must also queue a flush invalidation"
+        );
+
+        let _ = rt.swap_session(previous);
+    }
+
+    #[test]
     fn resp3_client_tracking_invalidation_redirects_encode_as_push_frames() {
         let mut rt = Runtime::default_strict();
         let redirect = rt.new_session();
@@ -16162,6 +17554,173 @@ mod tests {
         assert!(frame.to_bytes().starts_with(b">2\r\n"));
 
         let _writer = rt.swap_session(previous);
+    }
+
+    #[test]
+    fn client_tracking_bcast_current_session_receives_own_write() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CLIENT", b"TRACKING", b"ON", b"BCAST", b"PREFIX", b"foo"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"foo:1", b"payload"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.drain_pending_pubsub(),
+            vec![fr_store::PubSubMessage::Invalidate {
+                keys: vec![b"foo:1".to_vec()],
+            }]
+        );
+    }
+
+    #[test]
+    fn client_tracking_bcast_registry_drops_off_reset_and_disconnect() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON", b"BCAST"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(
+            rt.server
+                .client_tracking_bcast_clients
+                .contains(&rt.client_id())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"OFF"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(
+            !rt.server
+                .client_tracking_bcast_clients
+                .contains(&rt.client_id())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON", b"BCAST"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(
+            rt.server
+                .client_tracking_bcast_clients
+                .contains(&rt.client_id())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"RESET"]), 3),
+            RespFrame::SimpleString("RESET".to_string())
+        );
+        assert!(
+            !rt.server
+                .client_tracking_bcast_clients
+                .contains(&rt.client_id())
+        );
+
+        let tracker = rt.new_session();
+        let writer = rt.new_session();
+        let previous = rt.swap_session(tracker);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON", b"BCAST"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let tracker = rt.swap_session(writer);
+        rt.record_client_session(&tracker);
+        assert!(
+            rt.server
+                .client_tracking_bcast_clients
+                .contains(&tracker.client_id)
+        );
+        rt.remove_client_session(tracker.client_id);
+        assert!(
+            !rt.server
+                .client_tracking_bcast_clients
+                .contains(&tracker.client_id)
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"foo", b"v"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(rt.drain_pubsub_for_client(tracker.client_id), Vec::new());
+
+        let _writer = rt.swap_session(previous);
+    }
+
+    #[test]
+    fn non_bcast_tracking_emits_one_invalidate_push_per_key() {
+        // frankenredis-8ypwc: when a single command modifies multiple tracked
+        // keys, a non-BCAST (default/OPTIN/OPTOUT) client must receive one
+        // invalidate push PER key — upstream trackingInvalidateKey fires per key
+        // as each is modified — NOT one batched multi-key push. Verified against
+        // vendored redis 7.2.4 (MSET of two tracked keys → two pushes).
+        let mut rt = Runtime::default_strict();
+        let tracker = rt.new_session();
+        let writer = rt.new_session();
+
+        let previous = rt.swap_session(tracker);
+        assert!(matches!(
+            rt.execute_frame(command(&[b"HELLO", b"3"]), 0),
+            RespFrame::Map(Some(_))
+        ));
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // Register caching interest in both keys via reads.
+        rt.execute_frame(command(&[b"GET", b"m1"]), 2);
+        rt.execute_frame(command(&[b"GET", b"m2"]), 3);
+        let tracker_session = rt.swap_session(writer);
+        rt.record_client_session(&tracker_session);
+
+        // One command modifies both tracked keys, in arg order m1 then m2.
+        assert_eq!(
+            rt.execute_frame(command(&[b"MSET", b"m1", b"1", b"m2", b"2"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.drain_pubsub_for_client(tracker_session.client_id),
+            vec![
+                fr_store::PubSubMessage::Invalidate {
+                    keys: vec![b"m1".to_vec()],
+                },
+                fr_store::PubSubMessage::Invalidate {
+                    keys: vec![b"m2".to_vec()],
+                },
+            ],
+            "non-BCAST tracking must emit one single-key invalidate push per modified key, in key order"
+        );
+
+        let _writer = rt.swap_session(previous);
+    }
+
+    #[test]
+    fn bcast_tracking_batches_multiple_keys_into_one_push() {
+        // frankenredis-8ypwc companion: a BCAST client still batches every
+        // matching key modified by one command into a SINGLE invalidate push
+        // (one flush per command) — the per-key split above must not regress it.
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CLIENT", b"TRACKING", b"ON", b"BCAST", b"PREFIX", b"foo"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"MSET", b"foo1", b"1", b"foo2", b"2"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.drain_pending_pubsub(),
+            vec![fr_store::PubSubMessage::Invalidate {
+                keys: vec![b"foo1".to_vec(), b"foo2".to_vec()],
+            }]
+        );
     }
 
     #[test]
@@ -17168,6 +18727,307 @@ mod tests {
     }
 
     #[test]
+    fn relative_expire_rewritten_to_absolute_pexpireat_for_propagation() {
+        // (frankenredis-mdrk8) The propagation form must be the absolute
+        // PEXPIREAT so a replica's deadline matches the master's exactly.
+        let now = 1_000_000_u64;
+        let rw = |argv: &[&[u8]]| {
+            fr_command::rewrite_relative_expire_for_propagation(
+                &argv.iter().map(|a| a.to_vec()).collect::<Vec<_>>(),
+                now,
+            )
+        };
+        let pexpireat = |key: &[u8], ms: i64| {
+            Some(vec![
+                b"PEXPIREAT".to_vec(),
+                key.to_vec(),
+                ms.to_string().into_bytes(),
+            ])
+        };
+        // EXPIRE sec -> now + sec*1000
+        assert_eq!(rw(&[b"EXPIRE", b"k", b"100"]), pexpireat(b"k", 1_100_000));
+        // PEXPIRE ms -> now + ms
+        assert_eq!(rw(&[b"PEXPIRE", b"k", b"500"]), pexpireat(b"k", 1_000_500));
+        // EXPIREAT sec -> sec*1000 (absolute, unit-converted)
+        assert_eq!(rw(&[b"EXPIREAT", b"k", b"50"]), pexpireat(b"k", 50_000));
+        // PEXPIREAT ms -> passthrough as PEXPIREAT
+        assert_eq!(
+            rw(&[b"PEXPIREAT", b"k", b"123456"]),
+            pexpireat(b"k", 123_456)
+        );
+        // Conditional flags are dropped (success already happened).
+        assert_eq!(
+            rw(&[b"EXPIRE", b"k", b"100", b"GT"]),
+            pexpireat(b"k", 1_100_000)
+        );
+        // A past deadline is preserved (deletes the key on the replica too).
+        assert_eq!(rw(&[b"EXPIRE", b"k", b"-1"]), pexpireat(b"k", 999_000));
+        // Non-expire commands and malformed values are propagated verbatim.
+        assert_eq!(rw(&[b"EXPIRE", b"k", b"notanint"]), None);
+        assert_eq!(rw(&[b"PERSIST", b"k"]), None);
+
+        // (frankenredis-dt3v0) SET-with-expire family -> SET key val PXAT <ms>.
+        let setpxat = |key: &[u8], val: &[u8], ms: i64| {
+            Some(vec![
+                b"SET".to_vec(),
+                key.to_vec(),
+                val.to_vec(),
+                b"PXAT".to_vec(),
+                ms.to_string().into_bytes(),
+            ])
+        };
+        assert_eq!(
+            rw(&[b"SETEX", b"k", b"100", b"v"]),
+            setpxat(b"k", b"v", 1_100_000)
+        );
+        assert_eq!(
+            rw(&[b"PSETEX", b"k", b"500", b"v"]),
+            setpxat(b"k", b"v", 1_000_500)
+        );
+        assert_eq!(
+            rw(&[b"SET", b"k", b"v", b"EX", b"100"]),
+            setpxat(b"k", b"v", 1_100_000)
+        );
+        assert_eq!(
+            rw(&[b"SET", b"k", b"v", b"PX", b"500"]),
+            setpxat(b"k", b"v", 1_000_500)
+        );
+        assert_eq!(
+            rw(&[b"SET", b"k", b"v", b"EXAT", b"50"]),
+            setpxat(b"k", b"v", 50_000)
+        );
+        // Conditional/return options around the expire are dropped.
+        assert_eq!(
+            rw(&[b"SET", b"k", b"v", b"NX", b"EX", b"100", b"GET"]),
+            setpxat(b"k", b"v", 1_100_000)
+        );
+        // Absolute PXAT, KEEPTTL, and plain SET carry no relative drift -> verbatim.
+        assert_eq!(rw(&[b"SET", b"k", b"v", b"PXAT", b"123456"]), None);
+        assert_eq!(rw(&[b"SET", b"k", b"v", b"KEEPTTL"]), None);
+        assert_eq!(rw(&[b"SET", b"k", b"v"]), None);
+
+        // (frankenredis-dt3v0) GETEX -> PEXPIREAT (future) / PERSIST / DEL (past).
+        assert_eq!(
+            rw(&[b"GETEX", b"k", b"EX", b"100"]),
+            pexpireat(b"k", 1_100_000)
+        );
+        assert_eq!(
+            rw(&[b"GETEX", b"k", b"PXAT", b"2000000"]),
+            pexpireat(b"k", 2_000_000)
+        );
+        assert_eq!(
+            rw(&[b"GETEX", b"k", b"PERSIST"]),
+            Some(vec![b"PERSIST".to_vec(), b"k".to_vec()])
+        );
+        // GETEX with a past absolute deadline deletes the key.
+        assert_eq!(
+            rw(&[b"GETEX", b"k", b"EXAT", b"1"]),
+            Some(vec![b"DEL".to_vec(), b"k".to_vec()])
+        );
+        assert_eq!(rw(&[b"GETEX", b"k"]), None);
+    }
+
+    #[test]
+    fn xadd_autoid_aof_capture_and_replay_preserve_master_id() {
+        // (frankenredis-f9byo) Exercise the full capture path, not just the
+        // helper: the emitted AOF/replication argv must carry the master's
+        // concrete id, so replaying later with a different clock keeps the same
+        // stream entry id.
+        let mut source = Runtime::default_strict();
+        source.server.replication_runtime_state.ensure_replica(42);
+
+        let reply = source.execute_frame(command(&[b"XADD", b"s", b"*", b"f", b"v"]), 1_000);
+        assert!(
+            matches!(reply, RespFrame::BulkString(Some(_))),
+            "expected generated XADD id, got {reply:?}"
+        );
+        let RespFrame::BulkString(Some(generated_id)) = reply else {
+            return;
+        };
+        assert_eq!(
+            source.aof_records().last().expect("last aof record").argv,
+            vec![
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                generated_id.clone(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ]
+        );
+
+        let encoded = source.encoded_aof_stream();
+        let decoded = decode_aof_stream(&encoded).expect("decode xadd aof stream");
+        assert_eq!(decoded, source.aof_records());
+
+        let mut target = Runtime::default_strict();
+        target.server.replication_runtime_state.ensure_replica(43);
+        assert_eq!(
+            target.replay_aof_records(&decoded, 9_999),
+            vec![RespFrame::BulkString(Some(generated_id.clone()))]
+        );
+        assert_eq!(
+            target.execute_frame(command(&[b"XRANGE", b"s", b"-", b"+"]), 10_000),
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(generated_id)),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"f".to_vec())),
+                    RespFrame::BulkString(Some(b"v".to_vec())),
+                ])),
+            ]))])),
+        );
+    }
+
+    #[test]
+    fn active_expire_cycle_propagates_del_for_reaped_keys() {
+        // (frankenredis-wqrb6) The active-expire cycle must propagate a DEL per
+        // key it reaps so replicas / AOF replay delete the same keys (upstream
+        // activeExpireCycle does this; without it the stream lacks the expiry
+        // delete and an fr master + redis replica diverge).
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(42);
+        // Key set at t=900 with a 100ms TTL -> expires at t=1000.
+        rt.execute_frame(command(&[b"SET", b"ek", b"v", b"PX", b"100"]), 900);
+        let before = rt.aof_records().len();
+
+        // Run the cycle well past the deadline; it reaps `ek`.
+        let _ = rt.run_active_expire_cycle(5_000, ActiveExpireCycleKind::Fast);
+
+        let new_argvs: Vec<Vec<Vec<u8>>> = rt.aof_records()[before..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        assert!(
+            new_argvs.iter().any(|argv| argv
+                .first()
+                .is_some_and(|c| c.eq_ignore_ascii_case(b"DEL"))
+                && argv.get(1).is_some_and(|k| k.as_slice() == b"ek")),
+            "active-expire cycle must propagate `DEL ek`, got {new_argvs:?}"
+        );
+
+        // A replica (not a master) must NOT synthesize its own expiry DELs.
+        let mut replica = Runtime::default_strict();
+        replica.server.replication_runtime_state.ensure_replica(7);
+        replica.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6379"]), 900);
+        replica.execute_frame(command(&[b"SET", b"rk", b"v", b"PX", b"100"]), 900);
+        let rbefore = replica.aof_records().len();
+        let _ = replica.run_active_expire_cycle(5_000, ActiveExpireCycleKind::Fast);
+        let rnew: Vec<Vec<Vec<u8>>> = replica.aof_records()[rbefore..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        assert!(
+            !rnew
+                .iter()
+                .any(|argv| argv.first().is_some_and(|c| c.eq_ignore_ascii_case(b"DEL"))),
+            "a replica must not generate expiry DELs, got {rnew:?}"
+        );
+    }
+
+    #[test]
+    fn lazy_expiry_on_access_propagates_del_and_not_the_read() {
+        // (frankenredis-1d2xf) A command that lazily expires a key on access must
+        // propagate the DEL (so replicas/AOF delete it) but must NOT propagate the
+        // triggering read itself; and a write that recreates the key must order
+        // the DEL before its own record.
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(42);
+        // Disable the active cycle so access triggers LAZY expiry (otherwise the
+        // pre-dispatch active cycle reaps the key first).
+        rt.server.store.active_expire_enabled = false;
+
+        rt.execute_frame(command(&[b"SET", b"k", b"v", b"PX", b"100"]), 900); // expires t=1000
+        let before = rt.aof_records().len();
+
+        // GET at t=5000 lazily expires k -> nil; propagate DEL k, NOT the GET.
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 5000),
+            RespFrame::BulkString(None)
+        );
+        let argvs: Vec<Vec<Vec<u8>>> = rt.aof_records()[before..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        assert!(
+            argvs.iter().any(
+                |a| a.first().is_some_and(|c| c.eq_ignore_ascii_case(b"DEL"))
+                    && a.get(1).is_some_and(|k| k.as_slice() == b"k")
+            ),
+            "lazy expiry must propagate DEL k, got {argvs:?}"
+        );
+        assert!(
+            !argvs
+                .iter()
+                .any(|a| a.first().is_some_and(|c| c.eq_ignore_ascii_case(b"GET"))),
+            "the GET that lazy-expired must NOT propagate, got {argvs:?}"
+        );
+
+        // SET on an expired key recreates it: stream must be [DEL k2, SET k2 ..].
+        rt.execute_frame(command(&[b"SET", b"k2", b"old", b"PX", b"100"]), 900);
+        let before = rt.aof_records().len();
+        rt.execute_frame(command(&[b"SET", b"k2", b"new"]), 5000);
+        let argvs: Vec<Vec<Vec<u8>>> = rt.aof_records()[before..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        let del_pos = argvs.iter().position(|a| {
+            a.first().is_some_and(|c| c.eq_ignore_ascii_case(b"DEL"))
+                && a.get(1).is_some_and(|k| k.as_slice() == b"k2")
+        });
+        let set_pos = argvs.iter().position(|a| {
+            a.first().is_some_and(|c| c.eq_ignore_ascii_case(b"SET"))
+                && a.get(1).is_some_and(|k| k.as_slice() == b"k2")
+        });
+        assert!(
+            matches!((del_pos, set_pos), (Some(d), Some(s)) if d < s),
+            "SET on expired key must propagate DEL k2 before SET k2, got {argvs:?}"
+        );
+    }
+
+    #[test]
+    fn lazy_expiry_inside_exec_propagates_del_before_recreate() {
+        // (frankenredis-wzs7l) A queued command in MULTI/EXEC that lazily expires
+        // a key must propagate the DEL INSIDE the transaction, before a later
+        // queued command recreates the key.
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(42);
+        rt.server.store.active_expire_enabled = false;
+
+        rt.execute_frame(command(&[b"SET", b"k", b"old", b"PX", b"100"]), 900); // expires t=1000
+        let before = rt.aof_records().len();
+
+        // Transaction at t=5000: GET k (lazy-expires) then SET k new (recreates).
+        rt.execute_frame(command(&[b"MULTI"]), 5000);
+        rt.execute_frame(command(&[b"GET", b"k"]), 5000);
+        rt.execute_frame(command(&[b"SET", b"k", b"new"]), 5000);
+        rt.execute_frame(command(&[b"EXEC"]), 5000);
+
+        let argvs: Vec<Vec<Vec<u8>>> = rt.aof_records()[before..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        let pos = |name: &[u8], key: Option<&[u8]>| {
+            argvs.iter().position(|a| {
+                a.first().is_some_and(|c| c.eq_ignore_ascii_case(name))
+                    && key.is_none_or(|k| a.get(1).is_some_and(|kk| kk.as_slice() == k))
+            })
+        };
+        let multi = pos(b"MULTI", None);
+        let del = pos(b"DEL", Some(b"k"));
+        let set = pos(b"SET", Some(b"k"));
+        let exec = pos(b"EXEC", None);
+        // Order: MULTI < DEL k < SET k new < EXEC.
+        assert!(
+            matches!((multi, del, set, exec), (Some(m), Some(d), Some(s), Some(e)) if m < d && d < s && s < e),
+            "expected [MULTI, DEL k, SET k, EXEC] in order, got {argvs:?}"
+        );
+        // The lazy-expiring GET must not be propagated.
+        assert!(
+            pos(b"GET", None).is_none(),
+            "the GET that lazy-expired must NOT propagate, got {argvs:?}"
+        );
+    }
+
+    #[test]
     fn migrate_in_selected_db_propagates_as_del_not_migrate() {
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").expect("bind migrate runtime listener");
@@ -17788,6 +19648,117 @@ mod tests {
             rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"50"]), 4),
             RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
         );
+    }
+
+    #[test]
+    fn incremental_aof_flush_persists_writes_between_rewrites() {
+        // (frankenredis-ol9tz) Writes made between full rewrites must be
+        // appended to the on-disk AOF by flush_aof_to_disk; before this fix
+        // the file was only ever rewritten wholesale on SAVE/BGREWRITEAOF, so
+        // ordinary writes were silently lost on restart.
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_incremental_aof_flush_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("appendonly.aof");
+        let _ = std::fs::remove_file(&path);
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(path.clone());
+
+        // No rewrite has run; the file should not exist yet.
+        assert!(!path.exists(), "AOF file must not exist before any flush");
+
+        // First batch of writes, then an incremental flush.
+        rt.execute_frame(command(&[b"SET", b"k1", b"v1"]), 1);
+        rt.execute_frame(command(&[b"SET", b"k2", b"v2"]), 2);
+        rt.flush_aof_to_disk(3);
+
+        let bytes = std::fs::read(&path).expect("AOF file created by flush");
+        let records = decode_aof_stream(&bytes).expect("decode flushed AOF");
+        let argvs: Vec<Vec<Vec<u8>>> = records.iter().map(|r| r.argv.clone()).collect();
+        assert!(
+            argvs.iter().any(
+                |a| a.first().is_some_and(|c| c.eq_ignore_ascii_case(b"SET"))
+                    && a.get(1).is_some_and(|k| k.as_slice() == b"k1")
+            ),
+            "flushed AOF must contain `SET k1`, got {argvs:?}"
+        );
+
+        // A second batch flushes only the new records (append, not rewrite).
+        rt.execute_frame(command(&[b"SET", b"k3", b"v3"]), 4);
+        rt.flush_aof_to_disk(5);
+
+        // Replay the whole file into a fresh runtime and confirm every key
+        // survives — this is the restart path.
+        let bytes = std::fs::read(&path).expect("read AOF after second flush");
+        let records = decode_aof_stream(&bytes).expect("decode AOF after second flush");
+        let mut reloaded = Runtime::default_strict();
+        let _ = reloaded.replay_aof_records(&records, 9_000);
+        for (k, v) in [(b"k1", b"v1"), (b"k2", b"v2"), (b"k3", b"v3")] {
+            assert_eq!(
+                reloaded.execute_frame(command(&[b"GET", k]), 9_001),
+                RespFrame::BulkString(Some(v.to_vec())),
+                "key {} must survive an AOF reload",
+                String::from_utf8_lossy(k)
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn incremental_aof_flush_after_bgrewriteaof_appends_not_duplicates() {
+        // (frankenredis-ol9tz) Writes made AFTER a BGREWRITEAOF must be
+        // appended past the freshly written base, and the base must not be
+        // duplicated by the next incremental flush (the cursor is anchored at
+        // rewrite time).
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_aof_flush_post_rewrite_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("appendonly.aof");
+        let _ = std::fs::remove_file(&path);
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(path.clone());
+        rt.execute_frame(command(&[b"SET", b"base", b"1"]), 1);
+        rt.execute_frame(command(&[b"BGREWRITEAOF"]), 2);
+        rt.execute_frame(command(&[b"SET", b"after", b"2"]), 3);
+        rt.flush_aof_to_disk(4);
+
+        let bytes = std::fs::read(&path).expect("read AOF");
+        let records = decode_aof_stream(&bytes).expect("decode AOF");
+        let mut reloaded = Runtime::default_strict();
+        let _ = reloaded.replay_aof_records(&records, 9_000);
+        assert_eq!(
+            reloaded.execute_frame(command(&[b"GET", b"base"]), 9_001),
+            RespFrame::BulkString(Some(b"1".to_vec())),
+            "pre-rewrite key must survive"
+        );
+        assert_eq!(
+            reloaded.execute_frame(command(&[b"GET", b"after"]), 9_002),
+            RespFrame::BulkString(Some(b"2".to_vec())),
+            "post-rewrite key must survive (the original ol9tz bug)"
+        );
+        // `base` was SET exactly once; replay must not have applied it twice in
+        // a way that corrupts a counter. Use a numeric witness instead: the
+        // base snapshot for a string is a single SET, so the decoded stream
+        // must contain exactly one SET for `base`.
+        let base_sets = records
+            .iter()
+            .filter(|r| {
+                r.argv
+                    .first()
+                    .is_some_and(|c| c.eq_ignore_ascii_case(b"SET"))
+                    && r.argv.get(1).is_some_and(|k| k.as_slice() == b"base")
+            })
+            .count();
+        assert_eq!(base_sets, 1, "base must appear once, not duplicated");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -18526,6 +20497,29 @@ mod tests {
         assert!(!trimmed.contains("watch="), "{trimmed}");
         // CLIENT TRACKING is off by default → redir should be -1.
         assert!(trimmed.contains("redir=-1 "), "{trimmed}");
+    }
+
+    #[test]
+    fn dispatch_peer_addr_cache_tracks_active_session_addr_changes() {
+        let mut rt = Runtime::default_strict();
+
+        rt.session.peer_addr = Some("10.0.0.9:7777".parse().expect("socket addr"));
+        rt.refresh_current_dispatch_client_context(1_000);
+        assert_eq!(
+            rt.server.store.dispatch_client_ctx.peer_addr,
+            "10.0.0.9:7777"
+        );
+
+        rt.session.peer_addr = Some("127.0.0.1:54636".parse().expect("socket addr"));
+        rt.refresh_current_dispatch_client_context(2_000);
+        assert_eq!(
+            rt.server.store.dispatch_client_ctx.peer_addr,
+            "127.0.0.1:54636"
+        );
+
+        rt.session.peer_addr = None;
+        rt.refresh_current_dispatch_client_context(3_000);
+        assert_eq!(rt.server.store.dispatch_client_ctx.peer_addr, "127.0.0.1:0");
     }
 
     #[test]
@@ -25309,6 +27303,42 @@ mod tests {
     }
 
     #[test]
+    fn load_rdb_reregisters_function_libraries() {
+        // Regression (frankenredis-tm139): a dump carrying FUNCTION libraries
+        // must restore them into the engine so FUNCTION LIST / FCALL survive a
+        // restart, not just the keyspace.
+        let dir = std::env::temp_dir().join("fr_runtime_rdb_function_reload_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let rdb_path = dir.join("functions.rdb");
+        let lib =
+            b"#!lua name=mylib\nredis.register_function('myfunc', function() return 'hello' end)";
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"k1".to_vec(),
+            value: RdbValue::String(b"v1".to_vec()),
+            expire_ms: None,
+        }];
+        let bytes = fr_persist::encode_rdb_with_functions(&entries, &[], &[lib.as_slice()]);
+        std::fs::write(&rdb_path, &bytes).expect("write function rdb");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_rdb_path(rdb_path);
+        let loaded = rt.load_rdb(50).expect("load should succeed");
+        assert_eq!(loaded, 1, "the key must load alongside the function");
+
+        // FUNCTION LIST now reports exactly the one restored library.
+        let listing = rt.execute_frame(command(&[b"FUNCTION", b"LIST"]), 100);
+        let RespFrame::Array(Some(libs)) = &listing else {
+            panic!("FUNCTION LIST should be an array: {listing:?}");
+        };
+        assert_eq!(libs.len(), 1, "exactly one library expected: {listing:?}");
+
+        // And the function is callable (definitive proof it was re-registered).
+        let called = rt.execute_frame(command(&[b"FCALL", b"myfunc", b"0"]), 101);
+        assert_eq!(called, RespFrame::BulkString(Some(b"hello".to_vec())), "{called:?}");
+    }
+
+    #[test]
     fn load_aof_rejects_invalid_replay_without_mutating_existing_state() {
         let dir = std::env::temp_dir().join("fr_runtime_aof_invalid_test");
         let _ = std::fs::create_dir_all(&dir);
@@ -25371,7 +27401,7 @@ mod tests {
         assert_eq!(
             out,
             RespFrame::Error(
-                "NOPERM this user has no permissions to run the 'ACL' command".to_string()
+                "NOPERM User alice has no permissions to run the 'acl|whoami' command".to_string()
             )
         );
     }
@@ -25651,6 +27681,107 @@ mod tests {
     }
 
     #[test]
+    fn acl_dispatch_permission_snapshot_cache_invalidates_on_acl_generation_and_user_switch_ptqye()
+    {
+        let mut rt = Runtime::default_strict();
+        let mut trace = Vec::new();
+
+        let mut run = |rt: &mut Runtime, parts: &[&[u8]], now_ms: u64| {
+            let reply = rt.execute_frame(command(parts), now_ms);
+            trace.extend_from_slice(&reply.to_bytes());
+            reply
+        };
+
+        assert_eq!(
+            run(
+                &mut rt,
+                &[
+                    b"ACL", b"SETUSER", b"default", b"-@all", b"+acl", b"+get", b"~*", b"&*"
+                ],
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            run(&mut rt, &[b"GET", b"cache:warm"], 2),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            rt.dispatch_acl_snapshot_user.as_deref(),
+            Some(DEFAULT_AUTH_USER)
+        );
+        assert!(
+            rt.server
+                .store
+                .dispatch_client_ctx
+                .acl_permissions
+                .as_ref()
+                .is_some_and(|permissions| permissions.allowed_commands.contains("get")
+                    && !permissions.allowed_commands.contains("set")),
+            "GET dispatch should cache the restrictive ACL snapshot"
+        );
+
+        assert_eq!(
+            run(&mut rt, &[b"ACL", b"SETUSER", b"default", b"+set"], 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            run(&mut rt, &[b"SET", b"cache:warm", b"v"], 4),
+            RespFrame::SimpleString("OK".to_string()),
+            "SET must observe ACL SETUSER invalidation instead of stale cached permissions"
+        );
+        assert!(
+            rt.server
+                .store
+                .dispatch_client_ctx
+                .acl_permissions
+                .as_ref()
+                .is_some_and(|permissions| permissions.allowed_commands.contains("set")),
+            "dispatch ACL snapshot should refresh after auth-state generation changes"
+        );
+
+        let mut selector_rt = Runtime::default_strict();
+        assert_eq!(
+            run(
+                &mut selector_rt,
+                &[
+                    b"ACL",
+                    b"SETUSER",
+                    b"selu",
+                    b"on",
+                    b">pass",
+                    b"-@all",
+                    b"(+get ~cache:*)"
+                ],
+                5,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            run(&mut selector_rt, &[b"AUTH", b"selu", b"pass"], 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            run(&mut selector_rt, &[b"GET", b"cache:hit"], 7),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            selector_rt.dispatch_acl_snapshot_user.as_deref(),
+            Some(b"selu".as_slice())
+        );
+        assert_eq!(
+            run(&mut selector_rt, &[b"GET", b"other"], 8),
+            RespFrame::Error("NOPERM No permissions to access a key".to_string())
+        );
+
+        assert_eq!(
+            digest_bytes(&trace),
+            "cf0aa84b371ae1ca",
+            "golden trace digest should stay stable across cache changes"
+        );
+    }
+
+    #[test]
     fn acl_per_command_deny_specific_commands() {
         let mut rt = Runtime::default_strict();
         // Create user with +@all then selectively deny -del -flushdb
@@ -25704,6 +27835,137 @@ mod tests {
     }
 
     #[test]
+    fn acl_selectors_parse_render_and_enforce_additively() {
+        // Redis 7 ACL selectors (frankenredis-d919b): a user can carry zero or
+        // more `(commands keys channels)` permission groups. A command is
+        // permitted when the root set OR any selector grants it. Here the root
+        // grants nothing; two selectors each grant one command on one keyspace.
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL",
+                    b"SETUSER",
+                    b"selu",
+                    b"on",
+                    b"nopass",
+                    b"(+get ~app1:*)",
+                    b"(+set ~app2:*)",
+                ]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // Seed data as the (all-powerful) default user before dropping privs.
+        rt.execute_frame(command(&[b"SET", b"app1:x", b"v1"]), 1);
+        rt.execute_frame(command(&[b"SET", b"app2:y", b"v2"]), 2);
+
+        // ACL LIST renders both selector tokens byte-exactly vs vendored 7.2.4.
+        let list_line = match rt.execute_frame(command(&[b"ACL", b"LIST"]), 3) {
+            RespFrame::Array(Some(items)) => items
+                .iter()
+                .filter_map(|f| match f {
+                    RespFrame::BulkString(Some(b)) => Some(String::from_utf8_lossy(b).into_owned()),
+                    _ => None,
+                })
+                .find(|l| l.starts_with("user selu "))
+                .expect("selu line present"),
+            other => panic!("unexpected ACL LIST reply: {other:?}"),
+        };
+        assert_eq!(
+            list_line,
+            "user selu on nopass sanitize-payload resetchannels -@all \
+             (~app1:* resetchannels -@all +get) (~app2:* resetchannels -@all +set)"
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"selu", b""]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // Selector 1 grants GET on app1:* — allowed.
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"app1:x"]), 5),
+            RespFrame::BulkString(Some(b"v1".to_vec()))
+        );
+        // Selector 2 grants SET on app2:* — allowed.
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"app2:y", b"new"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // GET app2:y: a selector grants GET (key out of range) and another
+        // grants the key (command out of range) — deepest error is the key,
+        // so the reply must be the key-level NOPERM, not the command one.
+        match rt.execute_frame(command(&[b"GET", b"app2:y"]), 7) {
+            RespFrame::Error(e) => assert_eq!(e, "NOPERM No permissions to access a key"),
+            other => panic!("GET app2:y should be key-denied, got {other:?}"),
+        }
+        // SET app1:x: symmetric — SET granted by selector 2 but key out of
+        // range; selector 1 owns the key but not SET. Key-level error.
+        match rt.execute_frame(command(&[b"SET", b"app1:x", b"new"]), 8) {
+            RespFrame::Error(e) => assert_eq!(e, "NOPERM No permissions to access a key"),
+            other => panic!("SET app1:x should be key-denied, got {other:?}"),
+        }
+        // DEL is granted by no selector at all — command-level denial.
+        match rt.execute_frame(command(&[b"DEL", b"app1:x"]), 9) {
+            RespFrame::Error(e) => assert!(
+                e.contains("has no permissions to run the"),
+                "DEL should be command-denied, got {e:?}"
+            ),
+            other => panic!("DEL should be command-denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn acl_clearselectors_and_reset_drop_selector_groups() {
+        // clearselectors removes selector groups but keeps root rules;
+        // reset wipes everything. (frankenredis-d919b)
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(
+            command(&[
+                b"ACL",
+                b"SETUSER",
+                b"selu",
+                b"on",
+                b"nopass",
+                b"(+get ~app1:*)",
+            ]),
+            0,
+        );
+        let has_selector = |rt: &mut Runtime| -> bool {
+            match rt.execute_frame(command(&[b"ACL", b"LIST"]), 99) {
+                RespFrame::Array(Some(items)) => items.iter().any(|f| {
+                    matches!(
+                        f,
+                        RespFrame::BulkString(Some(b))
+                            if String::from_utf8_lossy(b).starts_with("user selu ")
+                                && String::from_utf8_lossy(b).contains('(')
+                    )
+                }),
+                _ => false,
+            }
+        };
+        assert!(has_selector(&mut rt), "selector present after SETUSER");
+
+        rt.execute_frame(
+            command(&[b"ACL", b"SETUSER", b"selu", b"clearselectors"]),
+            1,
+        );
+        assert!(!has_selector(&mut rt), "clearselectors drops the selector");
+
+        // Re-add then reset.
+        rt.execute_frame(
+            command(&[b"ACL", b"SETUSER", b"selu", b"(+get ~app1:*)"]),
+            2,
+        );
+        assert!(has_selector(&mut rt), "selector re-added");
+        rt.execute_frame(command(&[b"ACL", b"SETUSER", b"selu", b"reset"]), 3);
+        assert!(!has_selector(&mut rt), "reset drops selectors too");
+    }
+
+    #[test]
     fn acl_per_subcommand_allow_specific_selector() {
         let mut rt = Runtime::default_strict();
 
@@ -25739,7 +28001,7 @@ mod tests {
         assert_eq!(
             whoami_reply,
             RespFrame::Error(
-                "NOPERM this user has no permissions to run the 'ACL' command".to_string()
+                "NOPERM User sub has no permissions to run the 'acl|whoami' command".to_string()
             )
         );
     }
@@ -26013,7 +28275,7 @@ mod tests {
         assert_eq!(
             cat_reply,
             RespFrame::Error(
-                "NOPERM this user has no permissions to run the 'ACL' command".to_string()
+                "NOPERM User sub has no permissions to run the 'acl|cat' command".to_string()
             )
         );
 
@@ -26225,6 +28487,200 @@ mod tests {
     }
 
     #[test]
+    fn command_to_keyspace_event_names_match_upstream() {
+        // (frankenredis-ylu1p) Several commands fire a keyspace event whose
+        // name differs from the command verb. Verified vs vendored 7.2.4.
+        let ev = |parts: &[&[u8]]| {
+            let argv: Vec<Vec<u8>> = parts.iter().map(|p| p.to_vec()).collect();
+            Runtime::command_to_keyspace_event(&argv)
+        };
+        assert_eq!(ev(&[b"SETRANGE", b"k", b"0", b"x"]), "setrange");
+        assert_eq!(ev(&[b"ZINCRBY", b"z", b"1", b"m"]), "zincr");
+        // (frankenredis-irbta/msv0x/0gibs) GEOADD -> zadd; ZADD INCR -> zincr;
+        // DECR/DECRBY -> incrby (all route through the upstream generic paths).
+        assert_eq!(ev(&[b"GEOADD", b"g", b"13.0", b"38.0", b"m"]), "zadd");
+        assert_eq!(ev(&[b"ZADD", b"z", b"INCR", b"1", b"m"]), "zincr");
+        assert_eq!(
+            ev(&[b"ZADD", b"z", b"GT", b"CH", b"INCR", b"1", b"m"]),
+            "zincr"
+        );
+        assert_eq!(ev(&[b"ZADD", b"z", b"1", b"m"]), "zadd");
+        assert_eq!(ev(&[b"ZADD", b"z", b"GT", b"1", b"m"]), "zadd");
+        // Member literally named INCR (after the score) must stay "zadd".
+        assert_eq!(ev(&[b"ZADD", b"z", b"1", b"INCR"]), "zadd");
+        assert_eq!(ev(&[b"DECR", b"k"]), "incrby");
+        assert_eq!(ev(&[b"DECRBY", b"k", b"3"]), "incrby");
+        assert_eq!(ev(&[b"INCR", b"k"]), "incrby");
+        assert_eq!(ev(&[b"GETDEL", b"k"]), "del");
+        assert_eq!(ev(&[b"GETEX", b"k", b"EX", b"100"]), "expire");
+        assert_eq!(ev(&[b"GETEX", b"k", b"PERSIST"]), "persist");
+        assert_eq!(
+            ev(&[b"ZREMRANGEBYRANK", b"z", b"0", b"1"]),
+            "zremrangebyrank"
+        );
+        assert_eq!(
+            ev(&[b"ZREMRANGEBYSCORE", b"z", b"0", b"1"]),
+            "zremrangebyscore"
+        );
+        assert_eq!(ev(&[b"ZREMRANGEBYLEX", b"z", b"-", b"+"]), "zremrangebylex");
+        // (frankenredis-5wz6g) *STORE commands each fire their OWN name.
+        assert_eq!(ev(&[b"SINTERSTORE", b"d", b"s1", b"s2"]), "sinterstore");
+        assert_eq!(ev(&[b"SUNIONSTORE", b"d", b"s1", b"s2"]), "sunionstore");
+        assert_eq!(ev(&[b"SDIFFSTORE", b"d", b"s1", b"s2"]), "sdiffstore");
+        assert_eq!(
+            ev(&[b"ZINTERSTORE", b"d", b"2", b"z1", b"z2"]),
+            "zinterstore"
+        );
+        assert_eq!(
+            ev(&[b"ZUNIONSTORE", b"d", b"2", b"z1", b"z2"]),
+            "zunionstore"
+        );
+        assert_eq!(ev(&[b"ZDIFFSTORE", b"d", b"2", b"z1", b"z2"]), "zdiffstore");
+        assert_eq!(
+            ev(&[b"ZRANGESTORE", b"d", b"z1", b"0", b"-1"]),
+            "zrangestore"
+        );
+        assert_eq!(ev(&[b"SORT", b"l", b"STORE", b"d"]), "sortstore");
+        assert_eq!(ev(&[b"GEOSEARCHSTORE", b"d", b"s"]), "geosearchstore");
+        // Regression guard: the plain SET family stays "set".
+        assert_eq!(ev(&[b"SET", b"k", b"v"]), "set");
+        assert_eq!(ev(&[b"GETSET", b"k", b"v"]), "set");
+        assert_eq!(ev(&[b"SETNX", b"k", b"v"]), "set");
+    }
+
+    #[test]
+    fn is_store_command_and_dest_position() {
+        // (frankenredis-5wz6g) *STORE commands write a single destination key;
+        // SORT/GEORADIUS put it LAST (after STORE), the set/zset/geosearch
+        // stores put it FIRST.
+        for c in [
+            &b"SINTERSTORE"[..],
+            b"SUNIONSTORE",
+            b"SDIFFSTORE",
+            b"ZINTERSTORE",
+            b"ZUNIONSTORE",
+            b"ZDIFFSTORE",
+            b"ZRANGESTORE",
+            b"GEOSEARCHSTORE",
+            b"SORT",
+            b"GEORADIUS",
+            b"GEORADIUSBYMEMBER",
+            b"BITOP",
+            b"PFMERGE",
+        ] {
+            assert!(Runtime::is_store_command(c), "{c:?} is a *STORE command");
+        }
+        for c in [&b"SADD"[..], b"SET", b"SMOVE", b"COPY", b"SORT_RO"] {
+            assert!(
+                !Runtime::is_store_command(c),
+                "{c:?} is NOT a *STORE command"
+            );
+        }
+        assert!(Runtime::store_command_dest_is_last(b"SORT"));
+        assert!(Runtime::store_command_dest_is_last(b"GEORADIUS"));
+        assert!(Runtime::store_command_dest_is_last(b"GEORADIUSBYMEMBER"));
+        assert!(!Runtime::store_command_dest_is_last(b"SINTERSTORE"));
+        assert!(!Runtime::store_command_dest_is_last(b"ZRANGESTORE"));
+    }
+
+    #[test]
+    fn command_sets_expire_as_side_effect_matches_upstream() {
+        // (frankenredis-hm2as) SET with EX/PX/EXAT/PXAT and SETEX/PSETEX set
+        // a TTL, so upstream fires a secondary "expire" event after "set".
+        // Plain SET / KEEPTTL / MSET do not.
+        let f = |parts: &[&[u8]]| {
+            let argv: Vec<Vec<u8>> = parts.iter().map(|p| p.to_vec()).collect();
+            Runtime::command_sets_expire_as_side_effect(&argv)
+        };
+        assert!(f(&[b"SET", b"k", b"v", b"EX", b"100"]));
+        assert!(f(&[b"SET", b"k", b"v", b"PX", b"100"]));
+        assert!(f(&[b"SET", b"k", b"v", b"EXAT", b"100"]));
+        assert!(f(&[b"SET", b"k", b"v", b"PXAT", b"100"]));
+        assert!(f(&[b"SET", b"k", b"v", b"NX", b"EX", b"100"]));
+        assert!(f(&[b"SETEX", b"k", b"100", b"v"]));
+        assert!(f(&[b"PSETEX", b"k", b"100", b"v"]));
+        assert!(!f(&[b"SET", b"k", b"v"]));
+        assert!(!f(&[b"SET", b"k", b"v", b"KEEPTTL"]));
+        assert!(!f(&[b"MSET", b"a", b"1", b"b", b"2"]));
+    }
+
+    #[test]
+    fn command_can_empty_collection_covers_element_removers() {
+        // (frankenredis-g0crt) These commands remove elements and can leave a
+        // key empty, triggering a secondary "del" event. Non-removal writes
+        // and the delete-family (which fires "del" as its primary) are out.
+        let yes: &[&[u8]] = &[
+            b"LPOP", b"RPOP", b"LREM", b"LTRIM", b"LMPOP", b"SREM", b"SPOP", b"HDEL", b"ZREM",
+            b"ZPOPMIN", b"ZPOPMAX", b"ZMPOP",
+        ];
+        for c in yes {
+            assert!(
+                Runtime::command_can_empty_collection(c),
+                "{} should be a collection-emptier",
+                String::from_utf8_lossy(c)
+            );
+        }
+        // LMOVE/RPOPLPUSH (and blocking variants) fire their "del" via the
+        // dedicated list-move branch (frankenredis-uw80w); SMOVE fires its
+        // own srem/del/sadd from Store::smove (frankenredis-4ayjf). None of
+        // them go through the generic trailing-del loop.
+        let no: &[&[u8]] = &[
+            b"SADD",
+            b"LPUSH",
+            b"HSET",
+            b"ZADD",
+            b"SET",
+            b"DEL",
+            b"GETDEL",
+            b"LMOVE",
+            b"RPOPLPUSH",
+            b"BLMOVE",
+            b"BRPOPLPUSH",
+            b"SMOVE",
+        ];
+        for c in no {
+            assert!(
+                !Runtime::command_can_empty_collection(c),
+                "{} should NOT be a collection-emptier",
+                String::from_utf8_lossy(c)
+            );
+        }
+    }
+
+    #[test]
+    fn list_move_events_map_directions() {
+        // (frankenredis-uw80w) (pop_on_src, push_on_dst). RPOPLPUSH is fixed
+        // rpop→lpush; LMOVE reads FROM (argv[3]) / TO (argv[4]). Verified vs
+        // vendored 7.2.4.
+        let ev = |parts: &[&[u8]]| {
+            let argv: Vec<Vec<u8>> = parts.iter().map(|p| p.to_vec()).collect();
+            Runtime::list_move_events(&argv)
+        };
+        assert_eq!(ev(&[b"RPOPLPUSH", b"a", b"b"]), ("rpop", "lpush"));
+        assert_eq!(ev(&[b"BRPOPLPUSH", b"a", b"b", b"0"]), ("rpop", "lpush"));
+        assert_eq!(
+            ev(&[b"LMOVE", b"a", b"b", b"LEFT", b"RIGHT"]),
+            ("lpop", "rpush")
+        );
+        assert_eq!(
+            ev(&[b"LMOVE", b"a", b"b", b"RIGHT", b"LEFT"]),
+            ("rpop", "lpush")
+        );
+        assert_eq!(
+            ev(&[b"LMOVE", b"a", b"b", b"LEFT", b"LEFT"]),
+            ("lpop", "lpush")
+        );
+        assert_eq!(
+            ev(&[b"LMOVE", b"a", b"b", b"RIGHT", b"RIGHT"]),
+            ("rpop", "rpush")
+        );
+        assert_eq!(
+            ev(&[b"BLMOVE", b"a", b"b", b"LEFT", b"RIGHT", b"0"]),
+            ("lpop", "rpush")
+        );
+    }
+
+    #[test]
     fn acl_getuser_under_resp3_returns_map_shape() {
         // (frankenredis-e4njz) Upstream acl.c::aclCommand GETUSER calls
         // addReplyMapLen(c, 6), so the RESP3 wire shape is a Map of
@@ -26250,6 +28706,13 @@ mod tests {
         assert_eq!(keys[3], &RespFrame::BulkString(Some(b"keys".to_vec())));
         assert_eq!(keys[4], &RespFrame::BulkString(Some(b"channels".to_vec())));
         assert_eq!(keys[5], &RespFrame::BulkString(Some(b"selectors".to_vec())));
+        // (frankenredis-42abp) The `flags` value is emitted via addReplySetLen,
+        // so under RESP3 it must be a Set (~), not an Array.
+        assert!(
+            matches!(entries[0].1, RespFrame::Set(_)),
+            "RESP3 ACL GETUSER flags must be a Set, got {:?}",
+            entries[0].1
+        );
     }
 
     #[test]
@@ -26766,7 +29229,7 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"INCR", b"foo"]), 4),
             RespFrame::Error(
-                "NOPERM this user has no permissions to run the 'INCR' command".to_string()
+                "NOPERM User antirez has no permissions to run the 'incr' command".to_string()
             )
         );
         assert_eq!(
@@ -26834,7 +29297,7 @@ mod tests {
         assert_eq!(
             exec_results[0],
             RespFrame::Error(
-                "NOPERM this user has no permissions to run the 'INCR' command".to_string()
+                "NOPERM User antirez has no permissions to run the 'incr' command".to_string()
             )
         );
         assert_eq!(
@@ -26887,7 +29350,7 @@ mod tests {
         ) else {
             unreachable!("expected EVAL ACL failure");
         };
-        assert!(err.contains("NOPERM this user has no permissions to run the 'incr' command"));
+        assert!(err.contains("NOPERM User antirez has no permissions to run the 'incr' command"));
         assert_eq!(
             rt.execute_frame(command(&[b"AUTH", b"default", b""]), 4),
             RespFrame::SimpleString("OK".to_string())
@@ -26918,6 +29381,44 @@ mod tests {
     }
 
     #[test]
+    fn acl_getuser_commands_preserve_rule_insertion_order() {
+        // (frankenredis-4kuad) ACL GETUSER `commands` must re-emit rules in
+        // application order (upstream acl.c::ACLDescribeUserCommandRules), not
+        // regrouped/sorted. Mixed individual + category grants expose the bug:
+        // fr previously rendered `-@all +@read +get +set`.
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(
+            command(&[
+                b"ACL", b"SETUSER", b"ru", b"on", b"nopass", b"+get", b"+set", b"+@read",
+            ]),
+            0,
+        );
+        let read_commands = |rt: &mut Runtime| -> Vec<u8> {
+            let getuser = rt.execute_frame(command(&[b"ACL", b"GETUSER", b"ru"]), 1);
+            let RespFrame::Array(Some(items)) = getuser else {
+                panic!("ACL GETUSER should return an array");
+            };
+            let pos = items
+                .iter()
+                .position(|f| matches!(f, RespFrame::BulkString(Some(b)) if b == b"commands"))
+                .expect("commands field");
+            match &items[pos + 1] {
+                RespFrame::BulkString(Some(b)) => b.clone(),
+                other => panic!("commands value should be a bulk string, got {other:?}"),
+            }
+        };
+        assert_eq!(read_commands(&mut rt), b"-@all +get +set +@read");
+
+        // A later opposite-sign rule for an existing target moves it to the end.
+        rt.execute_frame(command(&[b"ACL", b"SETUSER", b"ru", b"-set"]), 2);
+        assert_eq!(read_commands(&mut rt), b"-@all +get +@read -set");
+
+        // `+@all` resets the override baseline; later grants re-append.
+        rt.execute_frame(command(&[b"ACL", b"SETUSER", b"ru", b"+@all", b"-get"]), 3);
+        assert_eq!(read_commands(&mut rt), b"+@all -get");
+    }
+
+    #[test]
     fn acl_reset_rule_clears_all_permissions() {
         let mut rt = Runtime::default_strict();
         assert_eq!(
@@ -26940,6 +29441,26 @@ mod tests {
         assert!(
             matches!(&reply, RespFrame::BulkString(Some(b)) if std::str::from_utf8(b).map(|s| s.contains("no permissions")).unwrap_or(false)),
             "GET should be denied after reset, got: {reply:?}"
+        );
+        // (frankenredis-3b1jc) reset must also disable the user — GETUSER flags
+        // must report `off`, matching upstream ACLResetUser.
+        let getuser = rt.execute_frame(command(&[b"ACL", b"GETUSER", b"reset_user"]), 3);
+        let RespFrame::Array(Some(items)) = &getuser else {
+            panic!("ACL GETUSER should return an array, got: {getuser:?}");
+        };
+        // The flags value is the inner array immediately after the "flags" key.
+        let flags_pos = items
+            .iter()
+            .position(|f| matches!(f, RespFrame::BulkString(Some(b)) if b == b"flags"))
+            .expect("GETUSER must contain a flags field");
+        let flags_off = matches!(
+            items.get(flags_pos + 1),
+            Some(RespFrame::Array(Some(inner)))
+                if inner.iter().any(|x| matches!(x, RespFrame::BulkString(Some(b)) if b == b"off"))
+        );
+        assert!(
+            flags_off,
+            "user must be `off` after reset, GETUSER: {getuser:?}"
         );
     }
 
@@ -27393,7 +29914,7 @@ mod tests {
             .expect("expected alice in ACL LIST");
         assert_eq!(
             alice,
-            "user alice on #<hidden> sanitize-payload resetkeys ~foo:* ~bar:* resetchannels -@all +get +set"
+            "user alice on sanitize-payload #d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1 ~foo:* ~bar:* resetchannels -@all +get +set"
         );
 
         assert_eq!(
@@ -27792,7 +30313,7 @@ mod tests {
             .expect("expected mixed in ACL LIST");
         assert_eq!(
             mixed,
-            "user mixed on nopass sanitize-payload resetkeys ~obj* %R~r* %W~w* ~rw* resetchannels -@all"
+            "user mixed on nopass sanitize-payload ~obj* %R~r* %W~w* ~rw* resetchannels -@all"
         );
     }
 
@@ -27936,7 +30457,7 @@ mod tests {
             .expect("expected alice in ACL LIST");
         assert_eq!(
             alice,
-            "user alice on #<hidden> sanitize-payload ~* resetchannels &foo:1 &bar:* &orders +@all"
+            "user alice on sanitize-payload #d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1 ~* resetchannels &foo:1 &bar:* &orders +@all"
         );
 
         assert_eq!(
@@ -28146,7 +30667,7 @@ mod tests {
         );
         assert!(matches!(
             rt.execute_frame(command(&[b"DEL", b"allowed:1"]), 3),
-            RespFrame::Error(err) if err == "NOPERM this user has no permissions to run the 'DEL' command"
+            RespFrame::Error(err) if err == "NOPERM User alice has no permissions to run the 'del' command"
         ));
         assert_eq!(
             rt.execute_frame(command(&[b"GET", b"blocked:1"]), 4),
@@ -28552,7 +31073,7 @@ mod tests {
             .expect("expected alice in ACL LIST after ACL LOAD");
         assert_eq!(
             alice,
-            "user alice on #<hidden> sanitize-payload ~* &* -@all +get"
+            "user alice on sanitize-payload #d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1 ~* &* -@all +get"
         );
 
         let _ = std::fs::remove_file(&acl_path);

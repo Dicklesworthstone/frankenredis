@@ -1,11 +1,22 @@
 #![forbid(unsafe_code)]
 
+// Succinct listpack-style packing for small generic sets (frankenredis-9mh3o):
+// `GenericSet` stores a small set in one packed buffer, promoting to an IndexSet
+// hashtable past the threshold. SMEMBERS/SSCAN/SPOP output is unchanged.
+mod packed_set;
+use packed_set::{GenericSet, HashFieldMap, ListValue, PackedZSet, PackedZSetIter};
+
 use fr_expire::evaluate_expiry;
-use indexmap::{IndexMap, IndexSet};
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::ops::{Deref, DerefMut};
 
+/// Generic (hash-backed) set encoding behind `SetValue::Generic` — the non-int
+/// string set. foldhash (not SipHash) for fast SADD/SREM/SISMEMBER membership;
+/// `IndexSet` iterates in INSERTION order regardless of hasher, so
+/// SMEMBERS/SSCAN/SPOP output is byte-identical. (frankenredis-rqdxh follow-up)
 /// Redis-compatible version string. Single source of truth for all version reporting.
 pub const REDIS_COMPAT_VERSION: &str = "7.2.4";
 
@@ -396,13 +407,45 @@ pub enum StoreError {
     GenericError(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+const SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES: usize = 128;
+const SORTED_SET_PACKED_DEFAULT_MAX_VALUE: usize = 64;
+
+#[derive(Debug, Clone)]
 pub struct SortedSet {
-    /// member -> score
-    dict: HashMap<Vec<u8>, f64>,
+    inner: SortedSetInner,
+}
+
+#[derive(Debug, Clone)]
+enum SortedSetInner {
+    Packed(PackedZSet),
+    Full(FullSortedSet),
+}
+
+#[derive(Debug, Clone)]
+struct FullSortedSet {
+    /// member -> score. foldhash (not SipHash) for fast ZSCORE/ZADD/ZINCRBY
+    /// member lookups; this map's iteration order is never observed (all zset
+    /// output is produced from `ordered`), so the hasher is invisible.
+    /// (frankenredis-rqdxh, extends 8kuy1)
+    dict: HashMap<Vec<u8>, f64, foldhash::quality::RandomState>,
     /// (score, member) -> ()
     /// We use ScoreMember wrapper to handle f64 comparison and lexicographical member tie-breaking.
     ordered: BTreeMap<ScoreMember, ()>,
+    /// Lazily-built order-statistic index (treap) over `ordered`, giving
+    /// O(log n) ZRANK/ZREVRANK that survives mutations without an O(n) rebuild.
+    /// Behavior-invisible: built on first rank query, then kept in sync at every
+    /// mutation choke point; `None` means "not yet needed" so rank-free zsets
+    /// pay nothing. (frankenredis-oyhl7)
+    rank_tree: Option<ZRankTreap>,
+}
+
+impl PartialEq for SortedSet {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len()
+            && self
+                .iter_asc()
+                .all(|(member, score)| other.get_score(member).is_some_and(|other| other == score))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -473,20 +516,17 @@ impl ScoreMember {
     }
 }
 
-impl SortedSet {
-    fn new() -> Self {
+impl FullSortedSet {
+    fn with_capacity(cap: usize) -> Self {
         Self {
-            dict: HashMap::new(),
+            dict: HashMap::with_capacity_and_hasher(cap, foldhash::quality::RandomState::default()),
             ordered: BTreeMap::new(),
+            rank_tree: None,
         }
     }
 
     fn len(&self) -> usize {
         self.dict.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.dict.is_empty()
     }
 
     fn insert(&mut self, member: Vec<u8>, score: f64) -> bool {
@@ -495,19 +535,31 @@ impl SortedSet {
             if old_score.total_cmp(&score).is_eq() {
                 return false;
             }
-            self.ordered
-                .remove(&ScoreMember::actual(old_score, member.clone()));
-            self.ordered.insert(ScoreMember::actual(score, member), ());
+            let old_sm = ScoreMember::actual(old_score, member.clone());
+            let new_sm = ScoreMember::actual(score, member);
+            self.ordered.remove(&old_sm);
+            self.ordered.insert(new_sm.clone(), ());
+            if let Some(tree) = &mut self.rank_tree {
+                tree.remove(&old_sm);
+                tree.insert(new_sm);
+            }
             return false;
         }
-        self.ordered.insert(ScoreMember::actual(score, member), ());
+        let new_sm = ScoreMember::actual(score, member);
+        self.ordered.insert(new_sm.clone(), ());
+        if let Some(tree) = &mut self.rank_tree {
+            tree.insert(new_sm);
+        }
         true
     }
 
     fn remove(&mut self, member: &[u8]) -> bool {
         if let Some(score) = self.dict.remove(member) {
-            self.ordered
-                .remove(&ScoreMember::actual(score, member.to_vec()));
+            let sm = ScoreMember::actual(score, member.to_vec());
+            self.ordered.remove(&sm);
+            if let Some(tree) = &mut self.rank_tree {
+                tree.remove(&sm);
+            }
             true
         } else {
             false
@@ -524,6 +576,54 @@ impl SortedSet {
             .filter_map(|sm| sm.member.as_actual().map(|member| (member, &sm.score)))
     }
 
+    /// `count` (member, score) pairs starting at ascending index `start_idx`.
+    /// When the order-statistic tree is already built (a prior ZRANK/ZREVRANK),
+    /// jump to `start_idx` in O(log n) via `select` instead of an O(start_idx)
+    /// linear skip; behaviour is identical either way. (frankenredis-m4uxp)
+    fn index_slice_asc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
+        if let Some(tree) = &self.rank_tree
+            && let Some(start_key) = tree.select(start_idx)
+        {
+            return self
+                .ordered
+                .range(start_key..)
+                .take(count)
+                .filter_map(|(sm, _)| sm.member.as_actual().map(|m| (m.clone(), sm.score)))
+                .collect();
+        }
+        self.iter_asc()
+            .skip(start_idx)
+            .take(count)
+            .map(|(m, s)| (m.clone(), *s))
+            .collect()
+    }
+
+    /// `count` (member, score) pairs starting at descending index `start_idx`
+    /// (0 = highest score), in descending order. Uses the order-statistic tree
+    /// (descending index `i` == ascending index `len-1-i`) for an O(log n) jump
+    /// when it is already built; identical to a linear `iter_desc().skip`.
+    /// (frankenredis-m4uxp)
+    fn index_slice_desc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
+        let len = self.dict.len();
+        if start_idx < len
+            && let Some(tree) = &self.rank_tree
+            && let Some(start_key) = tree.select(len - 1 - start_idx)
+        {
+            return self
+                .ordered
+                .range(..=start_key)
+                .rev()
+                .take(count)
+                .filter_map(|(sm, _)| sm.member.as_actual().map(|m| (m.clone(), sm.score)))
+                .collect();
+        }
+        self.iter_desc()
+            .skip(start_idx)
+            .take(count)
+            .map(|(m, s)| (m.clone(), *s))
+            .collect()
+    }
+
     fn iter_desc(&self) -> impl Iterator<Item = (&Vec<u8>, &f64)> {
         self.ordered
             .keys()
@@ -534,6 +634,9 @@ impl SortedSet {
     fn pop_min(&mut self) -> Option<(Vec<u8>, f64)> {
         while let Some(sm) = self.ordered.first_key_value().map(|(sm, _)| sm.clone()) {
             self.ordered.remove(&sm);
+            if let Some(tree) = &mut self.rank_tree {
+                tree.remove(&sm);
+            }
             if let Some(member) = sm.member.into_actual() {
                 let score = sm.score;
                 self.dict.remove(&member);
@@ -546,6 +649,9 @@ impl SortedSet {
     fn pop_max(&mut self) -> Option<(Vec<u8>, f64)> {
         while let Some(sm) = self.ordered.last_key_value().map(|(sm, _)| sm.clone()) {
             self.ordered.remove(&sm);
+            if let Some(tree) = &mut self.rank_tree {
+                tree.remove(&sm);
+            }
             if let Some(member) = sm.member.into_actual() {
                 let score = sm.score;
                 self.dict.remove(&member);
@@ -555,14 +661,672 @@ impl SortedSet {
         None
     }
 
-    /// Iterate over (member, score) pairs in hash-map order (unordered).
-    fn iter(&self) -> impl Iterator<Item = (&Vec<u8>, &f64)> {
-        self.dict.iter()
+    /// Ensure the order-statistic index exists, building it from `ordered`
+    /// (the source of truth) on first use. O(n log n) one-time; thereafter it
+    /// is maintained incrementally at the mutation choke points.
+    fn ensure_rank_tree(&mut self) -> &ZRankTreap {
+        if self.rank_tree.is_none() {
+            let mut tree = ZRankTreap::with_capacity(self.ordered.len());
+            for sm in self.ordered.keys() {
+                tree.insert(sm.clone());
+            }
+            self.rank_tree = Some(tree);
+        }
+        self.rank_tree.as_ref().expect("rank tree just built")
+    }
+
+    fn rank(&mut self, member: &[u8]) -> Option<usize> {
+        let score = self.get_score(member)?;
+        let target = ScoreMember::actual(score, member.to_vec());
+        // Ascending rank == number of members strictly less than `target`.
+        Some(self.ensure_rank_tree().rank_of(&target))
+    }
+
+    fn rev_rank(&mut self, member: &[u8]) -> Option<usize> {
+        let score = self.get_score(member)?;
+        // For an existing member in a totally-ordered set, the descending rank
+        // is len - 1 - (ascending rank): no separate index needed.
+        let len = self.dict.len();
+        let target = ScoreMember::actual(score, member.to_vec());
+        let asc = self.ensure_rank_tree().rank_of(&target);
+        Some(len - 1 - asc)
+    }
+}
+
+impl SortedSet {
+    fn new() -> Self {
+        Self {
+            inner: SortedSetInner::Packed(PackedZSet::new()),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match &self.inner {
+            SortedSetInner::Packed(p) => p.len(),
+            SortedSetInner::Full(f) => f.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn promote(&mut self) {
+        let SortedSetInner::Packed(packed) = &mut self.inner else {
+            return;
+        };
+        let packed = std::mem::take(packed);
+        let mut full = FullSortedSet::with_capacity(packed.len());
+        for (member, score) in packed.iter() {
+            full.insert(member.to_vec(), score);
+        }
+        self.inner = SortedSetInner::Full(full);
+    }
+
+    fn maybe_promote_for_insert(
+        &mut self,
+        member: &[u8],
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) {
+        let SortedSetInner::Packed(p) = &self.inner else {
+            return;
+        };
+        let contains_member = p.contains(member);
+        let packed_exceeds_current_limits = p.len() > max_listpack_entries
+            || p.iter()
+                .any(|(existing_member, _)| existing_member.len() > max_listpack_value);
+        let insert_would_exceed_limits = !contains_member
+            && (p.len() >= max_listpack_entries || member.len() > max_listpack_value);
+        if packed_exceeds_current_limits || insert_would_exceed_limits {
+            self.promote();
+        }
+    }
+
+    fn insert(&mut self, member: Vec<u8>, score: f64) -> bool {
+        self.insert_with_limits(
+            member,
+            score,
+            SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES,
+            SORTED_SET_PACKED_DEFAULT_MAX_VALUE,
+        )
+    }
+
+    fn insert_with_limits(
+        &mut self,
+        member: Vec<u8>,
+        score: f64,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) -> bool {
+        let score = canonicalize_zero_score(score);
+        self.maybe_promote_for_insert(&member, max_listpack_entries, max_listpack_value);
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => p.insert(&member, score),
+            SortedSetInner::Full(f) => f.insert(member, score),
+        }
+    }
+
+    fn from_unique_pairs_with_limits(
+        pairs: Vec<(Vec<u8>, f64)>,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) -> Self {
+        if pairs.len() <= max_listpack_entries
+            && pairs
+                .iter()
+                .all(|(member, _)| member.len() <= max_listpack_value)
+        {
+            Self {
+                inner: SortedSetInner::Packed(PackedZSet::from_unique_pairs(pairs)),
+            }
+        } else {
+            let mut full = FullSortedSet::with_capacity(pairs.len());
+            for (member, score) in pairs {
+                full.insert(member, score);
+            }
+            Self {
+                inner: SortedSetInner::Full(full),
+            }
+        }
+    }
+
+    fn remove(&mut self, member: &[u8]) -> bool {
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => p.remove(member),
+            SortedSetInner::Full(f) => f.remove(member),
+        }
+    }
+
+    fn get_score(&self, member: &[u8]) -> Option<f64> {
+        match &self.inner {
+            SortedSetInner::Packed(p) => p.get_score(member),
+            SortedSetInner::Full(f) => f.get_score(member),
+        }
+    }
+
+    pub fn iter_asc(&self) -> SortedSetIterAsc<'_> {
+        let inner = match &self.inner {
+            SortedSetInner::Packed(p) => SortedSetIterAscInner::Packed(p.iter()),
+            SortedSetInner::Full(f) => SortedSetIterAscInner::Full(f.ordered.keys()),
+        };
+        SortedSetIterAsc { inner }
+    }
+
+    fn iter_desc(&self) -> SortedSetIterDesc<'_> {
+        match &self.inner {
+            SortedSetInner::Packed(p) => SortedSetIterDesc::Packed(p.iter_desc()),
+            SortedSetInner::Full(f) => SortedSetIterDesc::Full(f.ordered.keys().rev()),
+        }
+    }
+
+    /// Iterate over (member, score) pairs. The order is not part of any Redis
+    /// reply contract for callers that use this method; ascending order avoids
+    /// exposing the full variant's hash-map layout.
+    fn iter(&self) -> SortedSetIterAsc<'_> {
+        self.iter_asc()
     }
 
     /// Return an iterator over the member keys.
-    fn keys(&self) -> impl Iterator<Item = &Vec<u8>> {
-        self.dict.keys()
+    fn keys(&self) -> impl Iterator<Item = &[u8]> {
+        self.iter_asc().map(|(member, _)| member)
+    }
+
+    /// Invoke `f` for each (member, score) whose score lies in the inclusive
+    /// range `[lo, hi]`, in ascending (score, member) order, borrowing members.
+    fn for_each_in_score_range(&self, lo: f64, hi: f64, mut f: impl FnMut(&[u8], f64)) {
+        match &self.inner {
+            SortedSetInner::Packed(p) => p.for_each_in_score_range(lo, hi, f),
+            SortedSetInner::Full(full) => {
+                let lo_bound = ScoreMember::min_for_score(canonicalize_zero_score(lo));
+                let hi_bound = ScoreMember::max_for_score(canonicalize_zero_score(hi));
+                for (sm, _) in full.ordered.range(lo_bound..=hi_bound) {
+                    if let Some(member) = sm.member.as_actual() {
+                        f(member, sm.score);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `count` (member, score) pairs starting at ascending index `start_idx`.
+    fn index_slice_asc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
+        match &self.inner {
+            SortedSetInner::Packed(p) => p.index_slice_asc(start_idx, count),
+            SortedSetInner::Full(f) => f.index_slice_asc(start_idx, count),
+        }
+    }
+
+    /// `count` (member, score) pairs starting at descending index `start_idx`
+    /// (0 = highest score), in descending order.
+    fn index_slice_desc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
+        match &self.inner {
+            SortedSetInner::Packed(p) => p.index_slice_desc(start_idx, count),
+            SortedSetInner::Full(f) => f.index_slice_desc(start_idx, count),
+        }
+    }
+
+    fn pop_min(&mut self) -> Option<(Vec<u8>, f64)> {
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => p.pop_min(),
+            SortedSetInner::Full(f) => f.pop_min(),
+        }
+    }
+
+    fn pop_max(&mut self) -> Option<(Vec<u8>, f64)> {
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => p.pop_max(),
+            SortedSetInner::Full(f) => f.pop_max(),
+        }
+    }
+
+    fn rank(&mut self, member: &[u8]) -> Option<usize> {
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => p.rank(member),
+            SortedSetInner::Full(f) => f.rank(member),
+        }
+    }
+
+    fn rev_rank(&mut self, member: &[u8]) -> Option<usize> {
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => p.rank(member).map(|rank| p.len() - 1 - rank),
+            SortedSetInner::Full(f) => f.rev_rank(member),
+        }
+    }
+
+    fn score_bounds(
+        min: ScoreBound,
+        max: ScoreBound,
+    ) -> (std::ops::Bound<ScoreMember>, std::ops::Bound<ScoreMember>) {
+        let lower = match min {
+            ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
+            ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
+        };
+        let upper = match max {
+            ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
+            ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
+        };
+        (lower, upper)
+    }
+
+    fn score_bound_range_limited(
+        &self,
+        min: ScoreBound,
+        max: ScoreBound,
+        rev: bool,
+        offset: usize,
+        take: usize,
+    ) -> Vec<(Vec<u8>, f64)> {
+        match &self.inner {
+            SortedSetInner::Packed(p) => {
+                if rev {
+                    p.iter_desc()
+                        .filter(|(_, score)| score_in_range(*score, min, max))
+                        .skip(offset)
+                        .take(take)
+                        .map(|(member, score)| (member.to_vec(), score))
+                        .collect()
+                } else {
+                    p.iter()
+                        .filter(|(_, score)| score_in_range(*score, min, max))
+                        .skip(offset)
+                        .take(take)
+                        .map(|(member, score)| (member.to_vec(), score))
+                        .collect()
+                }
+            }
+            SortedSetInner::Full(full) => {
+                let (lower, upper) = Self::score_bounds(min, max);
+                if rev {
+                    full.ordered
+                        .range((lower, upper))
+                        .rev()
+                        .filter_map(|(sm, _)| {
+                            sm.member
+                                .as_actual()
+                                .map(|member| (member.clone(), sm.score))
+                        })
+                        .skip(offset)
+                        .take(take)
+                        .collect()
+                } else {
+                    full.ordered
+                        .range((lower, upper))
+                        .filter_map(|(sm, _)| {
+                            sm.member
+                                .as_actual()
+                                .map(|member| (member.clone(), sm.score))
+                        })
+                        .skip(offset)
+                        .take(take)
+                        .collect()
+                }
+            }
+        }
+    }
+
+    fn score_bound_range(
+        &self,
+        min: ScoreBound,
+        max: ScoreBound,
+        rev: bool,
+    ) -> Vec<(Vec<u8>, f64)> {
+        self.score_bound_range_limited(min, max, rev, 0, usize::MAX)
+    }
+
+    fn score_bound_members(&self, min: ScoreBound, max: ScoreBound, rev: bool) -> Vec<Vec<u8>> {
+        self.score_bound_range(min, max, rev)
+            .into_iter()
+            .map(|(member, _)| member)
+            .collect()
+    }
+
+    fn score_bound_count(&self, min: ScoreBound, max: ScoreBound) -> usize {
+        match &self.inner {
+            SortedSetInner::Packed(p) => p
+                .iter()
+                .filter(|(_, score)| score_in_range(*score, min, max))
+                .count(),
+            SortedSetInner::Full(full) => {
+                let (lower, upper) = Self::score_bounds(min, max);
+                full.ordered
+                    .range((lower, upper))
+                    .filter(|(sm, _)| sm.member.as_actual().is_some())
+                    .count()
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn is_packed_storage(&self) -> bool {
+        matches!(self.inner, SortedSetInner::Packed(_))
+    }
+
+    #[cfg(test)]
+    fn is_full_storage(&self) -> bool {
+        matches!(self.inner, SortedSetInner::Full(_))
+    }
+
+    #[cfg(test)]
+    fn insert_min_score_sentinel(&mut self, score: f64) {
+        self.promote();
+        if let SortedSetInner::Full(full) = &mut self.inner {
+            full.ordered.insert(ScoreMember::min_for_score(score), ());
+        }
+    }
+
+    #[cfg(test)]
+    fn insert_max_score_sentinel(&mut self, score: f64) {
+        self.promote();
+        if let SortedSetInner::Full(full) = &mut self.inner {
+            full.ordered.insert(ScoreMember::max_for_score(score), ());
+        }
+    }
+
+    #[cfg(test)]
+    fn contains_min_score_sentinel(&self, score: f64) -> bool {
+        matches!(
+            &self.inner,
+            SortedSetInner::Full(full)
+                if full.ordered.contains_key(&ScoreMember::min_for_score(score))
+        )
+    }
+
+    #[cfg(test)]
+    fn contains_max_score_sentinel(&self, score: f64) -> bool {
+        matches!(
+            &self.inner,
+            SortedSetInner::Full(full)
+                if full.ordered.contains_key(&ScoreMember::max_for_score(score))
+        )
+    }
+}
+
+pub struct SortedSetIterAsc<'a> {
+    inner: SortedSetIterAscInner<'a>,
+}
+
+enum SortedSetIterAscInner<'a> {
+    Packed(PackedZSetIter<'a>),
+    Full(std::collections::btree_map::Keys<'a, ScoreMember, ()>),
+}
+
+impl<'a> Iterator for SortedSetIterAsc<'a> {
+    type Item = (&'a [u8], f64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.inner {
+            SortedSetIterAscInner::Packed(iter) => iter.next(),
+            SortedSetIterAscInner::Full(keys) => {
+                for sm in keys.by_ref() {
+                    if let Some(member) = sm.member.as_actual() {
+                        return Some((member.as_slice(), sm.score));
+                    }
+                }
+                None
+            }
+        }
+    }
+}
+
+enum SortedSetIterDesc<'a> {
+    Packed(std::iter::Rev<std::vec::IntoIter<(&'a [u8], f64)>>),
+    Full(std::iter::Rev<std::collections::btree_map::Keys<'a, ScoreMember, ()>>),
+}
+
+impl<'a> Iterator for SortedSetIterDesc<'a> {
+    type Item = (&'a [u8], f64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            SortedSetIterDesc::Packed(iter) => iter.next(),
+            SortedSetIterDesc::Full(keys) => {
+                for sm in keys.by_ref() {
+                    if let Some(member) = sm.member.as_actual() {
+                        return Some((member.as_slice(), sm.score));
+                    }
+                }
+                None
+            }
+        }
+    }
+}
+
+/// Order-statistic treap over `ScoreMember` keys: a randomized balanced BST
+/// (priority = a hash of the key, so the shape is a deterministic function of
+/// the contents) augmented with subtree sizes. Provides O(log n) expected
+/// insert / remove / rank-of-key, backing `SortedSet`'s ZRANK/ZREVRANK so rank
+/// queries survive mutations without the O(n) rebuild the prior member->rank
+/// cache paid. Index-based arena (no `unsafe`, no `Rc`); freed slots recycle.
+/// (frankenredis-oyhl7)
+#[derive(Debug, Clone)]
+struct ZRankTreap {
+    nodes: Vec<ZRankTreapNode>,
+    free: Vec<usize>,
+    root: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ZRankTreapNode {
+    key: ScoreMember,
+    prio: u64,
+    left: usize,
+    right: usize,
+    size: u32,
+}
+
+/// Sentinel "null" child/root link for [`ZRankTreap`].
+const ZRANK_TREAP_NIL: usize = usize::MAX;
+
+impl ZRankTreap {
+    fn with_capacity(cap: usize) -> Self {
+        Self {
+            nodes: Vec::with_capacity(cap),
+            free: Vec::new(),
+            root: ZRANK_TREAP_NIL,
+        }
+    }
+
+    /// Deterministic "random" priority: FNV-1a over the canonicalized score
+    /// bits and member bytes. Well-distributed enough for treap balance; ties
+    /// (collisions) only mildly unbalance and never affect rank correctness.
+    fn key_prio(key: &ScoreMember) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut mix = |byte: u8| {
+            h ^= byte as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        for b in canonicalize_zero_score(key.score).to_bits().to_le_bytes() {
+            mix(b);
+        }
+        match &key.member {
+            MemberPart::Min => mix(0),
+            MemberPart::Actual(v) => {
+                mix(1);
+                for &b in v {
+                    mix(b);
+                }
+            }
+            MemberPart::Max => mix(2),
+        }
+        h
+    }
+
+    #[inline]
+    fn size(&self, n: usize) -> u32 {
+        if n == ZRANK_TREAP_NIL {
+            0
+        } else {
+            self.nodes[n].size
+        }
+    }
+
+    #[inline]
+    fn update_size(&mut self, n: usize) {
+        let (l, r) = (self.nodes[n].left, self.nodes[n].right);
+        self.nodes[n].size = 1 + self.size(l) + self.size(r);
+    }
+
+    fn alloc(&mut self, key: ScoreMember) -> usize {
+        let prio = Self::key_prio(&key);
+        let node = ZRankTreapNode {
+            key,
+            prio,
+            left: ZRANK_TREAP_NIL,
+            right: ZRANK_TREAP_NIL,
+            size: 1,
+        };
+        if let Some(idx) = self.free.pop() {
+            self.nodes[idx] = node;
+            idx
+        } else {
+            self.nodes.push(node);
+            self.nodes.len() - 1
+        }
+    }
+
+    fn rotate_right(&mut self, n: usize) -> usize {
+        let l = self.nodes[n].left;
+        self.nodes[n].left = self.nodes[l].right;
+        self.nodes[l].right = n;
+        self.update_size(n);
+        self.update_size(l);
+        l
+    }
+
+    fn rotate_left(&mut self, n: usize) -> usize {
+        let r = self.nodes[n].right;
+        self.nodes[n].right = self.nodes[r].left;
+        self.nodes[r].left = n;
+        self.update_size(n);
+        self.update_size(r);
+        r
+    }
+
+    fn insert(&mut self, key: ScoreMember) {
+        let new_idx = self.alloc(key);
+        let root = self.root;
+        self.root = self.insert_at(root, new_idx);
+    }
+
+    fn insert_at(&mut self, root: usize, new_idx: usize) -> usize {
+        if root == ZRANK_TREAP_NIL {
+            return new_idx;
+        }
+        match self.nodes[new_idx].key.cmp(&self.nodes[root].key) {
+            std::cmp::Ordering::Less => {
+                let l = self.insert_at(self.nodes[root].left, new_idx);
+                self.nodes[root].left = l;
+                self.update_size(root);
+                if self.nodes[l].prio > self.nodes[root].prio {
+                    return self.rotate_right(root);
+                }
+                root
+            }
+            std::cmp::Ordering::Greater => {
+                let r = self.insert_at(self.nodes[root].right, new_idx);
+                self.nodes[root].right = r;
+                self.update_size(root);
+                if self.nodes[r].prio > self.nodes[root].prio {
+                    return self.rotate_left(root);
+                }
+                root
+            }
+            std::cmp::Ordering::Equal => {
+                // Members are unique in a sorted set; an equal key is a stale
+                // duplicate insert. Recycle the freshly allocated node.
+                self.free.push(new_idx);
+                root
+            }
+        }
+    }
+
+    fn remove(&mut self, key: &ScoreMember) {
+        let root = self.root;
+        self.root = self.remove_at(root, key);
+    }
+
+    fn remove_at(&mut self, root: usize, key: &ScoreMember) -> usize {
+        if root == ZRANK_TREAP_NIL {
+            return ZRANK_TREAP_NIL;
+        }
+        match key.cmp(&self.nodes[root].key) {
+            std::cmp::Ordering::Less => {
+                let l = self.remove_at(self.nodes[root].left, key);
+                self.nodes[root].left = l;
+                self.update_size(root);
+                root
+            }
+            std::cmp::Ordering::Greater => {
+                let r = self.remove_at(self.nodes[root].right, key);
+                self.nodes[root].right = r;
+                self.update_size(root);
+                root
+            }
+            std::cmp::Ordering::Equal => {
+                let (l, r) = (self.nodes[root].left, self.nodes[root].right);
+                if l == ZRANK_TREAP_NIL {
+                    self.free.push(root);
+                    return r;
+                }
+                if r == ZRANK_TREAP_NIL {
+                    self.free.push(root);
+                    return l;
+                }
+                // Rotate the higher-priority child up and keep deleting below.
+                if self.nodes[l].prio > self.nodes[r].prio {
+                    let nr = self.rotate_right(root);
+                    let new_right = self.remove_at(self.nodes[nr].right, key);
+                    self.nodes[nr].right = new_right;
+                    self.update_size(nr);
+                    nr
+                } else {
+                    let nr = self.rotate_left(root);
+                    let new_left = self.remove_at(self.nodes[nr].left, key);
+                    self.nodes[nr].left = new_left;
+                    self.update_size(nr);
+                    nr
+                }
+            }
+        }
+    }
+
+    /// Number of stored keys strictly less than `key` (its ascending rank).
+    fn rank_of(&self, key: &ScoreMember) -> usize {
+        let mut n = self.root;
+        let mut acc: usize = 0;
+        while n != ZRANK_TREAP_NIL {
+            match key.cmp(&self.nodes[n].key) {
+                std::cmp::Ordering::Less => n = self.nodes[n].left,
+                std::cmp::Ordering::Greater => {
+                    acc += 1 + self.size(self.nodes[n].left) as usize;
+                    n = self.nodes[n].right;
+                }
+                std::cmp::Ordering::Equal => {
+                    acc += self.size(self.nodes[n].left) as usize;
+                    break;
+                }
+            }
+        }
+        acc
+    }
+
+    /// The key at ascending rank `idx` (0-based), or `None` if out of range.
+    /// O(log n) order-statistic descent using subtree sizes. (frankenredis-m4uxp)
+    fn select(&self, mut idx: usize) -> Option<ScoreMember> {
+        let mut n = self.root;
+        while n != ZRANK_TREAP_NIL {
+            let lsize = self.size(self.nodes[n].left) as usize;
+            match idx.cmp(&lsize) {
+                std::cmp::Ordering::Less => n = self.nodes[n].left,
+                std::cmp::Ordering::Equal => return Some(self.nodes[n].key.clone()),
+                std::cmp::Ordering::Greater => {
+                    idx -= lsize + 1;
+                    n = self.nodes[n].right;
+                }
+            }
+        }
+        None
     }
 }
 
@@ -576,25 +1340,493 @@ impl From<std::collections::HashMap<Vec<u8>, f64>> for SortedSet {
     }
 }
 
+/// A set value using redis-style encoding. An integer-only set up to
+/// `set-max-intset-entries` is stored as a packed, sorted, de-duplicated
+/// `Vec<i64>` (the *intset* encoding — 8 bytes per member, vs a separate heap
+/// `Vec<u8>` per member in a hash set). The first non-canonical-integer member,
+/// or growth past the limit, promotes the set one-way to a hash-backed
+/// `IndexSet<Vec<u8>>` (the *generic* encoding). Matches `t_set.c`: intset
+/// members enumerate in ASCENDING numeric order; generic members keep insertion
+/// order. Canonical-integer membership uses `parse_i64` (redis `string2ll`: no
+/// leading zeros, no `+`, within i64 range), so e.g. `"007"` is a non-integer
+/// member that never lives in an intset.
+///
+/// This is the foundational storage type for the intset memory optimisation
+/// (frankenredis-hjob8); it is verified in isolation here and wired into
+/// `Value::Set` in a follow-up.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum SetValue {
+    /// Sorted-ascending, unique i64 members (intset encoding).
+    Int(Vec<i64>),
+    /// Insertion-ordered byte-string members (generic encoding).
+    Generic(GenericSet),
+}
+
+/// Canonical decimal bytes for `n` (round-trips through `parse_i64`).
+#[allow(dead_code)]
+fn set_int_to_bytes(n: i64) -> Vec<u8> {
+    n.to_string().into_bytes()
+}
+
+/// Iterator over `SetValue` members yielding owned bytes for the intset
+/// encoding (each i64 formatted on demand) and borrowed bytes for the generic
+/// encoding. (frankenredis-hjob8)
+#[allow(dead_code)]
+pub enum SetValueIter<'a> {
+    Int(std::slice::Iter<'a, i64>),
+    Generic(packed_set::GenericSetIter<'a>),
+}
+
+impl<'a> Iterator for SetValueIter<'a> {
+    type Item = Cow<'a, [u8]>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            SetValueIter::Int(it) => it.next().map(|&n| Cow::Owned(set_int_to_bytes(n))),
+            SetValueIter::Generic(it) => it.next().map(Cow::Borrowed),
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl SetValue {
+    /// A new empty set (starts in the intset encoding).
+    pub(crate) fn new() -> Self {
+        SetValue::Int(Vec::new())
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            SetValue::Int(v) => v.len(),
+            SetValue::Generic(s) => s.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Whether the set is currently in the intset encoding.
+    pub fn is_intset(&self) -> bool {
+        matches!(self, SetValue::Int(_))
+    }
+
+    /// The canonical i64 for `member`, or `None` if it is not a canonical
+    /// integer (and therefore can never live in an intset).
+    fn canonical_int(member: &[u8]) -> Option<i64> {
+        parse_i64(member).ok()
+    }
+
+    pub fn contains(&self, member: &[u8]) -> bool {
+        match self {
+            SetValue::Int(v) => match Self::canonical_int(member) {
+                Some(n) => v.binary_search(&n).is_ok(),
+                None => false,
+            },
+            SetValue::Generic(s) => s.contains(member),
+        }
+    }
+
+    fn promote_to_generic(&mut self) {
+        if let SetValue::Int(v) = self {
+            let mut set = GenericSet::with_capacity_and_hasher(
+                v.len(),
+                foldhash::quality::RandomState::default(),
+            );
+            for &n in v.iter() {
+                set.insert(set_int_to_bytes(n));
+            }
+            *self = SetValue::Generic(set);
+        }
+    }
+
+    /// Insert `member`, returning true if it was newly added. Promotes to the
+    /// generic encoding when `member` is not a canonical integer or the intset
+    /// would exceed `max_intset_entries`.
+    pub(crate) fn insert(&mut self, member: Vec<u8>, max_intset_entries: usize) -> bool {
+        match self {
+            SetValue::Int(v) => match Self::canonical_int(&member) {
+                Some(n) => match v.binary_search(&n) {
+                    Ok(_) => false,
+                    Err(pos) => {
+                        if v.len() >= max_intset_entries {
+                            self.promote_to_generic();
+                            self.insert(member, max_intset_entries)
+                        } else {
+                            v.insert(pos, n);
+                            true
+                        }
+                    }
+                },
+                None => {
+                    self.promote_to_generic();
+                    self.insert(member, max_intset_entries)
+                }
+            },
+            SetValue::Generic(s) => s.insert(member),
+        }
+    }
+
+    /// Remove `member`, returning true if it was present. (Generic removal keeps
+    /// insertion order, matching `IndexSet::shift_remove`.)
+    pub(crate) fn shift_remove(&mut self, member: &[u8]) -> bool {
+        match self {
+            SetValue::Int(v) => match Self::canonical_int(member) {
+                Some(n) => match v.binary_search(&n) {
+                    Ok(pos) => {
+                        v.remove(pos);
+                        true
+                    }
+                    Err(_) => false,
+                },
+                None => false,
+            },
+            SetValue::Generic(s) => s.shift_remove(member),
+        }
+    }
+
+    pub fn iter(&self) -> SetValueIter<'_> {
+        match self {
+            SetValue::Int(v) => SetValueIter::Int(v.iter()),
+            SetValue::Generic(s) => SetValueIter::Generic(s.iter()),
+        }
+    }
+
+    /// The member at encoding index `idx` (ascending-numeric for intset,
+    /// insertion-order for generic), matching `iter().nth(idx)`.
+    pub fn get_index(&self, idx: usize) -> Option<Cow<'_, [u8]>> {
+        match self {
+            SetValue::Int(v) => v.get(idx).map(|&n| Cow::Owned(set_int_to_bytes(n))),
+            SetValue::Generic(s) => s.get_index(idx).map(Cow::Borrowed),
+        }
+    }
+
+    /// The underlying `IndexSet` for the generic encoding (used by the
+    /// listpack-vs-hashtable encoding helpers); `None` for an intset.
+    pub(crate) fn as_generic(&self) -> Option<&GenericSet> {
+        match self {
+            SetValue::Generic(s) => Some(s),
+            SetValue::Int(_) => None,
+        }
+    }
+
+    /// Reset to an empty set (back to the intset encoding).
+    pub(crate) fn clear(&mut self) {
+        *self = SetValue::Int(Vec::new());
+    }
+
+    /// Keep only members for which `keep` returns true.
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
+        match self {
+            SetValue::Int(v) => v.retain(|&n| keep(&set_int_to_bytes(n))),
+            SetValue::Generic(s) => s.retain(|m| keep(m)),
+        }
+    }
+
+    /// Insert every member of `members` (promoting to generic as needed).
+    pub(crate) fn extend<I: IntoIterator<Item = Vec<u8>>>(
+        &mut self,
+        members: I,
+        max_intset_entries: usize,
+    ) {
+        for m in members {
+            self.insert(m, max_intset_entries);
+        }
+    }
+
+    /// Build the optimal encoding (intset when all members are canonical
+    /// integers within the limit) from an existing `IndexSet`.
+    pub(crate) fn from_index_set(set: GenericSet, max_intset_entries: usize) -> Self {
+        let mut sv = SetValue::new();
+        sv.extend(set, max_intset_entries);
+        sv
+    }
+
+    /// Retain only members also present in `other` (in-place set intersection).
+    /// When both sets are intset-encoded, the intersection is computed directly
+    /// on the sorted `i64` arrays (binary search per element) — no per-member
+    /// string materialisation or re-parse, unlike the generic `contains` path.
+    /// Identical result to `self.retain(|m| other.contains(m))`. (frankenredis-jk9dq)
+    pub(crate) fn retain_intersect(&mut self, other: &SetValue) {
+        match (&mut *self, other) {
+            (SetValue::Int(a), SetValue::Int(b)) => {
+                a.retain(|n| b.binary_search(n).is_ok());
+            }
+            _ => self.retain(|m| other.contains(m)),
+        }
+    }
+
+    /// Retain only members NOT present in `other` (in-place set difference).
+    /// Direct sorted-`i64` path when both are intset-encoded; identical result
+    /// to `self.retain(|m| !other.contains(m))`. (frankenredis-jk9dq)
+    pub(crate) fn retain_diff(&mut self, other: &SetValue) {
+        match (&mut *self, other) {
+            (SetValue::Int(a), SetValue::Int(b)) => {
+                a.retain(|n| b.binary_search(n).is_err());
+            }
+            _ => self.retain(|m| !other.contains(m)),
+        }
+    }
+
+    /// The sorted `i64` array for the intset encoding; `None` for a generic set.
+    fn as_int(&self) -> Option<&Vec<i64>> {
+        match self {
+            SetValue::Int(v) => Some(v),
+            SetValue::Generic(_) => None,
+        }
+    }
+
+    /// Add every member of `other` (in-place set union). When both sets are
+    /// intset-encoded, merge the two sorted `i64` arrays in O(n+m) — no per-member
+    /// string materialisation, no per-insert array shift, no re-parse — promoting
+    /// to generic only if the union exceeds `max_intset_entries`. Identical result
+    /// to `self.extend(other.iter().map(into_owned), max)`. (frankenredis-295fy)
+    pub(crate) fn union_with(&mut self, other: &SetValue, max_intset_entries: usize) {
+        let merged = match (self.as_int(), other.as_int()) {
+            (Some(a), Some(b)) => Some(merge_sorted_unique_i64(a, b)),
+            _ => None,
+        };
+        if let Some(merged) = merged {
+            if merged.len() > max_intset_entries {
+                let mut generic = GenericSet::with_capacity_and_hasher(
+                    merged.len(),
+                    foldhash::quality::RandomState::default(),
+                );
+                for n in merged {
+                    generic.insert(set_int_to_bytes(n));
+                }
+                *self = SetValue::Generic(generic);
+            } else {
+                *self = SetValue::Int(merged);
+            }
+            return;
+        }
+        let members: Vec<Vec<u8>> = other.iter().map(|m| m.into_owned()).collect();
+        self.extend(members, max_intset_entries);
+    }
+}
+
+/// Merge two ascending, de-duplicated `i64` slices into one ascending,
+/// de-duplicated `Vec<i64>` (set union). (frankenredis-295fy)
+fn merge_sorted_unique_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => {
+                out.push(a[i]);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                out.push(b[j]);
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                out.push(a[i]);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    out.extend_from_slice(&a[i..]);
+    out.extend_from_slice(&b[j..]);
+    out
+}
+
+impl PartialEq for SetValue {
+    /// Set equality (representation-independent): an `Int` and a `Generic`
+    /// holding the same members compare equal, matching `IndexSet`'s order-
+    /// independent `PartialEq`.
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().all(|m| other.contains(m.as_ref()))
+    }
+}
+
 /// The inner value held by a key in the store.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
-    String(Vec<u8>),
+    String(SmallStr),
+    Integer(i64),
     /// Hash: uses IndexMap to preserve insertion order like Redis listpack.
-    Hash(IndexMap<Vec<u8>, Vec<u8>>),
-    List(VecDeque<Vec<u8>>),
-    /// Set: uses IndexSet to preserve insertion order like Redis listpack/intset.
-    Set(IndexSet<Vec<u8>>),
-    /// Sorted set: dual-indexed for efficiency.
-    SortedSet(SortedSet),
+    /// Boxed (64B inner) so it doesn't size every `Value`/`Entry`. (w2t01)
+    Hash(Box<HashFieldMap>),
+    /// List: a packed buffer when small (one allocation), promoting to a
+    /// `VecDeque` (O(1) ends) past the threshold. Boxed so the inner enum
+    /// doesn't size every `Value`/`Entry`. (frankenredis-9mh3o)
+    List(Box<ListValue>),
+    /// Set: intset (sorted packed i64) for integer-only sets, else a hash-backed
+    /// IndexSet (generic). See [`SetValue`]. (frankenredis-hjob8)
+    /// Boxed (64B inner) so it doesn't size every `Value`/`Entry`. (w2t01)
+    Set(Box<SetValue>),
+    /// Sorted set: dual-indexed for efficiency. Boxed because `SortedSet` is by
+    /// far the largest variant (dict + ordered BTreeMap + rank treap = 120B),
+    /// and an un-boxed variant forces EVERY `Value` (hence every keyspace
+    /// `Entry`, even a 3-byte string) to that size. Boxing it shrinks `Value`
+    /// 120B->64B and `Entry` 168B->~112B — a ~33% cut in per-key overhead, with
+    /// behaviour unchanged (zset ops auto-deref the box). (frankenredis-w2t01)
+    SortedSet(Box<SortedSet>),
     /// Stream entries keyed by `(milliseconds, sequence)` stream IDs.
     Stream(StreamEntries),
+}
+
+const SMALL_STR_INLINE_CAP: usize = 15;
+
+/// Small string payload for `Value::String`.
+///
+/// Values up to 15 bytes fit inside the `Value` payload instead of retaining a
+/// separate heap allocation. Larger strings keep the old `Vec<u8>` storage.
+#[derive(Debug, Clone)]
+pub enum SmallStr {
+    Inline {
+        len: u8,
+        bytes: [u8; SMALL_STR_INLINE_CAP],
+    },
+    Heap(Vec<u8>),
+}
+
+impl SmallStr {
+    fn from_vec(value: Vec<u8>) -> Self {
+        if value.len() <= SMALL_STR_INLINE_CAP {
+            let mut bytes = [0; SMALL_STR_INLINE_CAP];
+            bytes[..value.len()].copy_from_slice(&value);
+            Self::Inline {
+                len: value.len() as u8,
+                bytes,
+            }
+        } else {
+            Self::Heap(value)
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
+            Self::Heap(bytes) => bytes,
+        }
+    }
+
+    fn make_heap(&mut self) -> &mut Vec<u8> {
+        if let Self::Inline { .. } = self {
+            let bytes = self.as_slice().to_vec();
+            *self = Self::Heap(bytes);
+        }
+        match self {
+            Self::Heap(bytes) => bytes,
+            Self::Inline { .. } => unreachable!("inline value was materialized as heap"),
+        }
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        match self {
+            Self::Inline { len, bytes } => bytes[..usize::from(len)].to_vec(),
+            Self::Heap(bytes) => bytes,
+        }
+    }
+}
+
+impl Deref for SmallStr {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl DerefMut for SmallStr {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.make_heap().as_mut_slice()
+    }
+}
+
+impl From<Vec<u8>> for SmallStr {
+    fn from(value: Vec<u8>) -> Self {
+        Self::from_vec(value)
+    }
+}
+
+impl From<&[u8]> for SmallStr {
+    fn from(value: &[u8]) -> Self {
+        Self::from_vec(value.to_vec())
+    }
+}
+
+impl PartialEq for SmallStr {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for SmallStr {}
+
+impl Value {
+    fn string_bytes(&self) -> Option<Cow<'_, [u8]>> {
+        match self {
+            Self::String(bytes) => Some(Cow::Borrowed(bytes.as_slice())),
+            Self::Integer(value) => Some(Cow::Owned(value.to_string().into_bytes())),
+            _ => None,
+        }
+    }
+
+    fn string_owned(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::String(bytes) => Some(bytes.to_vec()),
+            Self::Integer(value) => Some(value.to_string().into_bytes()),
+            _ => None,
+        }
+    }
+
+    fn string_len(&self) -> Option<usize> {
+        match self {
+            Self::String(bytes) => Some(bytes.len()),
+            Self::Integer(value) => Some(i64_text_len(*value)),
+            _ => None,
+        }
+    }
+
+    fn is_string_like(&self) -> bool {
+        matches!(self, Self::String(_) | Self::Integer(_))
+    }
+
+    fn materialize_string(&mut self) -> Option<&mut Vec<u8>> {
+        if let Self::Integer(value) = self {
+            *self = Self::String(value.to_string().into_bytes().into());
+        }
+        match self {
+            Self::String(bytes) => Some(bytes.make_heap()),
+            _ => None,
+        }
+    }
+}
+
+fn canonical_string_value(value: Vec<u8>) -> Value {
+    match parse_i64(value.as_slice()) {
+        Ok(integer) => Value::Integer(integer),
+        Err(_) => Value::String(value.into()),
+    }
+}
+
+fn i64_text_len(value: i64) -> usize {
+    if value == 0 {
+        return 1;
+    }
+    let mut digits = usize::from(value.is_negative());
+    let mut n = value.unsigned_abs();
+    while n != 0 {
+        digits += 1;
+        n /= 10;
+    }
+    digits
 }
 
 #[derive(Debug, Clone, PartialEq)]
 struct Entry {
     value: Value,
-    expires_at_ms: Option<u64>,
+    /// Absolute expiry deadline in ms, or `None` for no TTL. Stored as
+    /// `Option<NonZeroU64>` (8B, niche-packed) rather than `Option<u64>` (16B,
+    /// no niche) — expiry timestamps are always `now_ms + ttl > 0`, so the
+    /// non-zero invariant never excludes a real deadline. Shaves 8B off EVERY
+    /// keyspace `Entry`. Read via `expiry_ms()`. (frankenredis-w2t01)
+    expires_at_ms: Option<std::num::NonZeroU64>,
     /// Last access timestamp in milliseconds (for OBJECT IDLETIME / LRU).
     last_access_ms: u64,
     /// LFU access frequency counter exposed via OBJECT FREQ when LFU eviction is active.
@@ -643,10 +1875,24 @@ struct Entry {
 const LFU_INIT_VAL: u8 = 5;
 
 impl Entry {
+    /// The absolute expiry deadline (ms), if any. Read accessor over the
+    /// niche-packed `Option<NonZeroU64>` storage. (frankenredis-w2t01)
+    #[inline]
+    fn expiry_ms(&self) -> Option<u64> {
+        self.expires_at_ms.map(std::num::NonZeroU64::get)
+    }
+
+    /// Set the expiry deadline from an `Option<u64>`. A `Some(0)` is impossible
+    /// for a real deadline (now_ms+ttl>0) and would mean "no TTL". (w2t01)
+    #[inline]
+    fn set_expiry_ms(&mut self, ms: Option<u64>) {
+        self.expires_at_ms = ms.and_then(std::num::NonZeroU64::new);
+    }
+
     fn new(value: Value, expires_at_ms: Option<u64>, now_ms: u64) -> Self {
         Self {
             value,
-            expires_at_ms,
+            expires_at_ms: expires_at_ms.and_then(std::num::NonZeroU64::new),
             last_access_ms: now_ms,
             lfu_freq: LFU_INIT_VAL,
             lfu_last_touch_min: now_ms / 60_000,
@@ -723,7 +1969,7 @@ impl Entry {
     }
 
     fn duplicate_for_copy(&self, now_ms: u64) -> Self {
-        let mut entry = Self::new(self.value.clone(), self.expires_at_ms, now_ms);
+        let mut entry = Self::new(self.value.clone(), self.expiry_ms(), now_ms);
         entry.force_raw_encoding = self.force_raw_encoding;
         entry.force_string_encoding = self.force_string_encoding;
         entry.force_set_listpack_encoding = self.force_set_listpack_encoding;
@@ -843,6 +2089,10 @@ pub struct ActiveExpireCycleResult {
     pub sampled_keys: usize,
     pub evicted_keys: usize,
     pub next_cursor: Option<Vec<u8>>,
+    /// (frankenredis-wqrb6) The db-encoded keys the cycle evicted this pass, so
+    /// the runtime can propagate a `DEL`/`UNLINK` per key to replicas + AOF
+    /// (upstream's active-expire cycle does this; replicas don't self-expire).
+    pub evicted_db_keys: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1153,6 +2403,35 @@ impl CommandHistogramTracker {
         // to send commands uppercase, breaking grep parity with
         // vendored. INFO Commandstats already lowercased on emission,
         // masking the bug for that one path.
+        //
+        // (frankenredis-igx7w) This runs on every command, so avoid the
+        // per-command heap allocation of `to_ascii_lowercase()`: lowercase the
+        // name into a stack buffer and probe the existing entry (the common
+        // case) without allocating, paying the owned-key allocation only on the
+        // first occurrence of each command. Command names are short ASCII; the
+        // rare longer name (e.g. an attacker's unknown command) takes the heap
+        // path. Byte-identical canonical key in all cases.
+        let bytes = command.as_bytes();
+        if bytes.len() <= 40 {
+            let mut buf = [0u8; 40];
+            let lower = &mut buf[..bytes.len()];
+            for (dst, &src) in lower.iter_mut().zip(bytes) {
+                *dst = src.to_ascii_lowercase();
+            }
+            // ASCII-lowercasing valid UTF-8 yields valid UTF-8 (only A-Z change,
+            // both ASCII), so this never fails.
+            if let Ok(key) = std::str::from_utf8(lower) {
+                if let Some(hist) = self.histograms.get_mut(key) {
+                    hist.record_with_kind(latency_us, kind);
+                    return;
+                }
+                self.histograms
+                    .entry(key.to_string())
+                    .or_default()
+                    .record_with_kind(latency_us, kind);
+                return;
+            }
+        }
         self.histograms
             .entry(command.to_ascii_lowercase())
             .or_default()
@@ -1375,6 +2654,10 @@ pub struct DispatchAclPermissions {
     pub all_keys: bool,
     pub channel_patterns: Vec<Vec<u8>>,
     pub all_channels: bool,
+    /// (frankenredis-d919b) ACL selector permission sets. A request is allowed
+    /// when the root set OR any selector grants the command with its keys and
+    /// channels. Inner selectors carry no nested selectors.
+    pub selectors: Vec<DispatchAclPermissions>,
 }
 
 // Match upstream server.h: PROPAGATE_AOF=1, PROPAGATE_REPL=2.
@@ -1393,8 +2676,25 @@ pub struct ScriptPropagationRecord {
 
 #[derive(Debug)]
 pub struct Store {
-    entries: HashMap<Vec<u8>, Entry>,
+    /// The keyspace dict. Uses `foldhash` (a fast, HashDoS-resistant, pure-
+    /// safe-Rust hasher) instead of std's SipHash: every command hashes its
+    /// key here, so this is the single hottest lookup in the server, and
+    /// SipHash's cryptographic strength is overkill — foldhash::quality keeps
+    /// per-instance random seeding (so crafted-key flooding is still
+    /// defeated) at a fraction of the cost. Iteration order is not an
+    /// observable: SCAN walks the sorted `ordered_keys`, and RANDOMKEY /
+    /// eviction sampling are already nondeterministic. (frankenredis-8kuy1)
+    entries: HashMap<Vec<u8>, Entry, foldhash::quality::RandomState>,
     ordered_keys: BTreeSet<Vec<u8>>,
+    /// Db-encoded keys that currently carry a TTL (a subset of `ordered_keys`).
+    /// The active-expire cycle samples from this set instead of every key, so
+    /// it finds expirable keys as efficiently as upstream's `activeExpireCycle`
+    /// (which scans `db->expires`) rather than wasting samples on persistent
+    /// keys. This is purely a sampling HINT: `evaluate_expiry` still re-checks
+    /// each candidate's real `expires_at_ms`, so a stale entry only costs a
+    /// wasted sample and a missing entry only defers a key to lazy expiry —
+    /// never an incorrect result. (frankenredis-yvg7h)
+    volatile_keys: BTreeSet<Vec<u8>>,
     running_digest: u64,
     digest_mutations: u64,
     digest_stale: bool,
@@ -1524,6 +2824,19 @@ pub struct Store {
     /// Pending keyspace notification messages (channel, message) to deliver
     /// via the pub/sub system after command execution.
     pub keyspace_notifications: Vec<(Vec<u8>, Vec<u8>)>,
+
+    /// (frankenredis-1d2xf) db-encoded keys lazily expired (via `drop_if_expired`)
+    /// during the current command, so the runtime can propagate a `DEL`/`UNLINK`
+    /// per key — ordered BEFORE the triggering command's own propagation — to
+    /// replicas + AOF. Drained every command by the runtime dispatch arm.
+    pub lazy_expired_propagation: Vec<Vec<u8>>,
+
+    /// (frankenredis-f7xy7) Transient signal set by the XADD command handler
+    /// when its inline MAXLEN/MINID trim actually removed entries. Upstream
+    /// xaddCommand fires a secondary "xtrim" keyspace event (after "xadd") in
+    /// that case; the runtime reads this flag post-dispatch to emit it in the
+    /// correct order. Overwritten by every XADD, only read for XADD.
+    pub last_xadd_trimmed: bool,
 
     // ── Server-wide metadata and stats (updated by runtime, read by INFO) ──
     /// Unique 40-character hex run ID generated at startup.
@@ -1754,7 +3067,10 @@ pub fn decode_db_key(key: &[u8]) -> Option<(usize, &[u8])> {
 pub fn read_rss_bytes() -> Option<usize> {
     #[cfg(target_os = "linux")]
     {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let mut file = std::fs::File::open("/proc/self/status").ok()?;
+        let mut buf = [0_u8; 8192];
+        let len = std::io::Read::read(&mut file, &mut buf).ok()?;
+        let status = std::str::from_utf8(&buf[..len]).ok()?;
         for line in status.lines() {
             if let Some(rest) = line.strip_prefix("VmRSS:") {
                 let kb_str = rest.trim().strip_suffix("kB")?.trim();
@@ -1799,8 +3115,9 @@ pub fn read_total_system_memory_bytes() -> Option<usize> {
 impl Default for Store {
     fn default() -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: HashMap::default(),
             ordered_keys: BTreeSet::new(),
+            volatile_keys: BTreeSet::new(),
             running_digest: 0,
             digest_mutations: 0,
             digest_stale: false,
@@ -1874,6 +3191,8 @@ impl Default for Store {
             cached_memory_usage_dirty: std::cell::Cell::new(0),
             notify_keyspace_events: 0,
             keyspace_notifications: Vec::new(),
+            lazy_expired_propagation: Vec::new(),
+            last_xadd_trimmed: false,
             server_run_id: generate_run_id(),
             cluster_shard_id: generate_run_id(),
             server_pid: std::process::id(),
@@ -2259,8 +3578,10 @@ impl Store {
     }
 
     fn record_keyspace_lookup(&mut self, key: &[u8], now_ms: u64) -> bool {
-        self.drop_if_expired(key, now_ms);
-        let hit = self.entries.contains_key(key);
+        // `drop_if_expired` already performs the keyspace lookup and now reports
+        // whether the key survived, so the separate `contains_key` it used to do
+        // here (a second hash lookup on every read) is gone. (frankenredis-shewy)
+        let hit = self.drop_if_expired(key, now_ms);
         if hit {
             self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
         } else {
@@ -2374,6 +3695,17 @@ impl Store {
     ) -> Option<u64> {
         if entries_added == 0 {
             return Some(0);
+        }
+        // (frankenredis-h3vkq) Upstream t_stream.c::streamEstimateDistanceFromFirstEverEntry
+        // can only compute the distance when `id` is at or after the last
+        // tombstone: if `id < max_deleted_entry_id` there may be deleted
+        // entries below `id`, so the count is unreliable and the function
+        // returns SCG_INVALID (→ XINFO entries-read / lag become nil). Without
+        // this guard the `id == last_id` / first-id shortcuts below returned a
+        // concrete value (e.g. after `XSETID … MAXDELETEDID` past the live
+        // entries), diverging from redis.
+        if max_deleted_id != (0, 0) && id < max_deleted_id {
+            return None;
         }
         if stream_len == 0 && last_id.is_some_and(|last_id| id <= last_id) {
             return Some(entries_added);
@@ -2495,7 +3827,7 @@ impl Store {
         self.slowlog.len()
     }
 
-    fn list_fits_legacy_listpack_size(&self, list: &VecDeque<Vec<u8>>) -> bool {
+    fn list_fits_legacy_listpack_size(&self, list: &ListValue) -> bool {
         if self.list_max_listpack_size >= 0 {
             return list.len() <= self.list_max_listpack_size as usize;
         }
@@ -2513,7 +3845,7 @@ impl Store {
         // walking the whole list every encoding query.
         // (frankenredis-t1z5)
         let mut total: usize = 0;
-        for v in list {
+        for v in list.iter() {
             total = total.saturating_add(v.len() + 11); // 11 bytes overhead per entry
             if total > max_bytes {
                 return false;
@@ -2522,17 +3854,26 @@ impl Store {
         true
     }
 
-    fn set_fits_intset(set: &IndexSet<Vec<u8>>, max_intset_entries: usize) -> bool {
-        set.len() <= max_intset_entries && set.iter().all(|member| parse_i64(member).is_ok())
+    fn set_fits_intset(set: &SetValue, max_intset_entries: usize) -> bool {
+        // The intset encoding is now intrinsic: a `SetValue::Int` holds only
+        // canonical integers and is kept within the limit by promotion.
+        set.is_intset() && set.len() <= max_intset_entries
     }
 
     fn set_fits_listpack(
-        set: &IndexSet<Vec<u8>>,
+        set: &SetValue,
         max_listpack_entries: usize,
         max_listpack_value: usize,
     ) -> bool {
-        set.len() <= max_listpack_entries
-            && set.iter().all(|member| member.len() <= max_listpack_value)
+        match set.as_generic() {
+            Some(generic) => {
+                generic.len() <= max_listpack_entries
+                    && generic
+                        .iter()
+                        .all(|member| member.len() <= max_listpack_value)
+            }
+            None => false, // an intset is never listpack-encoded
+        }
     }
 
     fn refresh_set_encoding_flags(
@@ -2608,8 +3949,9 @@ impl Store {
         }
     }
 
-    fn set_entry(&self, set: IndexSet<Vec<u8>>, expires_at_ms: Option<u64>, now_ms: u64) -> Entry {
-        let mut entry = Entry::new(Value::Set(set), expires_at_ms, now_ms);
+    fn set_entry(&self, set: GenericSet, expires_at_ms: Option<u64>, now_ms: u64) -> Entry {
+        let set = SetValue::from_index_set(set, self.set_max_intset_entries);
+        let mut entry = Entry::new(Value::Set(Box::new(set)), expires_at_ms, now_ms);
         Self::refresh_set_encoding_flags(
             &mut entry,
             self.set_max_intset_entries,
@@ -2634,17 +3976,16 @@ impl Store {
             0
         };
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::String(v) => {
-                    let v = v.clone();
-                    if lfu_tracking_enabled {
-                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                    }
-                    entry.touch(now_ms);
-                    Ok(Some(v))
+            Some(entry) => {
+                let Some(v) = entry.value.string_owned() else {
+                    return Err(StoreError::WrongType);
+                };
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                entry.touch(now_ms);
+                Ok(Some(v))
+            }
             None => Ok(None),
         }
     }
@@ -2672,7 +4013,7 @@ impl Store {
         };
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
-        let mut entry = Entry::new(Value::String(value), expires_at_ms, now_ms);
+        let mut entry = Entry::new(canonical_string_value(value), expires_at_ms, now_ms);
         entry.lfu_freq = next_lfu_freq;
         entry.lfu_last_touch_min = now_ms / 60_000;
         self.internal_entries_insert(key, entry);
@@ -2708,7 +4049,7 @@ impl Store {
         };
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
-        let mut entry = Entry::new(Value::String(value), expires_at_ms, now_ms);
+        let mut entry = Entry::new(canonical_string_value(value), expires_at_ms, now_ms);
         entry.lfu_freq = next_lfu_freq;
         entry.lfu_last_touch_min = now_ms / 60_000;
         self.internal_entries_insert(key, entry);
@@ -2718,7 +4059,7 @@ impl Store {
     /// Returns the current absolute expiry timestamp for a key, if any.
     pub fn get_expires_at_ms(&mut self, key: &[u8], now_ms: u64) -> Option<u64> {
         self.drop_if_expired(key, now_ms);
-        self.entries.get(key).and_then(|entry| entry.expires_at_ms)
+        self.entries.get(key).and_then(|entry| entry.expiry_ms())
     }
 
     pub fn expiretime_value(&mut self, key: &[u8], now_ms: u64) -> ExpireTimeValue {
@@ -2728,7 +4069,7 @@ impl Store {
         // (frankenredis-ttlnotouch) EXPIRETIME/PEXPIRETIME are metadata queries
         // that do NOT update access time. Differential probe vs vendored 7.2.4
         // confirmed OBJECT IDLETIME remains unchanged after these commands.
-        match self.entries.get(key).and_then(|entry| entry.expires_at_ms) {
+        match self.entries.get(key).and_then(|entry| entry.expiry_ms()) {
             Some(expires_at_ms) => ExpireTimeValue::ExpiresAt(expires_at_ms),
             None => ExpireTimeValue::NoExpiry,
         }
@@ -2775,11 +4116,22 @@ impl Store {
         self.record_keyspace_lookup(key, now_ms)
     }
 
+    /// Pure presence check against the keyspace map — no lazy expiry, no
+    /// hit/miss stat bump, no events. Intended for post-command bookkeeping
+    /// (e.g. detecting that an element-removal command just deleted a key
+    /// because it became empty) where the key was just mutated and so cannot
+    /// be a stale-expired entry. (frankenredis-g0crt)
+    #[must_use]
+    pub fn key_is_present(&self, key: &[u8]) -> bool {
+        self.entries.contains_key(key)
+    }
+
     pub fn incr(&mut self, key: &[u8], now_ms: u64) -> Result<i64, StoreError> {
         self.drop_if_expired(key, now_ms);
         let (current, expires_at_ms) = match self.entries.get(key) {
             Some(entry) => match &entry.value {
-                Value::String(v) => (parse_i64(v)?, entry.expires_at_ms),
+                Value::String(v) => (parse_i64(v)?, entry.expiry_ms()),
+                Value::Integer(value) => (*value, entry.expiry_ms()),
                 _ => return Err(StoreError::WrongType),
             },
             None => (0_i64, None),
@@ -2787,11 +4139,7 @@ impl Store {
         let next = current.checked_add(1).ok_or(StoreError::IntegerOverflow)?;
         self.internal_entries_insert(
             key.to_vec(),
-            Entry::new(
-                Value::String(next.to_string().into_bytes()),
-                expires_at_ms,
-                now_ms,
-            ),
+            Entry::new(Value::Integer(next), expires_at_ms, now_ms),
         );
         self.dirty = self.dirty.saturating_add(1);
         Ok(next)
@@ -2833,7 +4181,7 @@ impl Store {
         if self
             .with_mutated_entry(key, |entry| {
                 added_expiry = entry.expires_at_ms.is_none();
-                entry.expires_at_ms = Some(expires_at_ms);
+                entry.set_expiry_ms(Some(expires_at_ms));
             })
             .is_some()
         {
@@ -2844,6 +4192,8 @@ impl Store {
                     self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
                 }
             }
+            // The key now carries a TTL — track it for active-expire sampling.
+            self.volatile_keys.insert(key.to_vec());
             self.dirty = self.dirty.saturating_add(1);
             self.notify_keyspace_event(NOTIFY_GENERIC, "expire", &logical_key, db);
         }
@@ -2861,7 +4211,14 @@ impl Store {
             None => (0, key.to_vec()),
         };
         if i128::from(when_ms) <= i128::from(now_ms) {
-            self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", &logical_key, db);
+            // (frankenredis-08t0x) Upstream expire.c::expireGenericCommand, when
+            // the deadline is already in the past on a master, deletes the key
+            // synchronously and fires NOTIFY_GENERIC "del" — NOT the "expired"
+            // event, which is reserved for natural lazy/active expiry. Verified
+            // differentially vs vendored 7.2.4 (EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT
+            // with a past deadline all emit "del"). Mirrors the relative-time
+            // sibling expire_milliseconds above.
+            self.notify_keyspace_event(NOTIFY_GENERIC, "del", &logical_key, db);
             self.internal_entries_remove(key);
             self.stream_groups.remove(key);
             self.stream_last_ids.remove(key);
@@ -2874,7 +4231,7 @@ impl Store {
         if self
             .with_mutated_entry(key, |entry| {
                 added_expiry = entry.expires_at_ms.is_none();
-                entry.expires_at_ms = Some(expires_at_ms);
+                entry.set_expiry_ms(Some(expires_at_ms));
             })
             .is_some()
         {
@@ -2885,6 +4242,8 @@ impl Store {
                     self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
                 }
             }
+            // The key now carries a TTL — track it for active-expire sampling.
+            self.volatile_keys.insert(key.to_vec());
             self.dirty = self.dirty.saturating_add(1);
             self.notify_keyspace_event(NOTIFY_GENERIC, "expire", &logical_key, db);
         }
@@ -2902,7 +4261,7 @@ impl Store {
         let Some(entry) = self.entries.get(key) else {
             return PttlValue::KeyMissing;
         };
-        let decision = evaluate_expiry(now_ms, entry.expires_at_ms);
+        let decision = evaluate_expiry(now_ms, entry.expiry_ms());
         if decision.remaining_ms == -1 {
             PttlValue::NoExpiry
         } else {
@@ -2924,17 +4283,15 @@ impl Store {
             if lfu_tracking_enabled {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
-            match &mut entry.value {
-                Value::String(v) => {
-                    v.extend_from_slice(value);
-                    let len = v.len();
-                    entry.touch_write(now_ms);
-                    // (br-frankenredis-84bv)
-                    entry.force_raw_encoding = true;
-                    Ok(len)
-                }
-                _ => Err(StoreError::WrongType),
-            }
+            let Some(v) = entry.value.materialize_string() else {
+                return Err(StoreError::WrongType);
+            };
+            v.extend_from_slice(value);
+            let len = v.len();
+            entry.touch_write(now_ms);
+            // (br-frankenredis-84bv)
+            entry.force_raw_encoding = true;
+            Ok(len)
         }) {
             if result.is_ok() {
                 self.dirty = self.dirty.saturating_add(1);
@@ -2944,7 +4301,7 @@ impl Store {
             let len = value.len();
             self.internal_entries_insert(
                 key.to_vec(),
-                Entry::new(Value::String(value.to_vec()), None, now_ms),
+                Entry::new(Value::String(value.to_vec().into()), None, now_ms),
             );
             self.dirty = self.dirty.saturating_add(1);
             Ok(len)
@@ -2968,14 +4325,11 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
-                    Value::String(v) => {
-                        let len = v.len();
-                        entry.touch(now_ms);
-                        Ok(len)
-                    }
-                    _ => Err(StoreError::WrongType),
-                }
+                let Some(len) = entry.value.string_len() else {
+                    return Err(StoreError::WrongType);
+                };
+                entry.touch(now_ms);
+                Ok(len)
             }
             None => Ok(0),
         }
@@ -3003,14 +4357,11 @@ impl Store {
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
-                    match &entry.value {
-                        Value::String(v) => {
-                            let v = v.clone();
-                            entry.touch(now_ms);
-                            Some(v)
-                        }
-                        _ => None,
+                    let v = entry.value.string_owned();
+                    if v.is_some() {
+                        entry.touch(now_ms);
                     }
+                    v
                 }
                 None => None,
             };
@@ -3024,7 +4375,7 @@ impl Store {
         if self.entries.contains_key(&key) {
             return false;
         }
-        self.internal_entries_insert(key, Entry::new(Value::String(value), None, now_ms));
+        self.internal_entries_insert(key, Entry::new(canonical_string_value(value), None, now_ms));
         self.dirty = self.dirty.saturating_add(1);
         true
     }
@@ -3050,14 +4401,14 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 let lfu = (entry.lfu_freq, entry.lfu_last_touch_min);
-                match &entry.value {
-                    Value::String(v) => (Some(v.clone()), Some(lfu)),
-                    _ => return Err(StoreError::WrongType),
-                }
+                let Some(v) = entry.value.string_owned() else {
+                    return Err(StoreError::WrongType);
+                };
+                (Some(v), Some(lfu))
             }
             None => (None, None),
         };
-        let mut new_entry = Entry::new(Value::String(value), None, now_ms);
+        let mut new_entry = Entry::new(canonical_string_value(value), None, now_ms);
         if let Some((freq, last_touch)) = lfu_state {
             new_entry.lfu_freq = freq;
             new_entry.lfu_last_touch_min = last_touch;
@@ -3071,7 +4422,8 @@ impl Store {
         self.drop_if_expired(key, now_ms);
         let (current, expires_at_ms) = match self.entries.get(key) {
             Some(entry) => match &entry.value {
-                Value::String(v) => (parse_i64(v)?, entry.expires_at_ms),
+                Value::String(v) => (parse_i64(v)?, entry.expiry_ms()),
+                Value::Integer(value) => (*value, entry.expiry_ms()),
                 _ => return Err(StoreError::WrongType),
             },
             None => (0_i64, None),
@@ -3081,11 +4433,7 @@ impl Store {
             .ok_or(StoreError::IntegerOverflow)?;
         self.internal_entries_insert(
             key.to_vec(),
-            Entry::new(
-                Value::String(next.to_string().into_bytes()),
-                expires_at_ms,
-                now_ms,
-            ),
+            Entry::new(Value::Integer(next), expires_at_ms, now_ms),
         );
         self.dirty = self.dirty.saturating_add(1);
         Ok(next)
@@ -3107,18 +4455,22 @@ impl Store {
         self.drop_if_expired(key, now_ms);
         let (current, expires_at_ms) = match self.entries.get(key) {
             Some(entry) => match &entry.value {
-                Value::String(v) => (v.as_slice(), entry.expires_at_ms),
+                Value::String(v) => (Cow::Borrowed(v.as_slice()), entry.expiry_ms()),
+                Value::Integer(value) => (
+                    Cow::Owned(value.to_string().into_bytes()),
+                    entry.expiry_ms(),
+                ),
                 _ => return Err(StoreError::WrongType),
             },
-            None => (b"0".as_slice(), None),
+            None => (Cow::Borrowed(b"0".as_slice()), None),
         };
-        let next = add_float_text(current, delta_text, delta)?;
+        let next = add_float_text(current.as_ref(), delta_text, delta)?;
         // Upstream t_string.c::incrbyfloatCommand stores the result
         // via createStringObject which always produces embstr/raw,
         // never int. Even when the result text round-trips as an
         // integer (e.g. "1"), OBJECT ENCODING reports embstr.
         // (br-frankenredis-incrfloatenc)
-        let mut entry = Entry::new(Value::String(next.clone()), expires_at_ms, now_ms);
+        let mut entry = Entry::new(Value::String(next.clone().into()), expires_at_ms, now_ms);
         entry.force_string_encoding = true;
         self.internal_entries_insert(key.to_vec(), entry);
         self.dirty = self.dirty.saturating_add(1);
@@ -3130,10 +4482,11 @@ impl Store {
             return Ok(None);
         }
         match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::String(_) => {}
-                _ => return Err(StoreError::WrongType),
-            },
+            Some(entry) => {
+                if !entry.value.is_string_like() {
+                    return Err(StoreError::WrongType);
+                }
+            }
             None => return Ok(None),
         }
         let Some(entry) = self.internal_entries_remove(key) else {
@@ -3143,7 +4496,8 @@ impl Store {
         self.stream_last_ids.remove(key);
         self.dirty = self.dirty.saturating_add(1);
         match entry.value {
-            Value::String(v) => Ok(Some(v)),
+            Value::String(v) => Ok(Some(v.into_vec())),
+            Value::Integer(value) => Ok(Some(value.to_string().into_bytes())),
             _ => Err(StoreError::WrongType),
         }
     }
@@ -3172,33 +4526,31 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 entry.touch(now_ms);
-                match &entry.value {
-                    Value::String(v) => {
-                        let len = v.len() as i64;
-                        // Upstream t_string.c::getrangeCommand normalizes
-                        // negative offsets relative to length and clamps
-                        // BOTH start and end at 0 — fr previously only
-                        // clamped start, so a fully-negative range like
-                        // (-100, -90) on a length-6 string left end=-84
-                        // and the 's > e' guard wrongly returned empty
-                        // instead of the clamped slice [0..=0].
-                        // (br-frankenredis-grangneg)
-                        let mut s = if start < 0 { len + start } else { start };
-                        let mut e = if end < 0 { len + end } else { end };
-                        if s < 0 {
-                            s = 0;
-                        }
-                        if e < 0 {
-                            e = 0;
-                        }
-                        if s > e || len == 0 || s >= len {
-                            Ok(Vec::new())
-                        } else {
-                            let e_idx = e.min(len - 1) as usize;
-                            Ok(v[s as usize..e_idx + 1].to_vec())
-                        }
-                    }
-                    _ => Err(StoreError::WrongType),
+                let Some(v) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                let len = v.len() as i64;
+                // Upstream t_string.c::getrangeCommand normalizes
+                // negative offsets relative to length and clamps
+                // BOTH start and end at 0 — fr previously only
+                // clamped start, so a fully-negative range like
+                // (-100, -90) on a length-6 string left end=-84
+                // and the 's > e' guard wrongly returned empty
+                // instead of the clamped slice [0..=0].
+                // (br-frankenredis-grangneg)
+                let mut s = if start < 0 { len + start } else { start };
+                let mut e = if end < 0 { len + end } else { end };
+                if s < 0 {
+                    s = 0;
+                }
+                if e < 0 {
+                    e = 0;
+                }
+                if s > e || len == 0 || s >= len {
+                    Ok(Vec::new())
+                } else {
+                    let e_idx = e.min(len - 1) as usize;
+                    Ok(v[s as usize..e_idx + 1].to_vec())
                 }
             }
             None => Ok(Vec::new()),
@@ -3227,10 +4579,7 @@ impl Store {
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
-                    match &entry.value {
-                        Value::String(v) => Ok(v.len()),
-                        _ => Err(StoreError::WrongType),
-                    }
+                    entry.value.string_len().ok_or(StoreError::WrongType)
                 }
                 None => Ok(0),
             };
@@ -3240,16 +4589,14 @@ impl Store {
             if lfu_tracking_enabled {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
-            let len = match &mut entry.value {
-                Value::String(v) => {
-                    if v.len() < needed {
-                        v.resize(needed, 0);
-                    }
-                    v[offset..offset + value.len()].copy_from_slice(value);
-                    v.len()
-                }
-                _ => return Err(StoreError::WrongType),
+            let Some(v) = entry.value.materialize_string() else {
+                return Err(StoreError::WrongType);
             };
+            if v.len() < needed {
+                v.resize(needed, 0);
+            }
+            v[offset..offset + value.len()].copy_from_slice(value);
+            let len = v.len();
             entry.touch_write(now_ms);
             // (br-frankenredis-84bv)
             entry.force_raw_encoding = true;
@@ -3265,7 +4612,7 @@ impl Store {
                 let mut current = vec![0; needed];
                 current[offset..offset + value.len()].copy_from_slice(value);
                 let new_len = current.len();
-                let mut entry = Entry::new(Value::String(current), None, now_ms);
+                let mut entry = Entry::new(Value::String(current.into()), None, now_ms);
                 // (br-frankenredis-84bv)
                 entry.force_raw_encoding = true;
                 self.internal_entries_insert(key.to_vec(), entry);
@@ -3299,29 +4646,27 @@ impl Store {
             if lfu_tracking_enabled {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
-            match &mut entry.value {
-                Value::String(v) => {
-                    let old_len = v.len();
-                    if v.len() <= byte_idx {
-                        v.resize(byte_idx + 1, 0);
-                    }
-                    let old_bit = (v[byte_idx] >> bit_idx) & 1 == 1;
-                    if value {
-                        v[byte_idx] |= 1 << bit_idx;
-                    } else {
-                        v[byte_idx] &= !(1 << bit_idx);
-                    }
-                    let changed = old_len != v.len() || old_bit != value;
-                    entry.touch_write(now_ms);
-                    // Upstream bitops.c::setbitCommand calls
-                    // dbUnshareStringValue which always converts the
-                    // value to raw, regardless of length.
-                    // (br-frankenredis-setbitenc)
-                    entry.force_raw_encoding = true;
-                    Ok((old_bit, changed))
-                }
-                _ => Err(StoreError::WrongType),
+            let Some(v) = entry.value.materialize_string() else {
+                return Err(StoreError::WrongType);
+            };
+            let old_len = v.len();
+            if v.len() <= byte_idx {
+                v.resize(byte_idx + 1, 0);
             }
+            let old_bit = (v[byte_idx] >> bit_idx) & 1 == 1;
+            if value {
+                v[byte_idx] |= 1 << bit_idx;
+            } else {
+                v[byte_idx] &= !(1 << bit_idx);
+            }
+            let changed = old_len != v.len() || old_bit != value;
+            entry.touch_write(now_ms);
+            // Upstream bitops.c::setbitCommand calls
+            // dbUnshareStringValue which always converts the
+            // value to raw, regardless of length.
+            // (br-frankenredis-setbitenc)
+            entry.force_raw_encoding = true;
+            Ok((old_bit, changed))
         }) {
             Some(result) => {
                 let (old_bit, changed) = result?;
@@ -3336,7 +4681,7 @@ impl Store {
                 if value {
                     v[byte_idx] |= 1 << bit_idx;
                 }
-                let mut entry = Entry::new(Value::String(v), None, now_ms);
+                let mut entry = Entry::new(Value::String(v.into()), None, now_ms);
                 // (br-frankenredis-setbitenc) — newly-created keys
                 // also use raw encoding via dbAdd in upstream.
                 entry.force_raw_encoding = true;
@@ -3364,21 +4709,18 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                let is_string = matches!(&entry.value, Value::String(_));
-                if is_string {
+                if entry.value.is_string_like() {
                     entry.touch(now_ms);
                 }
-                match &entry.value {
-                    Value::String(v) => {
-                        let byte_idx = offset / 8;
-                        let bit_idx = 7 - (offset % 8);
-                        if byte_idx >= v.len() {
-                            Ok(false)
-                        } else {
-                            Ok((v[byte_idx] >> bit_idx) & 1 == 1)
-                        }
-                    }
-                    _ => Err(StoreError::WrongType),
+                let Some(v) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                let byte_idx = offset / 8;
+                let bit_idx = 7 - (offset % 8);
+                if byte_idx >= v.len() {
+                    Ok(false)
+                } else {
+                    Ok((v[byte_idx] >> bit_idx) & 1 == 1)
                 }
             }
             None => Ok(false),
@@ -3414,18 +4756,14 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                let is_string = matches!(&entry.value, Value::String(_));
-                if is_string {
+                if entry.value.is_string_like() {
                     entry.touch(now_ms);
                 }
-                match &entry.value {
-                    Value::String(v) => v.as_slice(),
-                    _ => return Err(StoreError::WrongType),
-                }
+                entry.value.string_bytes().ok_or(StoreError::WrongType)?
             }
-            None => &[],
+            None => Cow::Borrowed(&[][..]),
         };
-        Ok(bitfield_read(bytes, bit_offset, bits, signed))
+        Ok(bitfield_read(bytes.as_ref(), bit_offset, bits, signed))
     }
 
     /// Write an arbitrary-width integer field to the string at `key`.
@@ -3440,19 +4778,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<i64, StoreError> {
         self.drop_if_expired(key, now_ms);
-        let (mut bytes, expires_at_ms) = match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::String(v) => (v.clone(), entry.expires_at_ms),
-                _ => return Err(StoreError::WrongType),
-            },
-            None => (Vec::new(), None),
-        };
 
-        // Read old value first
-        let signed = false; // Old value is read as unsigned for SET
-        let old_value = bitfield_read(&bytes, bit_offset, bits, signed);
-
-        // Ensure the byte array is large enough
         let end_bit = bit_offset.saturating_add(u64::from(bits));
         let needed_bytes = end_bit.div_ceil(8) as usize;
         if needed_bytes > 512 * 1024 * 1024 {
@@ -3464,26 +4790,124 @@ impl Store {
             ));
         }
 
-        let old_len = bytes.len();
+        if let Some(entry) = self.entries.get_mut(key) {
+            let Some(bytes) = entry.value.materialize_string() else {
+                return Err(StoreError::WrongType);
+            };
+            let old_value = bitfield_read(bytes, bit_offset, bits, false);
+            let old_len = bytes.len();
+            if bytes.len() < needed_bytes {
+                bytes.resize(needed_bytes, 0);
+            }
+            bitfield_write(bytes, bit_offset, bits, value);
+            let changed = old_len != bytes.len()
+                || old_value != bitfield_read(bytes, bit_offset, bits, false);
+
+            let had_expiry = entry.expires_at_ms.is_some();
+            entry.last_access_ms = now_ms;
+            entry.lfu_freq = LFU_INIT_VAL;
+            entry.lfu_last_touch_min = now_ms / 60_000;
+            entry.modification_count = entry.modification_count.wrapping_add(1);
+            entry.force_raw_encoding = true;
+            entry.force_string_encoding = false;
+            entry.force_set_listpack_encoding = false;
+            entry.force_set_hashtable_encoding = false;
+            entry.force_hash_hashtable_encoding = false;
+            entry.force_zset_skiplist_encoding = false;
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+            if had_expiry {
+                let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+                self.expires_count = self.expires_count.saturating_add(1);
+                if db < self.database_count {
+                    self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
+                }
+            }
+            if changed {
+                self.dirty = self.dirty.saturating_add(1);
+            }
+            return Ok(old_value);
+        }
+
+        let mut bytes = Vec::new();
+        let old_value = bitfield_read(&bytes, bit_offset, bits, false);
         if bytes.len() < needed_bytes {
             bytes.resize(needed_bytes, 0);
         }
-
-        // Write the new value
         bitfield_write(&mut bytes, bit_offset, bits, value);
-
-        let signed = false;
-        if old_len != bytes.len() || old_value != bitfield_read(&bytes, bit_offset, bits, signed) {
-            self.dirty = self.dirty.saturating_add(1);
-        }
-
-        // Upstream bitops.c::bitfieldGeneric routes SET/INCRBY
-        // through dbUnshareStringValue / dbAdd which always store
-        // values with raw encoding. (br-frankenredis-bitfieldenc)
-        let mut entry = Entry::new(Value::String(bytes), expires_at_ms, now_ms);
+        let changed =
+            !bytes.is_empty() || old_value != bitfield_read(&bytes, bit_offset, bits, false);
+        let mut entry = Entry::new(Value::String(bytes.into()), None, now_ms);
+        // Upstream bitops.c::bitfieldGeneric routes SET/INCRBY through
+        // dbUnshareStringValue / dbAdd which always store values with raw
+        // encoding. (br-frankenredis-bitfieldenc)
         entry.force_raw_encoding = true;
         self.internal_entries_insert(key.to_vec(), entry);
+        if changed {
+            self.dirty = self.dirty.saturating_add(1);
+        }
         Ok(old_value)
+    }
+
+    /// Population count (number of set bits) over a byte slice, processed eight
+    /// bytes per iteration as a single 64-bit POPCNT. The result is bit-identical
+    /// to `bytes.iter().map(|b| b.count_ones()).sum()` because popcount is
+    /// order-independent; the word-at-a-time form just amortizes loop overhead
+    /// and per-byte bounds checks for BITCOUNT over large bitmaps.
+    #[inline]
+    fn popcount_bytes(bytes: &[u8]) -> usize {
+        let mut chunks = bytes.chunks_exact(8);
+        let mut count: usize = 0;
+        for chunk in &mut chunks {
+            let word = u64::from_ne_bytes(chunk.try_into().expect("chunk length is 8"));
+            count += word.count_ones() as usize;
+        }
+        for &b in chunks.remainder() {
+            count += b.count_ones() as usize;
+        }
+        count
+    }
+
+    #[inline]
+    fn bitpos_masked_byte(raw: u8, bit: bool, keep_mask: u8) -> Option<usize> {
+        let masked = if bit {
+            raw & keep_mask
+        } else {
+            raw | !keep_mask
+        };
+        if bit && masked != 0 {
+            return Some(masked.leading_zeros() as usize);
+        }
+        if !bit && masked != 0xFF {
+            return Some((!masked).leading_zeros() as usize);
+        }
+        None
+    }
+
+    #[inline]
+    fn bitpos_full_bytes(bytes: &[u8], bit: bool, base_byte: usize) -> Option<i64> {
+        let mut chunks = bytes.chunks_exact(8);
+        let mut byte_offset = base_byte;
+        for chunk in &mut chunks {
+            let word = u64::from_ne_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ]);
+            let has_candidate = if bit { word != 0 } else { word != u64::MAX };
+            if has_candidate {
+                for (i, &raw) in chunk.iter().enumerate() {
+                    if let Some(bit_in_byte) = Self::bitpos_masked_byte(raw, bit, 0xFF) {
+                        return Some(((byte_offset + i) * 8 + bit_in_byte) as i64);
+                    }
+                }
+            }
+            byte_offset += 8;
+        }
+        for &raw in chunks.remainder() {
+            if let Some(bit_in_byte) = Self::bitpos_masked_byte(raw, bit, 0xFF) {
+                return Some((byte_offset * 8 + bit_in_byte) as i64);
+            }
+            byte_offset += 1;
+        }
+        None
     }
 
     pub fn bitcount(
@@ -3510,92 +4934,82 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                let is_string = matches!(&entry.value, Value::String(_));
-                if is_string {
+                if entry.value.is_string_like() {
                     entry.touch(now_ms);
                 }
-                match &entry.value {
-                    Value::String(v) => {
-                        let len = i64::try_from(v.len()).unwrap_or(i64::MAX);
-                        let total_len = match unit {
-                            BitRangeUnit::Byte => len,
-                            BitRangeUnit::Bit => len.saturating_mul(8),
-                        };
-                        if total_len == 0 {
-                            return Ok(0);
-                        }
+                let Some(v) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                let len = i64::try_from(v.len()).unwrap_or(i64::MAX);
+                let total_len = match unit {
+                    BitRangeUnit::Byte => len,
+                    BitRangeUnit::Bit => len.saturating_mul(8),
+                };
+                if total_len == 0 {
+                    return Ok(0);
+                }
 
-                        let mut range_start = start.unwrap_or(0);
-                        let mut range_end = end.unwrap_or(total_len - 1);
+                let mut range_start = start.unwrap_or(0);
+                let mut range_end = end.unwrap_or(total_len - 1);
 
-                        if start.is_some_and(|s| s < 0)
-                            && end.is_some_and(|e| e < 0)
-                            && range_start > range_end
-                        {
-                            return Ok(0);
-                        }
+                if start.is_some_and(|s| s < 0)
+                    && end.is_some_and(|e| e < 0)
+                    && range_start > range_end
+                {
+                    return Ok(0);
+                }
 
-                        if range_start < 0 {
-                            range_start += total_len;
-                        }
-                        if range_end < 0 {
-                            range_end += total_len;
-                        }
-                        if range_start < 0 {
-                            range_start = 0;
-                        }
-                        if range_end < 0 {
-                            range_end = 0;
-                        }
-                        if range_end >= total_len {
-                            range_end = total_len - 1;
-                        }
-                        if range_start > range_end {
-                            return Ok(0);
-                        }
+                if range_start < 0 {
+                    range_start += total_len;
+                }
+                if range_end < 0 {
+                    range_end += total_len;
+                }
+                if range_start < 0 {
+                    range_start = 0;
+                }
+                if range_end < 0 {
+                    range_end = 0;
+                }
+                if range_end >= total_len {
+                    range_end = total_len - 1;
+                }
+                if range_start > range_end {
+                    return Ok(0);
+                }
 
-                        match unit {
-                            BitRangeUnit::Byte => {
-                                let start_idx = usize::try_from(range_start)
-                                    .expect("non-negative byte range start");
-                                let end_idx = usize::try_from(range_end)
-                                    .expect("non-negative byte range end");
-                                let end_idx_excl = end_idx + 1;
-                                Ok(v[start_idx..end_idx_excl]
-                                    .iter()
-                                    .map(|b| b.count_ones() as usize)
-                                    .sum())
-                            }
-                            BitRangeUnit::Bit => {
-                                let start_byte = usize::try_from(range_start >> 3)
-                                    .expect("non-negative bit range start byte");
-                                let end_byte = usize::try_from(range_end >> 3)
-                                    .expect("non-negative bit range end byte");
-                                let mut count: usize = v[start_byte..=end_byte]
-                                    .iter()
-                                    .map(|b| b.count_ones() as usize)
-                                    .sum();
-
-                                let first_byte_neg_mask =
-                                    (!((1_u16 << (8 - ((range_start & 7) as u32))) - 1) & 0xFF)
-                                        as u8;
-                                let last_byte_neg_mask =
-                                    ((1_u16 << (7 - ((range_end & 7) as u32))) - 1) as u8;
-                                if first_byte_neg_mask != 0 || last_byte_neg_mask != 0 {
-                                    let masked_edges = [
-                                        v[start_byte] & first_byte_neg_mask,
-                                        v[end_byte] & last_byte_neg_mask,
-                                    ];
-                                    count -= masked_edges
-                                        .iter()
-                                        .map(|b| b.count_ones() as usize)
-                                        .sum::<usize>();
-                                }
-                                Ok(count)
-                            }
-                        }
+                match unit {
+                    BitRangeUnit::Byte => {
+                        let start_idx =
+                            usize::try_from(range_start).expect("non-negative byte range start");
+                        let end_idx =
+                            usize::try_from(range_end).expect("non-negative byte range end");
+                        let end_idx_excl = end_idx + 1;
+                        Ok(Self::popcount_bytes(&v[start_idx..end_idx_excl]))
                     }
-                    _ => Err(StoreError::WrongType),
+                    BitRangeUnit::Bit => {
+                        let start_byte = usize::try_from(range_start >> 3)
+                            .expect("non-negative bit range start byte");
+                        let end_byte = usize::try_from(range_end >> 3)
+                            .expect("non-negative bit range end byte");
+                        let mut count: usize = Self::popcount_bytes(&v[start_byte..=end_byte]);
+
+                        let first_byte_neg_mask =
+                            (!((1_u16 << (8 - ((range_start & 7) as u32))) - 1) & 0xFF) as u8;
+                        let last_byte_neg_mask =
+                            ((1_u16 << (7 - ((range_end & 7) as u32))) - 1) as u8;
+                        if first_byte_neg_mask != 0 || last_byte_neg_mask != 0 {
+                            let masked_edges = [
+                                v[start_byte] & first_byte_neg_mask,
+                                v[end_byte] & last_byte_neg_mask,
+                            ];
+                            count -= masked_edges
+                                .iter()
+                                .map(|b| b.count_ones() as usize)
+                                .sum::<usize>();
+                        }
+                        Ok(count)
+                    }
                 }
             }
             None => Ok(0),
@@ -3627,14 +5041,10 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                let is_string = matches!(&entry.value, Value::String(_));
-                if is_string {
+                if entry.value.is_string_like() {
                     entry.touch(now_ms);
                 }
-                match &entry.value {
-                    Value::String(v) => v.as_slice(),
-                    _ => return Err(StoreError::WrongType),
-                }
+                entry.value.string_bytes().ok_or(StoreError::WrongType)?
             }
             None => return if bit { Ok(-1) } else { Ok(0) },
         };
@@ -3689,41 +5099,26 @@ impl Store {
         let first_keep_mask: u8 = 0xFFu8 >> s_bit_in_byte;
         let last_keep_mask: u8 = 0xFFu8 << (7 - e_bit_in_byte);
 
-        for (byte_offset, &raw) in bytes.iter().enumerate().take(e_byte + 1).skip(s_byte) {
-            let first_byte = byte_offset == s_byte;
-            let last_byte = byte_offset == e_byte;
-
-            // Apply masks per direction. Looking for 1: zero the
-            // out-of-range bits so they're skipped (`& keep_mask`).
-            // Looking for 0: set the out-of-range bits to 1 so they
-            // can't trip the search (`| !keep_mask`).
-            let masked = if bit {
-                let mut m = raw;
-                if first_byte {
-                    m &= first_keep_mask;
-                }
-                if last_byte {
-                    m &= last_keep_mask;
-                }
-                m
-            } else {
-                let mut m = raw;
-                if first_byte {
-                    m |= !first_keep_mask;
-                }
-                if last_byte {
-                    m |= !last_keep_mask;
-                }
-                m
-            };
-
-            if bit && masked != 0 {
-                let bit_in_byte = masked.leading_zeros() as usize;
-                return Ok((byte_offset * 8 + bit_in_byte) as i64);
+        if s_byte == e_byte {
+            let keep_mask = first_keep_mask & last_keep_mask;
+            if let Some(bit_in_byte) = Self::bitpos_masked_byte(bytes[s_byte], bit, keep_mask) {
+                return Ok((s_byte * 8 + bit_in_byte) as i64);
             }
-            if !bit && masked != 0xFF {
-                let bit_in_byte = (!masked).leading_zeros() as usize;
-                return Ok((byte_offset * 8 + bit_in_byte) as i64);
+        } else {
+            if let Some(bit_in_byte) = Self::bitpos_masked_byte(bytes[s_byte], bit, first_keep_mask)
+            {
+                return Ok((s_byte * 8 + bit_in_byte) as i64);
+            }
+            let interior_start = s_byte + 1;
+            if interior_start < e_byte
+                && let Some(pos) =
+                    Self::bitpos_full_bytes(&bytes[interior_start..e_byte], bit, interior_start)
+            {
+                return Ok(pos);
+            }
+            if let Some(bit_in_byte) = Self::bitpos_masked_byte(bytes[e_byte], bit, last_keep_mask)
+            {
+                return Ok((e_byte * 8 + bit_in_byte) as i64);
             }
         }
 
@@ -3754,6 +5149,7 @@ impl Store {
         self.with_mutated_entry(key, |entry| {
             entry.expires_at_ms = None;
         });
+        self.volatile_keys.remove(key);
         self.expires_count = self.expires_count.saturating_sub(1);
         let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
         if db < self.database_count {
@@ -3771,6 +5167,7 @@ impl Store {
         let entry = self.entries.get(key)?;
         Some(match &entry.value {
             Value::String(_) => ValueType::String,
+            Value::Integer(_) => ValueType::String,
             Value::Hash(_) => ValueType::Hash,
             Value::List(_) => ValueType::List,
             Value::Set(_) => ValueType::Set,
@@ -3816,6 +5213,7 @@ impl Store {
                     "raw"
                 }
             }
+            Value::Integer(_) => "int",
             Value::Hash(m) => {
                 // (frankenredis-yp503) Sticky hashtable encoding: once a
                 // hash crosses the listpack threshold, vendored keeps it
@@ -3924,21 +5322,25 @@ impl Store {
             return None;
         }
         let entry = self.entries.get(key)?;
-        let Value::String(v) = &entry.value else {
-            return Some(1);
-        };
         if entry.force_raw_encoding || entry.force_string_encoding {
             return Some(1);
         }
-        let Ok(s) = std::str::from_utf8(v) else {
-            return Some(1);
+        let n = match &entry.value {
+            Value::Integer(value) => *value,
+            Value::String(v) => {
+                let Ok(s) = std::str::from_utf8(v) else {
+                    return Some(1);
+                };
+                let Ok(n) = s.parse::<i64>() else {
+                    return Some(1);
+                };
+                if n.to_string() != s {
+                    return Some(1);
+                }
+                n
+            }
+            _ => return Some(1),
         };
-        let Ok(n) = s.parse::<i64>() else {
-            return Some(1);
-        };
-        if n.to_string() != s {
-            return Some(1);
-        }
         const OBJ_SHARED_INTEGERS: i64 = 10000;
         if !(0..OBJ_SHARED_INTEGERS).contains(&n) {
             return Some(1);
@@ -4206,6 +5608,21 @@ impl Store {
         key: &[u8],
         mutate: impl FnOnce(&mut Entry) -> R,
     ) -> Option<R> {
+        // (frankenredis-8x1i9) When the running digest is already stale,
+        // `state_digest()` recomputes it from a full scan, so `update_digest_hashes`
+        // discards the incremental before/after entry hashes. Computing them is
+        // O(value) FNV over the WHOLE value (plus an O(n log n) member sort for
+        // sets) — pure waste in the common runtime state where some earlier write
+        // already left the digest stale. Skip the hashing; `running_digest` and
+        // `digest_stale` are unchanged, so DEBUG DIGEST output is byte-identical.
+        if self.digest_stale {
+            let entry = self.entries.get_mut(key)?;
+            let result = mutate(entry);
+            // Preserve the (unread) mutation counter exactly as the discarded
+            // update_digest_hashes(Some,Some) path would have.
+            self.bump_digest_mutations();
+            return Some(result);
+        }
         let old_hash = self.current_entry_digest(key)?;
         let result = {
             let entry = self
@@ -4228,16 +5645,12 @@ impl Store {
         let db = decode_db_key(&key).map(|(db, _)| db).unwrap_or(0);
         let is_new_key = !self.entries.contains_key(&key);
         let new_is_stream = matches!(&entry.value, Value::Stream(_));
-        let old_digest = self
-            .entries
-            .get(&key)
-            .map(|existing| Self::entry_state_digest(&key, existing));
-
         if let Some(old_entry) = self.entries.get(&key) {
             entry.modification_count = old_entry.modification_count.wrapping_add(1);
         }
 
-        if entry.expires_at_ms.is_some() {
+        let new_has_expiry = entry.expires_at_ms.is_some();
+        if new_has_expiry {
             self.expires_count = self.expires_count.saturating_add(1);
             if db < self.database_count {
                 self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
@@ -4246,7 +5659,17 @@ impl Store {
         if is_new_key {
             self.ordered_keys.insert(key.clone());
         }
-        if let Some(old) = self.entries.insert(key.clone(), entry) {
+        // Keep the volatile-key sampling set in sync: the stored key is volatile
+        // iff the entry replacing it carries a TTL (an overwrite that drops the
+        // TTL must drop it from the set too). (frankenredis-yvg7h)
+        if new_has_expiry {
+            self.volatile_keys.insert(key.clone());
+        } else {
+            self.volatile_keys.remove(&key);
+        }
+        let old_entry = self.entries.insert(key.clone(), entry);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        if let Some(old) = old_entry {
             if matches!(&old.value, Value::Stream(_)) && !new_is_stream {
                 self.stream_groups.remove(&key);
                 self.stream_last_ids.remove(&key);
@@ -4259,21 +5682,11 @@ impl Store {
                     self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
                 }
             }
-            let new_digest = self
-                .entries
-                .get(&key)
-                .map(|inserted| Self::entry_state_digest(&key, inserted));
-            self.update_digest_hashes(old_digest, new_digest);
             Some(old)
         } else {
             if db < self.database_count {
                 self.db_key_counts[db] = self.db_key_counts[db].saturating_add(1);
             }
-            let new_digest = self
-                .entries
-                .get(&key)
-                .map(|inserted| Self::entry_state_digest(&key, inserted));
-            self.update_digest_hashes(None, new_digest);
             None
         }
     }
@@ -4281,6 +5694,7 @@ impl Store {
     fn internal_entries_remove(&mut self, key: &[u8]) -> Option<Entry> {
         if let Some(entry) = self.entries.remove(key) {
             self.ordered_keys.remove(key);
+            self.volatile_keys.remove(key);
             let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
             if db < self.database_count {
                 self.db_key_counts[db] = self.db_key_counts[db].saturating_sub(1);
@@ -4291,7 +5705,14 @@ impl Store {
                     self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
                 }
             }
-            self.update_digest_hashes(Some(Self::entry_state_digest(key, &entry)), None);
+            // (frankenredis-8x1i9) Skip the O(value) removed-entry hash when the
+            // digest is already stale — update_digest_hashes would discard it and
+            // DEBUG DIGEST recomputes via full scan. Preserve the mutation count.
+            if self.digest_stale {
+                self.bump_digest_mutations();
+            } else {
+                self.update_digest_hashes(Some(Self::entry_state_digest(key, &entry)), None);
+            }
             // Whole-key removal drops any per-field hash TTL entries so the
             // field_expires map doesn't accumulate orphan rows.
             // (br-frankenredis-b8ut)
@@ -4571,27 +5992,35 @@ impl Store {
         start_cursor: Option<Vec<u8>>,
         sample_limit: usize,
     ) -> ActiveExpireCycleResult {
-        if sample_limit == 0 || self.entries.is_empty() {
+        // Sample only volatile (TTL-bearing) keys, mirroring upstream's
+        // activeExpireCycle which scans `db->expires` rather than the whole
+        // keyspace. With no volatile keys there is nothing to reap, so the
+        // cycle is O(1) instead of sampling persistent keys in vain.
+        // (frankenredis-yvg7h)
+        if sample_limit == 0 || self.volatile_keys.is_empty() {
             return ActiveExpireCycleResult {
                 sampled_keys: 0,
                 evicted_keys: 0,
                 next_cursor: None,
+                evicted_db_keys: Vec::new(),
             };
         }
 
+        let volatile_key_count = self.volatile_keys.len();
         let keys_to_check: Vec<Vec<u8>> = match start_cursor {
             Some(ref k) => {
-                let mut it = self.ordered_keys.range(k.clone()..).cloned();
+                let mut it = self.volatile_keys.range(k.clone()..).cloned();
                 let mut collected: Vec<Vec<u8>> = it.by_ref().take(sample_limit).collect();
                 if collected.len() < sample_limit {
-                    // Wrap around
-                    let remaining = sample_limit - collected.len();
-                    collected.extend(self.ordered_keys.iter().take(remaining).cloned());
+                    // Wrap around without sampling any volatile key twice.
+                    let remaining_unique_keys = volatile_key_count.saturating_sub(collected.len());
+                    let remaining = (sample_limit - collected.len()).min(remaining_unique_keys);
+                    collected.extend(self.volatile_keys.iter().take(remaining).cloned());
                 }
                 collected
             }
             None => self
-                .ordered_keys
+                .volatile_keys
                 .iter()
                 .take(sample_limit)
                 .cloned()
@@ -4599,10 +6028,11 @@ impl Store {
         };
 
         let mut evicted_keys = 0usize;
+        let mut evicted_db_keys: Vec<Vec<u8>> = Vec::new();
         for key in &keys_to_check {
             let should_evict = evaluate_expiry(
                 now_ms,
-                self.entries.get(key).and_then(|entry| entry.expires_at_ms),
+                self.entries.get(key).and_then(|entry| entry.expiry_ms()),
             )
             .should_evict;
             if should_evict {
@@ -4617,20 +6047,28 @@ impl Store {
                 self.stream_last_ids.remove(key.as_slice());
                 evicted_keys = evicted_keys.saturating_add(1);
                 self.stat_expired_keys = self.stat_expired_keys.saturating_add(1);
+                // (frankenredis-wqrb6) Record the db-encoded key so the runtime
+                // can propagate the expiry deletion to replicas + AOF.
+                evicted_db_keys.push(key.clone());
             }
         }
 
-        let next_cursor = keys_to_check.last().and_then(|last| {
-            self.ordered_keys
-                .range((Excluded(last.clone()), Unbounded))
-                .next()
-                .cloned()
-        });
+        let next_cursor = if keys_to_check.len() >= volatile_key_count {
+            None
+        } else {
+            keys_to_check.last().and_then(|last| {
+                self.volatile_keys
+                    .range((Excluded(last.clone()), Unbounded))
+                    .next()
+                    .cloned()
+            })
+        };
 
         ActiveExpireCycleResult {
             sampled_keys: keys_to_check.len(),
             evicted_keys,
             next_cursor,
+            evicted_db_keys,
         }
     }
 
@@ -4646,6 +6084,7 @@ impl Store {
         // similarly survived as orphan TTLs without their parent
         // hashes, breaking HTTL/HEXPIRETIME on subsequent re-creates.
         self.ordered_keys.clear();
+        self.volatile_keys.clear();
         self.hash_field_expires.clear();
         self.running_digest = 0;
         self.digest_stale = false;
@@ -4968,26 +6407,31 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(IndexMap::new()), now_ms);
+        self.internal_entry(key.to_vec(), Value::Hash(Box::default()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
-        let result = self
-            .with_mutated_entry(key, |entry| {
-                if should_bump_lfu {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+        let result = {
+            let entry = self.entries.get_mut(key).expect("hash entry was ensured");
+            if should_bump_lfu {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+            }
+            match &mut entry.value {
+                Value::Hash(m) => {
+                    let is_new = !m.contains_key(&field);
+                    m.insert(field, value);
+                    entry.touch_write(now_ms);
+                    // (frankenredis-yp503) Lock the encoding into hashtable
+                    // once the hash crosses either listpack threshold.
+                    Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+                    Self::mark_digest_stale_fields(
+                        &mut self.digest_stale,
+                        &mut self.digest_mutations,
+                    );
+                    Ok(is_new)
                 }
-                let Value::Hash(m) = &mut entry.value else {
-                    return Err(StoreError::WrongType);
-                };
-                let is_new = !m.contains_key(&field);
-                m.insert(field, value);
-                entry.touch_write(now_ms);
-                // (frankenredis-yp503) Lock the encoding into hashtable
-                // once the hash crosses either listpack threshold.
-                Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
-                Ok(is_new)
-            })
-            .expect("hash entry was ensured");
+                _ => Err(StoreError::WrongType),
+            }
+        };
         self.dirty = self.dirty.saturating_add(1);
         result
     }
@@ -5020,7 +6464,7 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(m.get(field).cloned()),
+                    Value::Hash(m) => Ok(m.get(field).map(<[u8]>::to_vec)),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -5047,7 +6491,7 @@ impl Store {
             };
             let mut removed = 0_u64;
             for field in fields {
-                if m.shift_remove(*field).is_some() {
+                if m.shift_remove(field).is_some() {
                     removed += 1;
                 }
             }
@@ -5158,7 +6602,7 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+                    Value::Hash(m) => Ok(m.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect()),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -5186,7 +6630,7 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(m.keys().cloned().collect()),
+                    Value::Hash(m) => Ok(m.keys().map(<[u8]>::to_vec).collect()),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -5214,7 +6658,7 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(m.values().cloned().collect()),
+                    Value::Hash(m) => Ok(m.values().map(<[u8]>::to_vec).collect()),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -5249,7 +6693,10 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(fields.iter().map(|f| m.get(*f).cloned()).collect()),
+                    Value::Hash(m) => Ok(fields
+                        .iter()
+                        .map(|f| m.get(f).map(<[u8]>::to_vec))
+                        .collect()),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -5270,7 +6717,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(IndexMap::new()), now_ms);
+        self.internal_entry(key.to_vec(), Value::Hash(Box::default()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self
@@ -5329,7 +6776,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(IndexMap::new()), now_ms);
+        self.internal_entry(key.to_vec(), Value::Hash(Box::default()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let result = self
@@ -5340,8 +6787,8 @@ impl Store {
                 let Value::Hash(m) = &mut entry.value else {
                     return Err(StoreError::WrongType);
                 };
-                if let indexmap::map::Entry::Vacant(slot) = m.entry(field) {
-                    slot.insert(value);
+                if !m.contains_key(&field) {
+                    m.insert(field, value);
                     entry.touch_write(now_ms);
                     // (frankenredis-yp503) Lock hashtable encoding if
                     // threshold crossed.
@@ -5378,7 +6825,7 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(m.get(field).map_or(0, Vec::len)),
+                    Value::Hash(m) => Ok(m.get(field).map_or(0, <[u8]>::len)),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -5412,7 +6859,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(IndexMap::new()), now_ms);
+        self.internal_entry(key.to_vec(), Value::Hash(Box::default()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self
@@ -5475,7 +6922,7 @@ impl Store {
                             return Ok(None);
                         }
                         let idx = (rand_val as usize) % m.len();
-                        Ok(m.keys().nth(idx).cloned())
+                        Ok(m.keys().nth(idx).map(<[u8]>::to_vec))
                     }
                     _ => Err(StoreError::WrongType),
                 }
@@ -5510,8 +6957,11 @@ impl Store {
         } else {
             0
         };
-        let mut result_type = None;
-        if let Some(entry) = self.entries.get_mut(key) {
+        // (frankenredis-rndcnt) Apply LFU/touch + read the cardinality without
+        // cloning every field; draw the sample indices with the same next_rand()
+        // sequence as before, then clone only the chosen fields via O(1)
+        // IndexMap::get_index — O(count) clones instead of O(n).
+        let len = if let Some(entry) = self.entries.get_mut(key) {
             if lfu_tracking_enabled {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
             }
@@ -5521,52 +6971,53 @@ impl Store {
                     if m.is_empty() {
                         return Ok(Vec::new());
                     }
-                    let fields: Vec<(Vec<u8>, Vec<u8>)> =
-                        m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                    result_type = Some(fields);
+                    m.len()
                 }
                 _ => return Err(StoreError::WrongType),
             }
-        }
-
-        let fields = match result_type {
-            Some(f) if !f.is_empty() => f,
-            _ => return Ok(Vec::new()),
+        } else {
+            return Ok(Vec::new());
         };
 
-        if count >= 0 {
-            let n = (count as usize).min(fields.len());
-            // Use a more memory-efficient approach for small n
-            if n < fields.len() / 2 && n < 1024 {
-                let mut results = Vec::with_capacity(n);
+        let indices: Vec<usize> = if count >= 0 {
+            let n = (count as usize).min(len);
+            if n < len / 2 && n < 1024 {
+                let mut idxs = Vec::with_capacity(n);
                 let mut picked = HashSet::with_capacity(n);
-                while results.len() < n {
-                    let idx = (self.next_rand() as usize) % fields.len();
+                while idxs.len() < n {
+                    let idx = (self.next_rand() as usize) % len;
                     if picked.insert(idx) {
-                        results.push(fields[idx].clone());
+                        idxs.push(idx);
                     }
                 }
-                Ok(results)
+                idxs
             } else {
-                let mut indices: Vec<usize> = (0..fields.len()).collect();
+                let mut order: Vec<usize> = (0..len).collect();
                 for i in 0..n {
-                    let j = i + (self.next_rand() as usize % (fields.len() - i));
-                    indices.swap(i, j);
+                    let j = i + (self.next_rand() as usize % (len - i));
+                    order.swap(i, j);
                 }
-                Ok(indices[..n]
-                    .iter()
-                    .map(|&idx| fields[idx].clone())
-                    .collect())
+                order.truncate(n);
+                order
             }
         } else {
             let abs_count = count.unsigned_abs() as usize;
-            // Cap initial allocation to avoid DoS, but allow growth.
-            let mut result = Vec::with_capacity(abs_count.min(1024));
+            let mut idxs = Vec::with_capacity(abs_count.min(1024));
             for _ in 0..abs_count {
-                let idx = (self.next_rand() as usize) % fields.len();
-                result.push(fields[idx].clone());
+                idxs.push((self.next_rand() as usize) % len);
             }
-            Ok(result)
+            idxs
+        };
+
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Hash(m) => Ok(indices
+                    .iter()
+                    .filter_map(|&idx| m.get_index(idx).map(|(k, v)| (k.to_vec(), v.to_vec())))
+                    .collect()),
+                _ => Ok(Vec::new()),
+            },
+            None => Ok(Vec::new()),
         }
     }
 
@@ -5617,7 +7068,7 @@ impl Store {
                 let len = l.len();
                 self.internal_entries_insert(
                     key.to_vec(),
-                    Entry::new(Value::List(l), None, now_ms),
+                    Entry::new(Value::List(Box::new(l.into())), None, now_ms),
                 );
                 self.dirty = self.dirty.saturating_add(values.len() as u64);
                 Ok(len)
@@ -5670,7 +7121,7 @@ impl Store {
                 let len = l.len();
                 self.internal_entries_insert(
                     key.to_vec(),
-                    Entry::new(Value::List(l), None, now_ms),
+                    Entry::new(Value::List(Box::new(l.into())), None, now_ms),
                 );
                 self.dirty = self.dirty.saturating_add(values.len() as u64);
                 Ok(len)
@@ -5927,8 +7378,12 @@ impl Store {
                         }
                         let s = s as usize;
                         let e = e as usize;
-                        let result: Vec<Vec<u8>> =
-                            l.iter().skip(s).take(e - s + 1).cloned().collect();
+                        let result: Vec<Vec<u8>> = l
+                            .iter()
+                            .skip(s)
+                            .take(e - s + 1)
+                            .map(<[u8]>::to_vec)
+                            .collect();
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -5968,7 +7423,7 @@ impl Store {
                             return Ok(None);
                         }
                         let idx = normalize_index(index, len) as usize;
-                        let result = l.get(idx).cloned();
+                        let result = l.get(idx).map(<[u8]>::to_vec);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -6007,7 +7462,7 @@ impl Store {
                             return Err(StoreError::IndexOutOfRange);
                         }
                         let idx = normalize_index(index, len) as usize;
-                        l[idx] = value;
+                        l.set(idx, value);
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
@@ -6047,7 +7502,7 @@ impl Store {
                 }
                 match &entry.value {
                     Value::List(l) => {
-                        let result = l.iter().position(|v| v.as_slice() == element);
+                        let result = l.iter().position(|v| v == element);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -6102,7 +7557,7 @@ impl Store {
                         if rank >= 0 {
                             // Forward scan
                             for (i, item) in l.iter().enumerate().take(limit) {
-                                if item.as_slice() == element {
+                                if item == element {
                                     matched += 1;
                                     if matched > skip {
                                         results.push(i);
@@ -6113,15 +7568,12 @@ impl Store {
                                 }
                             }
                         } else {
-                            // Reverse scan
-                            for (i, item) in l
-                                .iter()
-                                .enumerate()
-                                .take(len)
-                                .skip(len.saturating_sub(limit))
-                                .rev()
-                            {
-                                if item.as_slice() == element {
+                            // Reverse scan over indices [len-limit, len) descending.
+                            // (Indexed rather than iter().rev() — the packed list
+                            // iterator is forward-only.)
+                            for i in (len.saturating_sub(limit)..len).rev() {
+                                let item = l.get(i).expect("index in range");
+                                if item == element {
                                     matched += 1;
                                     if matched > skip {
                                         results.push(i);
@@ -6165,7 +7617,7 @@ impl Store {
                 }
                 match &mut entry.value {
                     Value::List(l) => {
-                        if let Some(pos) = l.iter().position(|v| v.as_slice() == pivot) {
+                        if let Some(pos) = l.iter().position(|v| v == pivot) {
                             l.insert(pos, value);
                             let len = l.len();
                             Self::mark_digest_stale_fields(
@@ -6209,7 +7661,7 @@ impl Store {
                 }
                 match &mut entry.value {
                     Value::List(l) => {
-                        if let Some(pos) = l.iter().position(|v| v.as_slice() == pivot) {
+                        if let Some(pos) = l.iter().position(|v| v == pivot) {
                             l.insert(pos + 1, value);
                             let len = l.len();
                             Self::mark_digest_stale_fields(
@@ -6257,7 +7709,7 @@ impl Store {
                         if count > 0 {
                             let limit = count as u64;
                             l.retain(|v| {
-                                if removed < limit && v.as_slice() == value {
+                                if removed < limit && v == value {
                                     removed += 1;
                                     false
                                 } else {
@@ -6266,11 +7718,11 @@ impl Store {
                             });
                         } else if count < 0 {
                             let limit = count.unsigned_abs();
-                            let total = l.iter().filter(|v| v.as_slice() == value).count() as u64;
+                            let total = l.iter().filter(|v| *v == value).count() as u64;
                             let skip = total.saturating_sub(limit);
                             let mut seen = 0_u64;
                             l.retain(|v| {
-                                if v.as_slice() == value {
+                                if v == value {
                                     seen += 1;
                                     if seen > skip {
                                         removed += 1;
@@ -6281,7 +7733,7 @@ impl Store {
                             });
                         } else {
                             let old_len = l.len();
-                            l.retain(|v| v.as_slice() != value);
+                            l.retain(|v| v != value);
                             removed = (old_len - l.len()) as u64;
                         }
                         if removed > 0 {
@@ -6357,7 +7809,7 @@ impl Store {
         if source == destination
             && let Some(entry) = self.entries.get(source)
         {
-            source_ttl = entry.expires_at_ms;
+            source_ttl = entry.expiry_ms();
         }
 
         // Clean up empty source.
@@ -6388,7 +7840,7 @@ impl Store {
                 l.push_front(val.clone());
                 self.internal_entries_insert(
                     destination.to_vec(),
-                    Entry::new(Value::List(l), source_ttl, now_ms),
+                    Entry::new(Value::List(Box::new(l.into())), source_ttl, now_ms),
                 );
             }
         }
@@ -6484,13 +7936,21 @@ impl Store {
                         for v in values {
                             l.push_front(v.clone());
                         }
+                        let len = l.len();
                         if !values.is_empty() {
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
+                            // (frankenredis-lpushx-dirty) LPUSHX mutates the
+                            // list, so it must update the write time and bump
+                            // dirty — otherwise the push is invisible to
+                            // RDB/AOF persistence, replication, and keyspace
+                            // notifications (all gate on dirty changing).
+                            entry.touch_write(now_ms);
+                            self.dirty = self.dirty.saturating_add(values.len() as u64);
                         }
-                        Ok(l.len())
+                        Ok(len)
                     }
                     _ => Err(StoreError::WrongType),
                 }
@@ -6524,13 +7984,21 @@ impl Store {
                         for v in values {
                             l.push_back(v.clone());
                         }
+                        let len = l.len();
                         if !values.is_empty() {
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
                             );
+                            // (frankenredis-lpushx-dirty) RPUSHX mutates the
+                            // list, so it must update the write time and bump
+                            // dirty — otherwise the push is invisible to
+                            // RDB/AOF persistence, replication, and keyspace
+                            // notifications (all gate on dirty changing).
+                            entry.touch_write(now_ms);
+                            self.dirty = self.dirty.saturating_add(values.len() as u64);
                         }
-                        Ok(l.len())
+                        Ok(len)
                     }
                     _ => Err(StoreError::WrongType),
                 }
@@ -6609,7 +8077,7 @@ impl Store {
         if source == destination
             && let Some(entry) = self.entries.get(source)
         {
-            source_ttl = entry.expires_at_ms;
+            source_ttl = entry.expiry_ms();
         }
 
         // Clean up empty source.
@@ -6657,7 +8125,7 @@ impl Store {
                 }
                 self.internal_entries_insert(
                     destination.to_vec(),
-                    Entry::new(Value::List(l), source_ttl, now_ms),
+                    Entry::new(Value::List(Box::new(l.into())), source_ttl, now_ms),
                 );
             }
         }
@@ -6701,7 +8169,7 @@ impl Store {
                             && Self::set_fits_intset(s, max_intset_entries);
                         let mut added = 0_u64;
                         for m in members {
-                            if s.insert(m.clone()) {
+                            if s.insert(m.clone(), max_intset_entries) {
                                 added += 1;
                             }
                         }
@@ -6713,7 +8181,7 @@ impl Store {
                             // hashtable path in refresh_set_encoding_flags.
                             let intset_int_overflow = was_intset_encoded
                                 && s.len() > max_intset_entries
-                                && s.iter().all(|m| parse_i64(m).is_ok());
+                                && s.iter().all(|m| parse_i64(m.as_ref()).is_ok());
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
@@ -6736,7 +8204,7 @@ impl Store {
                 }
             }
             None => {
-                let mut s = IndexSet::new();
+                let mut s = GenericSet::default();
                 let mut added = 0_u64;
                 for m in members {
                     if s.insert(m.clone()) {
@@ -6771,7 +8239,7 @@ impl Store {
                     Value::Set(s) => {
                         let mut removed = 0_u64;
                         for m in members {
-                            if s.shift_remove(*m) {
+                            if s.shift_remove(m) {
                                 removed += 1;
                             }
                         }
@@ -6810,7 +8278,7 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
-                    let members: Vec<Vec<u8>> = s.iter().cloned().collect();
+                    let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
@@ -6989,7 +8457,7 @@ impl Store {
             match self.entries.get_mut(*key) {
                 Some(entry) => {
                     if let Value::Set(s) = &entry.value {
-                        result.retain(|m| s.contains(m));
+                        result.retain_intersect(s);
                         if lfu_tracking_enabled {
                             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                         }
@@ -7001,7 +8469,7 @@ impl Store {
                 }
             }
         }
-        let mut v: Vec<Vec<u8>> = result.into_iter().collect();
+        let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
         v.sort();
         Ok(v)
     }
@@ -7114,7 +8582,7 @@ impl Store {
             match self.entries.get_mut(*key) {
                 Some(entry) => match &entry.value {
                     Value::Set(s) => {
-                        result.retain(|m| s.contains(m));
+                        result.retain_intersect(s);
                         if lfu_tracking_enabled {
                             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                         }
@@ -7182,6 +8650,7 @@ impl Store {
             },
             None => return Ok(Vec::new()),
         };
+        let max_intset_entries = self.set_max_intset_entries;
 
         for (i, key) in keys.iter().enumerate() {
             if i == base_idx {
@@ -7190,11 +8659,11 @@ impl Store {
             if let Some(entry) = self.entries.get(*key)
                 && let Value::Set(s) = &entry.value
             {
-                result.extend(s.iter().cloned());
+                result.union_with(s, max_intset_entries);
             }
         }
 
-        let mut v: Vec<Vec<u8>> = result.into_iter().collect();
+        let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
         v.sort();
         Ok(v)
     }
@@ -7258,7 +8727,7 @@ impl Store {
                 if let Some(entry) = self.entries.get_mut(*key) {
                     match &entry.value {
                         Value::Set(s) => {
-                            result.retain(|m| !s.contains(m));
+                            result.retain_diff(s);
                             if lfu_tracking_enabled {
                                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                             }
@@ -7269,7 +8738,7 @@ impl Store {
                 }
             }
         }
-        let mut v: Vec<Vec<u8>> = result.into_iter().collect();
+        let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
         v.sort();
         Ok(v)
     }
@@ -7299,7 +8768,7 @@ impl Store {
                             return Ok(None);
                         }
                         let idx = (rand_val as usize) % s.len();
-                        let member = s.iter().nth(idx).cloned();
+                        let member = s.iter().nth(idx).map(|m| m.into_owned());
                         if let Some(ref m) = member {
                             s.shift_remove(m);
                         }
@@ -7327,6 +8796,14 @@ impl Store {
             self.internal_entries_remove(key);
             self.stream_groups.remove(key);
             self.stream_last_ids.remove(key);
+        }
+        // (frankenredis-bbutt) A successful pop mutates the keyspace and must
+        // bump the dirty counter — otherwise SPOP is invisible to RDB/AOF
+        // persistence, replication, and keyspace notifications (all of which
+        // gate on dirty changing). spop_count loops this, so it inherits the
+        // per-member increment, matching upstream server.dirty += popped.
+        if member.is_some() {
+            self.dirty = self.dirty.saturating_add(1);
         }
         Ok(member)
     }
@@ -7368,7 +8845,7 @@ impl Store {
                         None
                     } else {
                         let idx = (rand_val as usize) % s.len();
-                        s.iter().nth(idx).cloned()
+                        s.iter().nth(idx).map(|m| m.into_owned())
                     };
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
@@ -7402,59 +8879,70 @@ impl Store {
         } else {
             0
         };
-        let mut result_data = None;
-        if let Some(entry) = self.entries.get_mut(key) {
-            match &entry.value {
+        // (frankenredis-rndcnt) Don't materialise every member to sample a few.
+        // Find the cardinality + apply the LFU/touch bookkeeping, then draw the
+        // sample indices with the SAME next_rand() sequence as before, and finally
+        // clone only the chosen members via O(1) get_index. For a small count over
+        // a large set this is O(count) clones instead of O(n).
+        let len = match self.entries.get_mut(key) {
+            Some(entry) => match &entry.value {
                 Value::Set(s) => {
-                    let members: Vec<Vec<u8>> = s.iter().cloned().collect();
+                    let len = s.len();
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
                     }
                     entry.touch(now_ms);
-                    result_data = Some(members);
+                    len
                 }
                 _ => return Err(StoreError::WrongType),
-            }
+            },
+            None => return Ok(Vec::new()),
+        };
+        if len == 0 {
+            return Ok(Vec::new());
         }
 
-        let members = match result_data {
-            Some(m) if !m.is_empty() => m,
-            _ => return Ok(Vec::new()),
-        };
-
-        if count >= 0 {
-            let n = (count as usize).min(members.len());
-            // Use a more memory-efficient approach for small n
-            if n < members.len() / 2 && n < 1024 {
-                let mut results = Vec::with_capacity(n);
+        let indices: Vec<usize> = if count >= 0 {
+            let n = (count as usize).min(len);
+            if n < len / 2 && n < 1024 {
+                // Rejection sampling for a small distinct subset.
+                let mut idxs = Vec::with_capacity(n);
                 let mut picked = HashSet::with_capacity(n);
-                while results.len() < n {
-                    let idx = (self.next_rand() as usize) % members.len();
+                while idxs.len() < n {
+                    let idx = (self.next_rand() as usize) % len;
                     if picked.insert(idx) {
-                        results.push(members[idx].clone());
+                        idxs.push(idx);
                     }
                 }
-                Ok(results)
+                idxs
             } else {
-                let mut indices: Vec<usize> = (0..members.len()).collect();
+                // Partial Fisher-Yates over the index space (cheap usize array).
+                let mut order: Vec<usize> = (0..len).collect();
                 for i in 0..n {
-                    let j = i + (self.next_rand() as usize % (members.len() - i));
-                    indices.swap(i, j);
+                    let j = i + (self.next_rand() as usize % (len - i));
+                    order.swap(i, j);
                 }
-                Ok(indices[..n]
-                    .iter()
-                    .map(|&idx| members[idx].clone())
-                    .collect())
+                order.truncate(n);
+                order
             }
         } else {
             let abs_count = count.unsigned_abs() as usize;
-            // Cap initial allocation to avoid DoS, but allow growth.
-            let mut result = Vec::with_capacity(abs_count.min(1024));
+            let mut idxs = Vec::with_capacity(abs_count.min(1024));
             for _ in 0..abs_count {
-                let idx = (self.next_rand() as usize) % members.len();
-                result.push(members[idx].clone());
+                idxs.push((self.next_rand() as usize) % len);
             }
-            Ok(result)
+            idxs
+        };
+
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Set(s) => Ok(indices
+                    .iter()
+                    .filter_map(|&idx| s.get_index(idx).map(|c| c.into_owned()))
+                    .collect()),
+                _ => Ok(Vec::new()),
+            },
+            None => Ok(Vec::new()),
         }
     }
 
@@ -7550,14 +9038,36 @@ impl Store {
             return Ok(false);
         }
 
+        // (frankenredis-4ayjf) Emit SMOVE's keyspace events here, where the
+        // exact state changes are known — the runtime post-hoc dispatcher
+        // can't see whether the destination gained the member. Upstream
+        // t_set.c::smoveCommand fires "srem" on the source, then "del" if the
+        // source emptied, then "sadd" on the destination ONLY when the member
+        // is newly added (setTypeAdd returned 1). The runtime excludes SMOVE
+        // from its generic keyspace path so these are the only events. These
+        // calls are no-ops when keyspace notifications are disabled.
+        let (src_db, src_logical) = match decode_db_key(source) {
+            Some((db, lk)) => (db, lk.to_vec()),
+            None => (0, source.to_vec()),
+        };
+        self.notify_keyspace_event(NOTIFY_SET, "srem", &src_logical, src_db);
+
         // Clean up empty source
         if source_empty {
             self.internal_entries_remove(source);
             self.stream_groups.remove(source);
             self.stream_last_ids.remove(source);
+            self.notify_keyspace_event(NOTIFY_GENERIC, "del", &src_logical, src_db);
         }
-        // Add to destination
-        self.sadd(destination, &[member.to_vec()], now_ms)?;
+        // Add to destination — "sadd" fires only on a genuinely new member.
+        let added = self.sadd(destination, &[member.to_vec()], now_ms)?;
+        if added > 0 {
+            let (dst_db, dst_logical) = match decode_db_key(destination) {
+                Some((db, lk)) => (db, lk.to_vec()),
+                None => (0, destination.to_vec()),
+            };
+            self.notify_keyspace_event(NOTIFY_SET, "sadd", &dst_logical, dst_db);
+        }
         Ok(true)
     }
 
@@ -7573,7 +9083,7 @@ impl Store {
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
-            let set: IndexSet<Vec<u8>> = result.into_iter().collect();
+            let set: GenericSet = result.into_iter().collect();
             let entry = self.set_entry(set, None, now_ms);
             self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
@@ -7595,7 +9105,7 @@ impl Store {
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
-            let set: IndexSet<Vec<u8>> = result.into_iter().collect();
+            let set: GenericSet = result.into_iter().collect();
             let entry = self.set_entry(set, None, now_ms);
             self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
@@ -7617,7 +9127,7 @@ impl Store {
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
-            let set: IndexSet<Vec<u8>> = result.into_iter().collect();
+            let set: GenericSet = result.into_iter().collect();
             let entry = self.set_entry(set, None, now_ms);
             self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
@@ -7636,6 +9146,46 @@ impl Store {
         members: &[(f64, Vec<u8>)],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        if !self.entries.contains_key(key) {
+            let zset_max_entries = self.zset_max_listpack_entries;
+            let zset_max_value = self.zset_max_listpack_value;
+            let mut latest: HashMap<Vec<u8>, f64, foldhash::quality::RandomState> =
+                HashMap::with_capacity_and_hasher(
+                    members.len(),
+                    foldhash::quality::RandomState::default(),
+                );
+            let mut added = 0_usize;
+            let mut changed = 0_usize;
+            for (score, member) in members {
+                let score = canonicalize_zero_score(*score);
+                match latest.insert(member.clone(), score) {
+                    Some(old_score) => {
+                        if !old_score.total_cmp(&score).is_eq() {
+                            changed += 1;
+                        }
+                    }
+                    None => added += 1,
+                }
+            }
+            if added == 0 {
+                return Ok(0);
+            }
+
+            let zs = SortedSet::from_unique_pairs_with_limits(
+                latest.into_iter().collect(),
+                zset_max_entries,
+                zset_max_value,
+            );
+            let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms);
+            entry.touch_write(now_ms);
+            Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
+            self.internal_entries_insert(key.to_vec(), entry);
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+            self.dirty = self.dirty.saturating_add((added + changed) as u64);
+            return Ok(added);
+        }
+
         self.zadd_with_options(key, members, ZaddOptions::default(), now_ms)
             .map(|(added, _changed)| added)
     }
@@ -7662,24 +9212,26 @@ impl Store {
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
         let (added, changed, is_empty, touched) = {
-            let entry =
-                self.internal_entry(key.to_vec(), Value::SortedSet(SortedSet::new()), now_ms);
+            let entry = self.internal_entry(
+                key.to_vec(),
+                Value::SortedSet(Box::new(SortedSet::new())),
+                now_ms,
+            );
             let Value::SortedSet(zs) = &mut entry.value else {
                 return Err(StoreError::WrongType);
             };
             let mut added = 0_usize;
             let mut changed = 0_usize;
 
-            let mut deduplicated = Vec::with_capacity(members.len());
-            let mut seen = std::collections::HashSet::new();
-            for (score, member) in members.iter().rev() {
-                if seen.insert(member.as_slice()) {
-                    deduplicated.push((score, member));
-                }
-            }
-            deduplicated.reverse();
-
-            for (score, member) in deduplicated {
+            // (frankenredis-zadddedup) Upstream t_zset.c::zaddGenericCommand
+            // processes each (score, member) pair SEQUENTIALLY against the
+            // current set state, so a member that repeats within one ZADD is
+            // evaluated against the score an earlier pair just set. The prior
+            // dedup-keep-last shortcut corrupted both the final score (e.g.
+            // `ZADD k GT 20 a 10 a` must end at 20, not 10; `ZADD k NX 1 a 2 a`
+            // must keep 1, not 2) and the CH/added counts (each successive
+            // change counts). Iterate the pairs verbatim.
+            for (score, member) in members {
                 match zs.get_score(member) {
                     Some(old_score) => {
                         // Existing member
@@ -7697,7 +9249,12 @@ impl Store {
                             let old_canonical = canonicalize_zero_score(old_score);
                             let new_canonical = canonicalize_zero_score(*score);
                             let score_changed = !old_canonical.total_cmp(&new_canonical).is_eq();
-                            zs.insert(member.clone(), *score);
+                            zs.insert_with_limits(
+                                member.clone(),
+                                *score,
+                                zset_max_entries,
+                                zset_max_value,
+                            );
                             if score_changed {
                                 changed += 1;
                             }
@@ -7708,7 +9265,12 @@ impl Store {
                         if opts.xx {
                             continue; // XX: don't add new
                         }
-                        zs.insert(member.clone(), *score);
+                        zs.insert_with_limits(
+                            member.clone(),
+                            *score,
+                            zset_max_entries,
+                            zset_max_value,
+                        );
                         added += 1;
                     }
                 }
@@ -7819,12 +9381,12 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
-                    let result = zs.iter_asc().map(|(m, s)| (m.clone(), *s)).collect();
+                    let result = zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
                     entry.touch(now_ms);
                     Ok(result)
                 }
                 Value::Set(s) => {
-                    let mut members: Vec<_> = s.iter().cloned().collect();
+                    let mut members: Vec<_> = s.iter().map(|m| m.into_owned()).collect();
                     members.sort();
                     let result = members.into_iter().map(|m| (m, 1.0)).collect();
                     entry.touch(now_ms);
@@ -7926,17 +9488,11 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
-                        let Some(score) = zs.get_score(member) else {
-                            return Ok(None);
-                        };
-                        let rank = zs
-                            .iter_asc()
-                            .take_while(|&(m, s)| score_member_lt(*s, m, score, member))
-                            .count();
+                        let rank = zs.rank(member);
                         entry.touch(now_ms);
-                        Ok(Some(rank))
+                        Ok(rank)
                     }
                     _ => Err(StoreError::WrongType),
                 }
@@ -7968,17 +9524,11 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
-                        let Some(score) = zs.get_score(member) else {
-                            return Ok(None);
-                        };
-                        let rank = zs
-                            .iter_desc()
-                            .take_while(|&(m, s)| score_member_lt(score, member, *s, m))
-                            .count();
+                        let rank = zs.rev_rank(member);
                         entry.touch(now_ms);
-                        Ok(Some(rank))
+                        Ok(rank)
                     }
                     _ => Err(StoreError::WrongType),
                 }
@@ -8023,10 +9573,9 @@ impl Store {
                         let e_idx = e.min(len - 1) as usize;
                         let count = e_idx - s_idx + 1;
                         let result: Vec<Vec<u8>> = zs
-                            .iter_asc()
-                            .skip(s_idx)
-                            .take(count)
-                            .map(|(m, _)| m.clone())
+                            .index_slice_asc(s_idx, count)
+                            .into_iter()
+                            .map(|(m, _)| m)
                             .collect();
                         entry.touch(now_ms);
                         Ok(result)
@@ -8074,10 +9623,9 @@ impl Store {
                         let e_idx = e.min(len - 1) as usize;
                         let count = e_idx - s_idx + 1;
                         let result: Vec<Vec<u8>> = zs
-                            .iter_desc()
-                            .skip(s_idx)
-                            .take(count)
-                            .map(|(m, _)| m.clone())
+                            .index_slice_desc(s_idx, count)
+                            .into_iter()
+                            .map(|(m, _)| m)
                             .collect();
                         entry.touch(now_ms);
                         Ok(result)
@@ -8119,20 +9667,7 @@ impl Store {
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        let lower = match min {
-                            ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
-                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
-                        };
-                        let upper = match max {
-                            ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
-                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
-                        };
-
-                        let result: Vec<Vec<u8>> = zs
-                            .ordered
-                            .range((lower, upper))
-                            .filter_map(|(sm, _)| sm.member.as_actual().cloned())
-                            .collect();
+                        let result = zs.score_bound_members(min, max, false);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -8175,24 +9710,59 @@ impl Store {
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        let lower = match min {
-                            ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
-                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
-                        };
-                        let upper = match max {
-                            ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
-                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
-                        };
+                        let result = zs.score_bound_range(min, max, false);
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => Ok(Vec::new()),
+        }
+    }
 
-                        let result: Vec<(Vec<u8>, f64)> = zs
-                            .ordered
-                            .range((lower, upper))
-                            .filter_map(|(sm, _)| {
-                                sm.member
-                                    .as_actual()
-                                    .map(|member| (member.clone(), sm.score))
-                            })
-                            .collect();
+    /// ZRANGEBYSCORE/ZREVRANGEBYSCORE/`ZRANGE … BYSCORE` with the final ordering
+    /// (`rev`) and `LIMIT offset count` pushed DOWN into the range walk, so only
+    /// the requested window is materialised. The previous path collected the
+    /// entire score range into a `Vec`, reversed it, then drained/truncated to
+    /// the window — O(range). This walks the ordered map lazily and `skip/take`s
+    /// the window — O(offset + count). Byte-identical output to
+    /// `zrangebyscore_withscores` + `reverse()` (when rev) + the in-place LIMIT.
+    /// `count == None` means unbounded (LIMIT absent or a negative count).
+    #[allow(clippy::too_many_arguments)]
+    pub fn zrangebyscore_withscores_limited(
+        &mut self,
+        key: &[u8],
+        min: ScoreBound,
+        max: ScoreBound,
+        rev: bool,
+        offset: usize,
+        count: Option<usize>,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
+        if score_bound_value(min) > score_bound_value(max) {
+            return Ok(Vec::new());
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let take = count.unwrap_or(usize::MAX);
+                        let result = zs.score_bound_range_limited(min, max, rev, offset, take);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -8206,12 +9776,22 @@ impl Store {
     /// Create or overwrite a sorted set from member-score pairs.
     pub fn zstore_from_pairs(&mut self, key: Vec<u8>, pairs: Vec<(Vec<u8>, f64)>, now_ms: u64) {
         let mut zs = SortedSet::new();
+        let zset_max_entries = self.zset_max_listpack_entries;
+        let zset_max_value = self.zset_max_listpack_value;
         for (member, score) in pairs {
-            zs.insert(member, score);
+            zs.insert_with_limits(member, score, zset_max_entries, zset_max_value);
         }
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
-        self.internal_entries_insert(key, Entry::new(Value::SortedSet(zs), None, now_ms));
+        self.internal_entries_insert(
+            key,
+            Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
+        );
+        // (frankenredis-bhd3u) Writing the destination set is a keyspace
+        // mutation — bump dirty so ZRANGESTORE is persisted to RDB/AOF,
+        // replicated, and surfaces keyspace notifications (all gate on the
+        // dirty counter changing). Only caller is zrangestore_cmd.
+        self.dirty = self.dirty.saturating_add(1);
     }
 
     /// Count members with scores within the given bounds.
@@ -8251,19 +9831,7 @@ impl Store {
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        let lower = match min {
-                            ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
-                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
-                        };
-                        let upper = match max {
-                            ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
-                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
-                        };
-                        let result = zs
-                            .ordered
-                            .range((lower, upper))
-                            .filter(|(sm, _)| sm.member.as_actual().is_some())
-                            .count();
+                        let result = zs.score_bound_count(min, max);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -8315,8 +9883,11 @@ impl Store {
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
         let (res, is_empty, touched) = {
-            let entry =
-                self.internal_entry(key.to_vec(), Value::SortedSet(SortedSet::new()), now_ms);
+            let entry = self.internal_entry(
+                key.to_vec(),
+                Value::SortedSet(Box::new(SortedSet::new())),
+                now_ms,
+            );
             if lfu_tracking_enabled && key_existed {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
@@ -8337,11 +9908,11 @@ impl Store {
                     if (opts.gt && new_score <= old) || (opts.lt && new_score >= old) {
                         Ok(None)
                     } else {
-                        zs.insert(member, new_score);
+                        zs.insert_with_limits(member, new_score, zset_max_entries, zset_max_value);
                         Ok(Some(new_score))
                     }
                 } else {
-                    zs.insert(member, new_score);
+                    zs.insert_with_limits(member, new_score, zset_max_entries, zset_max_value);
                     Ok(Some(new_score))
                 }
             };
@@ -8480,6 +10051,12 @@ impl Store {
         }
         let is_empty = zs.is_empty();
         if !result.is_empty() {
+            // (frankenredis-zpopcountdirty) Each popped member is a keyspace
+            // mutation: bump dirty by the pop count, mirroring the no-count
+            // zpopmin/zpopmax above and upstream t_zset.c::genericZpopCommand
+            // (server.dirty += result). Without this the count form is invisible
+            // to RDB/AOF persistence, replication, AND keyspace notifications.
+            self.dirty = self.dirty.saturating_add(result.len() as u64);
             if is_empty {
                 self.internal_entries_remove(key);
                 self.stream_groups.remove(key);
@@ -8526,6 +10103,10 @@ impl Store {
         }
         let is_empty = zs.is_empty();
         if !result.is_empty() {
+            // (frankenredis-zpopcountdirty) See zpopmin_count: bump dirty by the
+            // pop count so the count form is visible to persistence/replication/
+            // notifications, matching upstream genericZpopCommand.
+            self.dirty = self.dirty.saturating_add(result.len() as u64);
             if is_empty {
                 self.internal_entries_remove(key);
                 self.stream_groups.remove(key);
@@ -8571,12 +10152,7 @@ impl Store {
                         let s_idx = s.max(0) as usize;
                         let e_idx = e.min(len - 1) as usize;
                         let count = e_idx - s_idx + 1;
-                        let result: Vec<(Vec<u8>, f64)> = zs
-                            .iter_asc()
-                            .skip(s_idx)
-                            .take(count)
-                            .map(|(m, &s)| (m.clone(), s))
-                            .collect();
+                        let result: Vec<(Vec<u8>, f64)> = zs.index_slice_asc(s_idx, count);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -8584,6 +10160,93 @@ impl Store {
                 }
             }
             None => Ok(Vec::new()),
+        }
+    }
+
+    /// Apply `f` to every (member, score) of the sorted set at `key` in
+    /// ascending (score, member) order, borrowing each member instead of
+    /// cloning it. Performs exactly the same expiry / LFU / touch bookkeeping as
+    /// `zrange_withscores(key, 0, -1, now_ms)`, so a scan-and-filter caller can
+    /// clone only the elements it keeps. Returns Ok(true) when the key held a
+    /// sorted set, Ok(false) when it was missing/expired, WrongType otherwise.
+    /// (frankenredis-5nimj)
+    pub fn zset_for_each_asc(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        mut f: impl FnMut(&[u8], f64),
+    ) -> Result<bool, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        for (member, score) in zs.iter_asc() {
+                            f(member, score);
+                        }
+                        entry.touch(now_ms);
+                        Ok(true)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Apply `f` to every (member, score) of the sorted set at `key` whose score
+    /// falls in any of the inclusive `ranges`, borrowing members. Each range is
+    /// walked in ascending order via the ordered index (O(ranges * log n + matched)).
+    /// Performs the SAME single expiry / LFU / touch bookkeeping as one
+    /// `zrange_withscores(key, 0, -1, now_ms)` (one lookup, one bump, one touch),
+    /// so a multi-range scan does not diverge from a single full scan on LFU or
+    /// keyspace stats. Returns Ok(true) when the key held a sorted set, Ok(false)
+    /// when missing/expired, WrongType otherwise. Caller must ensure ranges are
+    /// disjoint to avoid visiting a member twice. (frankenredis-7hg0r)
+    pub fn zset_for_each_in_score_ranges(
+        &mut self,
+        key: &[u8],
+        ranges: &[(f64, f64)],
+        now_ms: u64,
+        mut f: impl FnMut(&[u8], f64),
+    ) -> Result<bool, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        for &(lo, hi) in ranges {
+                            zs.for_each_in_score_range(lo, hi, &mut f);
+                        }
+                        entry.touch(now_ms);
+                        Ok(true)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => Ok(false),
         }
     }
 
@@ -8619,12 +10282,7 @@ impl Store {
                         let s_idx = s.max(0) as usize;
                         let e_idx = e.min(len - 1) as usize;
                         let count = e_idx - s_idx + 1;
-                        let result: Vec<(Vec<u8>, f64)> = zs
-                            .iter_desc()
-                            .skip(s_idx)
-                            .take(count)
-                            .map(|(m, &s)| (m.clone(), s))
-                            .collect();
+                        let result: Vec<(Vec<u8>, f64)> = zs.index_slice_desc(s_idx, count);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -8658,15 +10316,11 @@ impl Store {
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        let lower = Included(ScoreMember::min_for_score(min));
-                        let upper = Included(ScoreMember::max_for_score(max));
-
-                        let result: Vec<Vec<u8>> = zs
-                            .ordered
-                            .range((lower, upper))
-                            .rev()
-                            .filter_map(|(sm, _)| sm.member.as_actual().cloned())
-                            .collect();
+                        let result = zs.score_bound_members(
+                            ScoreBound::Inclusive(min),
+                            ScoreBound::Inclusive(max),
+                            true,
+                        );
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -8704,8 +10358,172 @@ impl Store {
                         let result: Vec<Vec<u8>> = zs
                             .iter_asc()
                             .filter(|(m, _)| lex_in_range(m, min, max))
-                            .map(|(m, _)| m.clone())
+                            .map(|(m, _)| m.to_vec())
                             .collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Like `zrangebylex` but returns (member, score) pairs. Avoids O(n) individual
+    /// zscore lookups when ZRANGE BYLEX WITHSCORES is requested. (frankenredis-ry0sr)
+    pub fn zrangebylex_withscores(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        validate_lex_range_bounds(min, max)?;
+        self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let result: Vec<(Vec<u8>, f64)> = zs
+                            .iter_asc()
+                            .filter(|(m, _)| lex_in_range(m, min, max))
+                            .map(|(m, s)| (m.to_vec(), s))
+                            .collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// ZRANGEBYLEX / ZREVRANGEBYLEX / `ZRANGE … BYLEX [REV]` with the final
+    /// ordering (`rev`) and `LIMIT offset count` pushed DOWN into the lex walk,
+    /// so only the requested window is cloned. The previous path cloned the
+    /// entire filtered range (`zrangebylex`/`zrevrangebylex`), then the command
+    /// reversed + drained/truncated to the window. This applies `skip(offset)
+    /// .take(count)` BEFORE the per-member clone, materialising only the window.
+    /// `rev` walks descending (`iter_desc`, == old `zrangebylex` + `reverse()`
+    /// and == `zrevrangebylex`); `count == None` means unbounded. Byte-identical
+    /// to the old collect-then-slice. (frankenredis-qchm7)
+    #[allow(clippy::too_many_arguments)]
+    pub fn zrangebylex_limited(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        offset: usize,
+        count: Option<usize>,
+        now_ms: u64,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
+        validate_lex_range_bounds(min, max)?;
+        self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        let take = count.unwrap_or(usize::MAX);
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        // `filter` (lex membership) and the `skip/take` window are
+                        // applied before `clone`, so only the window allocates.
+                        let result: Vec<Vec<u8>> = if rev {
+                            zs.iter_desc()
+                                .filter(|(m, _)| lex_in_range(m, min, max))
+                                .skip(offset)
+                                .take(take)
+                                .map(|(m, _)| m.to_vec())
+                                .collect()
+                        } else {
+                            zs.iter_asc()
+                                .filter(|(m, _)| lex_in_range(m, min, max))
+                                .skip(offset)
+                                .take(take)
+                                .map(|(m, _)| m.to_vec())
+                                .collect()
+                        };
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// `zrangebylex_limited` variant for callers that must preserve scores
+    /// (notably ZRANGESTORE). This mirrors `zrangebylex_withscores` followed by
+    /// optional reverse + LIMIT slicing, but applies the window before cloning.
+    /// (frankenredis-qchm7)
+    #[allow(clippy::too_many_arguments)]
+    pub fn zrangebylex_withscores_limited(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        offset: usize,
+        count: Option<usize>,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        validate_lex_range_bounds(min, max)?;
+        self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        let take = count.unwrap_or(usize::MAX);
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let result: Vec<(Vec<u8>, f64)> = if rev {
+                            zs.iter_desc()
+                                .filter(|(m, _)| lex_in_range(m, min, max))
+                                .skip(offset)
+                                .take(take)
+                                .map(|(m, s)| (m.to_vec(), s))
+                                .collect()
+                        } else {
+                            zs.iter_asc()
+                                .filter(|(m, _)| lex_in_range(m, min, max))
+                                .skip(offset)
+                                .take(take)
+                                .map(|(m, s)| (m.to_vec(), s))
+                                .collect()
+                        };
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -8745,19 +10563,11 @@ impl Store {
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        let lower = Included(ScoreMember::min_for_score(min));
-                        let upper = Included(ScoreMember::max_for_score(max));
-
-                        let result: Vec<(Vec<u8>, f64)> = zs
-                            .ordered
-                            .range((lower, upper))
-                            .rev()
-                            .filter_map(|(sm, _)| {
-                                sm.member
-                                    .as_actual()
-                                    .map(|member| (member.clone(), sm.score))
-                            })
-                            .collect();
+                        let result = zs.score_bound_range(
+                            ScoreBound::Inclusive(min),
+                            ScoreBound::Inclusive(max),
+                            true,
+                        );
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -8795,7 +10605,7 @@ impl Store {
                         let result: Vec<Vec<u8>> = zs
                             .iter_desc()
                             .filter(|(m, _)| lex_in_range(m, min, max))
-                            .map(|(m, _)| m.clone())
+                            .map(|(m, _)| m.to_vec())
                             .collect();
                         entry.touch(now_ms);
                         Ok(result)
@@ -8865,11 +10675,14 @@ impl Store {
                     let s_idx = s.max(0) as usize;
                     let e_idx = e.min(len as i64 - 1) as usize;
                     let count = e_idx - s_idx + 1;
+                    // Collect the members in rank range [s_idx, e_idx]; the
+                    // order-statistic tree (when already built) jumps to s_idx in
+                    // O(log n) instead of an O(s_idx) linear skip over the
+                    // filter_map iterator. (frankenredis-2ispi)
                     let to_remove: Vec<Vec<u8>> = zs
-                        .iter_asc()
-                        .skip(s_idx)
-                        .take(count)
-                        .map(|(m, _)| m.clone())
+                        .index_slice_asc(s_idx, count)
+                        .into_iter()
+                        .map(|(m, _)| m)
                         .collect();
                     let removed_count = to_remove.len();
                     for m in &to_remove {
@@ -8909,27 +10722,7 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::SortedSet(zs) => {
-                    let lower = match min {
-                        ScoreBound::Inclusive(s) => {
-                            std::ops::Bound::Included(ScoreMember::min_for_score(s))
-                        }
-                        ScoreBound::Exclusive(s) => {
-                            std::ops::Bound::Excluded(ScoreMember::max_for_score(s))
-                        }
-                    };
-                    let upper = match max {
-                        ScoreBound::Inclusive(s) => {
-                            std::ops::Bound::Included(ScoreMember::max_for_score(s))
-                        }
-                        ScoreBound::Exclusive(s) => {
-                            std::ops::Bound::Excluded(ScoreMember::min_for_score(s))
-                        }
-                    };
-                    let to_remove: Vec<Vec<u8>> = zs
-                        .ordered
-                        .range((lower, upper))
-                        .filter_map(|(sm, _)| sm.member.as_actual().cloned())
-                        .collect();
+                    let to_remove = zs.score_bound_members(min, max, false);
                     let removed_count = to_remove.len();
                     for m in &to_remove {
                         zs.remove(m);
@@ -8972,7 +10765,7 @@ impl Store {
                     let to_remove: Vec<Vec<u8>> = zs
                         .iter_asc()
                         .filter(|(m, _)| lex_in_range(m, min, max))
-                        .map(|(m, _)| m.clone())
+                        .map(|(m, _)| m.to_vec())
                         .collect();
                     let removed_count = to_remove.len();
                     for m in &to_remove {
@@ -9023,7 +10816,7 @@ impl Store {
                             return Ok(None);
                         }
                         let idx = (rand_val as usize) % zs.len();
-                        let member = zs.iter_asc().nth(idx).map(|(m, _)| m.clone());
+                        let member = zs.iter_asc().nth(idx).map(|(m, _)| m.to_vec());
                         entry.touch(now_ms);
                         Ok(member)
                     }
@@ -9061,7 +10854,7 @@ impl Store {
                 Value::SortedSet(zs) => {
                     if !zs.is_empty() {
                         let members: Vec<(Vec<u8>, f64)> =
-                            zs.iter_asc().map(|(m, s)| (m.clone(), *s)).collect();
+                            zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
                         entry.touch(now_ms);
                         result_data = Some(members);
                     }
@@ -9666,7 +11459,14 @@ impl Store {
             return Ok(None);
         };
         let consumer = consumer.to_vec();
-        group_state.consumers.insert(consumer.clone());
+        let consumer_created = group_state.consumers.insert(consumer.clone());
+        if consumer_created {
+            // (frankenredis-6zb4d) Upstream t_stream.c xreadCommand creates a
+            // missing consumer via streamCreateConsumer(SCC_DEFAULT), which does
+            // server.dirty++ independent of the per-serve bump below. Implicit
+            // creation must dirty even when the read delivers no new entries.
+            self.dirty = self.dirty.saturating_add(1);
+        }
         // (frankenredis-p4dpj) XREADGROUP is the canonical "active"
         // path: stamp both seen_time and active_time to now_ms.
         let meta = group_state
@@ -9707,10 +11507,34 @@ impl Store {
             // Consumer group state was mutated — mark dirty for AOF persistence
             self.dirty = self.dirty.saturating_add(1);
         }
+        if let StreamGroupReadCursor::Id(_) = cursor {
+            // (frankenredis-mlpy4) Upstream xreadCommand serves a consumer-group
+            // history read (explicit start ID, not '>') synchronously and does
+            // `if (groups) server.dirty++` regardless of how many pending entries
+            // are returned — even zero. Match it so rdb_changes_since_last_save
+            // agrees. ('>' reads only reach the bump above when new entries exist.)
+            self.dirty = self.dirty.saturating_add(1);
+        }
         // Note: when reading pending entries (cursor is Id), Redis does NOT
         // increment delivery count - it's a non-destructive replay.
 
+        if consumer_created {
+            // (frankenredis-hqj0t) Implicit consumer creation fires the
+            // xgroup-createconsumer keyspace event upstream (streamCreateConsumer
+            // with SCC_DEFAULT). Queued here, after the group borrow ends.
+            self.notify_stream_createconsumer_event(key);
+        }
         Ok(Some(records))
+    }
+
+    /// Queue the `xgroup-createconsumer` keyspace event for an implicitly
+    /// created consumer. `key` is the (db-encoded) stream key. (frankenredis-hqj0t)
+    fn notify_stream_createconsumer_event(&mut self, key: &[u8]) {
+        if let Some((db, logical)) = decode_db_key(key) {
+            self.notify_keyspace_event(NOTIFY_STREAM, "xgroup-createconsumer", logical, db);
+        } else {
+            self.notify_keyspace_event(NOTIFY_STREAM, "xgroup-createconsumer", key, 0);
+        }
     }
 
     pub fn xpending_summary(
@@ -9864,7 +11688,14 @@ impl Store {
         // destination consumer. fr was deferring this insertion to the
         // bottom of the function and gating it on a non-empty
         // claimed_ids — empty claims left the consumer absent.
-        group_state.consumers.insert(consumer_vec.clone());
+        let consumer_created = group_state.consumers.insert(consumer_vec.clone());
+        if consumer_created {
+            // (frankenredis-6zb4d) Upstream xclaimCommand creates the
+            // destination consumer via streamCreateConsumer(SCC_DEFAULT) before
+            // the claim loop, doing server.dirty++ even when zero entries are
+            // claimed (the per-entry bump below is in addition to this).
+            self.dirty = self.dirty.saturating_add(1);
+        }
         let meta = group_state
             .consumer_metadata
             .entry(consumer_vec.clone())
@@ -9937,6 +11768,11 @@ impl Store {
             self.dirty = self.dirty.saturating_add(claimed_ids.len() as u64);
         }
 
+        if consumer_created {
+            // (frankenredis-hqj0t) Implicit consumer creation fires
+            // xgroup-createconsumer upstream, even when zero entries are claimed.
+            self.notify_stream_createconsumer_event(key);
+        }
         if options.justid {
             Ok(Some(StreamClaimReply::Ids(claimed_ids)))
         } else {
@@ -10038,7 +11874,14 @@ impl Store {
         // bumps its seen_time. fr was gating the insertion on a
         // non-empty claimed_ids, so XINFO CONSUMERS showed nothing for
         // the cursor-driven first call.
-        group_state.consumers.insert(consumer_vec.clone());
+        let consumer_created = group_state.consumers.insert(consumer_vec.clone());
+        if consumer_created {
+            // (frankenredis-6zb4d) Upstream xautoclaimCommand creates the
+            // destination consumer via streamCreateConsumer(SCC_DEFAULT) before
+            // the claim loop, doing server.dirty++ even when zero entries are
+            // claimed (the per-entry bump below is in addition to this).
+            self.dirty = self.dirty.saturating_add(1);
+        }
         let meta = group_state
             .consumer_metadata
             .entry(consumer_vec.clone())
@@ -10077,6 +11920,11 @@ impl Store {
             })
             .unwrap_or((0, 0));
 
+        if consumer_created {
+            // (frankenredis-hqj0t) Implicit consumer creation fires
+            // xgroup-createconsumer upstream, even when zero entries are claimed.
+            self.notify_stream_createconsumer_event(key);
+        }
         if options.justid {
             Ok(Some(StreamAutoClaimReply::Ids {
                 next_start,
@@ -10438,7 +12286,7 @@ impl Store {
                     let Some(group_state) = groups.get_mut(group) else {
                         return Ok(None);
                     };
-                    group_state.consumers.remove(consumer);
+                    let consumer_existed = group_state.consumers.remove(consumer);
                     // (frankenredis-p4dpj) Drop the metadata alongside.
                     group_state.consumer_metadata.remove(consumer);
                     let mut removed_pending = 0_u64;
@@ -10449,8 +12297,16 @@ impl Store {
                         }
                         keep
                     });
-                    if removed_pending > 0 {
-                        self.dirty = self.dirty.saturating_add(1); // Redis treats this as 1 mutation
+                    // (frankenredis-xgdelcon-dirty) Upstream t_stream.c::
+                    // xgroupCommand bumps server.dirty (and fires the
+                    // "xgroup-delconsumer" event) once whenever the consumer
+                    // ACTUALLY EXISTED and was removed — regardless of how many
+                    // pending entries it held. Deleting a non-existent consumer
+                    // is a no-op (no dirty, no event). fr previously gated on
+                    // removed_pending > 0, so dropping a consumer with no
+                    // pending entries was silently not persisted/replicated.
+                    if consumer_existed {
+                        self.dirty = self.dirty.saturating_add(1);
                     }
                     Ok(Some(removed_pending))
                 }
@@ -10558,17 +12414,22 @@ impl Store {
     ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
         let (mut registers, encoding, existed) = match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::String(data) => {
-                    let (encoding, registers) = hll_parse(data)?;
-                    (registers, encoding, true)
-                }
-                _ => return Err(StoreError::WrongType),
-            },
+            Some(entry) => {
+                let Some(data) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                let (encoding, registers) = hll_parse(data.as_ref())?;
+                (registers, encoding, true)
+            }
             None => (vec![0u8; HLL_REGISTERS], HllEncoding::Sparse, false),
         };
 
-        let mut modified = false;
+        // (frankenredis-pfadddirty) Upstream pfaddCommand counts a dirty unit
+        // per element that actually advances a register (hllAdd == 1), plus one
+        // for creating the key, and does `server.dirty += updated`. fr only
+        // bumped dirty by 1, so rdb_changes_since_last_save / the auto-save
+        // threshold diverged for multi-element PFADD.
+        let mut register_updates: u64 = 0;
         for element in elements {
             let hash = hll_hash(element);
             let index = (hash as usize) & (HLL_REGISTERS - 1);
@@ -10576,13 +12437,14 @@ impl Store {
             let count = hll_rho(w);
             if count > registers[index] {
                 registers[index] = count;
-                modified = true;
+                register_updates += 1;
             }
         }
 
         let created = !existed;
+        let modified = register_updates > 0;
         if created || modified {
-            let expires_at = self.entries.get(key).and_then(|e| e.expires_at_ms);
+            let expires_at = self.entries.get(key).and_then(Entry::expiry_ms);
             let encoding = match encoding {
                 HllEncoding::Dense => HllEncoding::Dense,
                 HllEncoding::Sparse => {
@@ -10594,7 +12456,7 @@ impl Store {
                 }
             };
             let data = hll_encode(&registers, encoding);
-            let mut entry = Entry::new(Value::String(data), expires_at, now_ms);
+            let mut entry = Entry::new(Value::String(data.into()), expires_at, now_ms);
             // Upstream hyperloglog.c builds the HLL via createHLLObject /
             // createObject(OBJ_STRING,…), so OBJECT ENCODING reports `raw`
             // regardless of the payload size — a low-cardinality sparse HLL
@@ -10602,7 +12464,8 @@ impl Store {
             entry.force_raw_encoding = true;
             entry.touch_write(now_ms);
             self.internal_entries_insert(key.to_vec(), entry);
-            self.dirty = self.dirty.saturating_add(1);
+            let updated = u64::from(created).saturating_add(register_updates);
+            self.dirty = self.dirty.saturating_add(updated);
         }
         Ok(created || modified)
     }
@@ -10613,6 +12476,74 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
+
+        // (frankenredis-twdut) Single-key PFCOUNT uses the HLL header cache,
+        // mirroring upstream hyperloglog.c::pfcountCommand: a VALID cache
+        // returns the stored cardinality with no recompute; an INVALID cache
+        // (set by any prior PFADD/PFMERGE) is recomputed, written back into
+        // the header, and bumps dirty so the cache update replicates and
+        // persists (the modified key is propagated to AOF/replicas as the
+        // deterministic PFCOUNT). Multi-key PFCOUNT never touches the cache.
+        if keys.len() == 1 {
+            let key = keys[0];
+            self.drop_if_expired(key, now_ms);
+            let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+                self.next_rand()
+            } else {
+                0
+            };
+            let Some(entry) = self.entries.get_mut(key) else {
+                return Ok(0);
+            };
+            if lfu_tracking_enabled {
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+            }
+            enum Outcome {
+                Hit(u64),
+                Recomputed(u64, bool),
+            }
+            let outcome = match &mut entry.value {
+                Value::String(data) => {
+                    // (frankenredis-hllval) Upstream pfcountCommand validates the
+                    // object via isHLLObjectOrReply BEFORE consulting the cardinality
+                    // cache. A string carrying the `HYLL` cache-header shape but a
+                    // malformed encoding/length must surface WRONGTYPE, not the stale
+                    // bytes that happen to sit in the cache slot.
+                    if hll_has_redis_cache_header(data) && !hll_redis_header_is_valid(data) {
+                        return Err(StoreError::InvalidHllValue);
+                    }
+                    if let Some(card) = hll_cache_read(data) {
+                        Outcome::Hit(card)
+                    } else {
+                        let registers = hll_parse_registers(data)?;
+                        let card = hll_estimate(&registers);
+                        let wrote = hll_cache_write(data, card);
+                        Outcome::Recomputed(card, wrote)
+                    }
+                }
+                Value::Integer(value) => {
+                    let data = value.to_string();
+                    let registers = hll_parse_registers(data.as_bytes())?;
+                    Outcome::Recomputed(hll_estimate(&registers), false)
+                }
+                _ => return Err(StoreError::WrongType),
+            };
+            entry.touch(now_ms);
+            return match outcome {
+                Outcome::Hit(card) => Ok(card),
+                Outcome::Recomputed(card, wrote) => {
+                    if wrote {
+                        Self::mark_digest_stale_fields(
+                            &mut self.digest_stale,
+                            &mut self.digest_mutations,
+                        );
+                        self.dirty = self.dirty.saturating_add(1);
+                    }
+                    Ok(card)
+                }
+            };
+        }
+
         let mut merged = vec![0u8; HLL_REGISTERS];
         for &key in keys {
             self.drop_if_expired(key, now_ms);
@@ -10625,16 +12556,14 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
-                    Value::String(data) => {
-                        let registers = hll_parse_registers(data)?;
-                        for i in 0..HLL_REGISTERS {
-                            merged[i] = merged[i].max(registers[i]);
-                        }
-                        entry.touch(now_ms);
-                    }
-                    _ => return Err(StoreError::WrongType),
+                let Some(data) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                let registers = hll_parse_registers(data.as_ref())?;
+                for i in 0..HLL_REGISTERS {
+                    merged[i] = merged[i].max(registers[i]);
                 }
+                entry.touch(now_ms);
             }
         }
         Ok(hll_estimate(&merged))
@@ -10653,17 +12582,15 @@ impl Store {
 
         // Include dest if it already holds an HLL, and preserve its TTL
         self.drop_if_expired(dest, now_ms);
-        let existing_ttl = self.entries.get(dest).and_then(|e| e.expires_at_ms);
+        let existing_ttl = self.entries.get(dest).and_then(Entry::expiry_ms);
         if let Some(entry) = self.entries.get(dest) {
-            match &entry.value {
-                Value::String(data) => {
-                    let (encoding, registers) = hll_parse(data)?;
-                    saw_dense_input |= encoding == HllEncoding::Dense;
-                    for i in 0..HLL_REGISTERS {
-                        merged[i] = merged[i].max(registers[i]);
-                    }
-                }
-                _ => return Err(StoreError::WrongType),
+            let Some(data) = entry.value.string_bytes() else {
+                return Err(StoreError::WrongType);
+            };
+            let (encoding, registers) = hll_parse(data.as_ref())?;
+            saw_dense_input |= encoding == HllEncoding::Dense;
+            for i in 0..HLL_REGISTERS {
+                merged[i] = merged[i].max(registers[i]);
             }
         }
 
@@ -10671,15 +12598,13 @@ impl Store {
         for &src in sources {
             self.drop_if_expired(src, now_ms);
             if let Some(entry) = self.entries.get(src) {
-                match &entry.value {
-                    Value::String(data) => {
-                        let (encoding, registers) = hll_parse(data)?;
-                        saw_dense_input |= encoding == HllEncoding::Dense;
-                        for i in 0..HLL_REGISTERS {
-                            merged[i] = merged[i].max(registers[i]);
-                        }
-                    }
-                    _ => return Err(StoreError::WrongType),
+                let Some(data) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                let (encoding, registers) = hll_parse(data.as_ref())?;
+                saw_dense_input |= encoding == HllEncoding::Dense;
+                for i in 0..HLL_REGISTERS {
+                    merged[i] = merged[i].max(registers[i]);
                 }
             }
         }
@@ -10691,7 +12616,7 @@ impl Store {
                 HllEncoding::Sparse
             };
         let data = hll_encode(&merged, dest_encoding);
-        let mut entry = Entry::new(Value::String(data), existing_ttl, now_ms);
+        let mut entry = Entry::new(Value::String(data.into()), existing_ttl, now_ms);
         // PFMERGE's destination is a raw-encoded HLL string, same as pfadd.
         entry.force_raw_encoding = true;
         entry.touch_write(now_ms);
@@ -10710,11 +12635,16 @@ impl Store {
             Some(entry) => {
                 let (encoding, registers) = match &entry.value {
                     Value::String(data) => hll_parse(data)?,
+                    Value::Integer(value) => {
+                        let data = value.to_string();
+                        hll_parse(data.as_bytes())?
+                    }
                     _ => return Err(StoreError::WrongType),
                 };
                 match encoding {
                     HllEncoding::Sparse => {
-                        entry.value = Value::String(hll_encode(&registers, HllEncoding::Dense));
+                        entry.value =
+                            Value::String(hll_encode(&registers, HllEncoding::Dense).into());
                         entry.touch_write(now_ms);
                         self.dirty = self.dirty.saturating_add(1);
                     }
@@ -10733,14 +12663,14 @@ impl Store {
     ) -> Result<Option<()>, StoreError> {
         self.drop_if_expired(key, now_ms);
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::String(data) => {
-                    hll_parse(data)?;
-                    entry.touch(now_ms);
-                    Ok(Some(()))
-                }
-                _ => Err(StoreError::WrongType),
-            },
+            Some(entry) => {
+                let Some(data) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                hll_parse(data.as_ref())?;
+                entry.touch(now_ms);
+                Ok(Some(()))
+            }
             None => Ok(None),
         }
     }
@@ -10752,19 +12682,19 @@ impl Store {
     ) -> Result<Option<String>, StoreError> {
         self.drop_if_expired(key, now_ms);
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::String(data) => {
-                    let (encoding, registers) = hll_parse(data)?;
-                    entry.touch(now_ms);
-                    match encoding {
-                        HllEncoding::Sparse => Ok(Some(hll_sparse_decode(&registers)?)),
-                        HllEncoding::Dense => Err(StoreError::GenericError(
-                            "ERR HLL encoding is not sparse".to_string(),
-                        )),
-                    }
+            Some(entry) => {
+                let Some(data) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                let (encoding, registers) = hll_parse(data.as_ref())?;
+                entry.touch(now_ms);
+                match encoding {
+                    HllEncoding::Sparse => Ok(Some(hll_sparse_decode(&registers)?)),
+                    HllEncoding::Dense => Err(StoreError::GenericError(
+                        "ERR HLL encoding is not sparse".to_string(),
+                    )),
                 }
-                _ => Err(StoreError::WrongType),
-            },
+            }
             None => Ok(None),
         }
     }
@@ -10776,14 +12706,14 @@ impl Store {
     ) -> Result<Option<&'static str>, StoreError> {
         self.drop_if_expired(key, now_ms);
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::String(data) => {
-                    let (encoding, _) = hll_parse(data)?;
-                    entry.touch(now_ms);
-                    Ok(Some(encoding.as_str()))
-                }
-                _ => Err(StoreError::WrongType),
-            },
+            Some(entry) => {
+                let Some(data) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                let (encoding, _) = hll_parse(data.as_ref())?;
+                entry.touch(now_ms);
+                Ok(Some(encoding.as_str()))
+            }
             None => Ok(None),
         }
     }
@@ -10798,11 +12728,16 @@ impl Store {
             Some(entry) => {
                 let (encoding, registers) = match &entry.value {
                     Value::String(data) => hll_parse(data)?,
+                    Value::Integer(value) => {
+                        let data = value.to_string();
+                        hll_parse(data.as_bytes())?
+                    }
                     _ => return Err(StoreError::WrongType),
                 };
                 match encoding {
                     HllEncoding::Sparse => {
-                        entry.value = Value::String(hll_encode(&registers, HllEncoding::Dense));
+                        entry.value =
+                            Value::String(hll_encode(&registers, HllEncoding::Dense).into());
                         entry.touch_write(now_ms);
                         self.dirty = self.dirty.saturating_add(1);
                         Ok(Some(true))
@@ -10821,24 +12756,40 @@ impl Store {
         hll_run_selftest().map_err(StoreError::GenericError)
     }
 
-    fn drop_if_expired(&mut self, key: &[u8], now_ms: u64) {
-        let should_evict = evaluate_expiry(
-            now_ms,
-            self.entries.get(key).and_then(|entry| entry.expires_at_ms),
-        )
-        .should_evict;
+    /// Lazily reap `key` if its TTL has passed. Returns whether the key is
+    /// PRESENT afterwards (existed and was not reaped) — the single keyspace
+    /// lookup this already performs doubles as the existence check, so callers
+    /// like `record_keyspace_lookup` no longer need a redundant `contains_key`.
+    /// (frankenredis-shewy)
+    fn drop_if_expired(&mut self, key: &[u8], now_ms: u64) -> bool {
+        let entry = self.entries.get(key);
+        let exists = entry.is_some();
+        let should_evict =
+            evaluate_expiry(now_ms, entry.and_then(|entry| entry.expiry_ms())).should_evict;
         if should_evict && self.internal_entries_remove(key).is_some() {
             self.stream_groups.remove(key);
             self.stream_last_ids.remove(key);
             self.dirty = self.dirty.saturating_add(1);
             self.stat_expired_keys = self.stat_expired_keys.saturating_add(1);
+            // (frankenredis-1d2xf) Record the db-encoded key so the runtime can
+            // propagate this lazy-expiry deletion to replicas + AOF, ordered
+            // before the triggering command's own propagation.
+            self.lazy_expired_propagation.push(key.to_vec());
             // Emit expired keyspace notification (use logical key, not physical)
             let (db, logical_key) = match decode_db_key(key) {
                 Some((db, lk)) => (db, lk),
                 None => (0, key),
             };
             self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", logical_key, db);
+            return false;
         }
+        exists
+    }
+
+    /// (frankenredis-1d2xf) Drain the keys lazily expired during the current
+    /// command, for the runtime to propagate as `DEL`/`UNLINK`.
+    pub fn take_lazy_expired_propagation(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.lazy_expired_propagation)
     }
 
     // ── Hash field TTL primitives (Redis 7.4 HEXPIRE family) ────────
@@ -11109,46 +13060,131 @@ impl Store {
         } else {
             0
         };
-        match self.entries.get_mut(key) {
+        // Read the value (one LFU bump = the GETEX access) and capture the
+        // current TTL state under a scoped borrow, then apply the expiry change
+        // with disjoint &mut self helpers below.
+        let value = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
-                    Value::String(v) => {
-                        let result = v.clone();
-                        if let Some(exp) = new_expires_at_ms {
-                            let was_exp = entry.expires_at_ms.is_some();
-                            let is_exp = exp.is_some();
-                            if was_exp != is_exp {
-                                let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
-                                if is_exp {
-                                    self.expires_count = self.expires_count.saturating_add(1);
-                                    if db < self.database_count {
-                                        self.db_expires_counts[db] =
-                                            self.db_expires_counts[db].saturating_add(1);
-                                    }
-                                } else {
-                                    self.expires_count = self.expires_count.saturating_sub(1);
-                                    if db < self.database_count {
-                                        self.db_expires_counts[db] =
-                                            self.db_expires_counts[db].saturating_sub(1);
-                                    }
-                                }
-                            }
-                            entry.expires_at_ms = exp;
-                            Self::mark_digest_stale_fields(
-                                &mut self.digest_stale,
-                                &mut self.digest_mutations,
-                            );
-                            self.dirty = self.dirty.saturating_add(1);
-                        }
-                        Ok(Some(result))
-                    }
-                    _ => Err(StoreError::WrongType),
+                    Value::String(v) => v.to_vec(),
+                    _ => return Err(StoreError::WrongType),
                 }
             }
-            None => Ok(None),
+            None => return Ok(None),
+        };
+
+        // (frankenredis-cx98g) GETEX emits its own keyspace event from the store
+        // (mirroring upstream t_string.c::getexCommand), so GETEX is excluded
+        // from the runtime's generic keyevent path:
+        //   * EXAT/PXAT whose deadline is already in the past delete the key and
+        //     fire NOTIFY_GENERIC "del" (NOT "expire" + lazy "expired"). EX/PX
+        //     <= 0 are rejected before reaching the store, so a past deadline
+        //     can only come from an absolute EXAT/PXAT timestamp.
+        //   * A future deadline sets the TTL and fires "expire".
+        //   * PERSIST fires "persist" and dirties ONLY when a TTL was actually
+        //     removed; on a key with no TTL it is a pure read (no event, no
+        //     dirty), matching removeExpire()'s return-value gate upstream.
+        if let Some(exp) = new_expires_at_ms {
+            let (db, logical_key) = match decode_db_key(key) {
+                Some((db, lk)) => (db, lk.to_vec()),
+                None => (0, key.to_vec()),
+            };
+            match exp {
+                Some(deadline) if deadline <= now_ms => {
+                    self.notify_keyspace_event(NOTIFY_GENERIC, "del", &logical_key, db);
+                    self.internal_entries_remove(key);
+                    self.stream_groups.remove(key);
+                    self.stream_last_ids.remove(key);
+                    self.dirty = self.dirty.saturating_add(1);
+                }
+                Some(deadline) => {
+                    let mut added_expiry = false;
+                    self.with_mutated_entry(key, |entry| {
+                        added_expiry = entry.expires_at_ms.is_none();
+                        entry.set_expiry_ms(Some(deadline));
+                    });
+                    if added_expiry {
+                        self.expires_count = self.expires_count.saturating_add(1);
+                        if db < self.database_count {
+                            self.db_expires_counts[db] =
+                                self.db_expires_counts[db].saturating_add(1);
+                        }
+                    }
+                    self.volatile_keys.insert(key.to_vec());
+                    self.dirty = self.dirty.saturating_add(1);
+                    self.notify_keyspace_event(NOTIFY_GENERIC, "expire", &logical_key, db);
+                }
+                None => {
+                    let had_expiry = self
+                        .entries
+                        .get(key)
+                        .is_some_and(|entry| entry.expires_at_ms.is_some());
+                    if had_expiry {
+                        self.with_mutated_entry(key, |entry| {
+                            entry.expires_at_ms = None;
+                        });
+                        self.volatile_keys.remove(key);
+                        self.expires_count = self.expires_count.saturating_sub(1);
+                        if db < self.database_count {
+                            self.db_expires_counts[db] =
+                                self.db_expires_counts[db].saturating_sub(1);
+                        }
+                        self.dirty = self.dirty.saturating_add(1);
+                        self.notify_keyspace_event(NOTIFY_GENERIC, "persist", &logical_key, db);
+                    }
+                }
+            }
+        }
+        Ok(Some(value))
+    }
+
+    /// Word-at-a-time (8 bytes/iteration) in-place element-wise bitwise combine
+    /// of the overlapping prefix `dst[..n]` / `src[..n]` (n = min length), via a
+    /// single u64 op per chunk plus a byte-wise remainder tail. Byte-identical to
+    /// the scalar `dst[i] = byte_op(dst[i], src[i])` loop because each byte lane
+    /// is independent, so the endianness of the `from_ne_bytes`/`to_ne_bytes`
+    /// view never changes which source byte maps to which destination byte.
+    /// (frankenredis-0ppgh)
+    #[inline]
+    fn swar_zip_inplace(
+        dst: &mut [u8],
+        src: &[u8],
+        word_op: impl Fn(u64, u64) -> u64,
+        byte_op: impl Fn(u8, u8) -> u8,
+    ) {
+        let n = dst.len().min(src.len());
+        let mut dchunks = dst[..n].chunks_exact_mut(8);
+        let mut schunks = src[..n].chunks_exact(8);
+        for (dc, sc) in dchunks.by_ref().zip(schunks.by_ref()) {
+            let a = u64::from_ne_bytes(dc.try_into().unwrap());
+            let b = u64::from_ne_bytes(sc.try_into().unwrap());
+            dc.copy_from_slice(&word_op(a, b).to_ne_bytes());
+        }
+        let drem = dchunks.into_remainder();
+        let srem = schunks.remainder();
+        for (db, &sb) in drem.iter_mut().zip(srem.iter()) {
+            *db = byte_op(*db, sb);
+        }
+    }
+
+    /// Word-at-a-time bitwise NOT of `src` into `dst` (equal lengths for BITOP
+    /// NOT). Byte-identical to a scalar `dst[i] = !src[i]` loop. (frankenredis-0ppgh)
+    #[inline]
+    fn swar_not_into(dst: &mut [u8], src: &[u8]) {
+        let n = dst.len().min(src.len());
+        let mut dchunks = dst[..n].chunks_exact_mut(8);
+        let mut schunks = src[..n].chunks_exact(8);
+        for (dc, sc) in dchunks.by_ref().zip(schunks.by_ref()) {
+            let b = u64::from_ne_bytes(sc.try_into().unwrap());
+            dc.copy_from_slice(&(!b).to_ne_bytes());
+        }
+        let drem = dchunks.into_remainder();
+        let srem = schunks.remainder();
+        for (db, &sb) in drem.iter_mut().zip(srem.iter()) {
+            *db = !sb;
         }
     }
 
@@ -11189,7 +13225,7 @@ impl Store {
                                     "BITOP total input size exceeds limit".to_string(),
                                 ));
                             }
-                            values.push(v.clone());
+                            values.push(v.to_vec());
                         }
                         _ => return Err(StoreError::WrongType),
                     }
@@ -11205,15 +13241,13 @@ impl Store {
             if values.len() != 1 {
                 return Err(StoreError::WrongType);
             }
-            for (i, byte) in result.iter_mut().enumerate() {
-                *byte = !values[0].get(i).copied().unwrap_or(0);
-            }
+            // `result` is `max_len == values[0].len()` zeros; NOT every byte.
+            Self::swar_not_into(&mut result, &values[0]);
         } else {
-            // Initialize with first value
+            // Initialize with the first value (shorter operands zero-extend, and
+            // `result` is already zeroed beyond `first.len()`).
             if let Some(first) = values.first() {
-                for (i, byte) in result.iter_mut().enumerate() {
-                    *byte = first.get(i).copied().unwrap_or(0);
-                }
+                result[..first.len()].copy_from_slice(first);
             }
 
             let is_and = eq_ascii_ci(op, b"AND");
@@ -11222,17 +13256,16 @@ impl Store {
 
             for val in values.iter().skip(1) {
                 if is_and {
-                    for (i, byte) in result.iter_mut().enumerate() {
-                        *byte &= val.get(i).copied().unwrap_or(0);
+                    Self::swar_zip_inplace(&mut result, val, |a, b| a & b, |a, b| a & b);
+                    // Bytes beyond a shorter operand are AND-ed with implicit 0.
+                    if val.len() < result.len() {
+                        result[val.len()..].fill(0);
                     }
                 } else if is_or {
-                    for (i, byte) in result.iter_mut().enumerate() {
-                        *byte |= val.get(i).copied().unwrap_or(0);
-                    }
+                    // OR/XOR with implicit-0 tail leave `result` unchanged there.
+                    Self::swar_zip_inplace(&mut result, val, |a, b| a | b, |a, b| a | b);
                 } else if is_xor {
-                    for (i, byte) in result.iter_mut().enumerate() {
-                        *byte ^= val.get(i).copied().unwrap_or(0);
-                    }
+                    Self::swar_zip_inplace(&mut result, val, |a, b| a ^ b, |a, b| a ^ b);
                 }
             }
         }
@@ -11244,16 +13277,24 @@ impl Store {
         // key when the result length is 0, rather than storing an
         // empty string. (br-frankenredis-bitopempty)
         if len == 0 {
+            // (frankenredis-5wz6g) Mirror upstream: an empty result only
+            // bumps dirty / signals a change when the destination key
+            // actually EXISTED (dbDelete returns non-zero). Deleting a
+            // non-existent dest is a no-op — no dirty, no keyspace "del".
+            let existed = self.entries.contains_key(dest);
             self.internal_entries_remove(dest);
+            if existed {
+                self.dirty = self.dirty.saturating_add(1);
+            }
         } else {
             // Upstream creates the destination via dbAdd which uses
             // raw encoding regardless of length.
             // (br-frankenredis-bitopenc)
-            let mut entry = Entry::new(Value::String(result), None, now_ms);
+            let mut entry = Entry::new(Value::String(result.into()), None, now_ms);
             entry.force_raw_encoding = true;
             self.internal_entries_insert(dest.to_vec(), entry);
+            self.dirty = self.dirty.saturating_add(1);
         }
-        self.dirty = self.dirty.saturating_add(1);
         Ok(len)
     }
 
@@ -11271,6 +13312,8 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
+        let zset_max_entries = self.zset_max_listpack_entries;
+        let zset_max_value = self.zset_max_listpack_value;
         let mut combined: HashMap<Vec<u8>, f64> = HashMap::new();
 
         for (i, &key) in keys.iter().enumerate() {
@@ -11285,10 +13328,10 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                let mut add_member = |member: &Vec<u8>, score: f64| {
-                    let weighted = score * weight;
+                let mut add_member = |member: &[u8], score: f64| {
+                    let weighted = normalize_weighted_score(score, weight);
                     use std::collections::hash_map::Entry as HEntry;
-                    match combined.entry(member.clone()) {
+                    match combined.entry(member.to_vec()) {
                         HEntry::Vacant(e) => {
                             e.insert(weighted);
                         }
@@ -11301,14 +13344,14 @@ impl Store {
 
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        for (member, &score) in zs.iter() {
+                        for (member, score) in zs.iter() {
                             add_member(member, score);
                         }
                         entry.touch(now_ms);
                     }
                     Value::Set(s) => {
                         for member in s.iter() {
-                            add_member(member, 1.0);
+                            add_member(member.as_ref(), 1.0);
                         }
                         entry.touch(now_ms);
                     }
@@ -11325,11 +13368,11 @@ impl Store {
         if count > 0 {
             let mut zs = SortedSet::new();
             for (m, s) in combined {
-                zs.insert(m, s);
+                zs.insert_with_limits(m, s, zset_max_entries, zset_max_value);
             }
             self.internal_entries_insert(
                 dest.to_vec(),
-                Entry::new(Value::SortedSet(zs), None, now_ms),
+                Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
             );
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
@@ -11360,6 +13403,8 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
+        let zset_max_entries = self.zset_max_listpack_entries;
+        let zset_max_value = self.zset_max_listpack_value;
 
         let mut min_card = usize::MAX;
         let mut min_idx = 0;
@@ -11426,10 +13471,14 @@ impl Store {
                 }
                 let w = weights.get(min_idx).copied().unwrap_or(1.0);
                 let res = match &entry.value {
-                    Value::SortedSet(zs) => {
-                        zs.dict.iter().map(|(m, &s)| (m.clone(), s * w)).collect()
-                    }
-                    Value::Set(s) => s.iter().map(|m| (m.clone(), 1.0 * w)).collect(),
+                    Value::SortedSet(zs) => zs
+                        .iter()
+                        .map(|(m, s)| (m.to_vec(), normalize_weighted_score(s, w)))
+                        .collect(),
+                    Value::Set(s) => s
+                        .iter()
+                        .map(|m| (m.into_owned(), normalize_weighted_score(1.0, w)))
+                        .collect(),
                     _ => return Err(StoreError::WrongType),
                 };
                 entry.touch(now_ms);
@@ -11472,7 +13521,7 @@ impl Store {
                     match &entry.value {
                         Value::SortedSet(zs) => {
                             result.retain(|member, score| {
-                                if let Some(&other_score) = zs.dict.get(member) {
+                                if let Some(other_score) = zs.get_score(member) {
                                     *score =
                                         aggregate_scores(*score, other_score * weight, aggregate);
                                     true
@@ -11510,11 +13559,11 @@ impl Store {
         if count > 0 {
             let mut zs = SortedSet::new();
             for (m, s) in result {
-                zs.insert(m, s);
+                zs.insert_with_limits(m, s, zset_max_entries, zset_max_value);
             }
             self.internal_entries_insert(
                 dest.to_vec(),
-                Entry::new(Value::SortedSet(zs), None, now_ms),
+                Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
             );
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
@@ -11544,7 +13593,7 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
-                    let result: Vec<bool> = members.iter().map(|m| s.contains(*m)).collect();
+                    let result: Vec<bool> = members.iter().map(|m| s.contains(m)).collect();
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
@@ -11587,7 +13636,7 @@ impl Store {
         let mut expired_keys = Vec::new();
         let mut result = None;
         for (key, entry) in &self.entries {
-            if evaluate_expiry(now_ms, entry.expires_at_ms).should_evict {
+            if evaluate_expiry(now_ms, entry.expiry_ms()).should_evict {
                 expired_keys.push(key.clone());
             } else {
                 result = Some(key.clone());
@@ -11636,7 +13685,7 @@ impl Store {
         self.entries
             .iter()
             .filter(|(k, e)| {
-                crc16_slot(k) == slot && !evaluate_expiry(now_ms, e.expires_at_ms).should_evict
+                crc16_slot(k) == slot && !evaluate_expiry(now_ms, e.expiry_ms()).should_evict
             })
             .take(count)
             .map(|(k, _)| k.clone())
@@ -11649,7 +13698,7 @@ impl Store {
         self.entries
             .iter()
             .filter(|(k, e)| {
-                crc16_slot(k) == slot && !evaluate_expiry(now_ms, e.expires_at_ms).should_evict
+                crc16_slot(k) == slot && !evaluate_expiry(now_ms, e.expiry_ms()).should_evict
             })
             .count()
     }
@@ -11682,7 +13731,7 @@ impl Store {
             };
             pos += 1;
             processed += 1;
-            if evaluate_expiry(now_ms, entry.expires_at_ms).should_evict {
+            if evaluate_expiry(now_ms, entry.expiry_ms()).should_evict {
                 if processed >= batch_size {
                     break;
                 }
@@ -11754,7 +13803,7 @@ impl Store {
                                 .filter(|(field, _)| {
                                     pattern.is_none_or(|pat| glob_match(pat, field))
                                 })
-                                .map(|(f, v)| (f.clone(), v.clone()))
+                                .map(|(f, v)| (f.to_vec(), v.to_vec()))
                                 .collect();
                             return Ok((0, result));
                         }
@@ -11780,7 +13829,7 @@ impl Store {
                                 }
                                 continue;
                             }
-                            result.push((field.clone(), value.clone()));
+                            result.push((field.to_vec(), value.to_vec()));
                             if processed >= batch_size {
                                 break;
                             }
@@ -11841,8 +13890,10 @@ impl Store {
                         if is_listpack_or_intset {
                             let result: Vec<Vec<u8>> = s
                                 .iter()
-                                .filter(|member| pattern.is_none_or(|pat| glob_match(pat, member)))
-                                .cloned()
+                                .filter(|member| {
+                                    pattern.is_none_or(|pat| glob_match(pat, member.as_ref()))
+                                })
+                                .map(|m| m.into_owned())
                                 .collect();
                             return Ok((0, result));
                         }
@@ -11859,14 +13910,14 @@ impl Store {
                             pos += 1;
                             processed += 1;
                             if let Some(pat) = pattern
-                                && !glob_match(pat, member)
+                                && !glob_match(pat, member.as_ref())
                             {
                                 if processed >= batch_size {
                                     break;
                                 }
                                 continue;
                             }
-                            result.push(member.clone());
+                            result.push(member.into_owned());
                             if processed >= batch_size {
                                 break;
                             }
@@ -11924,7 +13975,7 @@ impl Store {
                                 .filter(|(member, _)| {
                                     pattern.is_none_or(|pat| glob_match(pat, member))
                                 })
-                                .map(|(m, s)| (m.clone(), *s))
+                                .map(|(m, s)| (m.to_vec(), s))
                                 .collect();
                             return Ok((0, result));
                         }
@@ -11949,7 +14000,7 @@ impl Store {
                                 }
                                 continue;
                             }
-                            result.push((member.clone(), *score));
+                            result.push((member.to_vec(), score));
                             if processed >= batch_size {
                                 break;
                             }
@@ -12069,17 +14120,17 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::List(l) => {
-                    let result = l.iter().cloned().collect();
+                    let result = l.iter().map(<[u8]>::to_vec).collect();
                     entry.touch(now_ms);
                     Ok(result)
                 }
                 Value::Set(s) => {
-                    let result = s.iter().cloned().collect();
+                    let result = s.iter().map(|m| m.into_owned()).collect();
                     entry.touch(now_ms);
                     Ok(result)
                 }
                 Value::SortedSet(zs) => {
-                    let result = zs.iter_asc().map(|(m, _)| m.clone()).collect();
+                    let result = zs.iter_asc().map(|(m, _)| m.to_vec()).collect();
                     entry.touch(now_ms);
                     Ok(result)
                 }
@@ -12094,11 +14145,21 @@ impl Store {
     pub fn store_as_list(&mut self, key: Vec<u8>, elements: Vec<Vec<u8>>) {
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
+        // (frankenredis-sortstoredirty) Upstream sortCommand's STORE arm does
+        // `server.dirty += outputlen` (one unit per stored element), not a
+        // single increment — only the empty-result delete path is +1 (handled
+        // by the caller via store.del). The sole caller (SORT ... STORE) always
+        // passes a non-empty list here.
+        let stored = elements.len() as u64;
         self.internal_entries_insert(
             key,
-            Entry::new(Value::List(elements.into_iter().collect()), None, 0),
+            Entry::new(
+                Value::List(Box::new(elements.into_iter().collect())),
+                None,
+                0,
+            ),
         );
-        self.dirty = self.dirty.saturating_add(1);
+        self.dirty = self.dirty.saturating_add(stored.max(1));
     }
 
     /// Compute a fingerprint for a single key's current state.
@@ -12110,7 +14171,7 @@ impl Store {
             Some(e) => e,
             None => return 0,
         };
-        if let Some(exp) = entry.expires_at_ms
+        if let Some(exp) = entry.expiry_ms()
             && now_ms >= exp
         {
             return 0;
@@ -12126,16 +14187,21 @@ impl Store {
                 hash = fnv1a_update(hash, b"S");
                 hash = fnv1a_update(hash, v);
             }
+            Value::Integer(value) => {
+                let bytes = value.to_string();
+                hash = fnv1a_update(hash, b"S");
+                hash = fnv1a_update(hash, bytes.as_bytes());
+            }
             Value::Hash(m) => {
                 hash = fnv1a_update(hash, b"H");
-                for (k, v) in m {
+                for (k, v) in m.iter() {
                     hash = fnv1a_update(hash, k);
                     hash = fnv1a_update(hash, v);
                 }
             }
             Value::List(l) => {
                 hash = fnv1a_update(hash, b"L");
-                for item in l {
+                for item in l.iter() {
                     hash = fnv1a_update(hash, item);
                 }
             }
@@ -12144,7 +14210,7 @@ impl Store {
                 let mut members: Vec<_> = s.iter().collect();
                 members.sort();
                 for m in members {
-                    hash = fnv1a_update(hash, m);
+                    hash = fnv1a_update(hash, m.as_ref());
                 }
             }
             Value::SortedSet(zs) => {
@@ -12166,7 +14232,7 @@ impl Store {
                 }
             }
         }
-        let expiry_bytes = entry.expires_at_ms.unwrap_or(0).to_le_bytes();
+        let expiry_bytes = entry.expiry_ms().unwrap_or(0).to_le_bytes();
         hash = fnv1a_update(hash, &expiry_bytes);
         hash
     }
@@ -12175,7 +14241,7 @@ impl Store {
     pub fn key_modification_count(&self, key: &[u8], now_ms: u64) -> u64 {
         match self.entries.get(key) {
             Some(entry) => {
-                if let Some(exp) = entry.expires_at_ms
+                if let Some(exp) = entry.expiry_ms()
                     && now_ms >= exp
                 {
                     return 0;
@@ -12212,12 +14278,14 @@ impl Store {
         }
 
         let mut zs = SortedSet::new();
+        let zset_max_entries = self.zset_max_listpack_entries;
+        let zset_max_value = self.zset_max_listpack_value;
         for (m, s) in members {
-            zs.insert(m, s);
+            zs.insert_with_limits(m, s, zset_max_entries, zset_max_value);
         }
         self.internal_entries_insert(
             dest.to_vec(),
-            Entry::new(Value::SortedSet(zs), None, now_ms),
+            Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
         );
         self.dirty = self.dirty.saturating_add(1);
     }
@@ -12293,31 +14361,51 @@ impl Store {
         volatile_only: bool,
         sample_limit: usize,
     ) -> Vec<Vec<u8>> {
-        let candidates: Vec<Vec<u8>> = self
+        // (frankenredis-sa0uk) The previous implementation cloned EVERY eligible
+        // key into `candidates` on every call (O(n) heap allocations per
+        // eviction, O(n * evicted) when freeing memory under pressure) just to
+        // index a handful of random samples. Instead count the eligible keys
+        // (no clones), draw the SAME random indices the old loop would (identical
+        // `next_rand()` sequence and modulus, same distinct-index set), then
+        // clone ONLY the up-to-`sample_limit` sampled keys in a single pass.
+        let eligible_len = self
             .entries
-            .iter()
-            .filter_map(|(key, entry)| {
-                if !volatile_only || entry.expires_at_ms.is_some() {
-                    Some(key.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
+            .values()
+            .filter(|entry| !volatile_only || entry.expires_at_ms.is_some())
+            .count();
 
         let sample_limit = sample_limit.max(1);
-        if candidates.len() <= sample_limit {
-            return candidates;
+        if eligible_len <= sample_limit {
+            // Same as before: every eligible key, in iteration order.
+            return self
+                .entries
+                .iter()
+                .filter(|(_, entry)| !volatile_only || entry.expires_at_ms.is_some())
+                .map(|(key, _)| key.clone())
+                .collect();
         }
 
-        let mut sampled = Vec::with_capacity(sample_limit);
+        // Identical index draw to the prior loop: pull `next_rand() % eligible_len`
+        // until `sample_limit` DISTINCT indices have been chosen.
         let mut selected_indices = HashSet::with_capacity(sample_limit);
-        while sampled.len() < sample_limit {
-            let idx = self.next_rand() as usize % candidates.len();
-            if selected_indices.insert(idx)
-                && let Some(candidate) = candidates.get(idx)
-            {
-                sampled.push(candidate.clone());
+        while selected_indices.len() < sample_limit {
+            let idx = self.next_rand() as usize % eligible_len;
+            selected_indices.insert(idx);
+        }
+
+        // Single pass: clone only the keys at the selected eligible-indices. The
+        // resulting order differs from the old generation order, but the LRU/LFU/
+        // TTL scorers pick the victim by score with a key-value tie-break,
+        // independent of sample position — so the chosen victim is unchanged.
+        let mut sampled = Vec::with_capacity(sample_limit);
+        for (eligible_idx, (key, _entry)) in self
+            .entries
+            .iter()
+            .filter(|(_, entry)| !volatile_only || entry.expires_at_ms.is_some())
+            .enumerate()
+        {
+            if selected_indices.contains(&eligible_idx) {
+                sampled.push(key.clone());
             }
         }
         sampled
@@ -12375,7 +14463,7 @@ impl Store {
             let Some(entry) = self.entries.get(key) else {
                 continue;
             };
-            if let Some(expires_at_ms) = entry.expires_at_ms
+            if let Some(expires_at_ms) = entry.expiry_ms()
                 && (expires_at_ms < best_ttl
                     || (expires_at_ms == best_ttl
                         && best_key.as_ref().is_none_or(|best| key < best)))
@@ -13308,23 +15396,30 @@ impl Store {
                 buf.push(RDB_TYPE_STRING);
                 encode_rdb_string(&mut buf, v);
             }
+            Value::Integer(value) => {
+                buf.push(RDB_TYPE_STRING);
+                encode_rdb_string(&mut buf, value.to_string().as_bytes());
+            }
             Value::List(l) => {
                 buf.push(RDB_TYPE_LIST_QUICKLIST_2);
                 encode_dump_quicklist2(&mut buf, l, self.list_max_listpack_size)?;
             }
             Value::Set(s) => {
-                let integer_members: Option<Vec<i64>> =
-                    s.iter().map(|member| parse_i64(member).ok()).collect();
+                let integer_members: Option<Vec<i64>> = s
+                    .iter()
+                    .map(|member| parse_i64(member.as_ref()).ok())
+                    .collect();
                 if entry.force_set_hashtable_encoding {
                     buf.push(RDB_TYPE_SET);
                     encode_length(&mut buf, s.len());
-                    for member in s {
-                        encode_dump_bulk(&mut buf, member);
+                    for member in s.iter() {
+                        encode_dump_bulk(&mut buf, member.as_ref());
                     }
                 } else if entry.force_set_listpack_encoding {
                     buf.push(RDB_TYPE_SET_LISTPACK);
-                    let members: Vec<&[u8]> = s.iter().map(Vec::as_slice).collect();
-                    encode_dump_bulk(&mut buf, &encode_listpack_strings(&members)?);
+                    let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
+                    let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+                    encode_dump_bulk(&mut buf, &encode_listpack_strings(&refs)?);
                 } else if s.len() <= self.set_max_intset_entries {
                     if let Some(mut integers) = integer_members {
                         integers.sort_unstable();
@@ -13334,26 +15429,28 @@ impl Store {
                         && s.iter().all(|member| member.len() <= 64)
                     {
                         buf.push(RDB_TYPE_SET_LISTPACK);
-                        let members: Vec<&[u8]> = s.iter().map(Vec::as_slice).collect();
-                        encode_dump_bulk(&mut buf, &encode_listpack_strings(&members)?);
+                        let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
+                        let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+                        encode_dump_bulk(&mut buf, &encode_listpack_strings(&refs)?);
                     } else {
                         buf.push(RDB_TYPE_SET);
                         encode_length(&mut buf, s.len());
-                        for member in s {
-                            encode_dump_bulk(&mut buf, member);
+                        for member in s.iter() {
+                            encode_dump_bulk(&mut buf, member.as_ref());
                         }
                     }
                 } else if s.len() <= self.set_max_listpack_entries
                     && s.iter().all(|member| member.len() <= 64)
                 {
                     buf.push(RDB_TYPE_SET_LISTPACK);
-                    let members: Vec<&[u8]> = s.iter().map(Vec::as_slice).collect();
-                    encode_dump_bulk(&mut buf, &encode_listpack_strings(&members)?);
+                    let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
+                    let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+                    encode_dump_bulk(&mut buf, &encode_listpack_strings(&refs)?);
                 } else {
                     buf.push(RDB_TYPE_SET);
                     encode_length(&mut buf, s.len());
-                    for member in s {
-                        encode_dump_bulk(&mut buf, member);
+                    for member in s.iter() {
+                        encode_dump_bulk(&mut buf, member.as_ref());
                     }
                 }
             }
@@ -13366,15 +15463,15 @@ impl Store {
                 {
                     buf.push(RDB_TYPE_HASH_LISTPACK);
                     let mut pairs = Vec::with_capacity(h.len() * 2);
-                    for (field, value) in h {
-                        pairs.push(field.as_slice());
-                        pairs.push(value.as_slice());
+                    for (field, value) in h.iter() {
+                        pairs.push(field);
+                        pairs.push(value);
                     }
                     encode_dump_bulk(&mut buf, &encode_listpack_strings(&pairs)?);
                 } else {
                     buf.push(RDB_TYPE_HASH);
                     encode_length(&mut buf, h.len());
-                    for (field, value) in h {
+                    for (field, value) in h.iter() {
                         encode_dump_bulk(&mut buf, field);
                         encode_dump_bulk(&mut buf, value);
                     }
@@ -13389,8 +15486,8 @@ impl Store {
                     buf.push(RDB_TYPE_ZSET_LISTPACK);
                     let mut pairs = Vec::with_capacity(zs.len() * 2);
                     for (member, score) in zs.iter_asc() {
-                        pairs.push(member.clone());
-                        pairs.push(redis_score_to_string(*score).into_bytes());
+                        pairs.push(member.to_vec());
+                        pairs.push(redis_score_to_string(score).into_bytes());
                     }
                     let pair_refs: Vec<&[u8]> = pairs.iter().map(Vec::as_slice).collect();
                     encode_dump_bulk(&mut buf, &encode_listpack_strings(&pair_refs)?);
@@ -13485,7 +15582,7 @@ impl Store {
             RDB_TYPE_STRING => {
                 let (v, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                Value::String(v)
+                Value::String(v.into())
             }
             RDB_TYPE_LIST => {
                 // List
@@ -13500,7 +15597,7 @@ impl Store {
                     cursor += consumed;
                     list.push_back(item);
                 }
-                Value::List(list)
+                Value::List(Box::new(list.into()))
             }
             RDB_TYPE_SET => {
                 // Set
@@ -13509,7 +15606,7 @@ impl Store {
                 if count == 0 {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                let mut set = IndexSet::new();
+                let mut set = GenericSet::default();
                 for _ in 0..count {
                     let (member, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += consumed;
@@ -13518,7 +15615,7 @@ impl Store {
                     }
                 }
                 force_set_hashtable_encoding = true;
-                Value::Set(set)
+                Value::Set(Box::new(SetValue::Generic(set)))
             }
             RDB_TYPE_HASH => {
                 // Hash
@@ -13527,7 +15624,7 @@ impl Store {
                 if count == 0 {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                let mut hash = IndexMap::new();
+                let mut hash = HashFieldMap::default();
                 for _ in 0..count {
                     let (field, fc) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += fc;
@@ -13537,7 +15634,7 @@ impl Store {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                 }
-                Value::Hash(hash)
+                Value::Hash(Box::new(hash))
             }
             RDB_TYPE_ZSET | RDB_TYPE_ZSET_2 => {
                 // Sorted set
@@ -13547,6 +15644,8 @@ impl Store {
                     return Err(StoreError::InvalidDumpPayload);
                 }
                 let mut zs = SortedSet::new();
+                let zset_max_entries = self.zset_max_listpack_entries;
+                let zset_max_value = self.zset_max_listpack_value;
                 for _ in 0..count {
                     let (member, mc) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += mc;
@@ -13570,11 +15669,11 @@ impl Store {
                     if score.is_nan() {
                         return Err(StoreError::InvalidDumpPayload);
                     }
-                    if !zs.insert(member, score) {
+                    if !zs.insert_with_limits(member, score, zset_max_entries, zset_max_value) {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                 }
-                Value::SortedSet(zs)
+                Value::SortedSet(Box::new(zs))
             }
             RDB_TYPE_STREAM_LISTPACKS
             | RDB_TYPE_STREAM_LISTPACKS_2
@@ -13616,7 +15715,7 @@ impl Store {
                 if list.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::List(list)
+                Value::List(Box::new(list.into()))
             }
             RDB_TYPE_LIST_QUICKLIST_2 => {
                 let (node_count, consumed) = decode_length(payload, cursor)?;
@@ -13648,7 +15747,7 @@ impl Store {
                 if list.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::List(list)
+                Value::List(Box::new(list.into()))
             }
             RDB_TYPE_LIST_QUICKLIST => {
                 let (node_count, consumed) = decode_length(payload, cursor)?;
@@ -13664,7 +15763,7 @@ impl Store {
                 if list.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::List(list)
+                Value::List(Box::new(list.into()))
             }
             RDB_TYPE_HASH_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -13673,7 +15772,7 @@ impl Store {
                 if hash.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::Hash(hash)
+                Value::Hash(Box::new(hash))
             }
             RDB_TYPE_HASH_ZIPLIST => {
                 let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -13682,7 +15781,7 @@ impl Store {
                 if hash.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::Hash(hash)
+                Value::Hash(Box::new(hash))
             }
             RDB_TYPE_HASH_ZIPMAP => {
                 let (zipmap, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -13691,25 +15790,27 @@ impl Store {
                 if hash.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::Hash(hash)
+                Value::Hash(Box::new(hash))
             }
             RDB_TYPE_SET_INTSET => {
                 let (intset, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                let mut set = IndexSet::new();
+                let mut set = GenericSet::default();
                 for member in decode_intset_members(&intset)? {
                     set.insert(member);
                 }
                 if set.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::Set(set)
+                // A loaded intset stays intset-encoded regardless of the current
+                // set-max-intset-entries limit (the limit governs new adds only).
+                Value::Set(Box::new(SetValue::from_index_set(set, usize::MAX)))
             }
             RDB_TYPE_SET_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
                 let members = decode_listpack_strings(&listpack)?;
-                let mut set = IndexSet::new();
+                let mut set = GenericSet::default();
                 for member in members {
                     if !set.insert(member) {
                         return Err(StoreError::InvalidDumpPayload);
@@ -13719,7 +15820,7 @@ impl Store {
                     return Err(StoreError::InvalidDumpPayload);
                 }
                 force_set_listpack_encoding = true;
-                Value::Set(set)
+                Value::Set(Box::new(SetValue::Generic(set)))
             }
             RDB_TYPE_ZSET_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -13728,7 +15829,7 @@ impl Store {
                 if zs.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::SortedSet(zs)
+                Value::SortedSet(Box::new(zs))
             }
             RDB_TYPE_ZSET_ZIPLIST => {
                 let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -13737,7 +15838,7 @@ impl Store {
                 if zs.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::SortedSet(zs)
+                Value::SortedSet(Box::new(zs))
             }
             _ => return Err(StoreError::InvalidDumpPayload),
         };
@@ -13798,7 +15899,7 @@ impl Store {
     pub fn get_value_and_expiry(&self, key: &[u8]) -> Option<(&Value, Option<u64>)> {
         self.entries
             .get(key)
-            .map(|entry| (&entry.value, entry.expires_at_ms))
+            .map(|entry| (&entry.value, entry.expiry_ms()))
     }
 
     /// and encoded/replayed to reconstruct the database from scratch.
@@ -13845,20 +15946,27 @@ impl Store {
 
             match &entry.value {
                 Value::String(v) => {
-                    commands.push(vec![b"SET".to_vec(), logical_key.clone(), v.clone()]);
+                    commands.push(vec![b"SET".to_vec(), logical_key.clone(), v.to_vec()]);
+                }
+                Value::Integer(value) => {
+                    commands.push(vec![
+                        b"SET".to_vec(),
+                        logical_key.clone(),
+                        value.to_string().into_bytes(),
+                    ]);
                 }
                 Value::Hash(h) => {
                     if !h.is_empty() {
                         // Sort fields for deterministic output.
-                        let mut fields: Vec<(&Vec<u8>, &Vec<u8>)> = h.iter().collect();
+                        let mut fields: Vec<(&[u8], &[u8])> = h.iter().collect();
                         fields.sort_by(|a, b| a.0.cmp(b.0));
                         for chunk in fields.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
                             // Redis aof.c::rewriteHashObject writes HMSET in
                             // batches capped by AOF_REWRITE_ITEMS_PER_CMD.
                             let mut argv = vec![b"HMSET".to_vec(), logical_key.clone()];
                             for (field, value) in chunk {
-                                argv.push((*field).clone());
-                                argv.push((*value).clone());
+                                argv.push(field.to_vec());
+                                argv.push(value.to_vec());
                             }
                             commands.push(argv);
                         }
@@ -13888,11 +15996,11 @@ impl Store {
                 }
                 Value::List(l) => {
                     if !l.is_empty() {
-                        let items: Vec<&Vec<u8>> = l.iter().collect();
+                        let items: Vec<&[u8]> = l.iter().collect();
                         for chunk in items.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
                             let mut argv = vec![b"RPUSH".to_vec(), logical_key.clone()];
                             for item in chunk {
-                                argv.push((*item).clone());
+                                argv.push((*item).to_vec());
                             }
                             commands.push(argv);
                         }
@@ -13901,12 +16009,12 @@ impl Store {
                 Value::Set(s) => {
                     if !s.is_empty() {
                         // Sort members for deterministic output.
-                        let mut members: Vec<&Vec<u8>> = s.iter().collect();
+                        let mut members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
                         members.sort();
                         for chunk in members.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
                             let mut argv = vec![b"SADD".to_vec(), logical_key.clone()];
                             for member in chunk {
-                                argv.push((*member).clone());
+                                argv.push(member.clone());
                             }
                             commands.push(argv);
                         }
@@ -13915,17 +16023,17 @@ impl Store {
                 Value::SortedSet(zs) => {
                     if !zs.is_empty() {
                         // Sort by score then member for deterministic output.
-                        let mut pairs: Vec<(&Vec<u8>, &f64)> = zs.iter().collect();
+                        let mut pairs: Vec<(&[u8], f64)> = zs.iter().collect();
                         pairs.sort_by(|a, b| {
-                            a.1.partial_cmp(b.1)
+                            a.1.partial_cmp(&b.1)
                                 .unwrap_or(std::cmp::Ordering::Equal)
                                 .then_with(|| a.0.cmp(b.0))
                         });
                         for chunk in pairs.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
                             let mut argv = vec![b"ZADD".to_vec(), logical_key.clone()];
                             for (member, score) in chunk {
-                                argv.push(redis_score_to_string(**score).into_bytes());
-                                argv.push((*member).clone());
+                                argv.push(redis_score_to_string(*score).into_bytes());
+                                argv.push((*member).to_vec());
                             }
                             commands.push(argv);
                         }
@@ -14047,7 +16155,7 @@ impl Store {
             }
 
             // Emit PEXPIREAT if the key has an expiry timestamp.
-            if let Some(exp_ms) = entry.expires_at_ms {
+            if let Some(exp_ms) = entry.expiry_ms() {
                 commands.push(vec![
                     b"PEXPIREAT".to_vec(),
                     logical_key.clone(),
@@ -14128,7 +16236,7 @@ fn encode_rdb_string(buf: &mut Vec<u8>, data: &[u8]) {
 
 fn encode_dump_quicklist2(
     buf: &mut Vec<u8>,
-    list: &VecDeque<Vec<u8>>,
+    list: &ListValue,
     list_max_listpack_size: i64,
 ) -> Option<()> {
     if list.is_empty() {
@@ -14142,8 +16250,7 @@ fn encode_dump_quicklist2(
 
     let mut nodes = Vec::new();
     let mut packed = Vec::new();
-    for item in list {
-        let item = item.as_slice();
+    for item in list.iter() {
         if quicklist_plain_node_required(item, list_max_listpack_size) {
             if !packed.is_empty() {
                 nodes.push(Node::Packed(std::mem::take(&mut packed)));
@@ -14669,12 +16776,12 @@ fn decode_listpack_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
         .map_err(|_| StoreError::InvalidDumpPayload)
 }
 
-fn hash_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<IndexMap<Vec<u8>, Vec<u8>>, StoreError> {
+fn hash_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<HashFieldMap, StoreError> {
     let mut chunks = entries.chunks_exact(2);
     if !chunks.remainder().is_empty() {
         return Err(StoreError::InvalidDumpPayload);
     }
-    let mut hash = IndexMap::new();
+    let mut hash = HashFieldMap::default();
     for pair in &mut chunks {
         if hash.insert(pair[0].clone(), pair[1].clone()).is_some() {
             return Err(StoreError::InvalidDumpPayload);
@@ -14704,7 +16811,7 @@ fn zset_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<SortedSet, StoreError
     Ok(zs)
 }
 
-fn decode_zipmap_pairs(data: &[u8]) -> Result<IndexMap<Vec<u8>, Vec<u8>>, StoreError> {
+fn decode_zipmap_pairs(data: &[u8]) -> Result<HashFieldMap, StoreError> {
     const ZIPMAP_BIGLEN: u8 = 254;
     const ZIPMAP_END: u8 = 255;
 
@@ -14718,7 +16825,7 @@ fn decode_zipmap_pairs(data: &[u8]) -> Result<IndexMap<Vec<u8>, Vec<u8>>, StoreE
         .ok_or(StoreError::InvalidDumpPayload)?;
     let mut cursor = 1;
     let payload_end = data.len() - 1;
-    let mut hash = IndexMap::new();
+    let mut hash = HashFieldMap::default();
 
     while cursor < payload_end {
         let (key_len, key_len_size) = decode_zipmap_len(data, cursor, payload_end)?;
@@ -15102,84 +17209,14 @@ pub fn sha1_hex_public(data: &[u8]) -> String {
     sha1_hex(data)
 }
 
-/// (frankenredis-nhy73) Convert a sorted-set / GEO score to the
-/// RESP bulk-string form vendored Redis 7.2.4 emits.
-///
-/// Upstream util.c::d2string fast-paths exact-integer doubles
-/// (double2ll → ll2string) and otherwise delegates to
-/// fpconv_dtoa (Grisu3 shortest roundtrip).
-///
-/// Rust's f64::to_string() also produces a shortest-roundtrip
-/// decimal but always in FIXED form, so values like 1e308 expand to
-/// 309 chars instead of vendored's "1e+308". This helper mirrors
-/// upstream by:
-///   - emitting "nan" / "inf" / "-inf" / "0" / "-0" for the special
-///     cases (matches d2string verbatim);
-///   - returning the i64 decimal when the score is an exact integer
-///     in [i64::MIN, i64::MAX];
-///   - otherwise using Rust's shortest-roundtrip fixed-point for
-///     reasonably-scaled values, and switching to scientific (with
-///     '+' on positive exponents to match vendored) when the
-///     base-10 exponent is <= -7 or >= 19. Those thresholds were
-///     calibrated empirically against vendored Redis 7.2.4 ZSCORE
-///     output (1e-6 stays as "0.000001"; 1e-7 becomes "1e-7";
-///     1e18 stays as "1000000000000000000"; 1e19 becomes "1e+19").
+/// (frankenredis-nhy73) Convert a sorted-set / GEO score to the RESP
+/// bulk-string form vendored Redis 7.2.4 emits (ZSCORE, ZADD INCR,
+/// ZINCRBY, GEODIST, …). This is the same conversion the RESP3 Double
+/// type uses, so the canonical d2string/fpconv_dtoa port lives in
+/// fr-protocol and both RESP2 and RESP3 share it. (frankenredis-sk4ss)
+#[must_use]
 pub fn redis_score_to_string(value: f64) -> String {
-    if value.is_nan() {
-        return "nan".to_string();
-    }
-    if value.is_infinite() {
-        return if value > 0.0 {
-            "inf".to_string()
-        } else {
-            "-inf".to_string()
-        };
-    }
-    if value == 0.0 {
-        return if value.is_sign_negative() {
-            "-0".to_string()
-        } else {
-            "0".to_string()
-        };
-    }
-
-    // Exact-integer fast path mirrors double2ll. The bounds match
-    // i64's representable range; the equality re-check guards
-    // against f64s like 1e19 that fall outside i64 even though the
-    // bounds check would pass for marginal values.
-    if value >= i64::MIN as f64 && value <= i64::MAX as f64 {
-        let truncated = value as i64;
-        if truncated as f64 == value {
-            return truncated.to_string();
-        }
-    }
-
-    let abs = value.abs();
-    let log10_floor = abs.log10().floor() as i32;
-    let use_scientific = log10_floor <= -7 || log10_floor >= 19;
-
-    if use_scientific {
-        let raw = format!("{:e}", value);
-        // Rust's {:e} omits the '+' sign on positive exponents;
-        // vendored fpconv_dtoa always emits one (so "1e+308" not
-        // "1e308"). Insert it after the 'e' when the next char is
-        // a digit.
-        let bytes = raw.as_bytes();
-        if let Some(epos) = bytes.iter().position(|&b| b == b'e')
-            && epos + 1 < bytes.len()
-            && bytes[epos + 1] != b'-'
-            && bytes[epos + 1] != b'+'
-        {
-            let mut out = String::with_capacity(raw.len() + 1);
-            out.push_str(&raw[..=epos]);
-            out.push('+');
-            out.push_str(&raw[epos + 1..]);
-            return out;
-        }
-        raw
-    } else {
-        value.to_string()
-    }
+    fr_protocol::format_redis_double(value)
 }
 
 /// Generate a 40-character hex run ID (like Redis's run_id).
@@ -15373,6 +17410,7 @@ fn estimate_expiry_memory_usage_bytes(entry: &Entry) -> usize {
 fn estimate_value_memory_usage_bytes(entry: &Entry) -> usize {
     match &entry.value {
         Value::String(bytes) => estimate_string_value_memory_usage_bytes(bytes, entry),
+        Value::Integer(_) => REDIS_OBJECT_OVERHEAD_BYTES,
         Value::Hash(fields) => estimate_hash_memory_usage_bytes(fields),
         Value::List(items) => estimate_list_memory_usage_bytes(items),
         Value::Set(members) => estimate_set_memory_usage_bytes(members),
@@ -15405,7 +17443,7 @@ fn is_int_encoded_string(bytes: &[u8]) -> bool {
     n.to_string() == s
 }
 
-fn estimate_hash_memory_usage_bytes(fields: &IndexMap<Vec<u8>, Vec<u8>>) -> usize {
+fn estimate_hash_memory_usage_bytes(fields: &HashFieldMap) -> usize {
     if fields
         .iter()
         .all(|(field, value)| field.len() <= 64 && value.len() <= 64)
@@ -15435,11 +17473,8 @@ fn estimate_hash_memory_usage_bytes(fields: &IndexMap<Vec<u8>, Vec<u8>>) -> usiz
         )
 }
 
-fn estimate_list_memory_usage_bytes(items: &VecDeque<Vec<u8>>) -> usize {
-    let payload: usize = items
-        .iter()
-        .map(|item| estimate_listpack_entry_bytes(item))
-        .sum();
+fn estimate_list_memory_usage_bytes(items: &ListValue) -> usize {
+    let payload: usize = items.iter().map(estimate_listpack_entry_bytes).sum();
     let listpack_bytes =
         redis_allocation_size(REDIS_LISTPACK_HEADER_AND_EOF_BYTES.saturating_add(payload));
     if listpack_bytes <= 8 * 1024 {
@@ -15452,15 +17487,19 @@ fn estimate_list_memory_usage_bytes(items: &VecDeque<Vec<u8>>) -> usize {
     }
 }
 
-fn estimate_set_memory_usage_bytes(members: &IndexSet<Vec<u8>>) -> usize {
-    if members.len() <= 512 && members.iter().all(|member| parse_i64(member).is_ok()) {
+fn estimate_set_memory_usage_bytes(members: &SetValue) -> usize {
+    if members.len() <= 512
+        && members
+            .iter()
+            .all(|member| parse_i64(member.as_ref()).is_ok())
+    {
         let payload = 8usize.saturating_add(members.len().saturating_mul(REDIS_SCORE_BYTES));
         return REDIS_OBJECT_OVERHEAD_BYTES.saturating_add(redis_allocation_size(payload));
     }
     if members.len() <= 128 && members.iter().all(|member| member.len() <= 64) {
         let payload = members
             .iter()
-            .map(|member| estimate_listpack_entry_bytes(member))
+            .map(|member| estimate_listpack_entry_bytes(member.as_ref()))
             .sum();
         return estimate_listpack_object_memory_usage_bytes(payload);
     }
@@ -15484,7 +17523,7 @@ fn estimate_sorted_set_memory_usage_bytes(members: &SortedSet) -> usize {
             .iter()
             .map(|(member, score)| {
                 estimate_listpack_entry_bytes(member)
-                    .saturating_add(estimate_listpack_score_bytes(*score))
+                    .saturating_add(estimate_listpack_score_bytes(score))
             })
             .sum();
         return estimate_listpack_object_memory_usage_bytes(payload);
@@ -15663,9 +17702,19 @@ fn aggregate_scores(a: f64, b: f64, aggregate: &[u8]) -> f64 {
     } else if eq_ascii_ci(aggregate, b"MAX") {
         a.max(b)
     } else {
-        // Default is SUM
-        a + b
+        // Default is SUM. Upstream zunionInterAggregate (t_zset.c) keeps the
+        // convention that +inf + -inf (which is NaN) resolves to 0.0.
+        let r = a + b;
+        if r.is_nan() { 0.0 } else { r }
     }
+}
+
+/// (frankenredis-zsetnan) Upstream zunionInterDiffGenericCommand normalizes
+/// every weighted source score with `if (isnan(score)) score = 0;` — e.g.
+/// 0 * ±inf yields NaN, which Redis stores as 0.0.
+fn normalize_weighted_score(score: f64, weight: f64) -> f64 {
+    let s = score * weight;
+    if s.is_nan() { 0.0 } else { s }
 }
 
 fn parse_i64(bytes: &[u8]) -> Result<i64, StoreError> {
@@ -16538,19 +18587,6 @@ fn normalize_index(index: i64, len: i64) -> i64 {
     }
 }
 
-/// Compare (score, member) pairs for sorted set ordering.
-/// Redis sorts by score first, then by member lexicographically for ties.
-fn cmp_score_member(s1: f64, m1: &[u8], s2: f64, m2: &[u8]) -> std::cmp::Ordering {
-    canonicalize_zero_score(s1)
-        .total_cmp(&canonicalize_zero_score(s2))
-        .then_with(|| m1.cmp(m2))
-}
-
-/// Returns true if (s1, m1) < (s2, m2) in Redis sorted set ordering.
-fn score_member_lt(s1: f64, m1: &[u8], s2: f64, m2: &[u8]) -> bool {
-    cmp_score_member(s1, m1, s2, m2) == std::cmp::Ordering::Less
-}
-
 fn canonicalize_zero_score(score: f64) -> f64 {
     if score == 0.0 { 0.0 } else { score }
 }
@@ -16600,6 +18636,12 @@ fn invalid_lex_range_error() -> StoreError {
 
 const HLL_P: u32 = 14;
 const HLL_REGISTERS: usize = 1 << HLL_P; // 16384
+// (frankenredis-2bpzv) Constants for the Otmar Ertl 2017 cardinality estimator
+// (redis hyperloglog.c::hllCount), matching upstream byte-for-byte.
+const HLL_Q: usize = 64 - HLL_P as usize; // 50 — max rho the hash can yield is HLL_Q+1
+// 0.5/ln(2). Shortest decimal that round-trips to the exact same f64 as
+// upstream's `0.721347520444481703680`, so the estimate is bit-identical.
+const HLL_ALPHA_INF: f64 = 0.7213475204444817;
 const HLL_REDIS_MAGIC: &[u8] = b"HYLL";
 const HLL_MAGIC_V2: &[u8] = b"HYL2";
 const HLL_HEADER_SIZE: usize = HLL_MAGIC_V2.len() + 1;
@@ -16735,6 +18777,66 @@ fn hll_parse_registers(data: &[u8]) -> Result<Vec<u8>, StoreError> {
     hll_parse(data).map(|(_, registers)| registers)
 }
 
+/// True when `data` is the Redis HLL serialization — `HYLL` magic plus a
+/// 16-byte header whose trailing 8 bytes carry the cardinality cache — as
+/// opposed to the header-less legacy form or fr's internal `HYL2` form.
+/// (frankenredis-twdut)
+fn hll_has_redis_cache_header(data: &[u8]) -> bool {
+    data.starts_with(HLL_REDIS_MAGIC)
+        && data.len() >= HLL_REDIS_HEADER_SIZE
+        && data.len() != HLL_LEGACY_DATA_SIZE
+}
+
+/// O(1) structural validation of a Redis HLL header, mirroring upstream
+/// `hyperloglog.c::isHLLObjectOrReply`: magic `HYLL`, a header of at least 16
+/// bytes, an encoding byte of 0 (dense) or 1 (sparse), and — for the dense
+/// encoding — a string length that exactly matches the dense register payload.
+/// The caller must ensure `data` carries the Redis cache-header form
+/// (`hll_has_redis_cache_header`). This guards the cardinality-cache fast path:
+/// upstream validates the object BEFORE reading the cache, so a `HYLL` string
+/// with a bogus encoding/length surfaces WRONGTYPE rather than a stale cache.
+/// (frankenredis-hllval)
+fn hll_redis_header_is_valid(data: &[u8]) -> bool {
+    let Some(&encoding) = data.get(HLL_REDIS_MAGIC.len()) else {
+        return false;
+    };
+    if encoding > HLL_REDIS_SPARSE_ENCODING {
+        return false;
+    }
+    if encoding == HLL_REDIS_DENSE_ENCODING && data.len() != HLL_REDIS_DENSE_SIZE {
+        return false;
+    }
+    true
+}
+
+/// Read the cached cardinality from a Redis HLL header when it is valid (the
+/// high bit of the last cache byte is clear). Returns `None` when the cache
+/// has been invalidated by a modification or the value isn't in the Redis
+/// 16-byte-header form. Mirrors upstream `HLL_VALID_CACHE`. (frankenredis-twdut)
+fn hll_cache_read(data: &[u8]) -> Option<u64> {
+    if !hll_has_redis_cache_header(data) {
+        return None;
+    }
+    let card: [u8; 8] = data[8..16].try_into().ok()?;
+    if card[7] & 0x80 != 0 {
+        return None; // HLL_INVALIDATE_CACHE bit set
+    }
+    Some(u64::from_le_bytes(card))
+}
+
+/// Store `card` into the Redis HLL header cache, clearing the invalid bit.
+/// Returns whether the value carried a Redis header to update. Cardinalities
+/// fit far below 2^56, so the little-endian value's top "invalid" bit is
+/// naturally 0. Mirrors upstream which writes `card[0..8]` and clears
+/// `HLL_INVALIDATE_CACHE`. (frankenredis-twdut)
+fn hll_cache_write(data: &mut [u8], card: u64) -> bool {
+    if !hll_has_redis_cache_header(data) {
+        return false;
+    }
+    data[8..16].copy_from_slice(&card.to_le_bytes());
+    true
+}
+
 fn hll_encode(registers: &[u8], encoding: HllEncoding) -> Vec<u8> {
     let mut data = Vec::new();
     data.extend_from_slice(HLL_REDIS_MAGIC);
@@ -16758,17 +18860,25 @@ fn hll_encode(registers: &[u8], encoding: HllEncoding) -> Vec<u8> {
     data
 }
 
+// HLL dense registers are 6-bit LSB-first fields. Exactly 4 registers occupy
+// 24 bits = 3 bytes, and both HLL_REGISTERS (16384 = 4096·4) and the dense
+// payload (12288 = 4096·3) are exact multiples, so the codec runs in 4096
+// remainder-free groups: one 24-bit word per group instead of per-register
+// bit/8, bit%8, and masked-OR byte loads/stores. (frankenredis-kgsni)
 fn hll_encode_dense_registers(registers: &[u8]) -> Vec<u8> {
     let mut payload = vec![0u8; HLL_REDIS_DENSE_REGISTER_BYTES];
-    for (index, &register) in registers.iter().take(HLL_REGISTERS).enumerate() {
-        let bit = index * 6;
-        let byte = bit / 8;
-        let shift = bit % 8;
-        let value = u16::from(register & 0x3f);
-        payload[byte] |= (value << shift) as u8;
-        if shift > 2 {
-            payload[byte + 1] |= (value >> (8 - shift)) as u8;
-        }
+    for (regs, bytes) in registers
+        .chunks_exact(4)
+        .zip(payload.chunks_exact_mut(3))
+        .take(HLL_REGISTERS / 4)
+    {
+        let w = (u32::from(regs[0] & 0x3f))
+            | (u32::from(regs[1] & 0x3f) << 6)
+            | (u32::from(regs[2] & 0x3f) << 12)
+            | (u32::from(regs[3] & 0x3f) << 18);
+        bytes[0] = w as u8;
+        bytes[1] = (w >> 8) as u8;
+        bytes[2] = (w >> 16) as u8;
     }
     payload
 }
@@ -16778,13 +18888,12 @@ fn hll_decode_dense_registers(payload: &[u8]) -> Result<Vec<u8>, StoreError> {
         return Err(StoreError::InvalidHllValue);
     }
     let mut registers = vec![0u8; HLL_REGISTERS];
-    for (index, register) in registers.iter_mut().enumerate() {
-        let bit = index * 6;
-        let byte = bit / 8;
-        let shift = bit % 8;
-        let raw =
-            u16::from(payload[byte]) | u16::from(payload.get(byte + 1).copied().unwrap_or(0)) << 8;
-        *register = ((raw >> shift) & 0x3f) as u8;
+    for (regs, bytes) in registers.chunks_exact_mut(4).zip(payload.chunks_exact(3)) {
+        let w = u32::from(bytes[0]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[2]) << 16);
+        regs[0] = (w & 0x3f) as u8;
+        regs[1] = ((w >> 6) & 0x3f) as u8;
+        regs[2] = ((w >> 12) & 0x3f) as u8;
+        regs[3] = ((w >> 18) & 0x3f) as u8;
     }
     Ok(registers)
 }
@@ -16926,28 +19035,69 @@ fn hll_sparse_decode(registers: &[u8]) -> Result<String, StoreError> {
     Ok(segments.join(" "))
 }
 
-fn hll_estimate(registers: &[u8]) -> u64 {
-    let m = HLL_REGISTERS as f64;
-    let alpha_m = 0.7213 / (1.0 + 1.079 / m);
-
-    let mut sum = 0.0_f64;
-    let mut zeros = 0_u32;
-    for &reg in registers {
-        sum += 2.0_f64.powi(-i32::from(reg));
-        if reg == 0 {
-            zeros += 1;
+/// `hllSigma` from redis hyperloglog.c — converges via exact f64 equality, so
+/// it reproduces upstream's loop bit-for-bit. (frankenredis-2bpzv)
+fn hll_sigma(mut x: f64) -> f64 {
+    if x == 1.0 {
+        return f64::INFINITY;
+    }
+    let mut y = 1.0_f64;
+    let mut z = x;
+    loop {
+        x *= x;
+        let z_prime = z;
+        z += x * y;
+        y += y;
+        if z_prime == z {
+            break;
         }
     }
+    z
+}
 
-    let estimate = alpha_m * m * m / sum;
-
-    // Small-range correction via linear counting
-    if estimate <= 2.5 * m && zeros > 0 {
-        let lc = m * (m / f64::from(zeros)).ln();
-        lc.round() as u64
-    } else {
-        estimate.round() as u64
+/// `hllTau` from redis hyperloglog.c. (frankenredis-2bpzv)
+fn hll_tau(mut x: f64) -> f64 {
+    if x == 0.0 || x == 1.0 {
+        return 0.0;
     }
+    let mut y = 1.0_f64;
+    let mut z = 1.0 - x;
+    loop {
+        x = x.sqrt();
+        let z_prime = z;
+        y *= 0.5;
+        z -= (1.0 - x).powi(2) * y;
+        if z_prime == z {
+            break;
+        }
+    }
+    z / 3.0
+}
+
+/// Estimate HLL cardinality using the Otmar Ertl 2017 algorithm
+/// ("New cardinality estimation algorithms for HyperLogLog sketches",
+/// arXiv:1702.01284), a direct port of redis 7.2.4 hyperloglog.c::hllCount.
+/// The older Flajolet 2007 estimator (alpha*m^2/sum + linear-counting) that
+/// fr used previously diverged from upstream by ~1 at higher cardinalities
+/// even with byte-identical registers. (frankenredis-2bpzv)
+fn hll_estimate(registers: &[u8]) -> u64 {
+    let m = HLL_REGISTERS as f64;
+    // Register-value histogram. Register rho values are 6-bit (0..=63); mask
+    // keeps the index in bounds for any malformed RESTORE payload, matching
+    // upstream's fixed reghisto[64].
+    let mut reghisto = [0_i64; 64];
+    for &reg in registers {
+        reghisto[(reg as usize) & 63] += 1;
+    }
+
+    let mut z = m * hll_tau((m - reghisto[HLL_Q + 1] as f64) / m);
+    for j in (1..=HLL_Q).rev() {
+        z += reghisto[j] as f64;
+        z *= 0.5;
+    }
+    z += m * hll_sigma(reghisto[0] as f64 / m);
+    let e = (HLL_ALPHA_INF * m * m / z).round();
+    e as u64
 }
 
 fn hll_add_to_registers(registers: &mut [u8], element: &[u8]) {
@@ -17535,8 +19685,8 @@ mod tests {
         RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST,
         RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET,
         RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET,
-        RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, ScoreBound, ScoreMember,
-        Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions,
+        RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, ScoreBound, Store,
+        StoreError, StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions,
         StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value,
         ValueType, decode_length, decode_listpack_strings, decode_rdb_string, encode_db_key,
         encode_intset, encode_length, encode_listpack_strings, hll_sparse_decode,
@@ -18071,17 +20221,21 @@ mod tests {
     }
 
     #[test]
-    fn expire_at_milliseconds_emits_expired_event_when_deadline_in_past() {
+    fn expire_at_milliseconds_emits_del_event_when_deadline_in_past() {
         let mut store = Store::new();
-        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_EXPIRED;
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_GENERIC;
         store.set(b"k".to_vec(), b"v".to_vec(), None, 1_000);
 
-        // Deadline in the past (500ms < now 1000ms) should emit "expired" not "del"
+        // (frankenredis-08t0x) A past deadline supplied to the EXPIREAT command
+        // path deletes the key synchronously and emits NOTIFY_GENERIC "del",
+        // matching upstream expire.c::expireGenericCommand. "expired" is only
+        // for natural lazy/active expiry, not command-driven past deadlines.
+        // Verified differentially vs vendored Redis 7.2.4.
         assert!(store.expire_at_milliseconds(b"k", 500, 1_000));
         assert_eq!(store.get(b"k", 1_000).unwrap(), None);
         assert_eq!(
             store.drain_keyspace_notifications(),
-            vec![(b"__keyevent@0__:expired".to_vec(), b"k".to_vec())]
+            vec![(b"__keyevent@0__:del".to_vec(), b"k".to_vec())]
         );
     }
 
@@ -18378,7 +20532,10 @@ mod tests {
         store.set(b"c".to_vec(), b"3".to_vec(), None, 0);
 
         let result = store.run_active_expire_cycle(10, None, 10);
-        assert_eq!(result.sampled_keys, 3);
+        // (frankenredis-yvg7h) Active-expire now samples only volatile keys, so
+        // the persistent `c` is not sampled (2 sampled, not 3) — matching
+        // upstream's expires-dict scan. The eviction outcome is unchanged.
+        assert_eq!(result.sampled_keys, 2);
         assert_eq!(result.evicted_keys, 2);
         assert_eq!(store.stat_expired_keys, 2);
         assert_eq!(store.dbsize_in_db(0), 1);
@@ -18393,14 +20550,102 @@ mod tests {
         store.set(b"c".to_vec(), b"3".to_vec(), Some(1), 0);
         store.set(b"d".to_vec(), b"4".to_vec(), None, 0);
 
+        // (frankenredis-yvg7h) Sampling the volatile set {a, c} (persistent b, d
+        // are excluded): a limit-2 cycle now reaps BOTH expired keys at once and
+        // the cursor wraps to None — the effectiveness gain over diluting the
+        // sample with persistent keys. A follow-up cycle has nothing to do.
         let first = store.run_active_expire_cycle(10, None, 2);
         assert_eq!(first.sampled_keys, 2);
-        assert_eq!(first.evicted_keys, 1);
-        assert_eq!(first.next_cursor, Some(b"c".to_vec()));
+        assert_eq!(first.evicted_keys, 2);
+        assert_eq!(first.next_cursor, None);
 
         let second = store.run_active_expire_cycle(10, first.next_cursor.clone(), 2);
-        assert_eq!(second.sampled_keys, 2);
-        assert_eq!(second.evicted_keys, 1);
+        assert_eq!(second.sampled_keys, 0);
+        assert_eq!(second.evicted_keys, 0);
+    }
+
+    #[test]
+    fn volatile_keys_index_tracks_ttl_transitions() {
+        // (frankenredis-yvg7h) The volatile-key sampling set must follow every
+        // TTL transition so active-expire samples exactly the keys with a TTL.
+        let mut store = Store::new();
+        store.set(b"p".to_vec(), b"v".to_vec(), None, 0); // persistent
+        store.set(b"v".to_vec(), b"x".to_vec(), Some(5_000), 0); // volatile
+        assert!(!store.volatile_keys.contains(b"p".as_slice()));
+        assert!(store.volatile_keys.contains(b"v".as_slice()));
+
+        // PERSIST drops the TTL -> leaves the volatile set.
+        assert!(store.persist(b"v", 0));
+        assert!(!store.volatile_keys.contains(b"v".as_slice()));
+
+        // EXPIREAT adds a TTL to a persistent key -> enters the set.
+        assert!(store.expire_at_milliseconds(b"p", 9_999, 0));
+        assert!(store.volatile_keys.contains(b"p".as_slice()));
+
+        // Overwriting with a TTL-less SET clears it again.
+        store.set(b"p".to_vec(), b"y".to_vec(), None, 0);
+        assert!(!store.volatile_keys.contains(b"p".as_slice()));
+
+        // DEL of a volatile key removes it from the set.
+        store.set(b"d".to_vec(), b"z".to_vec(), Some(1_000), 0);
+        assert!(store.volatile_keys.contains(b"d".as_slice()));
+        store.del(&[b"d".to_vec()], 0);
+        assert!(!store.volatile_keys.contains(b"d".as_slice()));
+
+        // FLUSHDB clears the set.
+        store.set(b"f".to_vec(), b"z".to_vec(), Some(1_000), 0);
+        assert!(!store.volatile_keys.is_empty());
+        store.flushdb();
+        assert!(store.volatile_keys.is_empty());
+    }
+
+    #[test]
+    fn active_expire_samples_volatile_keys_only_not_persistent() {
+        // (frankenredis-yvg7h) With a mostly-persistent keyspace, active-expire
+        // must still reap expired volatile keys promptly — it samples the
+        // volatile set, not the whole keyspace. All-key sampling with the same
+        // small sample_limit would almost never hit the handful of TTL keys.
+        let mut store = Store::new();
+        for i in 0..1000u32 {
+            store.set(
+                format!("persist:{i:04}").into_bytes(),
+                b"v".to_vec(),
+                None,
+                0,
+            );
+        }
+        for i in 0..5u32 {
+            store.set(format!("vol:{i}").into_bytes(), b"v".to_vec(), Some(100), 0);
+        }
+        // Single cycle at t=1000 (all 5 volatile keys expired), sample_limit=10.
+        let result = store.run_active_expire_cycle(1000, None, 10);
+        assert_eq!(
+            result.sampled_keys, 5,
+            "must sample only the 5 volatile keys, not the 1000 persistent ones"
+        );
+        assert_eq!(result.evicted_keys, 5, "every expired volatile key reaped");
+        assert_eq!(result.next_cursor, None);
+        // The 1000 persistent keys are untouched.
+        assert_eq!(store.entries.len(), 1000);
+        // No volatile keys remain -> the next cycle is an O(1) no-op.
+        assert!(store.volatile_keys.is_empty());
+        let empty = store.run_active_expire_cycle(2000, None, 10);
+        assert_eq!(empty.sampled_keys, 0);
+        assert_eq!(empty.evicted_keys, 0);
+    }
+
+    #[test]
+    fn active_expire_cycle_wraparound_samples_each_key_once() {
+        let mut store = Store::new();
+        store.set(b"a".to_vec(), b"1".to_vec(), Some(10_000), 0);
+        store.set(b"b".to_vec(), b"2".to_vec(), Some(10_000), 0);
+        store.set(b"c".to_vec(), b"3".to_vec(), Some(10_000), 0);
+
+        let result = store.run_active_expire_cycle(1, Some(b"b".to_vec()), 5);
+
+        assert_eq!(result.sampled_keys, 3);
+        assert_eq!(result.evicted_keys, 0);
+        assert_eq!(result.next_cursor, None);
     }
 
     #[test]
@@ -18553,6 +20798,14 @@ mod tests {
         assert_digest_matches(&mut store);
 
         store
+            .hset(b"hash", b"field".to_vec(), b"value".to_vec(), 0)
+            .expect("hset should create hash");
+        store
+            .hset(b"hash", b"field".to_vec(), b"updated".to_vec(), 1)
+            .expect("hset should update hash field");
+        assert_digest_matches(&mut store);
+
+        store
             .rpush(b"list", &[b"a".to_vec(), b"b".to_vec()], 0)
             .expect("rpush");
         store.lpushx(b"list", &[b"c".to_vec()], 0).expect("lpushx");
@@ -18591,6 +20844,22 @@ mod tests {
     }
 
     #[test]
+    fn whole_entry_insert_marks_digest_stale_until_state_digest_recompute() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v1".to_vec(), None, 0);
+        assert!(store.digest_stale);
+        let inserted_digest = format!("{:016x}", store.state_digest_full_scan());
+        assert_eq!(store.state_digest(), inserted_digest);
+        assert!(!store.digest_stale);
+
+        store.set(b"k".to_vec(), b"v2".to_vec(), None, 1);
+        assert!(store.digest_stale);
+        let replaced_digest = format!("{:016x}", store.state_digest_full_scan());
+        assert_eq!(store.state_digest(), replaced_digest);
+        assert!(!store.digest_stale);
+    }
+
+    #[test]
     fn state_digest_stays_stale_after_incremental_update_follows_direct_mutation() {
         let mut store = Store::new();
         store
@@ -18603,6 +20872,49 @@ mod tests {
 
         let expected = format!("{:016x}", store.state_digest_full_scan());
         assert_eq!(store.state_digest(), expected);
+    }
+
+    #[test]
+    fn smove_emits_keyspace_events_with_conditional_sadd() {
+        // (frankenredis-4ayjf) SMOVE fires srem(src), del(src if it empties),
+        // then sadd(dst) ONLY when the member is newly added to the
+        // destination. Verified byte-exact vs vendored 7.2.4 on the wire.
+        fn events(store: &mut Store) -> Vec<String> {
+            store
+                .drain_keyspace_notifications()
+                .into_iter()
+                .filter_map(|(chan, _key)| {
+                    String::from_utf8_lossy(&chan)
+                        .strip_prefix("__keyevent@0__:")
+                        .map(str::to_string)
+                })
+                .collect()
+        }
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | super::NOTIFY_SET | NOTIFY_GENERIC;
+
+        store
+            .sadd(b"a", &[b"x".to_vec(), b"y".to_vec()], 0)
+            .expect("seed a");
+        store.sadd(b"b", &[b"z".to_vec()], 0).expect("seed b");
+        let _ = events(&mut store);
+
+        // Normal move — destination gains the member: srem, sadd.
+        store.smove(b"a", b"b", b"x", 0).expect("smove x");
+        assert_eq!(events(&mut store), vec!["srem", "sadd"]);
+
+        // Source empties on this move: srem, del, sadd (y is new to b).
+        store.smove(b"a", b"b", b"y", 0).expect("smove y");
+        assert_eq!(events(&mut store), vec!["srem", "del", "sadd"]);
+
+        // Destination already holds the member: srem only, no sadd.
+        store
+            .sadd(b"c", &[b"m".to_vec(), b"n".to_vec()], 0)
+            .expect("seed c");
+        store.sadd(b"d", &[b"m".to_vec()], 0).expect("seed d");
+        let _ = events(&mut store);
+        store.smove(b"c", b"d", b"m", 0).expect("smove m");
+        assert_eq!(events(&mut store), vec!["srem"]);
     }
 
     #[test]
@@ -18989,6 +21301,58 @@ mod tests {
         assert_eq!(store.incrby(b"n", 5, 0).expect("incrby"), 5);
         assert_eq!(store.incrby(b"n", -3, 0).expect("incrby"), 2);
         assert_eq!(store.incrby(b"n", -10, 0).expect("incrby"), -8);
+    }
+
+    #[test]
+    fn integer_string_values_keep_string_semantics_without_vec_payload() {
+        let mut store = Store::new();
+        store.set(b"n".to_vec(), b"123".to_vec(), None, 0);
+
+        assert_eq!(store.get(b"n", 0).unwrap(), Some(b"123".to_vec()));
+        assert_eq!(store.value_type(b"n", 0), Some(ValueType::String));
+        assert_eq!(store.object_encoding(b"n", 0), Some("int"));
+        assert_eq!(store.strlen(b"n", 0).unwrap(), 3);
+        assert_eq!(store.memory_usage_for_key(b"n", 0), Some(48));
+
+        assert_eq!(store.incrby(b"n", -100, 1).unwrap(), 23);
+        assert_eq!(store.get(b"n", 1).unwrap(), Some(b"23".to_vec()));
+        assert_eq!(store.object_encoding(b"n", 1), Some("int"));
+
+        assert_eq!(store.append(b"n", b"x", 2).unwrap(), 3);
+        assert_eq!(store.get(b"n", 2).unwrap(), Some(b"23x".to_vec()));
+        assert_eq!(store.object_encoding(b"n", 2), Some("raw"));
+    }
+
+    #[test]
+    fn small_string_values_inline_without_changing_string_semantics() {
+        let mut store = Store::new();
+        store.set(b"s".to_vec(), b"abc".to_vec(), None, 0);
+
+        let entry = store.entries.get(b"s".as_slice()).expect("stored key");
+        match &entry.value {
+            Value::String(crate::SmallStr::Inline { len, bytes }) => {
+                assert_eq!(*len, 3);
+                assert_eq!(&bytes[..usize::from(*len)], b"abc");
+            }
+            other => panic!("small string should be inline, got {other:?}"),
+        }
+
+        assert_eq!(store.get(b"s", 0).unwrap(), Some(b"abc".to_vec()));
+        assert_eq!(store.getrange(b"s", 1, -1, 0).unwrap(), b"bc".to_vec());
+        assert_eq!(store.strlen(b"s", 0).unwrap(), 3);
+        assert_eq!(store.getdel(b"s", 0).unwrap(), Some(b"abc".to_vec()));
+
+        let large = vec![b'x'; crate::SMALL_STR_INLINE_CAP + 1];
+        store.set(b"large".to_vec(), large.clone(), None, 1);
+        let entry = store
+            .entries
+            .get(b"large".as_slice())
+            .expect("stored large key");
+        assert!(matches!(
+            &entry.value,
+            Value::String(crate::SmallStr::Heap(_))
+        ));
+        assert_eq!(store.get(b"large", 1).unwrap(), Some(large));
     }
 
     #[test]
@@ -19665,6 +22029,63 @@ mod tests {
                 .hash_field_expires
                 .contains_key(&(b"db0:h".to_vec(), b"f".to_vec())),
             "old (db0:h, f) row must be gone"
+        );
+    }
+
+    #[test]
+    fn command_histogram_record_canonicalizes_and_reports_ab_ratio() {
+        use super::{CommandHistogramTracker, CommandRecordKind};
+        // Case-insensitive canonicalization: SET/set/Set all land on "set", and
+        // the count aggregates (byte-identical to the to_ascii_lowercase path).
+        // (frankenredis-igx7w)
+        let mut t = CommandHistogramTracker::default();
+        t.record_with_kind("SET", 10, CommandRecordKind::Success);
+        t.record_with_kind("set", 20, CommandRecordKind::Success);
+        t.record_with_kind("Set", 30, CommandRecordKind::Success);
+        t.record_with_kind("GET", 5, CommandRecordKind::Success);
+        let all = t.all();
+        let keys: Vec<&str> = all.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, vec!["get", "set"], "canonical lowercase keys");
+        // Long-name (>40 bytes) fallback path stays correct.
+        let long = "x".repeat(60);
+        let long_upper = long.to_uppercase();
+        t.record_with_kind(&long_upper, 1, CommandRecordKind::Success);
+        assert!(t.get(&long).is_some(), "long-name fallback canonicalizes");
+        // Container subcommand fullnames ("config|get") canonicalize too.
+        t.record_with_kind("CONFIG|GET", 1, CommandRecordKind::Success);
+        assert!(t.get("config|get").is_some());
+
+        // A/B: per-command record() — stack-buffer probe vs the old
+        // entry(to_ascii_lowercase()) heap-allocating path.
+        fn old_record(t: &mut CommandHistogramTracker, command: &str) {
+            // mirror the prior implementation (allocates every call)
+            t.record_with_kind(&command.to_ascii_lowercase(), 1, CommandRecordKind::Success);
+        }
+        let cmds = [
+            "SET", "GET", "HSET", "INCR", "LPUSH", "ZADD", "EXPIRE", "MGET",
+        ];
+        let reps = 2_000_000usize;
+        let mut t1 = CommandHistogramTracker::default();
+        let t0 = std::time::Instant::now();
+        for i in 0..reps {
+            old_record(&mut t1, std::hint::black_box(cmds[i & 7]));
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(&t1);
+        let mut t2 = CommandHistogramTracker::default();
+        let s0 = std::time::Instant::now();
+        for i in 0..reps {
+            t2.record_with_kind(
+                std::hint::black_box(cmds[i & 7]),
+                1,
+                CommandRecordKind::Success,
+            );
+        }
+        let new_ns = s0.elapsed().as_nanos().max(1);
+        std::hint::black_box(&t2);
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "command-stats record A/B (x{reps}): old(alloc)={old_ns}ns new(stackbuf)={new_ns}ns ratio={ratio:.2}x"
         );
     }
 
@@ -20453,6 +22874,265 @@ mod tests {
     }
 
     #[test]
+    fn swar_bitop_matches_scalar_and_reports_ab_ratio() {
+        // Golden equivalence (frankenredis-0ppgh): SWAR BITOP must be
+        // byte-identical to the scalar reference for AND/OR/XOR (multi-operand,
+        // ragged lengths exercising zero-extension + all remainder sizes) and
+        // NOT. This is the durable regression guard.
+        fn scalar(op: &str, vals: &[Vec<u8>]) -> Vec<u8> {
+            let max_len = vals.iter().map(|v| v.len()).max().unwrap_or(0);
+            let mut r = vec![0u8; max_len];
+            if op == "NOT" {
+                for (i, b) in r.iter_mut().enumerate() {
+                    *b = !vals[0].get(i).copied().unwrap_or(0);
+                }
+                return r;
+            }
+            if let Some(first) = vals.first() {
+                for (i, b) in r.iter_mut().enumerate() {
+                    *b = first.get(i).copied().unwrap_or(0);
+                }
+            }
+            for val in vals.iter().skip(1) {
+                for (i, b) in r.iter_mut().enumerate() {
+                    let o = val.get(i).copied().unwrap_or(0);
+                    match op {
+                        "AND" => *b &= o,
+                        "OR" => *b |= o,
+                        "XOR" => *b ^= o,
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            r
+        }
+        fn swar(op: &str, vals: &[Vec<u8>]) -> Vec<u8> {
+            let max_len = vals.iter().map(|v| v.len()).max().unwrap_or(0);
+            let mut r = vec![0u8; max_len];
+            if op == "NOT" {
+                Store::swar_not_into(&mut r, &vals[0]);
+                return r;
+            }
+            if let Some(first) = vals.first() {
+                r[..first.len()].copy_from_slice(first);
+            }
+            for val in vals.iter().skip(1) {
+                match op {
+                    "AND" => {
+                        Store::swar_zip_inplace(&mut r, val, |a, b| a & b, |a, b| a & b);
+                        if val.len() < r.len() {
+                            r[val.len()..].fill(0);
+                        }
+                    }
+                    "OR" => Store::swar_zip_inplace(&mut r, val, |a, b| a | b, |a, b| a | b),
+                    "XOR" => Store::swar_zip_inplace(&mut r, val, |a, b| a ^ b, |a, b| a ^ b),
+                    _ => unreachable!(),
+                }
+            }
+            r
+        }
+        let mut state: u64 = 0xD1B5_4A32_D192_ED03;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..300 {
+            // 1..=4 operands of ragged lengths 0..80 (covers all 8-byte remainders)
+            let nvals = 1 + (next() % 4) as usize;
+            let vals: Vec<Vec<u8>> = (0..nvals)
+                .map(|_| {
+                    let len = (next() % 80) as usize;
+                    (0..len).map(|_| (next() & 0xFF) as u8).collect()
+                })
+                .collect();
+            for op in ["AND", "OR", "XOR"] {
+                assert_eq!(scalar(op, &vals), swar(op, &vals), "op={op} vals={vals:?}");
+            }
+            assert_eq!(scalar("NOT", &vals[..1]), swar("NOT", &vals[..1]), "op=NOT");
+        }
+
+        // A/B timing: XOR of two 16 MiB operands ×5 (run with `--release -- --nocapture`).
+        let n = 16 * 1024 * 1024;
+        let mk = |seed: u8| -> Vec<u8> {
+            (0..n)
+                .map(|i| (i as u8).wrapping_mul(seed).wrapping_add(seed))
+                .collect()
+        };
+        let a = mk(31);
+        let b = mk(131);
+        let vals = vec![a, b];
+        let expected = scalar("XOR", &vals);
+        let reps = 5;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(scalar("XOR", std::hint::black_box(&vals)));
+        }
+        let scalar_ns = t0.elapsed().as_nanos().max(1);
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(swar("XOR", std::hint::black_box(&vals)));
+        }
+        let swar_ns = t1.elapsed().as_nanos().max(1);
+        assert_eq!(swar("XOR", &vals), expected);
+        let ratio = scalar_ns as f64 / swar_ns as f64;
+        println!(
+            "BITOP XOR A/B over {n} bytes x{reps}: scalar={scalar_ns}ns swar={swar_ns}ns ratio={ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn bitop_empty_result_on_absent_dest_does_not_dirty() {
+        // (frankenredis-jx15l) Upstream bitops.c only bumps dirty (and fires
+        // "del") for an empty BITOP result when the destination actually
+        // existed — deleting a non-existent dest is a no-op.
+        let mut store = Store::new();
+        let before = store.dirty;
+        // AND with a non-existent source → empty result, dest "d" absent.
+        let len = store.bitop(b"AND", b"d", &[b"missing"], 0).expect("bitop");
+        assert_eq!(len, 0);
+        assert_eq!(store.dirty, before, "no-op BITOP must not bump dirty");
+        assert!(!store.key_is_present(b"d"));
+
+        // When the dest exists, the empty result deletes it and DOES dirty.
+        store.set(b"d".to_vec(), b"old".to_vec(), None, 0);
+        let before = store.dirty;
+        let len = store.bitop(b"AND", b"d", &[b"missing"], 0).expect("bitop2");
+        assert_eq!(len, 0);
+        assert_eq!(store.dirty, before + 1, "deleting an existing dest dirties");
+        assert!(!store.key_is_present(b"d"));
+    }
+
+    #[test]
+    fn zstore_from_pairs_bumps_dirty_counter() {
+        // (frankenredis-bhd3u) ZRANGESTORE writes its destination via
+        // zstore_from_pairs, which must bump dirty — otherwise the new key is
+        // invisible to RDB/AOF persistence, replication, and keyspace
+        // notifications (all gate on the dirty counter changing).
+        let mut store = Store::new();
+        let before = store.dirty;
+        store.zstore_from_pairs(b"d".to_vec(), vec![(b"a".to_vec(), 1.0)], 0);
+        assert_eq!(store.dirty, before + 1);
+        assert!(store.key_is_present(b"d"));
+    }
+
+    #[test]
+    fn zpopmin_zpopmax_count_bump_dirty_per_popped_member() {
+        // (frankenredis-pjhzg) The count forms must bump dirty by the number of
+        // members popped — matching the no-count zpopmin/zpopmax and upstream
+        // genericZpopCommand — otherwise the pop is invisible to RDB/AOF
+        // persistence, replication, and keyspace notifications.
+        let mk = |store: &mut Store| {
+            store
+                .zadd(
+                    b"z",
+                    &[
+                        (1.0, b"a".to_vec()),
+                        (2.0, b"b".to_vec()),
+                        (3.0, b"c".to_vec()),
+                    ],
+                    0,
+                )
+                .expect("zadd");
+        };
+
+        // Partial pop (count < cardinality): dirty += count, key survives.
+        let mut store = Store::new();
+        mk(&mut store);
+        let before = store.dirty;
+        assert_eq!(store.zpopmin_count(b"z", 2, 0).expect("zpopmin").len(), 2);
+        assert_eq!(store.dirty, before + 2);
+        assert!(store.key_is_present(b"z"));
+
+        // Pop that empties the set: dirty += popped, key removed.
+        let mut store = Store::new();
+        mk(&mut store);
+        let before = store.dirty;
+        assert_eq!(store.zpopmax_count(b"z", 5, 0).expect("zpopmax").len(), 3);
+        assert_eq!(store.dirty, before + 3);
+        assert!(!store.key_is_present(b"z"));
+
+        // No members popped (missing key): dirty unchanged.
+        let mut store = Store::new();
+        let before = store.dirty;
+        let popped = store.zpopmin_count(b"missing", 5, 0).expect("zpopmin");
+        assert!(popped.is_empty());
+        assert_eq!(store.dirty, before);
+    }
+
+    #[test]
+    fn zunion_zinterstore_normalize_nan_scores_to_zero() {
+        // (frankenredis-zsetnan) Upstream zunionInterDiffGenericCommand maps a
+        // weighted source score of NaN (0 * ±inf) to 0.0, and the SUM
+        // aggregate resolves +inf + -inf (NaN) to 0.0. fr previously stored the
+        // raw NaN.
+        let mut store = Store::new();
+        store.zadd(b"z", &[(0.0, b"x".to_vec())], 0).expect("zadd");
+
+        let inf = f64::INFINITY;
+        let ninf = f64::NEG_INFINITY;
+
+        // 0 * inf and 0 * -inf are both NaN -> 0; SUM -> 0.
+        let n = store
+            .zunionstore(b"u", &[b"z", b"z"], &[inf, ninf], b"SUM", 0)
+            .expect("zunionstore");
+        assert_eq!(n, 1);
+        assert_eq!(store.zscore(b"u", b"x", 0).expect("zscore"), Some(0.0));
+
+        // +inf + -inf (SUM result NaN) -> 0 on a non-zero score.
+        store
+            .zadd(b"a", &[(1.0, b"m".to_vec())], 0)
+            .expect("zadd a");
+        store
+            .zadd(b"b", &[(1.0, b"m".to_vec())], 0)
+            .expect("zadd b");
+        store
+            .zunionstore(b"u2", &[b"a", b"b"], &[inf, ninf], b"SUM", 0)
+            .expect("zunionstore2");
+        assert_eq!(store.zscore(b"u2", b"m", 0).expect("zscore"), Some(0.0));
+
+        // ZINTERSTORE first-key normalization: 0 * inf -> 0, + (5 * 1) = 5.
+        store
+            .zadd(b"c", &[(0.0, b"m".to_vec())], 0)
+            .expect("zadd c");
+        store
+            .zadd(b"d", &[(5.0, b"m".to_vec())], 0)
+            .expect("zadd d");
+        store
+            .zinterstore(b"i", &[b"c", b"d"], &[inf, 1.0], b"SUM", 0)
+            .expect("zinterstore");
+        assert_eq!(store.zscore(b"i", b"m", 0).expect("zscore"), Some(5.0));
+    }
+
+    #[test]
+    fn spop_bumps_dirty_counter() {
+        // (frankenredis-bbutt) SPOP mutates the keyspace, so it must bump the
+        // dirty counter — otherwise the pop is invisible to RDB/AOF
+        // persistence, replication, and keyspace notifications.
+        let mut store = Store::new();
+        store
+            .sadd(b"s", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 0)
+            .expect("sadd");
+        let before = store.dirty;
+        store.spop(b"s", 0).expect("spop");
+        assert_eq!(store.dirty, before + 1, "single SPOP must bump dirty by 1");
+        // spop_count loops spop, so a 2-member pop bumps dirty by 2.
+        let before = store.dirty;
+        let popped = store.spop_count(b"s", 5, 0).expect("spop_count");
+        assert_eq!(popped.len(), 2);
+        assert_eq!(
+            store.dirty,
+            before + 2,
+            "SPOP count must bump dirty per member"
+        );
+        // A no-op SPOP on a missing key must not bump dirty.
+        let before = store.dirty;
+        assert!(store.spop(b"missing", 0).expect("spop missing").is_none());
+        assert_eq!(store.dirty, before, "no-op SPOP must not bump dirty");
+    }
+
+    #[test]
     fn spop_existing_set_bumps_lfu_frequency() -> Result<(), String> {
         let mut store = Store::new();
         store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
@@ -20854,6 +23534,72 @@ mod tests {
             other => return Err(format!("GETEX LFU mismatch: {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn getex_keyspace_events_and_dirty_match_upstream() {
+        // (frankenredis-cx98g) GETEX emits its own keyspace events from the
+        // store, mirroring upstream getexCommand. Verify each branch.
+        let ev = |store: &mut Store| store.drain_keyspace_notifications();
+
+        // EXAT/PXAT past deadline -> delete + "del", returns the old value.
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_GENERIC;
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 1_000);
+        let before = store.dirty;
+        assert_eq!(
+            store.getex(b"k", Some(Some(500)), 1_000).unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert!(!store.key_is_present(b"k"));
+        assert_eq!(store.dirty, before + 1);
+        assert_eq!(
+            ev(&mut store),
+            vec![(b"__keyevent@0__:del".to_vec(), b"k".to_vec())]
+        );
+
+        // Future deadline -> set TTL + "expire".
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_GENERIC;
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 1_000);
+        let before = store.dirty;
+        assert_eq!(
+            store.getex(b"k", Some(Some(5_000)), 1_000).unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert!(store.key_is_present(b"k"));
+        assert_eq!(store.dirty, before + 1);
+        assert_eq!(
+            ev(&mut store),
+            vec![(b"__keyevent@0__:expire".to_vec(), b"k".to_vec())]
+        );
+
+        // PERSIST with a TTL -> remove TTL + "persist".
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_GENERIC;
+        store.set(b"k".to_vec(), b"v".to_vec(), Some(10_000), 1_000);
+        let before = store.dirty;
+        assert_eq!(
+            store.getex(b"k", Some(None), 1_000).unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert_eq!(store.dirty, before + 1);
+        assert_eq!(
+            ev(&mut store),
+            vec![(b"__keyevent@0__:persist".to_vec(), b"k".to_vec())]
+        );
+
+        // PERSIST with NO TTL -> pure read: no event, no dirty.
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_GENERIC;
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 1_000);
+        let before = store.dirty;
+        assert_eq!(
+            store.getex(b"k", Some(None), 1_000).unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert_eq!(store.dirty, before);
+        assert!(ev(&mut store).is_empty());
     }
 
     #[test]
@@ -21351,6 +24097,29 @@ mod tests {
     }
 
     #[test]
+    fn lpushx_rpushx_bump_dirty_by_pushed_count() {
+        // (frankenredis-maggg) LPUSHX/RPUSHX mutate an existing list, so they
+        // must bump dirty by the number of values pushed — otherwise the
+        // push is invisible to RDB/AOF persistence, replication, and keyspace
+        // notifications. A no-op on a missing key must NOT dirty.
+        let mut store = Store::new();
+        store.rpush(b"l", &[b"a".to_vec()], 0).unwrap();
+        let before = store.dirty;
+        store
+            .rpushx(b"l", &[b"b".to_vec(), b"c".to_vec()], 0)
+            .unwrap();
+        assert_eq!(store.dirty, before + 2, "RPUSHX must dirty by pushed count");
+        let before = store.dirty;
+        store.lpushx(b"l", &[b"z".to_vec()], 0).unwrap();
+        assert_eq!(store.dirty, before + 1, "LPUSHX must dirty by pushed count");
+        // No-op on a missing key — no dirty.
+        let before = store.dirty;
+        assert_eq!(store.rpushx(b"missing", &[b"x".to_vec()], 0).unwrap(), 0);
+        assert_eq!(store.lpushx(b"missing", &[b"x".to_vec()], 0).unwrap(), 0);
+        assert_eq!(store.dirty, before, "no-op PUSHX must not dirty");
+    }
+
+    #[test]
     fn lpushx_rpushx_require_existing_key() {
         let mut store = Store::new();
         assert_eq!(store.lpushx(b"missing", &[b"x".to_vec()], 0).unwrap(), 0);
@@ -21530,6 +24299,856 @@ mod tests {
     }
 
     #[test]
+    fn zadd_repeated_member_processes_pairs_sequentially() {
+        // (frankenredis-u3ifm) A member repeated within one ZADD must be
+        // evaluated sequentially against the score an earlier pair just set —
+        // not deduped to last. Verified byte-exact vs vendored 7.2.4.
+        use super::ZaddOptions;
+        let gt = ZaddOptions {
+            gt: true,
+            ch: true,
+            ..ZaddOptions::default()
+        };
+        let mut store = Store::new();
+        store.zadd(b"z", &[(8.0, b"a".to_vec())], 0).unwrap();
+        // GT CH: a 8->10 (chg), b added, a 10->20 (chg) = 3; final a = 20.
+        let (n, _) = store
+            .zadd_with_options(
+                b"z",
+                &[
+                    (10.0, b"a".to_vec()),
+                    (1.0, b"b".to_vec()),
+                    (20.0, b"a".to_vec()),
+                ],
+                gt,
+                0,
+            )
+            .unwrap();
+        assert_eq!(n, 3, "GT CH counts each sequential change");
+        assert_eq!(store.zscore(b"z", b"a", 0).unwrap(), Some(20.0));
+
+        // GT with descending repeats must keep the HIGHER score (20), not last.
+        let gt2 = ZaddOptions {
+            gt: true,
+            ..ZaddOptions::default()
+        };
+        store.zadd(b"z2", &[(8.0, b"a".to_vec())], 0).unwrap();
+        store
+            .zadd_with_options(
+                b"z2",
+                &[(20.0, b"a".to_vec()), (10.0, b"a".to_vec())],
+                gt2,
+                0,
+            )
+            .unwrap();
+        assert_eq!(store.zscore(b"z2", b"a", 0).unwrap(), Some(20.0));
+
+        // NX keeps the FIRST score for a repeated member.
+        let nx = ZaddOptions {
+            nx: true,
+            ..ZaddOptions::default()
+        };
+        store
+            .zadd_with_options(b"z3", &[(1.0, b"a".to_vec()), (2.0, b"a".to_vec())], nx, 0)
+            .unwrap();
+        assert_eq!(store.zscore(b"z3", b"a", 0).unwrap(), Some(1.0));
+
+        // Plain CH counts each successive update of the same member.
+        let ch = ZaddOptions {
+            ch: true,
+            ..ZaddOptions::default()
+        };
+        let (n, _) = store
+            .zadd_with_options(
+                b"z4",
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"a".to_vec()),
+                    (3.0, b"a".to_vec()),
+                ],
+                ch,
+                0,
+            )
+            .unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(store.zscore(b"z4", b"a", 0).unwrap(), Some(3.0));
+    }
+
+    #[test]
+    fn zset_rank_treap_matches_oracle_and_reports_ab_ratio() {
+        use super::{ScoreMember, SortedSet, canonicalize_zero_score};
+        use std::collections::BTreeMap;
+
+        // Ground-truth ascending rank: number of (score, member) pairs strictly
+        // less than the target by the sorted-set total order.
+        fn oracle_rank(model: &BTreeMap<Vec<u8>, f64>, member: &[u8]) -> Option<usize> {
+            let score = *model.get(member)?;
+            let target = ScoreMember::actual(canonicalize_zero_score(score), member.to_vec());
+            let mut keys: Vec<ScoreMember> = model
+                .iter()
+                .map(|(m, s)| ScoreMember::actual(canonicalize_zero_score(*s), m.clone()))
+                .collect();
+            keys.sort();
+            Some(keys.iter().take_while(|k| **k < target).count())
+        }
+
+        let mut state: u64 = 0x51ED_2718_2845_9045;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        // Fuzz zadd / re-score / remove / pop-min / pop-max against the oracle,
+        // probing rank + rev_rank after every mutation (covers the cold build,
+        // the incremental upkeep, and the post-mutation paths). Small score and
+        // member ranges force many score ties broken by member bytes.
+        let mut model: BTreeMap<Vec<u8>, f64> = BTreeMap::new();
+        let mut zs = SortedSet::new();
+        for _ in 0..20000 {
+            let op = next() % 10;
+            let m = format!("m{}", next() % 200).into_bytes();
+            if op < 6 {
+                let score = (next() % 50) as f64;
+                zs.insert(m.clone(), score);
+                model.insert(m, score);
+            } else if op < 8 {
+                zs.remove(&m);
+                model.remove(&m);
+            } else if op == 8 {
+                if let Some((mm, _)) = zs.pop_min() {
+                    model.remove(&mm);
+                }
+            } else if let Some((mm, _)) = zs.pop_max() {
+                model.remove(&mm);
+            }
+            for _ in 0..3 {
+                let q = format!("m{}", next() % 200).into_bytes();
+                let expect_asc = oracle_rank(&model, &q);
+                assert_eq!(zs.rank(&q), expect_asc, "rank q={q:?}");
+                let expect_rev = expect_asc.map(|asc| model.len() - 1 - asc);
+                assert_eq!(zs.rev_rank(&q), expect_rev, "rev_rank q={q:?}");
+            }
+        }
+
+        // Baseline replicating the prior strategy: a member->rank map rebuilt
+        // (O(n) + n clones) after every mutation, then O(1) lookups.
+        struct OldSim {
+            dict: std::collections::HashMap<Vec<u8>, f64>,
+            ordered: BTreeMap<ScoreMember, ()>,
+            cache: Option<std::collections::HashMap<Vec<u8>, usize>>,
+        }
+        impl OldSim {
+            fn insert(&mut self, m: Vec<u8>, s: f64) {
+                let s = canonicalize_zero_score(s);
+                if let Some(old) = self.dict.insert(m.clone(), s) {
+                    if old.total_cmp(&s).is_eq() {
+                        return;
+                    }
+                    self.cache = None;
+                    self.ordered.remove(&ScoreMember::actual(old, m.clone()));
+                    self.ordered.insert(ScoreMember::actual(s, m), ());
+                } else {
+                    self.cache = None;
+                    self.ordered.insert(ScoreMember::actual(s, m), ());
+                }
+            }
+            fn rank(&mut self, m: &[u8]) -> Option<usize> {
+                self.dict.get(m)?;
+                if self.cache.is_none() {
+                    let mut c = std::collections::HashMap::with_capacity(self.dict.len());
+                    for (r, sm) in self.ordered.keys().enumerate() {
+                        if let Some(mem) = sm.member.as_actual() {
+                            c.insert(mem.clone(), r);
+                        }
+                    }
+                    self.cache = Some(c);
+                }
+                self.cache.as_ref().unwrap().get(m).copied()
+            }
+        }
+
+        // A/B: leaderboard pattern — one re-score followed by a handful of rank
+        // queries, repeated. Treap upkeep is O(log n); the rebuild cache pays
+        // O(n) on the first rank after each mutation.
+        let n = 20000usize;
+        let members: Vec<Vec<u8>> = (0..n).map(|i| format!("k{i:06}").into_bytes()).collect();
+        let mut newz = SortedSet::new();
+        let mut oldz = OldSim {
+            dict: std::collections::HashMap::new(),
+            ordered: BTreeMap::new(),
+            cache: None,
+        };
+        for mem in &members {
+            let s = (next() % 100000) as f64;
+            newz.insert(mem.clone(), s);
+            oldz.insert(mem.clone(), s);
+        }
+        let probes: Vec<usize> = (0..50).map(|i| (i * 397) % n).collect();
+        let reps = 300usize;
+        let _ = newz.rank(&members[0]);
+        let _ = oldz.rank(&members[0]);
+        for &p in &probes {
+            assert_eq!(newz.rank(&members[p]), oldz.rank(&members[p]), "A/B agree");
+        }
+        let t_new = std::time::Instant::now();
+        let mut a_new = 0usize;
+        for r in 0..reps {
+            newz.insert(members[r % n].clone(), (r % 100000) as f64);
+            for &p in &probes {
+                a_new = a_new.wrapping_add(newz.rank(&members[p]).unwrap_or(0));
+            }
+        }
+        let new_ns = t_new.elapsed().as_nanos().max(1);
+        std::hint::black_box(a_new);
+        let t_old = std::time::Instant::now();
+        let mut a_old = 0usize;
+        for r in 0..reps {
+            oldz.insert(members[r % n].clone(), (r % 100000) as f64);
+            for &p in &probes {
+                a_old = a_old.wrapping_add(oldz.rank(&members[p]).unwrap_or(0));
+            }
+        }
+        let old_ns = t_old.elapsed().as_nanos().max(1);
+        std::hint::black_box(a_old);
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "ZRANK interleaved A/B (n={n}, {reps} re-scores x {} probes): old(rebuild)={old_ns}ns new(treap)={new_ns}ns ratio={ratio:.2}x",
+            probes.len()
+        );
+        assert!(
+            ratio > 2.0 || cfg!(debug_assertions),
+            "expected >2x, got {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn zset_index_slice_treap_matches_linear_and_reports_ab_ratio() {
+        let key = b"z";
+        let mut store = Store::new();
+        let n = 100_000usize;
+        let mut adds: Vec<(f64, Vec<u8>)> = Vec::with_capacity(n);
+        // Small score range forces many ties broken by member bytes, so the
+        // (score, member) ordering is non-trivial.
+        for i in 0..n {
+            adds.push(((i % 500) as f64, format!("m{i:06}").into_bytes()));
+        }
+        store.zadd(key, &adds, 0).unwrap();
+
+        let ranges: [(i64, i64); 9] = [
+            (0, 9),
+            (100, 199),
+            (2_000, 2_050),
+            (49_000, 49_100),
+            (99_900, 99_999),
+            (0, -1),
+            (-100, -1),
+            (-1, -1),
+            (50_000, 49_000), // empty (start > stop)
+        ];
+
+        // Cold path (order-statistic tree NOT yet built — zrange/zrevrange never
+        // build it): capture results for every range + variant.
+        let cold_asc: Vec<_> = ranges
+            .iter()
+            .map(|&(s, e)| store.zrange(key, s, e, 0).unwrap())
+            .collect();
+        let cold_desc: Vec<_> = ranges
+            .iter()
+            .map(|&(s, e)| store.zrevrange(key, s, e, 0).unwrap())
+            .collect();
+        let cold_asc_ws: Vec<_> = ranges
+            .iter()
+            .map(|&(s, e)| store.zrange_withscores(key, s, e, 0).unwrap())
+            .collect();
+        let cold_desc_ws: Vec<_> = ranges
+            .iter()
+            .map(|&(s, e)| store.zrevrange_withscores(key, s, e, 0).unwrap())
+            .collect();
+
+        // Warm the order-statistic tree via a ZRANK, then assert every by-index
+        // read returns byte-identical results through the treap-select path.
+        let _ = store.zrank(key, b"m050000", 0);
+        let _ = store.zrevrank(key, b"m050000", 0);
+        for (i, &(s, e)) in ranges.iter().enumerate() {
+            assert_eq!(
+                store.zrange(key, s, e, 0).unwrap(),
+                cold_asc[i],
+                "zrange {s}..{e}"
+            );
+            assert_eq!(
+                store.zrevrange(key, s, e, 0).unwrap(),
+                cold_desc[i],
+                "zrevrange {s}..{e}"
+            );
+            assert_eq!(
+                store.zrange_withscores(key, s, e, 0).unwrap(),
+                cold_asc_ws[i],
+                "zrange_withscores {s}..{e}"
+            );
+            assert_eq!(
+                store.zrevrange_withscores(key, s, e, 0).unwrap(),
+                cold_desc_ws[i],
+                "zrevrange_withscores {s}..{e}"
+            );
+        }
+
+        // A/B: a deep ZRANGE (large start offset, small page). Cold uses an
+        // O(offset) linear skip; warm uses the O(log n) order-statistic select.
+        let key_cold = b"zc";
+        let mut store_cold = Store::new();
+        store_cold.zadd(key_cold, &adds, 0).unwrap();
+        let (s, e) = (99_900i64, 99_999i64);
+        let reps = 2_000;
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            c0 = c0.wrapping_add(store_cold.zrange(key_cold, s, e, 0).unwrap().len());
+        }
+        let cold_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        // `store` already has the tree warm from the ZRANK above.
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            c1 = c1.wrapping_add(store.zrange(key, s, e, 0).unwrap().len());
+        }
+        let warm_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        let ratio = cold_ns as f64 / warm_ns as f64;
+        println!(
+            "ZRANGE deep-index A/B (n={n}, start={s}, x{reps}): linear-skip={cold_ns}ns treap-select={warm_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(
+            ratio > 2.0 || cfg!(debug_assertions),
+            "expected >2x, got {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn zremrangebyrank_treap_matches_linear_and_reports_ab_ratio() {
+        let key = b"z";
+        let n = 100_000usize;
+        let build = || {
+            let mut store = Store::new();
+            let adds: Vec<(f64, Vec<u8>)> = (0..n)
+                .map(|i| ((i % 500) as f64, format!("m{i:06}").into_bytes()))
+                .collect();
+            store.zadd(key, &adds, 0).unwrap();
+            store
+        };
+
+        // Equivalence: a ZREMRANGEBYRANK through the order-statistic tree (warm)
+        // removes exactly the same members as the linear path (cold).
+        for &(start, stop) in &[
+            (0i64, 9i64),
+            (100, 250),
+            (4_000, 4_100),
+            (99_000, 99_999),
+            (0, -1),
+            (-100, -1),
+            (50_000, 49_000), // empty (start > stop)
+        ] {
+            let mut cold = build();
+            let removed_cold = cold.zremrangebyrank(key, start, stop, 0).unwrap();
+            let remaining_cold = cold.zrange(key, 0, -1, 0).unwrap();
+
+            let mut warm = build();
+            let _ = warm.zrank(key, b"m050000", 0); // build the tree
+            let removed_warm = warm.zremrangebyrank(key, start, stop, 0).unwrap();
+            let remaining_warm = warm.zrange(key, 0, -1, 0).unwrap();
+
+            assert_eq!(removed_cold, removed_warm, "removed count {start}..{stop}");
+            assert_eq!(
+                remaining_cold, remaining_warm,
+                "remaining set {start}..{stop}"
+            );
+        }
+
+        // A/B: remove one element at a fixed deep rank repeatedly. Cold pays an
+        // O(rank) linear skip to reach it; warm jumps via the tree in O(log n).
+        let reps = 2_000;
+        let deep = 90_000i64;
+        let mut cold = build();
+        let t0 = std::time::Instant::now();
+        let mut a0 = 0usize;
+        for _ in 0..reps {
+            a0 = a0.wrapping_add(cold.zremrangebyrank(key, deep, deep, 0).unwrap());
+        }
+        let cold_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(a0);
+
+        let mut warm = build();
+        let _ = warm.zrank(key, b"m050000", 0);
+        let t1 = std::time::Instant::now();
+        let mut a1 = 0usize;
+        for _ in 0..reps {
+            a1 = a1.wrapping_add(warm.zremrangebyrank(key, deep, deep, 0).unwrap());
+        }
+        let warm_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(a1);
+        assert_eq!(a0, a1, "same number removed");
+        let ratio = cold_ns as f64 / warm_ns as f64;
+        println!(
+            "ZREMRANGEBYRANK deep A/B (n={n}, rank={deep}, x{reps}): linear={cold_ns}ns treap={warm_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(
+            ratio > 2.0 || cfg!(debug_assertions),
+            "expected >2x, got {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn eviction_sampling_matches_old_clone_all_and_reports_ab_ratio() {
+        // Replica of the prior implementation (materialise every eligible key,
+        // then pick distinct random indices) for an apples-to-apples comparison.
+        fn old_sample(store: &mut Store, volatile_only: bool, sample_limit: usize) -> Vec<Vec<u8>> {
+            let candidates: Vec<Vec<u8>> = store
+                .entries
+                .iter()
+                .filter(|(_, e)| !volatile_only || e.expires_at_ms.is_some())
+                .map(|(k, _)| k.clone())
+                .collect();
+            let sample_limit = sample_limit.max(1);
+            if candidates.len() <= sample_limit {
+                return candidates;
+            }
+            let mut sampled = Vec::new();
+            let mut sel = std::collections::HashSet::new();
+            while sampled.len() < sample_limit {
+                let idx = store.next_rand() as usize % candidates.len();
+                if sel.insert(idx) {
+                    sampled.push(candidates[idx].clone());
+                }
+            }
+            sampled
+        }
+        let build = |n: usize| {
+            let mut s = Store::new();
+            for i in 0..n {
+                s.zadd(
+                    format!("k{i:06}").into_bytes().as_slice(),
+                    &[(1.0, b"m".to_vec())],
+                    0,
+                )
+                .unwrap();
+            }
+            s
+        };
+
+        // Equivalence: on the SAME store (one HashMap instance has a fixed
+        // iteration order; two instances would each pick a random RandomState
+        // seed and differ), resetting the deterministic RNG between calls, the
+        // new and old paths produce the same sample set. Covers the sampling
+        // branch (eligible > limit) and the take-all branch.
+        for &sl in &[1usize, 5, 10, 64] {
+            let mut s = build(3000);
+            let seed = s.rng_seed;
+            let mut ob = old_sample(&mut s, false, sl);
+            s.rng_seed = seed;
+            let mut na = s.sampled_eviction_candidate_keys(false, sl);
+            na.sort();
+            ob.sort();
+            assert_eq!(na, ob, "sampling mismatch at sample_limit={sl}");
+        }
+        {
+            let mut s = build(3);
+            let seed = s.rng_seed;
+            let mut ob = old_sample(&mut s, false, 10);
+            s.rng_seed = seed;
+            let mut na = s.sampled_eviction_candidate_keys(false, 10);
+            na.sort();
+            ob.sort();
+            assert_eq!(na, ob, "take-all branch mismatch");
+        }
+
+        // A/B: a large keyspace. Old clones every key on each call; new clones
+        // only the sampled ones.
+        let n = 100_000usize;
+        let mut a = build(n);
+        let mut b = build(n);
+        let reps = 200;
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            c0 = c0.wrapping_add(old_sample(&mut b, false, 10).len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            c1 = c1.wrapping_add(a.sampled_eviction_candidate_keys(false, 10).len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "Eviction-sampling A/B (n={n}, sample=10, x{reps}): clone-all={old_ns}ns sample-only={new_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(
+            ratio > 2.0 || cfg!(debug_assertions),
+            "expected >2x, got {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn setvalue_intset_semantics_and_fuzz_vs_reference() {
+        use super::{SetValue, parse_i64};
+        use std::collections::HashSet;
+        const LIMIT: usize = 512;
+
+        // Canonical-integer membership: "007" is NOT a canonical int (string2ll
+        // rejects leading zeros), so it never lives in an intset and inserting it
+        // promotes the set to the generic encoding.
+        let mut s = SetValue::new();
+        assert!(s.is_intset());
+        assert!(s.insert(b"7".to_vec(), LIMIT));
+        assert!(s.is_intset());
+        assert!(s.contains(b"7"));
+        assert!(!s.contains(b"007"));
+        assert!(s.insert(b"007".to_vec(), LIMIT));
+        assert!(!s.is_intset());
+        assert!(s.contains(b"007") && s.contains(b"7"));
+        assert_eq!(s.len(), 2);
+
+        // Intset iterates in ascending numeric order, de-duplicated.
+        let mut s = SetValue::new();
+        for v in [5i64, -3, 100, 5, 0, -3, 42] {
+            s.insert(v.to_string().into_bytes(), LIMIT);
+        }
+        assert!(s.is_intset());
+        let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
+        assert_eq!(
+            members,
+            vec![
+                b"-3".to_vec(),
+                b"0".to_vec(),
+                b"5".to_vec(),
+                b"42".to_vec(),
+                b"100".to_vec()
+            ]
+        );
+        for i in 0..s.len() {
+            assert_eq!(
+                s.get_index(i).map(|c| c.into_owned()),
+                s.iter().nth(i).map(|c| c.into_owned())
+            );
+        }
+
+        // Promotion exactly at the intset limit.
+        let mut s = SetValue::new();
+        for i in 0..LIMIT as i64 {
+            s.insert(i.to_string().into_bytes(), LIMIT);
+        }
+        assert!(s.is_intset() && s.len() == LIMIT);
+        assert!(s.insert((LIMIT as i64).to_string().into_bytes(), LIMIT));
+        assert!(!s.is_intset() && s.len() == LIMIT + 1);
+
+        // Representation-independent equality: an Int and a Generic holding the
+        // same members compare equal.
+        let mut a = SetValue::new();
+        for v in [3i64, 1, 2] {
+            a.insert(v.to_string().into_bytes(), LIMIT);
+        }
+        let mut b = SetValue::new();
+        b.insert(b"x".to_vec(), LIMIT); // force generic encoding
+        b.shift_remove(b"x");
+        for m in [b"2".to_vec(), b"1".to_vec(), b"3".to_vec()] {
+            b.insert(m, LIMIT);
+        }
+        assert!(a.is_intset() && !b.is_intset());
+        assert_eq!(a, b);
+        a.insert(b"4".to_vec(), LIMIT);
+        assert_ne!(a, b);
+
+        // Fuzz: every insert/remove/contains agrees with a HashSet reference, and
+        // the full member set matches regardless of encoding. A small limit (64)
+        // exercises promotion; the member mix covers canonical ints, leading-zero
+        // non-canonical strings, and plain strings.
+        let mut state: u64 = 0xA5A5_1234_DEAD_BEEF;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut sv = SetValue::new();
+        let mut model: HashSet<Vec<u8>> = HashSet::new();
+        for _ in 0..50_000 {
+            let member: Vec<u8> = match next() % 5 {
+                0..=2 => (((next() % 2000) as i64) - 1000).to_string().into_bytes(),
+                3 => format!("0{}", next() % 100).into_bytes(),
+                _ => format!("s{}", next() % 200).into_bytes(),
+            };
+            if next() % 3 == 0 {
+                assert_eq!(
+                    sv.shift_remove(&member),
+                    model.remove(&member),
+                    "rm {member:?}"
+                );
+            } else {
+                assert_eq!(
+                    sv.insert(member.clone(), 64),
+                    model.insert(member.clone()),
+                    "ins {member:?}"
+                );
+            }
+            assert_eq!(sv.len(), model.len());
+            assert_eq!(sv.contains(&member), model.contains(&member));
+        }
+        let sv_members: HashSet<Vec<u8>> = sv.iter().map(|m| m.into_owned()).collect();
+        assert_eq!(sv_members, model);
+        assert!(parse_i64(b"7").is_ok() && parse_i64(b"007").is_err());
+    }
+
+    #[test]
+    fn setvalue_intersect_int_fastpath_matches_generic_and_reports_ab_ratio() {
+        use super::SetValue;
+
+        let mut state: u64 = 0x1357_9BDF_2468_ACE0;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        // Equivalence: retain_intersect / retain_diff agree with the generic
+        // contains-based retain, across Int-Int, Int-Generic, and Generic-Generic
+        // pairs (a small intset limit forces some promotions).
+        for _ in 0..3000 {
+            let mix = next() % 3;
+            let mut a = SetValue::new();
+            let mut b = SetValue::new();
+            for _ in 0..(next() % 40) {
+                let v = if mix == 1 {
+                    format!("s{}", next() % 60).into_bytes()
+                } else {
+                    ((next() % 120) as i64).to_string().into_bytes()
+                };
+                a.insert(v, 16);
+            }
+            for _ in 0..(next() % 40) {
+                let v = if mix == 2 {
+                    format!("s{}", next() % 60).into_bytes()
+                } else {
+                    ((next() % 120) as i64).to_string().into_bytes()
+                };
+                b.insert(v, 16);
+            }
+            let mut ai = a.clone();
+            ai.retain_intersect(&b);
+            let mut ag = a.clone();
+            ag.retain(|m| b.contains(m));
+            assert_eq!(ai, ag, "retain_intersect mismatch");
+            let mut ad = a.clone();
+            ad.retain_diff(&b);
+            let mut agd = a.clone();
+            agd.retain(|m| !b.contains(m));
+            assert_eq!(ad, agd, "retain_diff mismatch");
+        }
+
+        // A/B: intersect two large intsets. Old generic path materialises+reparses
+        // each member; the fast path stays on the sorted i64 arrays.
+        let n = 100_000i64;
+        let mut a = SetValue::new();
+        let mut b = SetValue::new();
+        for i in 0..n {
+            a.insert(i.to_string().into_bytes(), usize::MAX);
+        }
+        for i in 0..n {
+            b.insert((i * 2).to_string().into_bytes(), usize::MAX);
+        }
+        let reps = 200;
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            let mut r = a.clone();
+            r.retain(|m| b.contains(m));
+            c0 = c0.wrapping_add(r.len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            let mut r = a.clone();
+            r.retain_intersect(&b);
+            c1 = c1.wrapping_add(r.len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        assert_eq!(c0, c1, "fast path and generic path produce different sizes");
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "SINTER int A/B (n={n}, x{reps}): generic-retain={old_ns}ns i64-fastpath={new_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(
+            ratio > 2.0 || cfg!(debug_assertions),
+            "expected >2x, got {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn setvalue_union_int_fastpath_matches_generic_and_reports_ab_ratio() {
+        use super::SetValue;
+
+        let mut state: u64 = 0x2468_ACE0_1357_9BDF;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        // Equivalence: union_with agrees with extend (same members AND same final
+        // encoding) across Int-Int / Int-Generic / Generic-Generic, with a small
+        // intset limit (16) to exercise promotion-on-overflow.
+        for _ in 0..3000 {
+            let mix = next() % 3;
+            let mut a = SetValue::new();
+            let mut b = SetValue::new();
+            for _ in 0..(next() % 40) {
+                let v = if mix == 1 {
+                    format!("s{}", next() % 60).into_bytes()
+                } else {
+                    ((next() % 120) as i64).to_string().into_bytes()
+                };
+                a.insert(v, 16);
+            }
+            for _ in 0..(next() % 40) {
+                let v = if mix == 2 {
+                    format!("s{}", next() % 60).into_bytes()
+                } else {
+                    ((next() % 120) as i64).to_string().into_bytes()
+                };
+                b.insert(v, 16);
+            }
+            let mut au = a.clone();
+            au.union_with(&b, 16);
+            let mut ag = a.clone();
+            ag.extend(b.iter().map(|m| m.into_owned()), 16);
+            assert_eq!(au, ag, "union members mismatch");
+            assert_eq!(au.is_intset(), ag.is_intset(), "union encoding mismatch");
+        }
+
+        // A/B: union two large intsets. The old extend inserts each member into a
+        // sorted Vec (binary search + O(n) shift) after a string round-trip; the
+        // fast path merges the two sorted i64 arrays once.
+        let n = 4000i64;
+        let mut a = SetValue::new();
+        let mut b = SetValue::new();
+        for i in 0..n {
+            a.insert((i * 2).to_string().into_bytes(), usize::MAX);
+            b.insert((i * 2 + 1).to_string().into_bytes(), usize::MAX);
+        }
+        let reps = 30;
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            let mut r = a.clone();
+            r.extend(b.iter().map(|m| m.into_owned()), usize::MAX);
+            c0 = c0.wrapping_add(r.len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            let mut r = a.clone();
+            r.union_with(&b, usize::MAX);
+            c1 = c1.wrapping_add(r.len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        assert_eq!(c0, c1, "union size mismatch");
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "SUNION int A/B (n={n}, x{reps}): extend-insert={old_ns}ns i64-merge={new_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(
+            ratio > 2.0 || cfg!(debug_assertions),
+            "expected >2x, got {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn srandmember_count_avoids_materializing_whole_set_and_reports_ab_ratio() {
+        let key = b"s";
+        let n = 100_000i64;
+        let build = || {
+            let mut store = Store::new();
+            let adds: Vec<(f64, Vec<u8>)> = Vec::new();
+            let _ = adds;
+            for i in 0..n {
+                store
+                    .sadd(key, &[format!("m{i:06}").into_bytes()], 0)
+                    .unwrap();
+            }
+            store
+        };
+
+        // Behaviour sanity: small positive and negative counts return the right
+        // sizes and (for distinct) unique members.
+        let mut store = build();
+        let pos = store.srandmember_count(key, 10, 0).unwrap();
+        assert_eq!(pos.len(), 10);
+        let uniq: std::collections::HashSet<_> = pos.iter().collect();
+        assert_eq!(uniq.len(), 10, "positive count must be distinct");
+        let neg = store.srandmember_count(key, -10, 0).unwrap();
+        assert_eq!(neg.len(), 10);
+        assert_eq!(
+            store.srandmember_count(key, n + 50, 0).unwrap().len(),
+            n as usize
+        );
+
+        // A/B: small sample over a large set. Old path materialised every member;
+        // the new path clones only the sampled ones.
+        let old_ref = |store: &mut Store, abs_count: usize| -> usize {
+            let members = store.smembers(key, 0).unwrap(); // O(n) materialise (old behaviour)
+            let mut r = 0usize;
+            for _ in 0..abs_count {
+                let idx = (store.next_rand() as usize) % members.len();
+                r = r.wrapping_add(members[idx].len());
+            }
+            r
+        };
+        let reps = 500;
+        let mut a = build();
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            c0 = c0.wrapping_add(old_ref(&mut a, 10));
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        let mut b = build();
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            c1 = c1.wrapping_add(
+                b.srandmember_count(key, -10, 0)
+                    .unwrap()
+                    .iter()
+                    .map(Vec::len)
+                    .sum::<usize>(),
+            );
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "SRANDMEMBER count A/B (n={n}, sample=10, x{reps}): materialise-all={old_ns}ns get_index-sample={new_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(
+            ratio > 2.0 || cfg!(debug_assertions),
+            "expected >2x, got {ratio:.2}x"
+        );
+    }
+
+    #[test]
     fn zadd_and_zscore() {
         let mut store = Store::new();
         let added = store
@@ -21564,6 +25183,89 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pairs, vec![(b"a".to_vec(), 0.0)]);
+    }
+
+    #[test]
+    fn zset_uses_packed_storage_then_promotes_without_order_drift() {
+        fn is_packed(store: &Store, key: &[u8]) -> bool {
+            match store.entries.get(key).map(|entry| &entry.value) {
+                Some(Value::SortedSet(zs)) => zs.is_packed_storage(),
+                _ => false,
+            }
+        }
+
+        fn is_full(store: &Store, key: &[u8]) -> bool {
+            match store.entries.get(key).map(|entry| &entry.value) {
+                Some(Value::SortedSet(zs)) => zs.is_full_storage(),
+                _ => false,
+            }
+        }
+
+        let mut store = Store::new();
+        store.zset_max_listpack_entries = 2;
+        store.zset_max_listpack_value = 3;
+        store
+            .zadd(b"z", &[(2.0, b"b".to_vec()), (1.0, b"a".to_vec())], 0)
+            .unwrap();
+        assert!(is_packed(&store, b"z"));
+        assert_eq!(store.zrank(b"z", b"a", 0).unwrap(), Some(0));
+        assert_eq!(
+            store.zrange_withscores(b"z", 0, -1, 0).unwrap(),
+            vec![(b"a".to_vec(), 1.0), (b"b".to_vec(), 2.0)]
+        );
+
+        store.zadd(b"z", &[(1.0, b"c".to_vec())], 0).unwrap();
+        assert!(is_full(&store, b"z"));
+        assert_eq!(
+            store.zrange(b"z", 0, -1, 0).unwrap(),
+            vec![b"a".to_vec(), b"c".to_vec(), b"b".to_vec()]
+        );
+        assert_eq!(store.zrevrank(b"z", b"a", 0).unwrap(), Some(2));
+
+        store.zadd(b"long", &[(1.5, b"wide".to_vec())], 0).unwrap();
+        assert!(is_full(&store, b"long"));
+        assert_eq!(store.zscore(b"long", b"wide", 0).unwrap(), Some(1.5));
+    }
+
+    #[test]
+    fn zset_promotes_when_listpack_limits_tighten_on_existing_update() {
+        fn is_full(store: &Store, key: &[u8]) -> bool {
+            match store.entries.get(key).map(|entry| &entry.value) {
+                Some(Value::SortedSet(zs)) => zs.is_full_storage(),
+                _ => false,
+            }
+        }
+
+        let mut store = Store::new();
+        store.zset_max_listpack_entries = 8;
+        store
+            .zadd(b"z", &[(2.0, b"b".to_vec()), (1.0, b"a".to_vec())], 0)
+            .unwrap();
+        store.zset_max_listpack_entries = 1;
+        assert_eq!(store.zadd(b"z", &[(3.0, b"a".to_vec())], 0).unwrap(), 0);
+        assert!(is_full(&store, b"z"));
+        assert_eq!(
+            store.zrange_withscores(b"z", 0, -1, 0).unwrap(),
+            vec![(b"b".to_vec(), 2.0), (b"a".to_vec(), 3.0)]
+        );
+
+        let mut value_store = Store::new();
+        value_store.zset_max_listpack_value = 8;
+        value_store
+            .zadd(b"wide", &[(1.0, b"wide".to_vec())], 0)
+            .unwrap();
+        value_store.zset_max_listpack_value = 3;
+        assert_eq!(
+            value_store
+                .zadd(b"wide", &[(2.0, b"wide".to_vec())], 0)
+                .unwrap(),
+            0
+        );
+        assert!(is_full(&value_store, b"wide"));
+        assert_eq!(
+            value_store.zrange(b"wide", 0, -1, 0).unwrap(),
+            vec![b"wide".to_vec()]
+        );
     }
 
     /// (frankenredis-xc0ty) Inverted score bounds (min > max) made
@@ -21740,6 +25442,40 @@ mod tests {
     }
 
     #[test]
+    fn zrank_cache_invalidates_after_sorted_set_mutations() {
+        let mut store = Store::new();
+        store
+            .zadd(
+                b"z",
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"b".to_vec()),
+                    (3.0, b"c".to_vec()),
+                ],
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(store.zrank(b"z", b"b", 0).unwrap(), Some(1));
+        assert_eq!(store.zrevrank(b"z", b"b", 0).unwrap(), Some(1));
+
+        store
+            .zadd(b"z", &[(4.0, b"b".to_vec()), (0.0, b"d".to_vec())], 1)
+            .unwrap();
+        assert_eq!(store.zrank(b"z", b"d", 1).unwrap(), Some(0));
+        assert_eq!(store.zrank(b"z", b"b", 1).unwrap(), Some(3));
+        assert_eq!(store.zrevrank(b"z", b"b", 1).unwrap(), Some(0));
+
+        assert_eq!(store.zrem(b"z", &[b"c"], 2).unwrap(), 1);
+        assert_eq!(store.zrank(b"z", b"b", 2).unwrap(), Some(2));
+        assert_eq!(store.zrevrank(b"z", b"d", 2).unwrap(), Some(2));
+        assert_eq!(
+            store.zrange(b"z", 0, -1, 2).unwrap(),
+            vec![b"d".to_vec(), b"a".to_vec(), b"b".to_vec()]
+        );
+    }
+
+    #[test]
     fn zrange_and_zrevrange() {
         let mut store = Store::new();
         store
@@ -21797,6 +25533,173 @@ mod tests {
     }
 
     #[test]
+    fn zrangebyscore_limited_matches_full_collect_then_slice() {
+        // Isomorphism proof for the LIMIT/REV push-down: the lazy
+        // skip/take walk must produce byte-identical output to the old
+        // path (zrangebyscore_withscores + reverse-if-rev + drain/truncate).
+        let mut store = Store::new();
+        let members: Vec<(f64, Vec<u8>)> = (0..50u32)
+            .map(|i| (f64::from(i), format!("m{i:03}").into_bytes()))
+            .collect();
+        store.zadd(b"z", &members, 0).unwrap();
+
+        // Reference: the exact computation the command layer used to do.
+        let reference = |min: ScoreBound,
+                         max: ScoreBound,
+                         rev: bool,
+                         offset: usize,
+                         count: Option<usize>|
+         -> Vec<(Vec<u8>, f64)> {
+            let mut store2 = Store::new();
+            store2.zadd(b"z", &members, 0).unwrap();
+            let mut pairs = store2.zrangebyscore_withscores(b"z", min, max, 0).unwrap();
+            if rev {
+                pairs.reverse();
+            }
+            if offset > 0 && offset < pairs.len() {
+                pairs.drain(0..offset);
+            } else if offset >= pairs.len() {
+                pairs.clear();
+            }
+            if let Some(c) = count {
+                pairs.truncate(c);
+            }
+            pairs
+        };
+
+        let bounds = [
+            (
+                ScoreBound::Inclusive(f64::NEG_INFINITY),
+                ScoreBound::Inclusive(f64::INFINITY),
+            ),
+            (ScoreBound::Inclusive(10.0), ScoreBound::Inclusive(40.0)),
+            (ScoreBound::Exclusive(10.0), ScoreBound::Exclusive(40.0)),
+            (ScoreBound::Inclusive(5.0), ScoreBound::Exclusive(5.0)), // empty
+        ];
+        for &(min, max) in &bounds {
+            for rev in [false, true] {
+                for offset in [0usize, 1, 7, 49, 50, 1000, usize::MAX] {
+                    for count in [None, Some(0usize), Some(3), Some(1000)] {
+                        let got = store
+                            .zrangebyscore_withscores_limited(b"z", min, max, rev, offset, count, 0)
+                            .unwrap();
+                        let want = reference(min, max, rev, offset, count);
+                        assert_eq!(
+                            got, want,
+                            "mismatch rev={rev} offset={offset} count={count:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zrangebylex_limited_matches_full_collect_then_slice() {
+        // Isomorphism proof for the BYLEX LIMIT/REV push-down: the windowed
+        // lex walk must match the old path (zrangebylex asc + reverse-if-rev +
+        // drain/truncate). BYLEX is meaningful only for equal-score members.
+        let mut store = Store::new();
+        let members: Vec<(f64, Vec<u8>)> = (0..40u32)
+            .map(|i| (0.0, format!("e{i:03}").into_bytes()))
+            .collect();
+        store.zadd(b"z", &members, 0).unwrap();
+
+        let reference = |min: &[u8], max: &[u8], rev: bool, offset: usize, count: Option<usize>| {
+            let mut s2 = Store::new();
+            s2.zadd(b"z", &members, 0).unwrap();
+            let mut m = s2.zrangebylex(b"z", min, max, 0).unwrap();
+            if rev {
+                m.reverse();
+            }
+            if offset > 0 && offset < m.len() {
+                m.drain(0..offset);
+            } else if offset >= m.len() {
+                m.clear();
+            }
+            if let Some(c) = count {
+                m.truncate(c);
+            }
+            m
+        };
+
+        let bounds: [(&[u8], &[u8]); 4] = [
+            (b"-", b"+"),
+            (b"[e005", b"[e030"),
+            (b"(e005", b"(e030"),
+            (b"[e010", b"(e010"), // empty
+        ];
+        for &(min, max) in &bounds {
+            for rev in [false, true] {
+                for offset in [0usize, 1, 5, 39, 40, 500, usize::MAX] {
+                    for count in [None, Some(0usize), Some(4), Some(500)] {
+                        let got = store
+                            .zrangebylex_limited(b"z", min, max, rev, offset, count, 0)
+                            .unwrap();
+                        let want = reference(min, max, rev, offset, count);
+                        assert_eq!(
+                            got, want,
+                            "mismatch min={min:?} max={max:?} rev={rev} offset={offset} count={count:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zrangebylex_withscores_limited_matches_full_collect_then_slice() {
+        // ZRANGESTORE needs scores too; prove the pair-returning windowed walk is
+        // exactly the old full collect + optional reverse + LIMIT slice.
+        let mut store = Store::new();
+        let members: Vec<(f64, Vec<u8>)> = (0..40u32)
+            .map(|i| (f64::from(i % 7), format!("e{i:03}").into_bytes()))
+            .collect();
+        store.zadd(b"z", &members, 0).unwrap();
+
+        let reference = |min: &[u8], max: &[u8], rev: bool, offset: usize, count: Option<usize>| {
+            let mut s2 = Store::new();
+            s2.zadd(b"z", &members, 0).unwrap();
+            let mut pairs = s2.zrangebylex_withscores(b"z", min, max, 0).unwrap();
+            if rev {
+                pairs.reverse();
+            }
+            if offset > 0 && offset < pairs.len() {
+                pairs.drain(0..offset);
+            } else if offset >= pairs.len() {
+                pairs.clear();
+            }
+            if let Some(c) = count {
+                pairs.truncate(c);
+            }
+            pairs
+        };
+
+        let bounds: [(&[u8], &[u8]); 4] = [
+            (b"-", b"+"),
+            (b"[e005", b"[e030"),
+            (b"(e005", b"(e030"),
+            (b"[e010", b"(e010"),
+        ];
+        for &(min, max) in &bounds {
+            for rev in [false, true] {
+                for offset in [0usize, 1, 5, 39, 40, 500, usize::MAX] {
+                    for count in [None, Some(0usize), Some(4), Some(500)] {
+                        let got = store
+                            .zrangebylex_withscores_limited(b"z", min, max, rev, offset, count, 0)
+                            .unwrap();
+                        let want = reference(min, max, rev, offset, count);
+                        assert_eq!(
+                            got, want,
+                            "mismatch min={min:?} max={max:?} rev={rev} offset={offset} count={count:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn zset_score_range_paths_ignore_corrupted_sentinel_entries() {
         let mut store = Store::new();
         store
@@ -21818,8 +25721,8 @@ mod tests {
             Value::SortedSet(zs) => zs,
             _ => return,
         };
-        zs.ordered.insert(ScoreMember::min_for_score(2.0), ());
-        zs.ordered.insert(ScoreMember::max_for_score(3.0), ());
+        zs.insert_min_score_sentinel(2.0);
+        zs.insert_max_score_sentinel(3.0);
 
         let range = store
             .zrangebyscore(
@@ -21936,8 +25839,8 @@ mod tests {
             Value::SortedSet(zs) => zs,
             _ => return,
         };
-        zs.ordered.insert(ScoreMember::min_for_score(0.0), ());
-        zs.ordered.insert(ScoreMember::max_for_score(10.0), ());
+        zs.insert_min_score_sentinel(0.0);
+        zs.insert_max_score_sentinel(10.0);
 
         assert_eq!(
             store.zrange(b"z", 0, -1, 0).unwrap(),
@@ -21962,8 +25865,8 @@ mod tests {
             Value::SortedSet(zs) => zs,
             _ => return,
         };
-        assert!(!zs.ordered.contains_key(&ScoreMember::min_for_score(0.0)));
-        assert!(!zs.ordered.contains_key(&ScoreMember::max_for_score(10.0)));
+        assert!(!zs.contains_min_score_sentinel(0.0));
+        assert!(!zs.contains_max_score_sentinel(10.0));
         assert_eq!(store.zrange(b"z", 0, -1, 0).unwrap(), vec![b"b".to_vec()]);
     }
 
@@ -23247,6 +27150,30 @@ mod tests {
     }
 
     #[test]
+    fn estimate_stream_entries_read_invalid_below_max_deleted_id() {
+        // (frankenredis-h3vkq) When `id` is below max_deleted_id there may be
+        // tombstones beneath it, so the distance is unknowable -> None
+        // (upstream SCG_INVALID). This holds even when id == last_id, which
+        // previously short-circuited to Some(entries_added).
+        assert_eq!(
+            Store::estimate_stream_entries_read(50, 3, Some((3, 0)), Some((5, 0)), (10, 0), (5, 0)),
+            None,
+            "id below max_deleted_id must be invalid"
+        );
+        // With the tombstone at-or-below `id`, the count is computable again.
+        assert_eq!(
+            Store::estimate_stream_entries_read(50, 3, Some((3, 0)), Some((5, 0)), (4, 0), (5, 0)),
+            Some(50),
+            "id at/above max_deleted_id stays computable"
+        );
+        // No tombstones at all -> unaffected.
+        assert_eq!(
+            Store::estimate_stream_entries_read(50, 3, Some((3, 0)), Some((5, 0)), (0, 0), (5, 0)),
+            Some(50)
+        );
+    }
+
+    #[test]
     fn stream_xgroup_entries_read_counters_are_reported_and_advanced() {
         let mut store = Store::new();
         for id in [(1000, 0), (1001, 0), (1002, 0)] {
@@ -23352,6 +27279,291 @@ mod tests {
         assert_eq!(
             store.xgroup_createconsumer(b"str", b"g1", b"alice", 0),
             Err(StoreError::WrongType)
+        );
+    }
+
+    #[test]
+    fn stream_xgroup_delconsumer_dirties_on_existing_consumer_only() {
+        // (frankenredis-pt04m) DELCONSUMER bumps dirty once whenever the
+        // consumer actually existed and was removed — regardless of pending
+        // count. Deleting a non-existent consumer is a no-op (no dirty).
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+        assert!(store.xgroup_create(b"s", b"g", (0, 0), false, 0).unwrap());
+        store.xgroup_createconsumer(b"s", b"g", b"c", 0).unwrap();
+
+        // Existing consumer with zero pending entries — must still dirty.
+        let before = store.dirty;
+        assert_eq!(
+            store.xgroup_delconsumer(b"s", b"g", b"c", 0).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            store.dirty,
+            before + 1,
+            "deleting an existing consumer dirties"
+        );
+
+        // Non-existent consumer — no-op, no dirty.
+        let before = store.dirty;
+        assert_eq!(
+            store.xgroup_delconsumer(b"s", b"g", b"nope", 0).unwrap(),
+            Some(0)
+        );
+        assert_eq!(store.dirty, before, "no-op DELCONSUMER must not dirty");
+    }
+
+    #[test]
+    fn implicit_consumer_creation_dirties_once_per_new_consumer() {
+        // (frankenredis-6zb4d) Upstream t_stream.c creates a missing consumer
+        // via streamCreateConsumer(SCC_DEFAULT) inside XREADGROUP / XCLAIM /
+        // XAUTOCLAIM, doing server.dirty++ on first use. fr's store inserted the
+        // consumer without dirtying, so rdb_changes_since_last_save undercounted
+        // by 1 every time a new consumer was named. Re-using an existing
+        // consumer must NOT add the create dirty again.
+        let mut store = Store::new();
+        for i in 0..6u64 {
+            store
+                .xadd(b"s", (1000, i), &[(b"f".to_vec(), b"v".to_vec())], 0)
+                .unwrap();
+        }
+        assert!(store.xgroup_create(b"s", b"g", (0, 0), false, 0).unwrap());
+
+        // XREADGROUP with a brand-new consumer: +1 for create, +1 for the
+        // synchronous new-entry serve = 2.
+        let before = store.dirty;
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(2)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(store.dirty, before + 2, "new consumer create + serve = 2");
+
+        // Re-using c1 delivers 2 more new entries: serve only, no create dirty.
+        let before = store.dirty;
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(2)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(store.dirty, before + 1, "existing consumer serve = 1");
+
+        // XCLAIM to a brand-new consumer claiming 2 entries: +1 create + 2.
+        let before = store.dirty;
+        store
+            .xclaim(
+                b"s",
+                b"g",
+                b"c2",
+                &[(1000, 0), (1000, 1)],
+                StreamClaimOptions {
+                    min_idle_time_ms: 0,
+                    idle_ms: None,
+                    time_ms: None,
+                    retry_count: None,
+                    force: false,
+                    justid: false,
+                    last_id: None,
+                },
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(
+            store.dirty,
+            before + 3,
+            "new consumer create + 2 claimed = 3"
+        );
+
+        // XCLAIM re-using c2 for one more entry: per-entry only.
+        let before = store.dirty;
+        store
+            .xclaim(
+                b"s",
+                b"g",
+                b"c2",
+                &[(1000, 2)],
+                StreamClaimOptions {
+                    min_idle_time_ms: 0,
+                    idle_ms: None,
+                    time_ms: None,
+                    retry_count: None,
+                    force: false,
+                    justid: false,
+                    last_id: None,
+                },
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(store.dirty, before + 1, "existing consumer + 1 claimed = 1");
+    }
+
+    #[test]
+    fn xreadgroup_history_read_dirties_once_per_synchronous_serve() {
+        // (frankenredis-mlpy4) Upstream xreadCommand does `if (groups)
+        // server.dirty++` for every synchronous group serve. For an explicit-ID
+        // (history) read that is unconditional — even when zero pending entries
+        // are returned. A '>' read only bumps when new entries are delivered.
+        let mut store = Store::new();
+        for i in 0..3u64 {
+            store
+                .xadd(b"s", (1000, i), &[(b"f".to_vec(), b"v".to_vec())], 0)
+                .unwrap();
+        }
+        assert!(store.xgroup_create(b"s", b"g", (0, 0), false, 0).unwrap());
+        // Seed c1 with 3 pending via a '>' read.
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(3)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+
+        // History read returning pending entries → +1.
+        let before = store.dirty;
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::Id((0, 0)), false, Some(3)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(
+            store.dirty,
+            before + 1,
+            "history read with results dirties +1"
+        );
+
+        // History read returning ZERO entries (start past the last pending) → still +1.
+        let before = store.dirty;
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::Id((9999, 0)), false, Some(3)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(
+            store.dirty,
+            before + 1,
+            "empty history read still dirties +1"
+        );
+
+        // '>' read with no new entries → no bump.
+        let before = store.dirty;
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(3)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(
+            store.dirty, before,
+            "'>' read with no new entries must not dirty"
+        );
+    }
+
+    #[test]
+    fn implicit_consumer_creation_fires_xgroup_createconsumer_event() {
+        // (frankenredis-hqj0t) Upstream streamCreateConsumer(SCC_DEFAULT) fires
+        // the NOTIFY_STREAM "xgroup-createconsumer" keyspace event when a
+        // consumer is implicitly created by XREADGROUP / XCLAIM / XAUTOCLAIM —
+        // and fires nothing for an existing consumer.
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | crate::NOTIFY_STREAM;
+        for i in 0..4u64 {
+            store
+                .xadd(b"s", (1000, i), &[(b"f".to_vec(), b"v".to_vec())], 0)
+                .unwrap();
+        }
+        assert!(store.xgroup_create(b"s", b"g", (0, 0), false, 0).unwrap());
+        let _ = store.drain_keyspace_notifications();
+
+        // New consumer via XREADGROUP → one xgroup-createconsumer event.
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(2)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![(
+                b"__keyevent@0__:xgroup-createconsumer".to_vec(),
+                b"s".to_vec()
+            )]
+        );
+
+        // Re-using c1 fires nothing.
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(1)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert!(store.drain_keyspace_notifications().is_empty());
+
+        // New consumer via XCLAIM → one event even though we claim an entry.
+        store
+            .xclaim(
+                b"s",
+                b"g",
+                b"c2",
+                &[(1000, 0)],
+                StreamClaimOptions {
+                    min_idle_time_ms: 0,
+                    idle_ms: None,
+                    time_ms: None,
+                    retry_count: None,
+                    force: false,
+                    justid: false,
+                    last_id: None,
+                },
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![(
+                b"__keyevent@0__:xgroup-createconsumer".to_vec(),
+                b"s".to_vec()
+            )]
         );
     }
 
@@ -23541,6 +27753,56 @@ mod tests {
                 String::from_utf8_lossy(stored),
             );
         }
+    }
+
+    #[test]
+    #[allow(clippy::approx_constant, clippy::excessive_precision)]
+    fn redis_score_to_string_matches_vendored_d2string() {
+        // Golden values captured from vendored redis 7.2.4 ZSCORE (d2string ->
+        // fpconv_dtoa). Verified byte-exact against the oracle across 437
+        // diverse magnitudes; these lock the representative branches.
+        // (frankenredis-sk4ss)
+        let cases: &[(f64, &str)] = &[
+            // specials
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (f64::INFINITY, "inf"),
+            (f64::NEG_INFINITY, "-inf"),
+            // exact-integer fast path (double2ll)
+            (3.0, "3"),
+            (17179869184.0, "17179869184"),
+            (-42.0, "-42"),
+            // fixed decimal > 1
+            (3.14, "3.14"),
+            (123.456, "123.456"),
+            (2.5, "2.5"),
+            (-2.5, "-2.5"),
+            // fixed decimal < 1
+            (0.1, "0.1"),
+            (0.000001, "0.000001"),
+            (-0.0007, "-0.0007"),
+            // scientific: many significant digits (K <= -7), regression for the
+            // old log10_floor heuristic that wrongly emitted fixed here
+            (123456789.123456789, "1.2345678912345679e+8"),
+            // scientific: large magnitude
+            (1.5e300, "1.5e+300"),
+            (1e20, "1e+20"),
+            (1e308, "1e+308"),
+            (-1.5e300, "-1.5e+300"),
+            (6.022e23, "6.022e+23"),
+            // scientific: small magnitude (K <= -7 and exp >= 4)
+            (1e-7, "1e-7"),
+            (1e-10, "1e-10"),
+            (1.6e-19, "1.6e-19"),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(
+                &super::redis_score_to_string(*value),
+                expected,
+                "redis_score_to_string({value:?})"
+            );
+        }
+        assert_eq!(super::redis_score_to_string(f64::NAN), "nan");
     }
 
     fn vendored_long_double_1e308_text() -> Vec<u8> {
@@ -23942,6 +28204,449 @@ mod tests {
     }
 
     #[test]
+    fn record_keyspace_lookup_drops_redundant_contains_key_ab() {
+        // (frankenredis-shewy) Every read used to hash its key twice in
+        // record_keyspace_lookup: once inside drop_if_expired and again in a
+        // separate contains_key. drop_if_expired now returns presence, so the
+        // second lookup is gone. A/B over the eliminated work.
+        use std::time::Instant;
+
+        let mut store = Store::new();
+        let keys: Vec<Vec<u8>> = (0..20_000u32)
+            .map(|i| format!("myapp:obj:{i:010}:field").into_bytes())
+            .collect();
+        for k in &keys {
+            store.set(k.clone(), b"v".to_vec(), None, 0);
+        }
+
+        let reps = 60u32;
+        // OLD: drop_if_expired + a separate contains_key (the redundant lookup).
+        let t0 = Instant::now();
+        let mut h0 = 0u64;
+        for _ in 0..reps {
+            for k in &keys {
+                let _ = store.drop_if_expired(k, 0);
+                h0 += u64::from(store.entries.contains_key(k.as_slice()));
+            }
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+
+        // NEW: drop_if_expired alone reports presence — one lookup.
+        let t1 = Instant::now();
+        let mut h1 = 0u64;
+        for _ in 0..reps {
+            for k in &keys {
+                h1 += u64::from(store.drop_if_expired(k, 0));
+            }
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+
+        assert_eq!(h0, h1, "presence results must match");
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "record_keyspace_lookup A/B ({} keys x{reps}): 2-lookup {} ms -> 1-lookup {} ms = {ratio:.2}x",
+            keys.len(),
+            old_ns / 1_000_000,
+            new_ns / 1_000_000,
+        );
+        // Loose guard (de-flake convention): removing one of two keyspace
+        // lookups per read; isolated ~1.6-1.9x, compresses under contention.
+        assert!(
+            ratio > 1.2 || cfg!(debug_assertions),
+            "redundant-lookup elimination regressed: {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn stale_digest_mutation_skips_entry_hashing_ab() {
+        // (frankenredis-8x1i9) In-place mutations (EXPIRE/EXPIREAT/PERSIST/GETEX
+        // via with_mutated_entry) used to FNV-hash the whole value twice per call
+        // for the running digest — discarded whenever the digest is stale (the
+        // normal runtime state, since every insert marks it stale and only a rare
+        // DEBUG DIGEST clears it). For large values this hashing IS the command
+        // cost. The A/B measures the eliminated work directly.
+        use std::time::Instant;
+
+        let mut store = Store::new();
+        let key = b"bigval".to_vec();
+        store.set(key.clone(), vec![b'x'; 100_000], None, 0);
+        assert!(store.digest_stale, "inserts leave the digest stale");
+
+        let reps = 300u32;
+        // NEW: each toggle = expire + persist, both via with_mutated_entry, which
+        // now skips the O(value) hashing while the digest is stale.
+        let t0 = Instant::now();
+        for _ in 0..reps {
+            store.expire_at_milliseconds(&key, 10_000, 0);
+            store.persist(&key, 0);
+        }
+        let new_ns = t0.elapsed().as_nanos().max(1);
+
+        // Eliminated work: 2x entry_state_digest per with_mutated_entry call = 4x
+        // per toggle. (Sets pay even more — entry_state_digest also sorts them.)
+        let entry = store.entries.get(key.as_slice()).unwrap();
+        let t1 = Instant::now();
+        let mut sink = 0u64;
+        for _ in 0..reps {
+            for _ in 0..4 {
+                sink ^= Store::entry_state_digest(&key, entry);
+            }
+        }
+        let eliminated_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(sink);
+
+        let old_ns = new_ns + eliminated_ns;
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "stale-digest EXPIRE/PERSIST on 100KB value x{reps}: was ~{} ms -> now {} ms = {ratio:.2}x (dropped {} ms of discarded digest hashing)",
+            old_ns / 1_000_000,
+            new_ns / 1_000_000,
+            eliminated_ns / 1_000_000,
+        );
+        assert!(
+            ratio > 2.0 || cfg!(debug_assertions),
+            "expected >2x by dropping discarded digest hashing, got {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn foldhash_generic_set_membership_beats_siphash_ab() {
+        // (frankenredis-rqdxh follow-up) SetValue::Generic (non-int string set)
+        // now uses foldhash for SADD/SREM/SISMEMBER membership. IndexSet iterates
+        // in insertion order regardless of hasher, so SMEMBERS/SSCAN/SPOP output
+        // is unchanged — a test asserts order-invariance; the A/B measures the
+        // membership probe.
+        use indexmap::IndexSet;
+        use std::time::Instant;
+
+        let members: Vec<Vec<u8>> = (0..20_000u32)
+            .map(|i| format!("set:member:{i:010}:value").into_bytes())
+            .collect();
+        let mut sip: IndexSet<Vec<u8>> = IndexSet::default();
+        let mut fold: IndexSet<Vec<u8>, foldhash::quality::RandomState> = IndexSet::default();
+        for m in &members {
+            sip.insert(m.clone());
+            fold.insert(m.clone());
+        }
+
+        let reps = 100u32;
+        let t0 = Instant::now();
+        let mut acc0 = 0u64;
+        for _ in 0..reps {
+            for m in &members {
+                acc0 += u64::from(sip.contains(m.as_slice()));
+            }
+        }
+        let sip_ns = t0.elapsed().as_nanos().max(1);
+
+        let t1 = Instant::now();
+        let mut acc1 = 0u64;
+        for _ in 0..reps {
+            for m in &members {
+                acc1 += u64::from(fold.contains(m.as_slice()));
+            }
+        }
+        let fold_ns = t1.elapsed().as_nanos().max(1);
+
+        assert_eq!(acc0, acc1, "membership results must match");
+        let sip_order: Vec<&Vec<u8>> = sip.iter().collect();
+        let fold_order: Vec<&Vec<u8>> = fold.iter().collect();
+        assert_eq!(
+            sip_order, fold_order,
+            "IndexSet iteration order must not depend on the hasher"
+        );
+
+        let ratio = sip_ns as f64 / fold_ns as f64;
+        println!(
+            "generic-set membership A/B ({} members x{reps}): siphash {} ms -> foldhash {} ms = {ratio:.2}x",
+            members.len(),
+            sip_ns / 1_000_000,
+            fold_ns / 1_000_000,
+        );
+        // Loose guard (isolated ~2.3x; compresses under parallel test contention).
+        assert!(
+            ratio > 1.2 || cfg!(debug_assertions),
+            "foldhash generic-set membership regressed: {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn foldhash_hash_field_lookup_beats_siphash_ab() {
+        // (frankenredis-rqdxh) Value::Hash / SortedSet.dict member maps now use
+        // foldhash too (HGET/HSET/ZSCORE field lookups). IndexMap iterates in
+        // insertion order regardless of hasher, so HGETALL/SMEMBERS output is
+        // unchanged — only the field-index probe is faster. A/B on the exact
+        // changed operation: an IndexMap field lookup, SipHash vs foldhash.
+        use std::time::Instant;
+
+        let fields: Vec<Vec<u8>> = (0..20_000u32)
+            .map(|i| format!("field:attribute:{i:010}:name").into_bytes())
+            .collect();
+        let mut sip: indexmap::IndexMap<Vec<u8>, u64> = indexmap::IndexMap::default();
+        let mut fold: indexmap::IndexMap<Vec<u8>, u64, foldhash::quality::RandomState> =
+            indexmap::IndexMap::default();
+        for (i, f) in fields.iter().enumerate() {
+            sip.insert(f.clone(), i as u64);
+            fold.insert(f.clone(), i as u64);
+        }
+
+        let reps = 100u32;
+        let t0 = Instant::now();
+        let mut acc0 = 0u64;
+        for _ in 0..reps {
+            for f in &fields {
+                acc0 = acc0.wrapping_add(*sip.get(f.as_slice()).unwrap());
+            }
+        }
+        let sip_ns = t0.elapsed().as_nanos().max(1);
+
+        let t1 = Instant::now();
+        let mut acc1 = 0u64;
+        for _ in 0..reps {
+            for f in &fields {
+                acc1 = acc1.wrapping_add(*fold.get(f.as_slice()).unwrap());
+            }
+        }
+        let fold_ns = t1.elapsed().as_nanos().max(1);
+
+        assert_eq!(acc0, acc1, "hash-field lookup results must match");
+        // Insertion order must be hasher-independent (the parity guarantee).
+        let sip_order: Vec<&Vec<u8>> = sip.keys().collect();
+        let fold_order: Vec<&Vec<u8>> = fold.keys().collect();
+        assert_eq!(
+            sip_order, fold_order,
+            "IndexMap iteration order must not depend on the hasher"
+        );
+
+        let ratio = sip_ns as f64 / fold_ns as f64;
+        println!(
+            "hash-field lookup A/B ({} fields x{reps}): siphash {} ms -> foldhash {} ms = {ratio:.2}x",
+            fields.len(),
+            sip_ns / 1_000_000,
+            fold_ns / 1_000_000,
+        );
+        // Isolated, this is ~2.4x; under parallel `cargo test` CPU contention the
+        // ratio compresses, so the regression guard is loose to avoid flaking
+        // (matches the popcount/CRC A/B convention — correctness is the hard
+        // assert, the ratio is reported).
+        assert!(
+            ratio > 1.2 || cfg!(debug_assertions),
+            "foldhash hash-field lookup regressed: {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn value_size_is_capped_by_boxing_sortedset() {
+        use std::mem::size_of;
+        // (frankenredis-w2t01) SortedSet (120B) is by far the largest variant
+        // and previously sized all of Value (and hence every keyspace Entry) at
+        // 120B. Boxing it drops Value to <=64B (now capped by Hash/Set at 64B).
+        let value_sz = size_of::<super::Value>();
+        let entry_sz = size_of::<super::Entry>();
+        println!(
+            "after boxing SortedSet+Hash+Set: Value={value_sz} Entry={entry_sz} (was 120/168) | unboxed inners: SortedSet={} Hash={} Set={} List={}",
+            size_of::<super::SortedSet>(),
+            size_of::<super::HashFieldMap>(),
+            size_of::<super::SetValue>(),
+            size_of::<std::collections::VecDeque<Vec<u8>>>(),
+        );
+        // Cumulative Entry-shrink vs the original inline-fat-Value layout
+        // (Value=120, Entry=168): boxing the 3 fat variants caps Value at 32B,
+        // and niche-packing the expiry (Option<NonZeroU64>) drops Entry to 72B —
+        // 96 bytes off EVERY key's overhead (~57%).
+        assert!(
+            value_sz <= 32,
+            "Value should be <=32B (boxed fat variants), got {value_sz}"
+        );
+        assert!(
+            entry_sz <= 72,
+            "Entry should be <=72B (boxed variants + niche-packed expiry), got {entry_sz}"
+        );
+    }
+
+    #[test]
+    fn foldhash_keyspace_lookup_beats_siphash_ab() {
+        // (frankenredis-8kuy1) The keyspace dict drives every command's key
+        // lookup. Replacing std SipHash with foldhash::quality (still
+        // per-instance seeded, so HashDoS-resistant) is a large constant-factor
+        // win on this hottest path. A/B over the exact operation that changed:
+        // identical contents, only the hasher differs.
+        use std::collections::HashMap as StdHashMap;
+        use std::time::Instant;
+
+        // Redis keys are commonly namespaced and 20-60 bytes; use a realistic
+        // ~44-byte key. SipHash's per-byte cost makes the gap widen with length.
+        let keys: Vec<Vec<u8>> = (0..20_000u32)
+            .map(|i| format!("myapp:user:{i:010}:session:{i:08}:token").into_bytes())
+            .collect();
+        let mut sip: StdHashMap<Vec<u8>, u64> = StdHashMap::default();
+        let mut fold: StdHashMap<Vec<u8>, u64, foldhash::quality::RandomState> =
+            StdHashMap::default();
+        for (i, k) in keys.iter().enumerate() {
+            sip.insert(k.clone(), i as u64);
+            fold.insert(k.clone(), i as u64);
+        }
+
+        let reps = 100u32;
+        let t0 = Instant::now();
+        let mut acc0 = 0u64;
+        for _ in 0..reps {
+            for k in &keys {
+                acc0 = acc0.wrapping_add(*sip.get(k.as_slice()).unwrap());
+            }
+        }
+        let sip_ns = t0.elapsed().as_nanos().max(1);
+
+        let t1 = Instant::now();
+        let mut acc1 = 0u64;
+        for _ in 0..reps {
+            for k in &keys {
+                acc1 = acc1.wrapping_add(*fold.get(k.as_slice()).unwrap());
+            }
+        }
+        let fold_ns = t1.elapsed().as_nanos().max(1);
+
+        assert_eq!(acc0, acc1, "lookup results must match across hashers");
+        let ratio = sip_ns as f64 / fold_ns as f64;
+        println!(
+            "keyspace lookup A/B ({} keys x{reps}): siphash {} ms -> foldhash {} ms = {ratio:.2}x",
+            keys.len(),
+            sip_ns / 1_000_000,
+            fold_ns / 1_000_000,
+        );
+        // Loose regression guard (isolated ~2.3x; compresses under parallel
+        // `cargo test` contention) — see hash-field A/B for rationale.
+        assert!(
+            ratio > 1.2 || cfg!(debug_assertions),
+            "foldhash keyspace lookup regressed: {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn popcount_bytes_swar_matches_naive_and_reports_ab_ratio() {
+        let naive = |b: &[u8]| -> usize { b.iter().map(|x| x.count_ones() as usize).sum() };
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        for len in 0..512usize {
+            buf.clear();
+            while buf.len() < len {
+                buf.extend_from_slice(&next().to_ne_bytes());
+            }
+            buf.truncate(len);
+            assert_eq!(Store::popcount_bytes(&buf), naive(&buf), "len={len}");
+            for s in 0..len.min(9) {
+                assert_eq!(
+                    Store::popcount_bytes(&buf[s..]),
+                    naive(&buf[s..]),
+                    "len={len} s={s}"
+                );
+            }
+        }
+
+        let n = 32 * 1024 * 1024;
+        let mut big = vec![0u8; n];
+        for (i, b) in big.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+        }
+        let expected = naive(&big);
+        let reps = 5;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc.wrapping_add(naive(std::hint::black_box(big.as_slice())));
+        }
+        let naive_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 = acc2.wrapping_add(Store::popcount_bytes(std::hint::black_box(big.as_slice())));
+        }
+        let swar_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(Store::popcount_bytes(&big), expected);
+        let ratio = naive_ns as f64 / swar_ns as f64;
+        println!(
+            "BITCOUNT popcount A/B over {n} bytes x{reps}: naive={naive_ns}ns swar={swar_ns}ns ratio={ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn bitpos_full_bytes_swar_matches_naive_and_reports_ab_ratio() {
+        let naive = |bytes: &[u8], bit: bool, base_byte: usize| -> Option<i64> {
+            for (i, &raw) in bytes.iter().enumerate() {
+                if bit && raw != 0 {
+                    return Some(((base_byte + i) * 8 + raw.leading_zeros() as usize) as i64);
+                }
+                if !bit && raw != 0xFF {
+                    return Some(((base_byte + i) * 8 + (!raw).leading_zeros() as usize) as i64);
+                }
+            }
+            None
+        };
+        let mut state: u64 = 0xD1B5_4A32_D192_ED03;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        for len in 0..512usize {
+            buf.clear();
+            while buf.len() < len {
+                buf.extend_from_slice(&next().to_ne_bytes());
+            }
+            buf.truncate(len);
+            for bit in [false, true] {
+                assert_eq!(
+                    Store::bitpos_full_bytes(&buf, bit, 13),
+                    naive(&buf, bit, 13),
+                    "len={len} bit={bit}"
+                );
+                for s in 0..len.min(9) {
+                    assert_eq!(
+                        Store::bitpos_full_bytes(&buf[s..], bit, 13 + s),
+                        naive(&buf[s..], bit, 13 + s),
+                        "len={len} s={s} bit={bit}"
+                    );
+                }
+            }
+        }
+
+        let n = 32 * 1024 * 1024;
+        let reps = 3;
+        let all_zero = vec![0u8; n];
+        let all_one = vec![0xFFu8; n];
+        let t0 = std::time::Instant::now();
+        let mut acc = None;
+        for _ in 0..reps {
+            acc = naive(std::hint::black_box(all_zero.as_slice()), true, 0);
+        }
+        let naive_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = None;
+        for _ in 0..reps {
+            acc2 = Store::bitpos_full_bytes(std::hint::black_box(all_zero.as_slice()), true, 0);
+        }
+        let swar_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(Store::bitpos_full_bytes(&all_zero, true, 0), None);
+        assert_eq!(Store::bitpos_full_bytes(&all_one, false, 0), None);
+        let ratio = naive_ns as f64 / swar_ns as f64;
+        println!(
+            "BITPOS word-scan A/B over {n} bytes x{reps}: naive={naive_ns}ns swar={swar_ns}ns ratio={ratio:.2}x"
+        );
+    }
+
+    #[test]
     fn bitcount_basic() {
         let mut store = Store::new();
         store.set(b"k".to_vec(), b"\xff".to_vec(), None, 0); // 8 bits set
@@ -24215,6 +28920,84 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bitfield_set_large_string_in_place_matches_clone_reference_and_reports_ab_ratio() {
+        fn clone_style_set(bytes: &mut Vec<u8>, bit_offset: u64, bits: u8, value: i64) -> i64 {
+            let mut cloned = bytes.clone();
+            let old = super::bitfield_read(&cloned, bit_offset, bits, false);
+            let needed_bytes = bit_offset.saturating_add(u64::from(bits)).div_ceil(8) as usize;
+            if cloned.len() < needed_bytes {
+                cloned.resize(needed_bytes, 0);
+            }
+            super::bitfield_write(&mut cloned, bit_offset, bits, value);
+            *bytes = cloned;
+            old
+        }
+
+        let mut seed = 0xB17F_13D5_9E37_79B9_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for len in 0..256usize {
+            let mut expected = vec![0u8; len];
+            for byte in &mut expected {
+                *byte = next() as u8;
+            }
+            let mut store = Store::new();
+            store.set(b"bf".to_vec(), expected.clone(), None, 0);
+            for step in 0..32_u64 {
+                let bit_offset = step.saturating_mul(11) % 2048;
+                let bits = [1, 2, 7, 8, 13, 16, 31, 64][step as usize % 8];
+                let value = i64::from_ne_bytes(next().to_ne_bytes());
+                let reference_old = clone_style_set(&mut expected, bit_offset, bits, value);
+                let optimized_old = store
+                    .bitfield_set(b"bf", bit_offset, bits, value, step + 1)
+                    .expect("optimized bitfield_set");
+                assert_eq!(
+                    optimized_old, reference_old,
+                    "old value mismatch len={len} step={step} bits={bits} offset={bit_offset}"
+                );
+            }
+            assert_eq!(
+                store.get(b"bf", 1000).unwrap().unwrap(),
+                expected,
+                "final bytes mismatch len={len}"
+            );
+        }
+
+        let n = 8 * 1024 * 1024;
+        let reps = 32;
+        let initial = vec![0u8; n];
+        let mut reference = initial.clone();
+        let t0 = std::time::Instant::now();
+        let mut ref_checksum = 0_i64;
+        for i in 0..reps {
+            ref_checksum ^= clone_style_set(&mut reference, 0, 8, i64::from(i & 1));
+        }
+        let clone_ns = t0.elapsed().as_nanos().max(1);
+
+        let mut store = Store::new();
+        store.set(b"bf".to_vec(), initial, None, 0);
+        let t1 = std::time::Instant::now();
+        let mut optimized_checksum = 0_i64;
+        for i in 0..reps {
+            optimized_checksum ^= store
+                .bitfield_set(b"bf", 0, 8, i64::from(i & 1), i as u64 + 1)
+                .expect("optimized bitfield_set");
+        }
+        let inplace_ns = t1.elapsed().as_nanos().max(1);
+
+        assert_eq!(optimized_checksum, ref_checksum);
+        assert_eq!(store.get(b"bf", 1000).unwrap().unwrap(), reference);
+        let ratio = clone_ns as f64 / inplace_ns as f64;
+        println!(
+            "BITFIELD SET large-string A/B over {n} bytes x{reps}: clone={clone_ns}ns inplace={inplace_ns}ns ratio={ratio:.2}x"
+        );
+    }
+
     // ── Extended List store tests ───────────────────────────────────────
 
     #[test]
@@ -24302,6 +29085,50 @@ mod tests {
                 .pfadd(b"hll", &[b"a".to_vec(), b"b".to_vec()], 0)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn pfadd_dirty_counts_key_creation_plus_register_updates() {
+        // (frankenredis-pfadddirty) Upstream `server.dirty += updated` where
+        // updated = (1 for key creation) + (one per element advancing a
+        // register). Duplicates within a call only count once.
+        let mut store = Store::new();
+        let before = store.dirty;
+        store
+            .pfadd(b"h", &[b"a".to_vec(), b"b".to_vec()], 0)
+            .unwrap();
+        assert_eq!(store.dirty, before + 3); // create(1) + a + b
+
+        // Adding one new element to an existing HLL: dirty += 1 (no creation).
+        let before = store.dirty;
+        store.pfadd(b"h", &[b"c".to_vec()], 0).unwrap();
+        assert_eq!(store.dirty, before + 1);
+
+        // A pure no-op (already-present element) does not dirty at all.
+        let before = store.dirty;
+        store.pfadd(b"h", &[b"a".to_vec()], 0).unwrap();
+        assert_eq!(store.dirty, before);
+
+        // Duplicate within one call counts the register update once + creation.
+        let mut store = Store::new();
+        let before = store.dirty;
+        store
+            .pfadd(b"d", &[b"x".to_vec(), b"x".to_vec()], 0)
+            .unwrap();
+        assert_eq!(store.dirty, before + 2); // create(1) + x(1)
+    }
+
+    #[test]
+    fn store_as_list_dirty_counts_each_stored_element() {
+        // (frankenredis-sortstoredirty) SORT ... STORE does
+        // `server.dirty += outputlen` (one unit per stored element).
+        let mut store = Store::new();
+        let before = store.dirty;
+        store.store_as_list(
+            b"d".to_vec(),
+            vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()],
+        );
+        assert_eq!(store.dirty, before + 3);
     }
 
     #[test]
@@ -24405,6 +29232,45 @@ mod tests {
     }
 
     #[test]
+    fn pfcount_single_key_caches_and_dirties_like_upstream() {
+        // (frankenredis-twdut) Single-key PFCOUNT recomputes + writes the HLL
+        // header cache + dirties when the cache is invalid (after a PFADD),
+        // then serves the cached value with no dirty until the next PFADD.
+        // Multi-key PFCOUNT never caches/dirties.
+        let mut store = Store::new();
+        store
+            .pfadd(b"a", &[b"x".to_vec(), b"y".to_vec()], 0)
+            .unwrap();
+        store.pfadd(b"b", &[b"z".to_vec()], 0).unwrap();
+
+        // First count: cache invalid -> recompute, write, dirty + digest stale.
+        let before = store.dirty;
+        let c1 = store.pfcount(&[b"a"], 0).unwrap();
+        assert_eq!(store.dirty, before + 1, "first single PFCOUNT dirties");
+
+        // Second count: cache valid -> no dirty, same value.
+        let before = store.dirty;
+        assert_eq!(store.pfcount(&[b"a"], 0).unwrap(), c1);
+        assert_eq!(store.dirty, before, "cached single PFCOUNT does not dirty");
+
+        // Multi-key never caches/dirties.
+        let before = store.dirty;
+        store.pfcount(&[b"a", b"b"], 0).unwrap();
+        assert_eq!(store.dirty, before, "multi-key PFCOUNT does not dirty");
+
+        // A PFADD invalidates the cache, so the next single count re-dirties.
+        store.pfadd(b"a", &[b"w".to_vec()], 0).unwrap();
+        let before = store.dirty;
+        store.pfcount(&[b"a"], 0).unwrap();
+        assert_eq!(store.dirty, before + 1, "PFCOUNT after PFADD re-dirties");
+
+        // Missing key counts 0 with no dirty.
+        let before = store.dirty;
+        assert_eq!(store.pfcount(&[b"missing"], 0).unwrap(), 0);
+        assert_eq!(store.dirty, before);
+    }
+
+    #[test]
     fn hll_bare_magic_string_is_invalid_not_panic() {
         let mut store = Store::new();
         store.set(b"hll".to_vec(), HLL_REDIS_MAGIC.to_vec(), None, 0);
@@ -24417,6 +29283,72 @@ mod tests {
             store.pfadd(b"hll", &[b"x".to_vec()], 0),
             Err(StoreError::InvalidHllValue)
         );
+    }
+
+    #[test]
+    fn hll_commands_validate_integer_encoded_strings_as_string_bytes() {
+        let mut store = Store::new();
+        store.set(b"hll".to_vec(), b"1".to_vec(), None, 0);
+
+        assert_eq!(store.object_encoding(b"hll", 0), Some("int"));
+        assert_eq!(
+            store.pfcount(&[b"hll"], 0),
+            Err(StoreError::InvalidHllValue)
+        );
+        assert_eq!(
+            store.pfadd(b"hll", &[b"x".to_vec()], 0),
+            Err(StoreError::InvalidHllValue)
+        );
+        assert_eq!(
+            store.pfmerge(b"dst", &[b"hll"], 0),
+            Err(StoreError::InvalidHllValue)
+        );
+    }
+
+    #[test]
+    fn pfcount_validates_redis_header_before_reading_cache() {
+        // (frankenredis-hllval) Single-key PFCOUNT consults the HLL cardinality
+        // cache (bytes 8..16 of the Redis header). A string carrying the `HYLL`
+        // cache-header SHAPE but a malformed encoding/length used to return the
+        // stale bytes sitting in the cache slot instead of WRONGTYPE. Upstream
+        // pfcountCommand validates via isHLLObjectOrReply first, so each of
+        // these must error rather than report a bogus cardinality.
+        let cases: &[Vec<u8>] = &[
+            // HYLL + dense encoding(0) but far too short for the dense payload;
+            // cache bytes are all zero so the stale read would have said 0.
+            {
+                let mut v = HLL_REDIS_MAGIC.to_vec();
+                v.extend_from_slice(&[0u8; 12]); // 16 bytes total, enc=0
+                v
+            },
+            // HYLL + an out-of-range encoding byte (0x5f) and arbitrary tail;
+            // a non-zero cache slot would have produced a garbage integer.
+            b"HYLL_invalid_header_padding_xxxxxx".to_vec(),
+            // HYLL + dense encoding(0) at 34 bytes (still != dense size).
+            {
+                let mut v = HLL_REDIS_MAGIC.to_vec();
+                v.extend_from_slice(&[0u8; 30]);
+                v
+            },
+        ];
+        for raw in cases {
+            let mut store = Store::new();
+            store.set(b"k".to_vec(), raw.clone(), None, 0);
+            assert_eq!(
+                store.pfcount(&[b"k"], 0),
+                Err(StoreError::InvalidHllValue),
+                "malformed HYLL string must be WRONGTYPE, not a cached value: {raw:?}",
+            );
+        }
+
+        // A genuine 16-byte sparse header (encoding=1, empty body) is valid and
+        // reports cardinality 0 — the validator must not reject it.
+        let mut store = Store::new();
+        let mut sparse = HLL_REDIS_MAGIC.to_vec();
+        sparse.push(HLL_REDIS_SPARSE_ENCODING);
+        sparse.extend_from_slice(&[0u8; 11]);
+        store.set(b"s".to_vec(), sparse, None, 0);
+        assert_eq!(store.pfcount(&[b"s"], 0), Ok(0));
     }
 
     #[test]
@@ -24522,6 +29454,100 @@ mod tests {
     fn hll_selftest_passes() {
         let store = Store::new();
         store.hll_selftest().unwrap();
+    }
+
+    #[test]
+    fn hll_dense_codec_batched_matches_per_register_and_reports_ab_ratio() {
+        use super::{HLL_REDIS_DENSE_REGISTER_BYTES, HLL_REGISTERS};
+        // Per-register reference codec (the prior form). (frankenredis-kgsni)
+        fn ref_encode(registers: &[u8]) -> Vec<u8> {
+            let mut payload = vec![0u8; HLL_REDIS_DENSE_REGISTER_BYTES];
+            for (index, &register) in registers.iter().take(HLL_REGISTERS).enumerate() {
+                let bit = index * 6;
+                let byte = bit / 8;
+                let shift = bit % 8;
+                let value = u16::from(register & 0x3f);
+                payload[byte] |= (value << shift) as u8;
+                if shift > 2 {
+                    payload[byte + 1] |= (value >> (8 - shift)) as u8;
+                }
+            }
+            payload
+        }
+        fn ref_decode(payload: &[u8]) -> Vec<u8> {
+            let mut registers = vec![0u8; HLL_REGISTERS];
+            for (index, register) in registers.iter_mut().enumerate() {
+                let bit = index * 6;
+                let byte = bit / 8;
+                let shift = bit % 8;
+                let raw = u16::from(payload[byte])
+                    | u16::from(payload.get(byte + 1).copied().unwrap_or(0)) << 8;
+                *register = ((raw >> shift) & 0x3f) as u8;
+            }
+            registers
+        }
+
+        let mut state: u64 = 0x5151_2323_9696_ABAB;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Equivalence + round-trip on random full register arrays (values 0..=63).
+        for _ in 0..50 {
+            let regs: Vec<u8> = (0..HLL_REGISTERS).map(|_| (next() & 0x3f) as u8).collect();
+            let enc = super::hll_encode_dense_registers(&regs);
+            assert_eq!(enc, ref_encode(&regs), "encode mismatch");
+            let dec = super::hll_decode_dense_registers(&enc).expect("decode");
+            assert_eq!(dec, ref_decode(&enc), "decode mismatch");
+            assert_eq!(dec, regs, "round-trip mismatch");
+        }
+
+        // A/B: batched codec vs per-register reference (encode+decode), release.
+        let regs: Vec<u8> = (0..HLL_REGISTERS).map(|_| (next() % 52) as u8).collect();
+        let payload = super::hll_encode_dense_registers(&regs);
+        let reps = 2000;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(ref_encode(std::hint::black_box(&regs)));
+            std::hint::black_box(ref_decode(std::hint::black_box(&payload)));
+        }
+        let ref_ns = t0.elapsed().as_nanos().max(1);
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(super::hll_encode_dense_registers(std::hint::black_box(
+                &regs,
+            )));
+            std::hint::black_box(
+                super::hll_decode_dense_registers(std::hint::black_box(&payload)).unwrap(),
+            );
+        }
+        let batched_ns = t1.elapsed().as_nanos().max(1);
+        let ratio = ref_ns as f64 / batched_ns as f64;
+        println!(
+            "HLL dense codec A/B (enc+dec) x{reps}: per-register={ref_ns}ns batched={batched_ns}ns ratio={ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn hll_estimate_matches_redis_ertl_count_exactly() {
+        // (frankenredis-2bpzv) The Otmar Ertl 2017 estimator must reproduce
+        // redis 7.2.4 PFCOUNT byte-for-byte from identical registers. These
+        // golden counts were captured from vendored redis-server 7.2.4 for the
+        // element sets e0..e(N-1); the prior Flajolet estimator returned 4969
+        // (not 4968) at N=5000 from the very same registers.
+        let mut store = Store::new();
+        for (n, expected) in [(1000usize, 1008u64), (5000, 4968)] {
+            let key = format!("hll{n}").into_bytes();
+            let elems: Vec<Vec<u8>> = (0..n).map(|i| format!("e{i}").into_bytes()).collect();
+            store.pfadd(&key, &elems, 0).unwrap();
+            assert_eq!(
+                store.pfcount(&[key.as_slice()], 0).unwrap(),
+                expected,
+                "PFCOUNT for e0..e{n} must match redis 7.2.4 exactly"
+            );
+        }
     }
 
     #[test]
@@ -29203,21 +34229,24 @@ mod tests {
                             .get(&physical_key)
                             .expect("all_keys entries must exist");
                         let value = match &entry.value {
-                            crate::Value::String(bytes) => AofValueSnapshot::String(bytes.clone()),
+                            crate::Value::String(bytes) => AofValueSnapshot::String(bytes.to_vec()),
+                            crate::Value::Integer(value) => {
+                                AofValueSnapshot::String(value.to_string().into_bytes())
+                            }
                             crate::Value::List(list) => {
-                                AofValueSnapshot::List(list.iter().cloned().collect())
+                                AofValueSnapshot::List(list.iter().map(<[u8]>::to_vec).collect())
                             }
                             crate::Value::Set(set) => {
-                                AofValueSnapshot::Set(set.iter().cloned().collect())
+                                AofValueSnapshot::Set(set.iter().map(|m| m.into_owned()).collect())
                             }
                             crate::Value::Hash(hash) => AofValueSnapshot::Hash(
                                 hash.iter()
-                                    .map(|(field, value)| (field.clone(), value.clone()))
+                                    .map(|(field, value)| (field.to_vec(), value.to_vec()))
                                     .collect(),
                             ),
                             crate::Value::SortedSet(zs) => AofValueSnapshot::SortedSet(
                                 zs.iter_asc()
-                                    .map(|(member, score)| (member.clone(), score.to_bits()))
+                                    .map(|(member, score)| (member.to_vec(), score.to_bits()))
                                     .collect(),
                             ),
                             crate::Value::Stream(entries) => {
@@ -29267,7 +34296,7 @@ mod tests {
                         AofKeySnapshot {
                             db,
                             key: logical_key.to_vec(),
-                            expires_at_ms: entry.expires_at_ms,
+                            expires_at_ms: entry.expiry_ms(),
                             value,
                         }
                     })

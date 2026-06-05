@@ -64,6 +64,14 @@ fn replicaof_command_name(argv: &[Vec<u8>]) -> &'static str {
     }
 }
 
+const HGET_COMMAND_NAME: &str = "hget";
+const HGET_COMMAND_FLAGS: &str = "readonly fast";
+const HGET_ARITY: usize = 3;
+
+fn is_hget_command(name: &[u8]) -> bool {
+    name.eq_ignore_ascii_case(b"HGET")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrateRequest {
     pub host: String,
@@ -128,11 +136,345 @@ pub fn command_keys(argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// Locate the index of the `<id>` argument in an `XADD` argv, skipping the
+/// optional `NOMKSTREAM` and `MAXLEN|MINID [=|~] <threshold> [LIMIT <n>]`
+/// prefix. Returns `None` when the argv is too short. Used to rewrite an
+/// auto-generated id (`*` / `<ms>-*`) to the concrete id for deterministic
+/// AOF/replication propagation. (frankenredis-f9byo)
+///
+/// This mirrors the option-skipping in `xadd`'s parser; it is intentionally
+/// lenient (it does not re-validate threshold values) because only a
+/// successfully executed XADD — whose options already parsed — is propagated.
+pub fn xadd_id_arg_index(argv: &[Vec<u8>]) -> Option<usize> {
+    // argv[0] = XADD, argv[1] = key, options begin at index 2.
+    let mut idx = 2;
+    while idx < argv.len() {
+        if eq_ascii_command(&argv[idx], b"NOMKSTREAM") {
+            idx += 1;
+        } else if eq_ascii_command(&argv[idx], b"MAXLEN") || eq_ascii_command(&argv[idx], b"MINID")
+        {
+            idx += 1;
+            if idx < argv.len()
+                && (eq_ascii_command(&argv[idx], b"=") || eq_ascii_command(&argv[idx], b"~"))
+            {
+                idx += 1;
+            }
+            idx += 1; // threshold
+        } else if eq_ascii_command(&argv[idx], b"LIMIT") && idx + 1 < argv.len() {
+            idx += 2; // LIMIT <n>
+        } else {
+            break;
+        }
+    }
+    (idx < argv.len()).then_some(idx)
+}
+
+/// Rewrite a non-deterministic write command into the deterministic form used
+/// for AOF/replication propagation, given the command's reply. This is the
+/// canonical implementation shared by the Lua/script EFFECT-capture path (so a
+/// script's `redis.call('XADD', k, '*')` / SPOP / INCRBYFLOAT don't propagate
+/// verbatim and diverge on a replica/AOF replay). `store` is read only for
+/// SPOP's DEL-vs-SREM decision (uses the current dispatch db). Returns `None`
+/// to propagate the command verbatim. (frankenredis-x1225)
+///
+/// Mirrors the runtime direct-dispatch rewrites (1uiql / f9byo / ybaw7):
+/// INCRBYFLOAT→SET, HINCRBYFLOAT→HSET, XADD `*`→concrete id, SPOP→SREM/DEL,
+/// BLPOP/BRPOP→LPOP/RPOP, BZPOP*→ZPOP*, BRPOPLPUSH→RPOPLPUSH, BLMOVE→LMOVE,
+/// (B)LMPOP→LPOP/RPOP key count, (B)ZMPOP→ZPOPMIN/MAX key count, GETDEL→DEL.
+pub fn rewrite_effect_command_for_propagation(
+    argv: &[Vec<u8>],
+    reply: &fr_protocol::RespFrame,
+    store: &Store,
+    now_ms: u64,
+) -> Option<Vec<Vec<u8>>> {
+    use fr_protocol::RespFrame;
+    let cmd = argv.first()?;
+
+    // (frankenredis-9snkx) Relative-time -> absolute rewrite (mdrk8/dt3v0) runs
+    // first; it is reply-independent and shares this one entry point so scripts
+    // and MULTI/EXEC get it too (they previously propagated EXPIRE verbatim and
+    // drifted the replica TTL).
+    if let Some(rewritten) = rewrite_relative_expire_for_propagation(argv, now_ms) {
+        return Some(rewritten);
+    }
+
+    let bulk = |f: &RespFrame| match f {
+        RespFrame::BulkString(Some(v)) => Some(v.clone()),
+        _ => None,
+    };
+    let items = |f: &RespFrame| match f {
+        RespFrame::Array(Some(v)) | RespFrame::Set(Some(v)) => Some(v.clone()),
+        _ => None,
+    };
+
+    if eq_ascii_command(cmd, b"INCRBYFLOAT") && argv.len() == 3 {
+        // (frankenredis-n66hv) KEEPTTL so the rewritten SET preserves the key's
+        // TTL (a plain SET would clear it on the replica / AOF replay).
+        return Some(vec![
+            b"SET".to_vec(),
+            argv[1].clone(),
+            bulk(reply)?,
+            b"KEEPTTL".to_vec(),
+        ]);
+    }
+    if eq_ascii_command(cmd, b"HINCRBYFLOAT") && argv.len() == 4 {
+        return Some(vec![
+            b"HSET".to_vec(),
+            argv[1].clone(),
+            argv[2].clone(),
+            bulk(reply)?,
+        ]);
+    }
+    if eq_ascii_command(cmd, b"XADD") {
+        let id_idx = xadd_id_arg_index(argv)?;
+        if !argv.get(id_idx)?.contains(&b'*') {
+            return None;
+        }
+        let mut out = argv.to_vec();
+        out[id_idx] = bulk(reply)?;
+        return Some(out);
+    }
+    if eq_ascii_command(cmd, b"GETDEL") && argv.len() == 2 {
+        return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
+    }
+    if eq_ascii_command(cmd, b"BRPOPLPUSH") && argv.len() == 4 {
+        return Some(vec![
+            b"RPOPLPUSH".to_vec(),
+            argv[1].clone(),
+            argv[2].clone(),
+        ]);
+    }
+    if eq_ascii_command(cmd, b"BLMOVE") && argv.len() == 6 {
+        return Some(vec![
+            b"LMOVE".to_vec(),
+            argv[1].clone(),
+            argv[2].clone(),
+            argv[3].clone(),
+            argv[4].clone(),
+        ]);
+    }
+    if eq_ascii_command(cmd, b"BLPOP") || eq_ascii_command(cmd, b"BRPOP") {
+        let key = bulk(items(reply)?.first()?)?;
+        let op = if eq_ascii_command(cmd, b"BLPOP") {
+            b"LPOP"
+        } else {
+            b"RPOP"
+        };
+        return Some(vec![op.to_vec(), key]);
+    }
+    if eq_ascii_command(cmd, b"BZPOPMIN") || eq_ascii_command(cmd, b"BZPOPMAX") {
+        let key = bulk(items(reply)?.first()?)?;
+        let op = if eq_ascii_command(cmd, b"BZPOPMIN") {
+            b"ZPOPMIN"
+        } else {
+            b"ZPOPMAX"
+        };
+        return Some(vec![op.to_vec(), key]);
+    }
+    if eq_ascii_command(cmd, b"SPOP") {
+        let key = argv.get(1)?;
+        let members: Vec<Vec<u8>> = match reply {
+            RespFrame::BulkString(Some(m)) => vec![m.clone()],
+            RespFrame::Array(Some(v)) | RespFrame::Set(Some(v)) => {
+                let mut out = Vec::with_capacity(v.len());
+                for it in v {
+                    out.push(bulk(it)?);
+                }
+                out
+            }
+            _ => return None,
+        };
+        if members.is_empty() {
+            return None;
+        }
+        let encoded = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, key);
+        return if store.key_is_present(&encoded) {
+            let mut out = Vec::with_capacity(2 + members.len());
+            out.push(b"SREM".to_vec());
+            out.push(key.clone());
+            out.extend(members);
+            Some(out)
+        } else {
+            Some(vec![b"DEL".to_vec(), key.clone()])
+        };
+    }
+    // (B)LMPOP / (B)ZMPOP -> LPOP/RPOP/ZPOPMIN/ZPOPMAX <served-key> <count>.
+    let (is_list, numkeys_idx) = if eq_ascii_command(cmd, b"LMPOP") {
+        (true, 1usize)
+    } else if eq_ascii_command(cmd, b"ZMPOP") {
+        (false, 1)
+    } else if eq_ascii_command(cmd, b"BLMPOP") {
+        (true, 2)
+    } else if eq_ascii_command(cmd, b"BZMPOP") {
+        (false, 2)
+    } else {
+        return None;
+    };
+    let numkeys: usize = std::str::from_utf8(argv.get(numkeys_idx)?)
+        .ok()?
+        .parse()
+        .ok()?;
+    let dir = argv.get(numkeys_idx + 1 + numkeys)?;
+    let top = items(reply)?;
+    let served_key = bulk(top.first()?)?;
+    let count = items(top.get(1)?)?.len();
+    let op: &[u8] = if is_list {
+        if eq_ascii_command(dir, b"LEFT") {
+            b"LPOP"
+        } else {
+            b"RPOP"
+        }
+    } else if eq_ascii_command(dir, b"MIN") {
+        b"ZPOPMIN"
+    } else {
+        b"ZPOPMAX"
+    };
+    Some(vec![
+        op.to_vec(),
+        served_key,
+        count.to_string().into_bytes(),
+    ])
+}
+
+/// Rewrite a relative-time expire command to its absolute form for AOF/
+/// replication propagation, so a replica/AOF replay does not recompute the
+/// deadline at its later receive time and drift the TTL upward. Mirrors upstream
+/// expire.c/t_string.c `rewriteClientCommandVector(...)`:
+///   EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT -> `PEXPIREAT key <ms>`
+///   SETEX/PSETEX / `SET key val EX|PX|EXAT ...` -> `SET key val PXAT <ms>`
+///   GETEX EX|PX|EXAT|PXAT (future) -> `PEXPIREAT`, past -> `DEL`, PERSIST -> `PERSIST`
+/// Returns `None` for a non-expire command or an absolute/no-expire form (those
+/// carry no relative drift and propagate verbatim). (frankenredis-mdrk8 / dt3v0)
+pub fn rewrite_relative_expire_for_propagation(
+    argv: &[Vec<u8>],
+    now_ms: u64,
+) -> Option<Vec<Vec<u8>>> {
+    let cmd = argv.first()?;
+    let now = i64::try_from(now_ms).unwrap_or(i64::MAX);
+
+    if eq_ascii_command(cmd, b"EXPIRE")
+        || eq_ascii_command(cmd, b"PEXPIRE")
+        || eq_ascii_command(cmd, b"EXPIREAT")
+        || eq_ascii_command(cmd, b"PEXPIREAT")
+    {
+        if argv.len() < 3 {
+            return None;
+        }
+        let value: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
+        let abs_ms: i64 = if eq_ascii_command(cmd, b"EXPIRE") {
+            now.saturating_add(value.saturating_mul(1000))
+        } else if eq_ascii_command(cmd, b"PEXPIRE") {
+            now.saturating_add(value)
+        } else if eq_ascii_command(cmd, b"EXPIREAT") {
+            value.saturating_mul(1000)
+        } else {
+            value
+        };
+        return Some(vec![
+            b"PEXPIREAT".to_vec(),
+            argv[1].clone(),
+            abs_ms.to_string().into_bytes(),
+        ]);
+    }
+
+    if eq_ascii_command(cmd, b"SETEX") || eq_ascii_command(cmd, b"PSETEX") {
+        if argv.len() != 4 {
+            return None;
+        }
+        let value: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
+        let abs_ms = if eq_ascii_command(cmd, b"SETEX") {
+            now.saturating_add(value.saturating_mul(1000))
+        } else {
+            now.saturating_add(value)
+        };
+        return Some(vec![
+            b"SET".to_vec(),
+            argv[1].clone(),
+            argv[3].clone(),
+            b"PXAT".to_vec(),
+            abs_ms.to_string().into_bytes(),
+        ]);
+    }
+    if eq_ascii_command(cmd, b"SET") {
+        if argv.len() < 3 {
+            return None;
+        }
+        let abs_ms = set_relative_expire_deadline_ms(&argv[3..], now)?;
+        return Some(vec![
+            b"SET".to_vec(),
+            argv[1].clone(),
+            argv[2].clone(),
+            b"PXAT".to_vec(),
+            abs_ms.to_string().into_bytes(),
+        ]);
+    }
+
+    if eq_ascii_command(cmd, b"GETEX") {
+        if argv.len() < 3 {
+            return None;
+        }
+        let opt = &argv[2];
+        if eq_ascii_command(opt, b"PERSIST") {
+            return Some(vec![b"PERSIST".to_vec(), argv[1].clone()]);
+        }
+        let value: i64 = std::str::from_utf8(argv.get(3)?).ok()?.parse().ok()?;
+        let abs_ms: i64 = if eq_ascii_command(opt, b"EX") {
+            now.saturating_add(value.saturating_mul(1000))
+        } else if eq_ascii_command(opt, b"PX") {
+            now.saturating_add(value)
+        } else if eq_ascii_command(opt, b"EXAT") {
+            value.saturating_mul(1000)
+        } else if eq_ascii_command(opt, b"PXAT") {
+            value
+        } else {
+            return None;
+        };
+        if abs_ms <= now {
+            return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
+        }
+        return Some(vec![
+            b"PEXPIREAT".to_vec(),
+            argv[1].clone(),
+            abs_ms.to_string().into_bytes(),
+        ]);
+    }
+
+    None
+}
+
+/// Scan SET option tokens for a relative expiry (`EX`/`PX`/`EXAT`) and return the
+/// absolute deadline in ms; `None` when the only expiry is an absolute `PXAT` or
+/// there is no expiry (`KEEPTTL`/plain SET). (frankenredis-dt3v0)
+fn set_relative_expire_deadline_ms(opts: &[Vec<u8>], now: i64) -> Option<i64> {
+    let mut i = 0;
+    while i < opts.len() {
+        let opt = &opts[i];
+        if eq_ascii_command(opt, b"EX")
+            || eq_ascii_command(opt, b"PX")
+            || eq_ascii_command(opt, b"EXAT")
+        {
+            let value: i64 = std::str::from_utf8(opts.get(i + 1)?).ok()?.parse().ok()?;
+            return Some(if eq_ascii_command(opt, b"EX") {
+                now.saturating_add(value.saturating_mul(1000))
+            } else if eq_ascii_command(opt, b"PX") {
+                now.saturating_add(value)
+            } else {
+                value.saturating_mul(1000)
+            });
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Return the argv indexes that correspond to keys for the command.
 pub fn command_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
     let Some(raw_cmd) = argv.first() else {
         return Vec::new();
     };
+    if is_hget_command(raw_cmd) {
+        return if argv.len() > 1 { vec![1] } else { Vec::new() };
+    }
     let cmd_name = match std::str::from_utf8(raw_cmd) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -292,7 +634,18 @@ pub fn command_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
             return Vec::new();
         }
         let mut keys = vec![1];
-        let mut i = 2;
+        // STORE / STOREDIST options only appear AFTER the fixed positional
+        // arguments, so the scan must skip them first — otherwise a member
+        // or coordinate literally named "STORE" is mis-read as the option.
+        // Upstream geo.c::georadiusGetKeys advances past the fixed args:
+        // GEORADIUS has 5 (key lon lat radius unit) → options from argv[6];
+        // GEORADIUSBYMEMBER has 4 (key member radius unit) → from argv[5].
+        // (frankenredis-u48rd)
+        let mut i = if cmd_name.eq_ignore_ascii_case("GEORADIUSBYMEMBER") {
+            5
+        } else {
+            6
+        };
         while i < argv.len() {
             if let Ok(s) = std::str::from_utf8(&argv[i])
                 && (s.eq_ignore_ascii_case("STORE") || s.eq_ignore_ascii_case("STOREDIST"))
@@ -609,10 +962,7 @@ fn command_has_keys(cmd_name: &str) -> bool {
         return false;
     }
     command_uses_custom_key_specs(cmd_name)
-        || COMMAND_TABLE
-            .iter()
-            .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
-            .is_some_and(|&(_, _, _, first_key, _, _)| first_key != 0)
+        || command_table_index(cmd_name.as_bytes()).is_some_and(|idx| COMMAND_TABLE[idx].3 != 0)
 }
 
 /// (frankenredis-z53ld) Validate the `numkeys` argument for the
@@ -752,9 +1102,8 @@ fn command_key_references(
     };
     let cmd_name =
         std::str::from_utf8(raw_cmd).map_err(|_| CommandKeyLookupError::InvalidCommand)?;
-    let Some(&(table_name, _arity, flags, _, _, _)) = COMMAND_TABLE
-        .iter()
-        .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
+    let Some((table_name, _arity, flags, _, _, _)) =
+        command_table_index(cmd_name.as_bytes()).map(|idx| COMMAND_TABLE[idx])
     else {
         return Err(CommandKeyLookupError::InvalidCommand);
     };
@@ -846,6 +1195,15 @@ fn acl_access_from_key_flags(flags: &[&str]) -> (bool, bool) {
 /// malformed — callers treat that as "no key checks needed", matching the
 /// earlier `command_key_indexes`-based behaviour.
 pub fn command_acl_key_access(argv: &[Vec<u8>]) -> Vec<AclKeyAccess> {
+    if let [cmd, _, _] = argv
+        && cmd.eq_ignore_ascii_case(b"HGET")
+    {
+        return vec![AclKeyAccess {
+            index: 1,
+            read: true,
+            write: false,
+        }];
+    }
     match command_key_references(argv) {
         Ok(refs) => refs
             .into_iter()
@@ -940,6 +1298,15 @@ fn command_key_references_with_exact_flags(
     }
 
     if cmd_name.eq_ignore_ascii_case("RENAME") || cmd_name.eq_ignore_ascii_case("RENAMENX") {
+        // Upstream commands/rename.json vs renamenx.json: the source key is
+        // RW/ACCESS/DELETE in both, but the destination key_spec differs —
+        // RENAME overwrites an existing dest (OW/UPDATE) whereas RENAMENX only
+        // succeeds when dest does NOT exist, so it is OW/INSERT.
+        let dst_flags = if cmd_name.eq_ignore_ascii_case("RENAMENX") {
+            KEY_FLAGS_OW_INSERT
+        } else {
+            KEY_FLAGS_OW_UPDATE
+        };
         return Ok(Some(vec![
             CommandKeyReference {
                 index: 1,
@@ -947,7 +1314,7 @@ fn command_key_references_with_exact_flags(
             },
             CommandKeyReference {
                 index: 2,
-                flags: KEY_FLAGS_OW_UPDATE,
+                flags: dst_flags,
             },
         ]));
     }
@@ -971,6 +1338,27 @@ fn command_key_references_with_exact_flags(
         return Ok(Some(vec![CommandKeyReference {
             index: 1,
             flags: KEY_FLAGS_RW_INSERT,
+        }]));
+    }
+
+    // SETRANGE / XSETID: single key, RW/update — upstream commands/
+    // {setrange,xsetid}.json key_specs declare no `access`, but the generic
+    // write fallback added it. (frankenredis-getkeysflags-rwupdate)
+    if cmd_name.eq_ignore_ascii_case("SETRANGE") || cmd_name.eq_ignore_ascii_case("XSETID") {
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_RW_UPDATE,
+        }]));
+    }
+
+    // RESTORE / RESTORE-ASKING: single key, OW/update — the command
+    // deserializes a fresh value over the key, so upstream commands/
+    // restore.json key_specs flag it OW (overwrite), not RW/access.
+    // (frankenredis-getkeysflags-rwupdate)
+    if cmd_name.eq_ignore_ascii_case("RESTORE") || cmd_name.eq_ignore_ascii_case("RESTORE-ASKING") {
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_OW_UPDATE,
         }]));
     }
 
@@ -999,6 +1387,36 @@ fn command_key_references_with_exact_flags(
             }
         }
         return Ok(Some(refs));
+    }
+
+    // GEORADIUS / GEORADIUSBYMEMBER: the source key is RO/access and the
+    // optional STORE / STOREDIST destination is OW/update — upstream geo.c
+    // declares two key specs (the second movable, found via georadiusGetKeys).
+    // The *_RO variants take no STORE option, so they fall through to the
+    // read-only generic path. Reuse command_key_indexes (already byte-exact
+    // for GETKEYS) for index detection and only correct the per-key flags:
+    // the source is always argv[1]; any further index is a STORE dst.
+    // (frankenredis-georadius-getkeysflags)
+    if cmd_name.eq_ignore_ascii_case("GEORADIUS")
+        || cmd_name.eq_ignore_ascii_case("GEORADIUSBYMEMBER")
+    {
+        let indexes = command_key_indexes(argv);
+        if indexes.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(
+            indexes
+                .into_iter()
+                .map(|index| CommandKeyReference {
+                    index,
+                    flags: if index == 1 {
+                        KEY_FLAGS_RO_ACCESS
+                    } else {
+                        KEY_FLAGS_OW_UPDATE
+                    },
+                })
+                .collect(),
+        ));
     }
 
     // BITOP: dst is OW/update, source keys are RO/access.
@@ -1551,6 +1969,97 @@ fn command_key_references_with_exact_flags(
         ));
     }
 
+    // Stream consumer-group / introspection commands carry per-subcommand
+    // key_specs that the generic write/readonly fallback mis-derives as a
+    // bare `access` flag. Mirror vendored commands/{xgroup,xinfo,xack,
+    // xclaim,xautoclaim,memory-usage,migrate}.json exactly so COMMAND
+    // GETKEYSANDFLAGS reports the real RW/RO + insert/update/delete flags.
+    // (frankenredis-agx04)
+    if cmd_name.eq_ignore_ascii_case("XGROUP") {
+        if argv.len() < 3 {
+            return Ok(None);
+        }
+        let flags = if argv[1].eq_ignore_ascii_case(b"CREATE")
+            || argv[1].eq_ignore_ascii_case(b"CREATECONSUMER")
+        {
+            KEY_FLAGS_RW_INSERT
+        } else if argv[1].eq_ignore_ascii_case(b"DELCONSUMER")
+            || argv[1].eq_ignore_ascii_case(b"DESTROY")
+        {
+            KEY_FLAGS_RW_DELETE
+        } else if argv[1].eq_ignore_ascii_case(b"SETID") {
+            KEY_FLAGS_RW_UPDATE
+        } else {
+            return Ok(None);
+        };
+        return Ok(Some(vec![CommandKeyReference { index: 2, flags }]));
+    }
+
+    if cmd_name.eq_ignore_ascii_case("XINFO") {
+        if argv.len() < 3 {
+            return Ok(None);
+        }
+        if argv[1].eq_ignore_ascii_case(b"STREAM")
+            || argv[1].eq_ignore_ascii_case(b"GROUPS")
+            || argv[1].eq_ignore_ascii_case(b"CONSUMERS")
+        {
+            return Ok(Some(vec![CommandKeyReference {
+                index: 2,
+                flags: KEY_FLAGS_RO_ACCESS,
+            }]));
+        }
+        return Ok(None);
+    }
+
+    if cmd_name.eq_ignore_ascii_case("XACK") || cmd_name.eq_ignore_ascii_case("XCLAIM") {
+        if argv.len() < 2 {
+            return Ok(None);
+        }
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_RW_UPDATE,
+        }]));
+    }
+
+    if cmd_name.eq_ignore_ascii_case("XAUTOCLAIM") {
+        if argv.len() < 2 {
+            return Ok(None);
+        }
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_RW_DELETE,
+        }]));
+    }
+
+    if cmd_name.eq_ignore_ascii_case("MEMORY") {
+        if argv.len() >= 3 && argv[1].eq_ignore_ascii_case(b"USAGE") {
+            return Ok(Some(vec![CommandKeyReference {
+                index: 2,
+                flags: KEY_FLAGS_RO,
+            }]));
+        }
+        return Ok(None);
+    }
+
+    // MIGRATE: every migrated key is RW/access/delete (the source key is
+    // removed on a successful migration). Reuse command_key_indexes, which
+    // is already byte-exact for both the positional and KEYS-tail forms.
+    if cmd_name.eq_ignore_ascii_case("MIGRATE") {
+        let indexes = command_key_indexes(argv);
+        if indexes.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(
+            indexes
+                .into_iter()
+                .map(|index| CommandKeyReference {
+                    index,
+                    flags: KEY_FLAGS_RW_ACCESS_DELETE,
+                })
+                .collect(),
+        ));
+    }
+
     Ok(None)
 }
 
@@ -1677,6 +2186,54 @@ pub fn frame_to_argv(frame: &RespFrame) -> Result<Vec<Vec<u8>>, CommandError> {
     Ok(argv)
 }
 
+/// Consuming counterpart to [`frame_to_argv`] that MOVES each argument's
+/// bytes out of the parsed frame instead of cloning them.
+///
+/// The command dispatch hot path parses a client frame into
+/// `RespFrame::Array(Some(vec![BulkString(Some(Vec<u8>)), ...]))` — one heap
+/// allocation per argument — and then immediately needs the same bytes as an
+/// argv (`Vec<Vec<u8>>`). [`frame_to_argv`] clones every argument a second
+/// time because its caller still borrows the frame. When the caller owns the
+/// frame and no longer needs it as a `RespFrame`, this function reuses the
+/// already-allocated argument buffers verbatim (a `Vec` move is a pointer
+/// copy), eliminating the redundant per-argument allocation+memcpy that an
+/// in-tree gdb profile attributed to ~58% of on-CPU allocator samples in the
+/// dispatch hot path (fr-server frame_to_argv note). The produced argv is
+/// byte-for-byte identical to `frame_to_argv(&frame)`. (frankenredis-8yfmt)
+pub fn argv_from_frame(frame: RespFrame) -> Result<Vec<Vec<u8>>, CommandError> {
+    let RespFrame::Array(Some(items)) = frame else {
+        return Err(CommandError::InvalidCommandFrame);
+    };
+
+    let mut argv = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            RespFrame::BulkString(Some(bytes)) => argv.push(bytes),
+            RespFrame::SimpleString(text) => argv.push(text.into_bytes()),
+            RespFrame::Integer(n) => argv.push(n.to_string().into_bytes()),
+            _ => return Err(CommandError::InvalidCommandFrame),
+        }
+    }
+    if argv.is_empty() {
+        return Err(CommandError::InvalidCommandFrame);
+    }
+    Ok(argv)
+}
+
+/// Reconstruct the canonical command frame from an argv. Commands on the wire
+/// are always RESP multibulk arrays of bulk strings, so for any argv produced
+/// by [`argv_from_frame`]/[`frame_to_argv`] from such a frame this is the exact
+/// inverse: `argv_to_command_frame(argv_from_frame(f)) == f`. Used only on the
+/// cold preflight/threat-evidence paths that must hash the original frame, so
+/// the hot success path never pays for it. (frankenredis-8yfmt)
+pub fn argv_to_command_frame(argv: &[Vec<u8>]) -> RespFrame {
+    RespFrame::Array(Some(
+        argv.iter()
+            .map(|a| RespFrame::BulkString(Some(a.clone())))
+            .collect(),
+    ))
+}
+
 pub fn dispatch_argv(
     argv: &[Vec<u8>],
     store: &mut Store,
@@ -1720,13 +2277,21 @@ pub fn dispatch_argv(
         && let Some(permission_error) = dispatch_acl_permission_error_for_argv(argv, permissions)
     {
         let command_name = String::from_utf8_lossy(raw_cmd).into_owned();
+        // A command-level ACL denial reports the authenticated username and the
+        // command's canonical lowercase fullname (`config|get` for subcommands),
+        // matching vendored redis 7.2.4. (frankenredis-1ktss)
+        let acl_denied_user =
+            String::from_utf8_lossy(&store.dispatch_client_ctx.authenticated_user).into_owned();
+        let acl_command_fullname = acl_command_selectors_for_argv(argv)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| command_name.to_ascii_lowercase());
         let (reason, object, error) = match permission_error {
             DispatchAclPermissionError::Command => (
                 DispatchAclPermissionReason::Command,
                 command_name.to_ascii_uppercase(),
                 CommandError::Custom(format!(
-                    "NOPERM this user has no permissions to run the '{}' command",
-                    command_name
+                    "NOPERM User {acl_denied_user} has no permissions to run the '{acl_command_fullname}' command"
                 )),
             ),
             DispatchAclPermissionError::Key(key) => {
@@ -2923,13 +3488,46 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
     }
 }
 
-#[inline]
+/// Pack up to 8 ASCII-uppercased bytes of a command name into a `u64`.
+/// Only ASCII lowercase letters are folded (matching `to_ascii_uppercase`
+/// / `eq_ignore_ascii_case` semantics exactly) so non-letter bytes never
+/// collide with a letter. Bytes are placed at distinct, non-overlapping
+/// 8-bit shifts, so for two equal-length slices `pack(a) == pack(b)` iff
+/// every uppercased byte matches — byte-identical to the per-byte fold
+/// below. Caller guarantees `b.len() <= 8`.
+#[inline(always)]
+const fn pack_cmd_u64(b: &[u8]) -> u64 {
+    let mut k = 0u64;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        let up = if c.is_ascii_lowercase() { c - 32 } else { c };
+        k |= (up as u64) << (i * 8);
+        i += 1;
+    }
+    k
+}
+
+/// Case-insensitive command-name compare. For the common case of names up
+/// to 8 bytes (every hot command — GET/SET/HSET/EXPIRE/ZADD/…), this packs
+/// both sides into a single `u64` and compares with one integer op instead
+/// of a per-byte fold loop. Because `pack_cmd_u64(lhs)` depends only on the
+/// (loop-invariant) command bytes, the optimizer hoists it across the
+/// inlined chain of `eq_ascii_command(cmd, b"LITERAL")` comparisons in
+/// `classify_command` and lowers the distinct-constant comparisons into a
+/// jump table — turning each length bucket's O(bucket) linear scan into an
+/// effectively O(1) dispatch. Names longer than 8 bytes keep the byte loop.
+#[inline(always)]
 fn eq_ascii_command(lhs: &[u8], rhs: &[u8]) -> bool {
-    lhs.len() == rhs.len()
-        && lhs
-            .iter()
-            .zip(rhs.iter())
-            .all(|(left, right)| left.to_ascii_uppercase() == *right)
+    if lhs.len() != rhs.len() {
+        return false;
+    }
+    if rhs.len() <= 8 {
+        return pack_cmd_u64(lhs) == pack_cmd_u64(rhs);
+    }
+    lhs.iter()
+        .zip(rhs.iter())
+        .all(|(left, right)| left.to_ascii_uppercase() == *right)
 }
 
 fn ping(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
@@ -4260,6 +4858,21 @@ fn format_coord_human(value: f64) -> String {
     s
 }
 
+/// Emits a GEOPOS / GEOSEARCH WITHCOORD coordinate the way upstream's
+/// geo.c does via `addReplyHumanLongDouble`: a RESP3 Double (`,`) when the
+/// client negotiated RESP3, otherwise a bulk string. The textual payload is
+/// identical in both cases (17-significant-digit human form); only the wire
+/// type tag differs. (frankenredis geopos RESP3 double fidelity)
+#[inline]
+fn geo_coord_frame(value: f64, resp3: bool) -> RespFrame {
+    let s = format_coord_human(value);
+    if resp3 {
+        RespFrame::Double(s)
+    } else {
+        RespFrame::BulkString(Some(s.into_bytes()))
+    }
+}
+
 #[inline]
 fn geo_unit_to_meters(unit: &[u8]) -> Option<f64> {
     if eq_ascii_command(unit, b"M") {
@@ -4293,6 +4906,291 @@ fn geo_distance_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
     let u = ((lat2r - lat1r) / 2.0).sin();
     let a = (u * u + lat1r.cos() * lat2r.cos() * v * v).clamp(0.0, 1.0);
     2.0 * GEO_EARTH_RADIUS_IN_METERS * a.sqrt().asin()
+}
+
+/// Conservative lat/lon bounding box fully containing the great-circle disk of
+/// `radius_m` around (`clon`, `clat`), returned as
+/// `(lat_min, lat_max, lon_min, lon_max, lon_wrap)`. When `lon_wrap` is true the
+/// box reaches a pole or crosses the antimeridian and the longitude bounds must
+/// not be used to reject candidates (latitude still prunes). Correctness: every
+/// point within `radius_m` of the center lies inside the returned box, so using
+/// it purely as a pre-filter leaves the radius results unchanged. A point at
+/// great-circle distance d has latitude offset <= d/R (latitude is 1-Lipschitz
+/// on the sphere); and since the geodesic to it stays within that latitude band,
+/// its longitude offset is <= d / (R * cos(worst_lat)) where
+/// `worst_lat = |clat| + lat_delta` is the band edge nearest a pole. A tiny
+/// relative margin absorbs floating-point rounding. (frankenredis-5nimj)
+fn geo_radius_bbox(clon: f64, clat: f64, radius_m: f64) -> (f64, f64, f64, f64, bool) {
+    const MARGIN: f64 = 1.0 + 1e-9;
+    let lat_delta = (radius_m / GEO_EARTH_RADIUS_IN_METERS).to_degrees() * MARGIN;
+    let lat_min = clat - lat_delta;
+    let lat_max = clat + lat_delta;
+    let worst_lat = clat.abs() + lat_delta;
+    if worst_lat >= 90.0 {
+        return (lat_min, lat_max, -180.0, 180.0, true);
+    }
+    let cos_worst = worst_lat.to_radians().cos();
+    if cos_worst <= 1e-12 {
+        return (lat_min, lat_max, -180.0, 180.0, true);
+    }
+    let lon_delta = (radius_m / (GEO_EARTH_RADIUS_IN_METERS * cos_worst)).to_degrees() * MARGIN;
+    if lon_delta >= 180.0 {
+        return (lat_min, lat_max, -180.0, 180.0, true);
+    }
+    let lon_min = clon - lon_delta;
+    let lon_max = clon + lon_delta;
+    // Crossing the antimeridian would need wrap-around comparisons; prefer
+    // correctness and simply skip longitude rejection in that rare case.
+    let lon_wrap = lon_min < -180.0 || lon_max > 180.0;
+    (lat_min, lat_max, lon_min, lon_max, lon_wrap)
+}
+
+/// Largest geohash precision (1..=26) at which a single cell is at least
+/// `radius_m` across in BOTH dimensions — N-S, and E-W at the poleward edge of
+/// the search band (where a degree of longitude is shortest). At that precision
+/// the center cell plus its 8 neighbours provably cover the whole radius disk
+/// (the disk reaches at most `radius_m` beyond the center cell, i.e. at most one
+/// neighbour cell), so the scan can never miss an in-range point. Unlike
+/// upstream's `geohashEstimateStepsByRadius` heuristic this guarantees coverage,
+/// which fr's exact full scan requires. Returns 0 when even precision 1 is too
+/// fine (radius spans most of the globe) — the caller then does a full scan.
+/// (frankenredis-7hg0r)
+fn geo_radius_cover_steps(clat: f64, radius_m: f64) -> u8 {
+    if radius_m <= 0.0 {
+        return 26;
+    }
+    let m_per_deg = GEO_EARTH_RADIUS_IN_METERS * std::f64::consts::PI / 180.0;
+    let lat_span = GEO_LAT_MAX - GEO_LAT_MIN;
+    let lon_span = GEO_LONG_MAX - GEO_LONG_MIN;
+    let lat_delta_deg = (radius_m / GEO_EARTH_RADIUS_IN_METERS).to_degrees();
+    let worst_lat = (clat.abs() + lat_delta_deg).min(89.9);
+    let cos_worst = worst_lat.to_radians().cos();
+    let mut steps = 0u8;
+    for s in 1..=GEO_STEP_MAX {
+        let cells = (1u64 << s) as f64;
+        let cell_lat_m = (lat_span / cells) * m_per_deg;
+        let cell_lon_m = (lon_span / cells) * m_per_deg * cos_worst;
+        if cell_lat_m >= radius_m && cell_lon_m >= radius_m {
+            steps = s;
+        } else {
+            break; // cells only shrink as precision grows
+        }
+    }
+    steps
+}
+
+/// Disjoint geohash-score ranges covering the center cell and its 8 neighbours
+/// at the precision from `geo_radius_cover_steps` — the only score
+/// sub-intervals that can hold a point within `radius_m` of the center. Returns
+/// `None` when the precision is so coarse (very large radius) that the cells span
+/// most of the keyspace and a plain full scan is just as good. Longitude wraps
+/// modulo 2^steps; out-of-range latitude neighbours are dropped (they hold no
+/// points — stored latitudes are clamped to +/-85.05). Each returned cell maps
+/// to `[cell << shift, (cell << shift) | (2^shift - 1)]` because the stored score
+/// is the 52-bit interleave whose top `2*steps` bits identify the cell.
+/// (frankenredis-7hg0r)
+fn geo_radius_cell_ranges(clon: f64, clat: f64, radius_m: f64) -> Option<Vec<(f64, f64)>> {
+    if clat < GEO_LAT_MIN || clat > GEO_LAT_MAX || clon < GEO_LONG_MIN || clon > GEO_LONG_MAX {
+        return None;
+    }
+    let steps = geo_radius_cover_steps(clat, radius_m);
+    if steps < 3 {
+        return None; // cells already span ~the whole world; full scan is fine
+    }
+    Some(geo_cells_for_steps(clon, clat, steps))
+}
+
+/// The up-to-9 disjoint geohash-score ranges for the cell containing
+/// (`clon`, `clat`) at precision `steps` plus its 8 neighbours. Longitude wraps
+/// mod 2^steps; out-of-range latitude neighbours are dropped (they hold no
+/// points). Each cell `C` maps to `[C << shift, (C << shift) | (2^shift - 1)]`
+/// where `shift = 2*(26 - steps)`, because the stored score is the 52-bit
+/// interleave whose top `2*steps` bits identify the cell. Shared by the radius
+/// and box neighbour scans. (frankenredis-b9utp)
+fn geo_cells_for_steps(clon: f64, clat: f64, steps: u8) -> Vec<(f64, f64)> {
+    let cells = 1i64 << steps;
+    let scale = cells as f64;
+    let lat_off = (((clat - GEO_LAT_MIN) / (GEO_LAT_MAX - GEO_LAT_MIN)) * scale) as i64;
+    let lon_off = (((clon - GEO_LONG_MIN) / (GEO_LONG_MAX - GEO_LONG_MIN)) * scale) as i64;
+    let max_idx = cells - 1;
+    let shift = 2 * (u32::from(GEO_STEP_MAX) - u32::from(steps));
+    let span = 1u64 << shift;
+    let mut seen: [u64; 9] = [0; 9];
+    let mut nseen = 0usize;
+    let mut ranges: Vec<(f64, f64)> = Vec::with_capacity(9);
+    for dlat in -1i64..=1 {
+        let la = lat_off + dlat;
+        if la < 0 || la > max_idx {
+            continue; // latitude does not wrap
+        }
+        for dlon in -1i64..=1 {
+            let mut lo = lon_off + dlon;
+            if lo < 0 {
+                lo += cells;
+            } else if lo > max_idx {
+                lo -= cells;
+            }
+            let cell = geo_interleave64(la as u32, lo as u32);
+            if seen[..nseen].contains(&cell) {
+                continue;
+            }
+            seen[nseen] = cell;
+            nseen += 1;
+            let score_min = cell << shift;
+            let score_max = score_min | (span - 1);
+            ranges.push((score_min as f64, score_max as f64));
+        }
+    }
+    ranges
+}
+
+/// Disjoint geohash-score ranges covering the GEOSEARCH BYBOX rectangle
+/// (`half_w` x `half_h` metres at (`clon`,`clat`)): the center cell + 8 neighbours
+/// at the largest precision where one cell is at least as wide as the box's
+/// angular half-extents (from `geo_box_bbox`, the exact superset). At that
+/// precision the box reaches at most one neighbour cell, so the 3x3 grid provably
+/// covers it. Returns `None` when the box wraps the antimeridian or is so wide the
+/// cells span most of the keyspace (the caller then does a full scan).
+/// (frankenredis-b9utp)
+fn geo_box_cell_ranges(clon: f64, clat: f64, half_w: f64, half_h: f64) -> Option<Vec<(f64, f64)>> {
+    if clat < GEO_LAT_MIN || clat > GEO_LAT_MAX || clon < GEO_LONG_MIN || clon > GEO_LONG_MAX {
+        return None;
+    }
+    let (_lat_min, lat_max, _lon_min, lon_max, lon_wrap) = geo_box_bbox(clon, clat, half_w, half_h);
+    if lon_wrap {
+        return None; // box spans too much longitude; full scan is simpler
+    }
+    let lat_ext = lat_max - clat; // degrees, one side
+    let lon_ext = lon_max - clon;
+    let lat_span = GEO_LAT_MAX - GEO_LAT_MIN;
+    let lon_span = GEO_LONG_MAX - GEO_LONG_MIN;
+    let mut steps = 0u8;
+    for s in 1..=GEO_STEP_MAX {
+        let cells = (1u64 << s) as f64;
+        if lat_span / cells >= lat_ext && lon_span / cells >= lon_ext {
+            steps = s;
+        } else {
+            break; // cells only shrink as precision grows
+        }
+    }
+    if steps < 3 {
+        return None;
+    }
+    Some(geo_cells_for_steps(clon, clat, steps))
+}
+
+/// Decode a stored geohash score, apply the radius bbox pre-filter, and on a hit
+/// push the exact (member, score, distance, lon, lat) tuple. Shared by both the
+/// neighbour-cell scan and the full bbox scan in `geo_search_core`. `bb` is
+/// (lat_min, lat_max, lon_min, lon_max, lon_wrap). (frankenredis-7hg0r)
+#[allow(clippy::too_many_arguments)]
+fn geo_collect_candidate(
+    member: &[u8],
+    score: f64,
+    clon: f64,
+    clat: f64,
+    radius_m: f64,
+    bb: (f64, f64, f64, f64, bool),
+    results: &mut Vec<(Vec<u8>, f64, f64, f64, f64)>,
+) {
+    let Some((lon, lat)) = geo_decode_score(score) else {
+        return;
+    };
+    if lat < bb.0 || lat > bb.1 {
+        return;
+    }
+    if !bb.4 && (lon < bb.2 || lon > bb.3) {
+        return;
+    }
+    let dist = geo_distance_m(clon, clat, lon, lat);
+    if dist <= radius_m {
+        results.push((member.to_vec(), score, dist, lon, lat));
+    }
+}
+
+/// Decode a stored geohash score, apply the box bbox pre-filter, and on an
+/// in-rectangle hit push the exact (member, score, distance, lon, lat) tuple.
+/// Shared by the BYBOX neighbour-cell scan and full bbox scan. `bb` is
+/// (lat_min, lat_max, lon_min, lon_max, lon_wrap). (frankenredis-b9utp)
+#[allow(clippy::too_many_arguments)]
+fn geo_collect_box_candidate(
+    member: &[u8],
+    score: f64,
+    cx: f64,
+    cy: f64,
+    half_w: f64,
+    half_h: f64,
+    bb: (f64, f64, f64, f64, bool),
+    results: &mut Vec<(Vec<u8>, f64, f64, f64, f64)>,
+) {
+    let Some((lon, lat)) = geo_decode_score(score) else {
+        return;
+    };
+    if lat < bb.0 || lat > bb.1 {
+        return;
+    }
+    if !bb.4 && (lon < bb.2 || lon > bb.3) {
+        return;
+    }
+    if geo_point_in_box(cx, cy, lon, lat, half_w, half_h) {
+        let dist = geo_distance_m(cx, cy, lon, lat);
+        results.push((member.to_vec(), score, dist, lon, lat));
+    }
+}
+
+/// Conservative lat/lon bounding box fully containing the GEOSEARCH BYBOX
+/// rectangle (`half_w` x `half_h` metres centred at (`cx`,`cy`)), returned as
+/// `(lat_min, lat_max, lon_min, lon_max, lon_wrap)`. A point passes
+/// `geo_point_in_box` only if its latitude distance <= `half_h`
+/// (=> `|lat-cy| <= half_h/R`, exact) and its east-west distance at its own
+/// latitude <= `half_w` (=> `|lon-cx| <= 2*asin(sin(half_w/2R)/cos(lat))`,
+/// widest at the band edge nearest a pole). Hence every in-box point lies inside
+/// this box, so it is safe purely as a pre-filter; pole / very-wide cases widen
+/// to a full-longitude box (latitude still prunes). (frankenredis-vnsnx)
+fn geo_box_bbox(cx: f64, cy: f64, half_w: f64, half_h: f64) -> (f64, f64, f64, f64, bool) {
+    const MARGIN: f64 = 1.0 + 1e-9;
+    let lat_delta = (half_h / GEO_EARTH_RADIUS_IN_METERS).to_degrees() * MARGIN;
+    let lat_min = cy - lat_delta;
+    let lat_max = cy + lat_delta;
+    let worst_lat = cy.abs() + lat_delta;
+    if worst_lat >= 90.0 {
+        return (lat_min, lat_max, -180.0, 180.0, true);
+    }
+    let cos_worst = worst_lat.to_radians().cos();
+    if cos_worst <= 1e-12 {
+        return (lat_min, lat_max, -180.0, 180.0, true);
+    }
+    let ang = half_w / (2.0 * GEO_EARTH_RADIUS_IN_METERS);
+    if ang >= std::f64::consts::FRAC_PI_2 {
+        return (lat_min, lat_max, -180.0, 180.0, true);
+    }
+    let s = ang.sin() / cos_worst;
+    if s >= 1.0 {
+        return (lat_min, lat_max, -180.0, 180.0, true);
+    }
+    let lon_delta = (2.0 * s.asin()).to_degrees() * MARGIN;
+    if lon_delta >= 180.0 {
+        return (lat_min, lat_max, -180.0, 180.0, true);
+    }
+    let lon_min = cx - lon_delta;
+    let lon_max = cx + lon_delta;
+    let lon_wrap = lon_min < -180.0 || lon_max > 180.0;
+    (lat_min, lat_max, lon_min, lon_max, lon_wrap)
+}
+
+/// GEOSEARCH BYBOX membership, a faithful port of upstream
+/// `geohashGetDistanceIfInRectangle` (geohash_helper.c). The N-S half-extent
+/// test uses the pure latitude distance; the E-W half-extent test measures the
+/// longitude distance AT THE POINT'S latitude (`geohashGetDistance(x2,y2,x1,y2)`).
+/// Because a degree of longitude shrinks by `cos(lat)` toward the poles,
+/// measuring at the search center's latitude (as the previous code did)
+/// mis-sized the box for any point off the center parallel. (frankenredis-f2g8h)
+fn geo_point_in_box(cx: f64, cy: f64, lon: f64, lat: f64, half_w: f64, half_h: f64) -> bool {
+    // Latitude check first (cheaper), matching upstream's early-out order.
+    if geo_lat_distance_m(cy, lat) > half_h {
+        return false;
+    }
+    geo_distance_m(lon, lat, cx, lat) <= half_w
 }
 
 #[inline]
@@ -4642,17 +5540,16 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         let min = parse_score_bound(&argv[2])?;
         let max = parse_score_bound(&argv[3])?;
         let (lo, hi) = if rev { (max, min) } else { (min, max) };
-        let mut pairs = store.zrangebyscore_withscores(&argv[1], lo, hi, now_ms)?;
-        if rev {
-            pairs.reverse();
-        }
-        if let Some(offset) = limit_offset {
-            if let Some(count) = limit_count {
-                pairs = pairs.into_iter().skip(offset).take(count).collect();
-            } else {
-                pairs = pairs.into_iter().skip(offset).collect();
-            }
-        }
+        // LIMIT pushed into the range walk — O(offset+count), not O(range).
+        let pairs = store.zrangebyscore_withscores_limited(
+            &argv[1],
+            lo,
+            hi,
+            rev,
+            limit_offset.unwrap_or(0),
+            limit_count,
+            now_ms,
+        )?;
         zrange_emit_with_resp(
             pairs,
             withscores,
@@ -4670,28 +5567,36 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         } else {
             (min_lex.as_slice(), max_lex.as_slice())
         };
-        let mut members = store.zrangebylex(&argv[1], lo, hi, now_ms)?;
-        if rev {
-            members.reverse();
-        }
-        if let Some(offset) = limit_offset {
-            if let Some(count) = limit_count {
-                members = members.into_iter().skip(offset).take(count).collect();
-            } else {
-                members = members.into_iter().skip(offset).collect();
-            }
-        }
         if withscores {
-            // (frankenredis-jnf53) Lex ranges look up scores individually
-            // and feed the (member, score) pairs through the same shape
-            // helper so RESP3 emits Array<[member, score]>.
-            let mut pairs: Vec<(Vec<u8>, f64)> = Vec::with_capacity(members.len());
-            for m in members {
-                let score = store.zscore(&argv[1], &m, now_ms)?.unwrap_or(0.0);
-                pairs.push((m, score));
+            // (frankenredis-ry0sr) Use zrangebylex_withscores to get scores in O(1)
+            // per element rather than O(n) individual zscore lookups.
+            let mut pairs = store.zrangebylex_withscores(&argv[1], lo, hi, now_ms)?;
+            if rev {
+                pairs.reverse();
+            }
+            if let Some(offset) = limit_offset {
+                // In-place LIMIT. (frankenredis-5qwm6)
+                if offset > 0 && offset < pairs.len() {
+                    pairs.drain(0..offset);
+                } else if offset >= pairs.len() {
+                    pairs.clear();
+                }
+                if let Some(count) = limit_count {
+                    pairs.truncate(count);
+                }
             }
             zrange_emit_with_resp(pairs, true, store.dispatch_client_ctx.resp_protocol_version)
         } else {
+            // LIMIT/REV pushed into the lex walk — O(offset+count). (frankenredis-qchm7)
+            let members = store.zrangebylex_limited(
+                &argv[1],
+                lo,
+                hi,
+                rev,
+                limit_offset.unwrap_or(0),
+                limit_count,
+                now_ms,
+            )?;
             let frames = members
                 .into_iter()
                 .map(|m| RespFrame::BulkString(Some(m)))
@@ -4838,14 +5743,16 @@ fn zrangebyscore(
     let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
     let min = parse_score_bound(&argv[2])?;
     let max = parse_score_bound(&argv[3])?;
-    let mut pairs = store.zrangebyscore_withscores(&argv[1], min, max, now_ms)?;
-    if let Some(offset) = limit_offset {
-        if let Some(count) = limit_count {
-            pairs = pairs.into_iter().skip(offset).take(count).collect();
-        } else {
-            pairs = pairs.into_iter().skip(offset).collect();
-        }
-    }
+    // LIMIT pushed into the range walk — O(offset+count), not O(range).
+    let pairs = store.zrangebyscore_withscores_limited(
+        &argv[1],
+        min,
+        max,
+        false,
+        limit_offset.unwrap_or(0),
+        limit_count,
+        now_ms,
+    )?;
     zrange_emit_with_resp(
         pairs,
         withscores,
@@ -5104,13 +6011,14 @@ fn geopos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("GEOPOS"));
     }
+    let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let mut frames = Vec::with_capacity(argv.len().saturating_sub(2));
     for member in &argv[2..] {
         let frame = match store.zscore(&argv[1], member, now_ms)? {
             Some(score) => match geo_decode_score(score) {
                 Some((longitude, latitude)) => RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(format_coord_human(longitude).into_bytes())),
-                    RespFrame::BulkString(Some(format_coord_human(latitude).into_bytes())),
+                    geo_coord_frame(longitude, resp3),
+                    geo_coord_frame(latitude, resp3),
                 ])),
                 None => RespFrame::Array(None),
             },
@@ -5191,15 +6099,54 @@ fn geo_search_core(
     any: bool,
     now_ms: u64,
 ) -> Result<Vec<(Vec<u8>, f64, f64, f64, f64)>, CommandError> {
-    let members = store.zrange_withscores(key, 0, -1, now_ms)?;
+    // Spatial pre-filter: a lat/lon bounding box that provably contains the
+    // whole great-circle disk of `radius_m`. Points outside it cannot be in
+    // range, so we skip the trig-heavy haversine for them; and by scanning the
+    // zset by reference (zset_for_each_asc) we clone only the members we keep
+    // instead of every member. The box is a conservative superset, so the
+    // surviving result set and its ascending-score order are identical to
+    // scanning and distance-testing every member. (frankenredis-5nimj)
+    let bb = geo_radius_bbox(center_lon, center_lat, radius_m);
     let mut results: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
-    for (member, score) in members {
-        let Some((lon, lat)) = geo_decode_score(score) else {
-            continue;
-        };
-        let dist = geo_distance_m(center_lon, center_lat, lon, lat);
-        if dist <= radius_m {
-            results.push((member, score, dist, lon, lat));
+    // When the radius is small enough that the center geohash cell + its 8
+    // neighbours cover it, walk only those cells' score ranges (O(log n + k))
+    // instead of every member; otherwise fall back to the full bbox+borrow scan.
+    // Both apply the identical exact bbox+haversine candidate filter, so results
+    // are unchanged. (frankenredis-7hg0r)
+    match geo_radius_cell_ranges(center_lon, center_lat, radius_m) {
+        Some(ranges) => {
+            store.zset_for_each_in_score_ranges(key, &ranges, now_ms, |member, score| {
+                geo_collect_candidate(
+                    member,
+                    score,
+                    center_lon,
+                    center_lat,
+                    radius_m,
+                    bb,
+                    &mut results,
+                );
+            })?;
+            // Per-cell scan order is not global; restore ascending (score, member)
+            // order so SORT_NONE output and the stable ASC/DESC tie-breaks match
+            // the full scan byte-for-byte.
+            results.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+        }
+        None => {
+            store.zset_for_each_asc(key, now_ms, |member, score| {
+                geo_collect_candidate(
+                    member,
+                    score,
+                    center_lon,
+                    center_lat,
+                    radius_m,
+                    bb,
+                    &mut results,
+                );
+            })?;
         }
     }
     // (frankenredis-1axne) Match upstream geo.c:714-718: if the
@@ -5241,6 +6188,7 @@ fn geo_search_reply(
     withdist: bool,
     withhash: bool,
     to_meter: f64,
+    resp3: bool,
 ) -> RespFrame {
     let frames: Vec<RespFrame> = results
         .iter()
@@ -5261,8 +6209,8 @@ fn geo_search_reply(
             }
             if withcoord {
                 parts.push(RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(format_coord_human(*lon).into_bytes())),
-                    RespFrame::BulkString(Some(format_coord_human(*lat).into_bytes())),
+                    geo_coord_frame(*lon, resp3),
+                    geo_coord_frame(*lat, resp3),
                 ])));
             }
             RespFrame::Array(Some(parts))
@@ -5579,7 +6527,12 @@ fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         geo_store_results(store, &dest, &results, unit_mult, storedist, now_ms)
     } else {
         Ok(geo_search_reply(
-            &results, withcoord, withdist, withhash, unit_mult,
+            &results,
+            withcoord,
+            withdist,
+            withhash,
+            unit_mult,
+            store.dispatch_client_ctx.resp_protocol_version == 3,
         ))
     }
 }
@@ -5649,7 +6602,12 @@ fn georadiusbymember(
         geo_store_results(store, &dest, &results, unit_mult, storedist, now_ms)
     } else {
         Ok(geo_search_reply(
-            &results, withcoord, withdist, withhash, unit_mult,
+            &results,
+            withcoord,
+            withdist,
+            withhash,
+            unit_mult,
+            store.dispatch_client_ctx.resp_protocol_version == 3,
         ))
     }
 }
@@ -5837,24 +6795,68 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     if let Some(rm) = radius_m {
         let results = geo_search_core(store, &argv[1], cx, cy, rm, count, sort, any, now_ms)?;
         Ok(geo_search_reply(
-            &results, withcoord, withdist, withhash, unit_mult,
+            &results,
+            withcoord,
+            withdist,
+            withhash,
+            unit_mult,
+            store.dispatch_client_ctx.resp_protocol_version == 3,
         ))
     } else if let (Some(w), Some(h)) = (box_width_m, box_height_m) {
-        // BYBOX: filter by bounding box
-        let members = store.zrange_withscores(&argv[1], 0, -1, now_ms)?;
+        // BYBOX: filter by bounding box. Pre-filter with a lat/lon box that
+        // provably contains the search rectangle and scan the zset by reference
+        // (zset_for_each_asc), so the trig-heavy geo_point_in_box / distance run
+        // only for candidates near the box and only survivors are cloned. The
+        // box is a conservative superset, so the surviving result set and its
+        // ascending-score order are identical to scanning every member.
+        // (frankenredis-vnsnx)
         let half_w = w / 2.0;
         let half_h = h / 2.0;
+        let bb = geo_box_bbox(cx, cy, half_w, half_h);
         let mut results: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
-        for (member, score) in members {
-            let Some((lon, lat)) = geo_decode_score(score) else {
-                continue;
-            };
-            let dist = geo_distance_m(cx, cy, lon, lat);
-            // Approximate box check using lat/lon distance components
-            let lat_dist = geo_distance_m(cx, cy, cx, lat);
-            let lon_dist = geo_distance_m(cx, cy, lon, cy);
-            if lat_dist <= half_h && lon_dist <= half_w {
-                results.push((member, score, dist, lon, lat));
+        // O(log n + k) geohash neighbour-cell scan when the box fits the center
+        // cell + its 8 neighbours; otherwise the full bbox+borrow scan. Both
+        // apply the identical exact bbox + geo_point_in_box filter, so results
+        // are unchanged. (frankenredis-b9utp)
+        match geo_box_cell_ranges(cx, cy, half_w, half_h) {
+            Some(ranges) => {
+                store.zset_for_each_in_score_ranges(
+                    &argv[1],
+                    &ranges,
+                    now_ms,
+                    |member, score| {
+                        geo_collect_box_candidate(
+                            member,
+                            score,
+                            cx,
+                            cy,
+                            half_w,
+                            half_h,
+                            bb,
+                            &mut results,
+                        );
+                    },
+                )?;
+                // Restore ascending (score, member) order to match the full scan.
+                results.sort_by(|a, b| {
+                    a.1.partial_cmp(&b.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.0.cmp(&b.0))
+                });
+            }
+            None => {
+                store.zset_for_each_asc(&argv[1], now_ms, |member, score| {
+                    geo_collect_box_candidate(
+                        member,
+                        score,
+                        cx,
+                        cy,
+                        half_w,
+                        half_h,
+                        bb,
+                        &mut results,
+                    );
+                })?;
             }
         }
         // (frankenredis-1axne) Apply the same SORT_NONE handling as
@@ -5879,7 +6881,12 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             results.truncate(limit);
         }
         Ok(geo_search_reply(
-            &results, withcoord, withdist, withhash, unit_mult,
+            &results,
+            withcoord,
+            withdist,
+            withhash,
+            unit_mult,
+            store.dispatch_client_ctx.resp_protocol_version == 3,
         ))
     } else {
         Ok(RespFrame::Error(
@@ -6515,6 +7522,18 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     };
 
     store.xadd(&argv[1], id, &fields, now_ms)?;
+    // (frankenredis-xaddtrimdirty) Upstream t_stream.c::xaddCommand bumps
+    // server.dirty exactly once (for the add). Its inline MAXLEN/MINID trim
+    // fires a separate "xtrim" keyspace event but does NOT add to server.dirty —
+    // only standalone XTRIM does. fr's store.xtrim bumps dirty per removed entry,
+    // so capture the post-add value and restore it after the inline trim to
+    // avoid overcounting rdb_changes_since_last_save (the trim's removals still
+    // happen; only the dirty contribution is dropped). The secondary "xtrim"
+    // keyspace notification on inline trim is tracked separately.
+    let dirty_after_add = store.dirty;
+    // (frankenredis-f7xy7) Total entries removed by the inline trim, used to
+    // decide whether to fire the secondary "xtrim" keyspace event.
+    let mut trimmed_entries: usize = 0;
 
     // Apply inline trimming after the add. Approximate trimming
     // (~) without LIMIT is best-effort: upstream lazily skips trimming
@@ -6553,7 +7572,10 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             max_len
         };
         let pass_limit = if trim_approx { None } else { trim_limit_usize };
-        let _ = store.xtrim(&argv[1], effective_max_len, pass_limit, now_ms);
+        let removed = store
+            .xtrim(&argv[1], effective_max_len, pass_limit, now_ms)
+            .unwrap_or(0);
+        trimmed_entries = trimmed_entries.saturating_add(removed);
     }
     if let Some(min_id) = trim_minid
         && should_run_inline_trim
@@ -6562,8 +7584,18 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         // pre-existing behavior; pass through with the LIMIT cap
         // unchanged. (frankenredis-hpz8a leaves MINID
         // node-boundary modeling for follow-up.)
-        let _ = store.xtrim_minid(&argv[1], min_id, trim_limit_usize, now_ms);
+        let removed = store
+            .xtrim_minid(&argv[1], min_id, trim_limit_usize, now_ms)
+            .unwrap_or(0);
+        trimmed_entries = trimmed_entries.saturating_add(removed);
     }
+    // (frankenredis-xaddtrimdirty) Drop any dirty units the inline trim added;
+    // the XADD itself already accounted for exactly one.
+    store.dirty = dirty_after_add;
+    // (frankenredis-f7xy7) Signal the runtime to emit the secondary "xtrim"
+    // keyspace event (after "xadd") iff the inline trim actually removed
+    // entries — matching upstream xaddCommand. Overwritten by every XADD.
+    store.last_xadd_trimmed = trimmed_entries > 0;
 
     Ok(RespFrame::BulkString(Some(format_stream_id(id))))
 }
@@ -7087,6 +8119,13 @@ fn stream_full_group_lag_frame(
         let len = i64::try_from(stream_entries_added).unwrap_or(i64::MAX);
         let read = i64::try_from(entries_read).unwrap_or(i64::MAX);
         return RespFrame::Integer(len.saturating_sub(read));
+    }
+    // (frankenredis-h3vkq) If the group's position sits within the tombstone
+    // range, the lag can't be determined — upstream streamCGLag returns nil
+    // (the same condition that invalidates entries-read). The structural
+    // fallback below must not fabricate a concrete lag here.
+    if stream_lag_range_has_tombstones(stream_len, first_id, max_deleted_id, last_delivered_id) {
+        return RespFrame::BulkString(None);
     }
     let Some(first_id) = first_id else {
         return RespFrame::Integer(0);
@@ -7708,6 +8747,15 @@ fn xpending(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
             ])));
         }
 
+        // Upstream t_stream.c::xpendingCommand summary form: when there are
+        // no pending entries it emits the consumers field as a NULL array
+        // (addReplyNullArray → *-1 / _), not an empty array. fr was emitting
+        // *0. min/max are already null in that case. (frankenredis-b2okv)
+        let consumers_frame = if total == 0 {
+            RespFrame::Array(None)
+        } else {
+            RespFrame::Array(Some(consumer_frames))
+        };
         return Ok(RespFrame::Array(Some(vec![
             RespFrame::Integer(i64::try_from(total).unwrap_or(i64::MAX)),
             min_id
@@ -7716,7 +8764,7 @@ fn xpending(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
             max_id
                 .map(|id| RespFrame::BulkString(Some(format_stream_id(id))))
                 .unwrap_or(RespFrame::BulkString(None)),
-            RespFrame::Array(Some(consumer_frames)),
+            consumers_frame,
         ])));
     }
 
@@ -9933,7 +10981,7 @@ fn zrangestore_cmd(
         ));
     }
 
-    let pairs: Vec<(Vec<u8>, f64)> = if byscore {
+    let mut pairs: Vec<(Vec<u8>, f64)> = if byscore {
         let min = parse_score_bound(&argv[3])?;
         let max = parse_score_bound(&argv[4])?;
         let (lo, hi) = if rev { (max, min) } else { (min, max) };
@@ -9952,17 +11000,15 @@ fn zrangestore_cmd(
         } else {
             (min_lex.as_slice(), max_lex.as_slice())
         };
-        let mut members = store.zrangebylex(src, lo, hi, now_ms)?;
-        if rev {
-            members.reverse();
-        }
-        // Look up scores for each member
-        let mut result = Vec::with_capacity(members.len());
-        for m in members {
-            let score = store.zscore(src, &m, now_ms)?.unwrap_or(0.0);
-            result.push((m, score));
-        }
-        result
+        store.zrangebylex_withscores_limited(
+            src,
+            lo,
+            hi,
+            rev,
+            limit_offset.unwrap_or(0),
+            limit_count,
+            now_ms,
+        )?
     } else {
         // Default: by rank (index)
         let start = parse_i64_arg(&argv[3])?;
@@ -9982,17 +11028,17 @@ fn zrangestore_cmd(
     // offset/count fields are only consumed in the BYSCORE/BYLEX
     // paths). Mirroring that here means `LIMIT 1 -1` doesn't drop
     // the first element from a rank-mode ZRANGESTORE.
-    let pairs = if (byscore || bylex)
-        && let Some(offset) = limit_offset
-    {
-        if let Some(count) = limit_count {
-            pairs.into_iter().skip(offset).take(count).collect()
-        } else {
-            pairs.into_iter().skip(offset).collect()
+    // In-place LIMIT avoids second allocation. (frankenredis-5qwm6)
+    if byscore && let Some(offset) = limit_offset {
+        if offset > 0 && offset < pairs.len() {
+            pairs.drain(0..offset);
+        } else if offset >= pairs.len() {
+            pairs.clear();
         }
-    } else {
-        pairs
-    };
+        if let Some(count) = limit_count {
+            pairs.truncate(count);
+        }
+    }
 
     let count = pairs.len() as i64;
     if pairs.is_empty() {
@@ -10146,12 +11192,21 @@ fn function_cmd(
                         Some(d) => RespFrame::BulkString(Some(d.as_bytes().to_vec())),
                         None => RespFrame::BulkString(None),
                     };
-                    let flags_frame = RespFrame::Array(Some(
-                        f.flags
-                            .iter()
-                            .map(|fl| RespFrame::BulkString(Some(fl.as_bytes().to_vec())))
-                            .collect(),
-                    ));
+                    // Upstream functions.c emits each function flag via
+                    // addReplyStatus (a simple string `+`), and wraps the
+                    // list in addReplySetLen — so it is a Set (~) in RESP3
+                    // and a flat Array of simple strings in RESP2. fr was
+                    // emitting bulk strings inside an Array. (frankenredis-fnflags)
+                    let flag_elems: Vec<RespFrame> = f
+                        .flags
+                        .iter()
+                        .map(|fl| RespFrame::SimpleString(fl.to_string()))
+                        .collect();
+                    let flags_frame = if resp == 3 {
+                        RespFrame::Set(Some(flag_elems))
+                    } else {
+                        RespFrame::Array(Some(flag_elems))
+                    };
                     if resp == 3 {
                         RespFrame::Map(Some(vec![
                             (RespFrame::BulkString(Some(b"name".to_vec())), name_frame),
@@ -11819,15 +12874,16 @@ fn zrevrangebyscore(
     let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
     let max = parse_score_bound(&argv[2])?;
     let min = parse_score_bound(&argv[3])?;
-    let mut pairs = store.zrangebyscore_withscores(&argv[1], min, max, now_ms)?;
-    pairs.reverse();
-    if let Some(offset) = limit_offset {
-        if let Some(count) = limit_count {
-            pairs = pairs.into_iter().skip(offset).take(count).collect();
-        } else {
-            pairs = pairs.into_iter().skip(offset).collect();
-        }
-    }
+    // REV + LIMIT pushed into the range walk — O(offset+count), not O(range).
+    let pairs = store.zrangebyscore_withscores_limited(
+        &argv[1],
+        min,
+        max,
+        true,
+        limit_offset.unwrap_or(0),
+        limit_count,
+        now_ms,
+    )?;
     zrange_emit_with_resp(
         pairs,
         withscores,
@@ -11864,14 +12920,16 @@ fn zrangebylex(
             "ERR syntax error, WITHSCORES not supported in combination with BYLEX".to_string(),
         ));
     }
-    let mut members = store.zrangebylex(&argv[1], &argv[2], &argv[3], now_ms)?;
-    if let Some(offset) = limit_offset {
-        if let Some(count) = limit_count {
-            members = members.into_iter().skip(offset).take(count).collect();
-        } else {
-            members = members.into_iter().skip(offset).collect();
-        }
-    }
+    // LIMIT pushed into the lex walk — O(offset+count). (frankenredis-qchm7)
+    let members = store.zrangebylex_limited(
+        &argv[1],
+        &argv[2],
+        &argv[3],
+        false,
+        limit_offset.unwrap_or(0),
+        limit_count,
+        now_ms,
+    )?;
     let frames = members
         .into_iter()
         .map(|m| RespFrame::BulkString(Some(m)))
@@ -11897,14 +12955,17 @@ fn zrevrangebylex(
             "ERR syntax error, WITHSCORES not supported in combination with BYLEX".to_string(),
         ));
     }
-    let mut members = store.zrevrangebylex(&argv[1], &argv[2], &argv[3], now_ms)?;
-    if let Some(offset) = limit_offset {
-        if let Some(count) = limit_count {
-            members = members.into_iter().skip(offset).take(count).collect();
-        } else {
-            members = members.into_iter().skip(offset).collect();
-        }
-    }
+    // REV + LIMIT pushed into the lex walk: zrevrangebylex(key, max, min) is
+    // zrangebylex_limited(key, min, max, rev=true). (frankenredis-qchm7)
+    let members = store.zrangebylex_limited(
+        &argv[1],
+        &argv[3],
+        &argv[2],
+        true,
+        limit_offset.unwrap_or(0),
+        limit_count,
+        now_ms,
+    )?;
     let frames = members
         .into_iter()
         .map(|m| RespFrame::BulkString(Some(m)))
@@ -13187,7 +14248,40 @@ struct LcsMatch {
 const LCS_MAX_DP_SIZE: usize = 16 * 1024 * 1024; // 16M entries = 64MB
 
 fn compute_lcs_len(a: &[u8], b: &[u8]) -> usize {
+    // `a` is the shorter string (the inner / pattern dimension).
     let (a, b) = if a.len() < b.len() { (a, b) } else { (b, a) };
+    let m = a.len();
+    let n = b.len();
+    if m == 0 || n == 0 {
+        return 0;
+    }
+    if m <= 64 {
+        // Bit-parallel LCS-length (Crochemore-Iliopoulos-Pinzon-Rytter, 2001):
+        // encode the pattern `a` (m<=64 bits) as per-byte position masks, then
+        // fold each text byte through one word recurrence instead of the O(m)
+        // inner DP row. The LCS length is `m` minus the popcount of the final
+        // match vector. This is the exact LCS length (not an approximation) and
+        // is byte-identical to the scalar DP — see
+        // compute_lcs_len_scalar and the equivalence test. (frankenredis-t8veh)
+        let mut pm = [0u64; 256];
+        for (i, &c) in a.iter().enumerate() {
+            pm[c as usize] |= 1u64 << i;
+        }
+        let mask: u64 = if m == 64 { !0u64 } else { (1u64 << m) - 1 };
+        let mut v: u64 = mask;
+        for &c in b {
+            let u = v & pm[c as usize];
+            v = (v.wrapping_add(u) | v.wrapping_sub(u)) & mask;
+        }
+        return m - v.count_ones() as usize;
+    }
+    compute_lcs_len_scalar(a, b)
+}
+
+/// Scalar two-row LCS-length DP. Reference fallback for patterns longer than a
+/// machine word (m > 64), and the equivalence oracle for the bit-parallel path.
+/// `a` must be the shorter string. (frankenredis-t8veh)
+fn compute_lcs_len_scalar(a: &[u8], b: &[u8]) -> usize {
     let m = a.len();
     let n = b.len();
     if m == 0 || n == 0 {
@@ -13208,6 +14302,103 @@ fn compute_lcs_len(a: &[u8], b: &[u8]) -> usize {
     prev[m] as usize
 }
 
+/// Low-`k`-bits mask (`k <= 64`); `lcs_low_mask(64) == u64::MAX`. (frankenredis-mug2e)
+fn lcs_low_mask(k: usize) -> u64 {
+    if k >= 64 { u64::MAX } else { (1u64 << k) - 1 }
+}
+
+/// LCS dynamic-programming oracle shared by `compute_lcs` and
+/// `compute_lcs_matches`. `Full` is the classic O(n*m) u32 matrix, used when
+/// both inputs exceed a machine word and as the equivalence oracle in tests.
+/// The two bit-parallel variants store one Allison-Dix LCS vector per
+/// outer-axis position (the same Crochemore-Iliopoulos-Pinzon-Rytter
+/// `v = (v+u)|(v-u)` recurrence as `compute_lcs_len`), from which any
+/// `dp[i][j]` is recovered by a single prefix-popcount: O(n+m) build + O(1)
+/// cell lookup, replacing the O(n*m) fill/alloc. Because `get` returns the
+/// *exact* scalar `dp` value, the shared backtrack is byte-identical to the
+/// matrix version. (frankenredis-mug2e)
+enum LcsDp {
+    /// Full scalar matrix; `dp[i * cols + j]`.
+    Full { dp: Vec<u32>, cols: usize },
+    /// Pattern = `a` along rows (`a.len() <= 64`); `v[j]` is the LCS vector after
+    /// column `j`, so `dp[i][j] = i - popcount(v[j] & low_mask(i))`.
+    ColBits { v: Vec<u64> },
+    /// Pattern = `b` along columns (`b.len() <= 64`); `v[i]` is the LCS vector
+    /// after row `i`, so `dp[i][j] = j - popcount(v[i] & low_mask(j))`.
+    RowBits { v: Vec<u64> },
+}
+
+impl LcsDp {
+    /// LCS length of the prefixes `a[..i]` x `b[..j]`. Identical to the scalar
+    /// `dp[i][j]` for every `(i, j)`; never underflows because
+    /// `popcount(v & low_mask(k)) <= k`. (frankenredis-mug2e)
+    #[inline]
+    fn get(&self, i: usize, j: usize) -> u32 {
+        match self {
+            LcsDp::Full { dp, cols } => dp[i * cols + j],
+            LcsDp::ColBits { v } => i as u32 - (v[j] & lcs_low_mask(i)).count_ones(),
+            LcsDp::RowBits { v } => j as u32 - (v[i] & lcs_low_mask(j)).count_ones(),
+        }
+    }
+}
+
+/// Build the LCS DP oracle for `a` (rows) x `b` (columns), preferring the
+/// bit-parallel representation whenever either string fits a machine word.
+/// Callers must already have handled the empty-input case. (frankenredis-mug2e)
+fn build_lcs_dp(a: &[u8], b: &[u8]) -> LcsDp {
+    let m = a.len();
+    let n = b.len();
+    if m <= 64 {
+        // Pattern = a over rows: fold each column (b byte) through the word
+        // recurrence, recording the LCS vector after every column.
+        let mut pm = [0u64; 256];
+        for (idx, &c) in a.iter().enumerate() {
+            pm[c as usize] |= 1u64 << idx;
+        }
+        let full = lcs_low_mask(m);
+        let mut v = Vec::with_capacity(n + 1);
+        let mut cur = full;
+        v.push(cur);
+        for &c in b {
+            let u = cur & pm[c as usize];
+            cur = (cur.wrapping_add(u) | cur.wrapping_sub(u)) & full;
+            v.push(cur);
+        }
+        LcsDp::ColBits { v }
+    } else if n <= 64 {
+        // Pattern = b over columns: fold each row (a byte) through the word
+        // recurrence, recording the LCS vector after every row.
+        let mut pm = [0u64; 256];
+        for (idx, &c) in b.iter().enumerate() {
+            pm[c as usize] |= 1u64 << idx;
+        }
+        let full = lcs_low_mask(n);
+        let mut v = Vec::with_capacity(m + 1);
+        let mut cur = full;
+        v.push(cur);
+        for &c in a {
+            let u = cur & pm[c as usize];
+            cur = (cur.wrapping_add(u) | cur.wrapping_sub(u)) & full;
+            v.push(cur);
+        }
+        LcsDp::RowBits { v }
+    } else {
+        // Both strings exceed a machine word: classic flat-matrix DP.
+        let cols = n + 1;
+        let mut dp = vec![0u32; (m + 1) * cols];
+        for i in 1..=m {
+            for j in 1..=n {
+                if a[i - 1] == b[j - 1] {
+                    dp[i * cols + j] = dp[(i - 1) * cols + (j - 1)] + 1;
+                } else {
+                    dp[i * cols + j] = dp[(i - 1) * cols + j].max(dp[i * cols + (j - 1)]);
+                }
+            }
+        }
+        LcsDp::Full { dp, cols }
+    }
+}
+
 fn compute_lcs(a: &[u8], b: &[u8]) -> Result<Vec<u8>, CommandError> {
     let m = a.len();
     let n = b.len();
@@ -13223,27 +14414,16 @@ fn compute_lcs(a: &[u8], b: &[u8]) -> Result<Vec<u8>, CommandError> {
                 .to_string(),
         ));
     }
-    // DP table: flat Vec for cache efficiency
-    let cols = n + 1;
-    let mut dp = vec![0u32; (m + 1) * cols];
-    for i in 1..=m {
-        for j in 1..=n {
-            if a[i - 1] == b[j - 1] {
-                dp[i * cols + j] = dp[(i - 1) * cols + (j - 1)] + 1;
-            } else {
-                dp[i * cols + j] = dp[(i - 1) * cols + j].max(dp[i * cols + (j - 1)]);
-            }
-        }
-    }
-    // Backtrack
-    let mut result = Vec::with_capacity(dp[m * cols + n] as usize);
+    let dp = build_lcs_dp(a, b);
+    // Backtrack (identical tie-break to the scalar matrix version).
+    let mut result = Vec::with_capacity(dp.get(m, n) as usize);
     let (mut i, mut j) = (m, n);
     while i > 0 && j > 0 {
         if a[i - 1] == b[j - 1] {
             result.push(a[i - 1]);
             i -= 1;
             j -= 1;
-        } else if dp[(i - 1) * cols + j] > dp[i * cols + (j - 1)] {
+        } else if dp.get(i - 1, j) > dp.get(i, j - 1) {
             i -= 1;
         } else {
             j -= 1;
@@ -13272,18 +14452,8 @@ fn compute_lcs_matches(
                 .to_string(),
         ));
     }
-    let cols = n + 1;
-    let mut dp = vec![0u32; (m + 1) * cols];
-    for i in 1..=m {
-        for j in 1..=n {
-            if a[i - 1] == b[j - 1] {
-                dp[i * cols + j] = dp[(i - 1) * cols + (j - 1)] + 1;
-            } else {
-                dp[i * cols + j] = dp[(i - 1) * cols + j].max(dp[i * cols + (j - 1)]);
-            }
-        }
-    }
-    // Backtrack to find matching segments
+    let dp = build_lcs_dp(a, b);
+    // Backtrack to find matching segments (identical tie-break to scalar).
     let mut segments = Vec::new();
     let (mut i, mut j) = (m, n);
     while i > 0 && j > 0 {
@@ -13306,7 +14476,7 @@ fn compute_lcs_matches(
                     len,
                 });
             }
-        } else if dp[(i - 1) * cols + j] > dp[i * cols + (j - 1)] {
+        } else if dp.get(i - 1, j) > dp.get(i, j - 1) {
             i -= 1;
         } else {
             j -= 1;
@@ -13466,9 +14636,10 @@ fn zmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                         Some((member, score)) => {
                             popped.push(RespFrame::Array(Some(vec![
                                 RespFrame::BulkString(Some(member)),
-                                RespFrame::BulkString(Some(
-                                    redis_score_to_string(score).into_bytes(),
-                                )),
+                                zpop_score_frame(
+                                    score,
+                                    store.dispatch_client_ctx.resp_protocol_version,
+                                ),
                             ])));
                         }
                         None => break,
@@ -14884,6 +16055,40 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("zrangestore", -5, "write denyoom", 1, 2, 1),
 ];
 
+/// O(1) case-insensitive lookup of a command name into `COMMAND_TABLE`,
+/// returning its index. Replaces the per-command `COMMAND_TABLE.iter().find(|n|
+/// n.eq_ignore_ascii_case(..))` linear scan (218 case-folding string compares)
+/// that showed up on the pipelined dispatch hot path (check_command_arity,
+/// get_command_flags, command_key_references — frankenredis-yaxr7 profile).
+///
+/// The index is built once (lazily) keyed by the lowercased command-name bytes,
+/// keeping the FIRST occurrence so the result is identical to `.find()` on a
+/// table with duplicate names. Lookups lowercase into a stack buffer to avoid a
+/// per-call heap allocation (command names are short ASCII tokens).
+fn command_table_index(name: &[u8]) -> Option<usize> {
+    static INDEX: OnceLock<HashMap<Vec<u8>, usize>> = OnceLock::new();
+    let index = INDEX.get_or_init(|| {
+        let mut map: HashMap<Vec<u8>, usize> = HashMap::with_capacity(COMMAND_TABLE.len() * 2);
+        for (i, &(table_name, ..)) in COMMAND_TABLE.iter().enumerate() {
+            // keep the first occurrence — matches `.find()` semantics
+            map.entry(table_name.as_bytes().to_ascii_lowercase())
+                .or_insert(i);
+        }
+        map
+    });
+    const STACK: usize = 64;
+    if name.len() <= STACK {
+        let mut buf = [0u8; STACK];
+        for (dst, &src) in buf[..name.len()].iter_mut().zip(name) {
+            *dst = src.to_ascii_lowercase();
+        }
+        index.get(&buf[..name.len()]).copied()
+    } else {
+        // Pathologically long token: cannot be a real command, but stay correct.
+        index.get(name.to_ascii_lowercase().as_slice()).copied()
+    }
+}
+
 /// Subcommand-level COMMAND INFO/LIST entries — the namespaced
 /// "parent|sub" rows that upstream emits from server.c::commandCommand
 /// by walking each container's `subcommand_dict`. fr previously
@@ -15170,16 +16375,17 @@ const SUBCOMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
 /// Check if the argument count (including command name) satisfies the command's arity.
 /// Returns Ok(()) if valid, Err(command_name) if arity mismatch.
 pub fn check_command_arity(name: &[u8], argc: usize) -> Result<(), &'static str> {
-    let name_str = match std::str::from_utf8(name) {
-        Ok(s) => s,
-        Err(_) => return Err(""),
-    };
-    let Some(&(cmd_name, arity, ..)) = COMMAND_TABLE
-        .iter()
-        .find(|&&(n, ..)| n.eq_ignore_ascii_case(name_str))
-    else {
+    if is_hget_command(name) {
+        return if argc == HGET_ARITY {
+            Ok(())
+        } else {
+            Err(HGET_COMMAND_NAME)
+        };
+    }
+    let Some(idx) = command_table_index(name) else {
         return Err(""); // Unknown command — caller handles separately
     };
+    let (cmd_name, arity, ..) = COMMAND_TABLE[idx];
     let argc = argc as i64;
     if arity > 0 {
         // Exact arity required.
@@ -15198,11 +16404,10 @@ pub fn check_command_arity(name: &[u8], argc: usize) -> Result<(), &'static str>
 /// Return the flags string for a given command name.
 #[must_use]
 pub fn get_command_flags(name: &[u8]) -> Option<&'static str> {
-    let name_str = std::str::from_utf8(name).ok()?;
-    COMMAND_TABLE
-        .iter()
-        .find(|&&(n, ..)| n.eq_ignore_ascii_case(name_str))
-        .map(|&(_, _, flags, ..)| flags)
+    if is_hget_command(name) {
+        return Some(HGET_COMMAND_FLAGS);
+    }
+    command_table_index(name).map(|idx| COMMAND_TABLE[idx].2)
 }
 
 fn command_writes_or_may_replicate_in_readonly_script(argv: &[Vec<u8>]) -> bool {
@@ -15531,10 +16736,25 @@ pub fn is_known_acl_command_selector(command: &str) -> bool {
 /// parents without subcommands accept any sub blindly.
 #[must_use]
 pub fn command_has_acl_subcommands(parent: &str) -> bool {
-    let prefix_lower = format!("{}|", parent.to_ascii_lowercase());
-    SUBCOMMAND_TABLE
-        .iter()
-        .any(|(name, ..)| name.to_ascii_lowercase().starts_with(&prefix_lower))
+    command_acl_parent_has_subcommands(parent)
+}
+
+fn command_acl_parent_has_subcommands(parent: &str) -> bool {
+    parent.eq_ignore_ascii_case("acl")
+        || parent.eq_ignore_ascii_case("client")
+        || parent.eq_ignore_ascii_case("cluster")
+        || parent.eq_ignore_ascii_case("command")
+        || parent.eq_ignore_ascii_case("config")
+        || parent.eq_ignore_ascii_case("function")
+        || parent.eq_ignore_ascii_case("latency")
+        || parent.eq_ignore_ascii_case("memory")
+        || parent.eq_ignore_ascii_case("module")
+        || parent.eq_ignore_ascii_case("object")
+        || parent.eq_ignore_ascii_case("pubsub")
+        || parent.eq_ignore_ascii_case("script")
+        || parent.eq_ignore_ascii_case("slowlog")
+        || parent.eq_ignore_ascii_case("xgroup")
+        || parent.eq_ignore_ascii_case("xinfo")
 }
 
 /// Return ACL selectors for a command invocation, most-specific first.
@@ -15546,7 +16766,9 @@ pub fn acl_command_selectors_for_argv(argv: &[Vec<u8>]) -> Vec<String> {
     let command = String::from_utf8_lossy(raw_command).to_ascii_lowercase();
     let mut selectors = Vec::with_capacity(2);
 
-    if let Some(raw_subcommand) = argv.get(1) {
+    if command_acl_parent_has_subcommands(&command)
+        && let Some(raw_subcommand) = argv.get(1)
+    {
         let subcommand = String::from_utf8_lossy(raw_subcommand).to_ascii_lowercase();
         let subcommand_selector = format!("{command}|{subcommand}");
         if is_known_acl_command_selector(&subcommand_selector) {
@@ -15719,6 +16941,55 @@ fn dispatch_acl_permission_error_for_argv(
     argv: &[Vec<u8>],
     permissions: &DispatchAclPermissions,
 ) -> Option<DispatchAclPermissionError> {
+    // Fast path: a fully-permissive root set with no selectors grants everything.
+    if permissions.all_commands
+        && permissions.allowed_commands.is_empty()
+        && permissions.denied_commands.is_empty()
+        && permissions.allowed_categories.is_empty()
+        && permissions.denied_categories.is_empty()
+        && permissions.all_keys
+        && permissions.all_channels
+        && permissions.selectors.is_empty()
+    {
+        return None;
+    }
+
+    // (frankenredis-d919b) Upstream ACLCheckAllPerm: permit when the root set OR
+    // any selector grants the command together with its keys and channels. When
+    // every set denies, report the DEEPEST failure across all sets — a set that
+    // granted the command but failed on a key/channel surfaces as a key/channel
+    // error, not a command error, matching upstream's errpos.
+    let mut best: Option<DispatchAclPermissionError> = None;
+    for set in std::iter::once(permissions).chain(permissions.selectors.iter()) {
+        let err = dispatch_acl_permission_error_for_set(argv, set)?;
+        let take = match &best {
+            Some(prev) => dispatch_acl_error_depth(&err) > dispatch_acl_error_depth(prev),
+            None => true,
+        };
+        if take {
+            best = Some(err);
+        }
+    }
+    best
+}
+
+/// How far an ACL check progressed before denying: command (shallowest), then
+/// keys, then channels. Used to report the most informative denial across the
+/// root set and all selectors. (frankenredis-d919b)
+fn dispatch_acl_error_depth(err: &DispatchAclPermissionError) -> u8 {
+    match err {
+        DispatchAclPermissionError::Command => 0,
+        DispatchAclPermissionError::Key(_) => 1,
+        DispatchAclPermissionError::Channel(_) => 2,
+    }
+}
+
+/// Whether a single dispatch permission set (root or one selector) grants
+/// `argv`. (frankenredis-d919b)
+fn dispatch_acl_permission_error_for_set(
+    argv: &[Vec<u8>],
+    permissions: &DispatchAclPermissions,
+) -> Option<DispatchAclPermissionError> {
     let cmd = argv.first()?;
     if !dispatch_acl_is_command_allowed(argv, permissions) {
         return Some(DispatchAclPermissionError::Command);
@@ -15765,12 +17036,18 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
         // (frankenredis-99to6) Upstream server.c::commandCommand walks
         // both the top-level commands dict AND each container's
         // subcommand_dict, so the reply contains both groups.
+        let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
         let entries: Vec<RespFrame> = COMMAND_TABLE
             .iter()
             .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
             .chain(SUBCOMMAND_TABLE.iter())
             .map(|&(name, arity, flags, first_key, last_key, step)| {
-                command_info_entry(name, arity, flags, first_key, last_key, step)
+                let entry = command_info_entry(name, arity, flags, first_key, last_key, step);
+                if resp3 {
+                    command_info_entry_to_resp3(entry)
+                } else {
+                    entry
+                }
             })
             .collect();
         return Ok(RespFrame::Array(Some(entries)));
@@ -15868,6 +17145,7 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
             .collect();
         Ok(RespFrame::Array(Some(names)))
     } else if sub.eq_ignore_ascii_case("INFO") {
+        let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
         if argv.len() < 3 {
             // (frankenredis-99to6) Bare COMMAND INFO mirrors the
             // top-level + subcommand walk.
@@ -15876,7 +17154,12 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
                 .chain(SUBCOMMAND_TABLE.iter())
                 .map(|&(name, arity, flags, first_key, last_key, step)| {
-                    command_info_entry(name, arity, flags, first_key, last_key, step)
+                    let entry = command_info_entry(name, arity, flags, first_key, last_key, step);
+                    if resp3 {
+                        command_info_entry_to_resp3(entry)
+                    } else {
+                        entry
+                    }
                 })
                 .collect();
             return Ok(RespFrame::Array(Some(entries)));
@@ -15897,9 +17180,12 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name));
             match found {
                 Some(&(name, arity, flags, first_key, last_key, step)) => {
-                    entries.push(command_info_entry(
-                        name, arity, flags, first_key, last_key, step,
-                    ));
+                    let entry = command_info_entry(name, arity, flags, first_key, last_key, step);
+                    entries.push(if resp3 {
+                        command_info_entry_to_resp3(entry)
+                    } else {
+                        entry
+                    });
                 }
                 None => entries.push(RespFrame::BulkString(None)),
             }
@@ -15987,19 +17273,28 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 "ERR wrong number of arguments for 'command|getkeysandflags' command".to_string(),
             ));
         }
+        // Upstream server.c::getKeysCommand wraps each key's flag list in
+        // addReplySetLen, so under RESP3 the per-key flags are a Set (`~`),
+        // not an Array. RESP2 keeps the flat array. (frankenredis-cmdgkaf-set)
+        let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
         match command_key_references(&argv[2..]) {
             Ok(references) => Ok(RespFrame::Array(Some(
                 references
                     .into_iter()
                     .map(|key| {
+                        let flag_frames: Vec<RespFrame> = key
+                            .flags
+                            .iter()
+                            .map(|flag| RespFrame::SimpleString((*flag).to_string()))
+                            .collect();
+                        let flags_frame = if resp3 {
+                            RespFrame::Set(Some(flag_frames))
+                        } else {
+                            RespFrame::Array(Some(flag_frames))
+                        };
                         RespFrame::Array(Some(vec![
                             RespFrame::BulkString(Some(argv[2 + key.index].clone())),
-                            RespFrame::Array(Some(
-                                key.flags
-                                    .iter()
-                                    .map(|flag| RespFrame::SimpleString((*flag).to_string()))
-                                    .collect(),
-                            )),
+                            flags_frame,
                         ]))
                     })
                     .collect(),
@@ -16928,6 +18223,143 @@ fn command_docs_subcommands(name: &str, resp: i64) -> Vec<RespFrame> {
     out
 }
 
+/// Read the field-name string out of a COMMAND INFO map key frame
+/// (always a bulk or simple string in the RESP2 array shape we build).
+fn command_info_field_name(frame: &RespFrame) -> Option<&str> {
+    match frame {
+        RespFrame::BulkString(Some(bytes)) => std::str::from_utf8(bytes).ok(),
+        RespFrame::SimpleString(s) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// Re-tag a built-as-Array reply element as a RESP3 Set, leaving the
+/// element order (and thus the wire bytes apart from the `*`→`~` tag)
+/// untouched. Non-array frames pass through unchanged.
+fn command_info_array_to_set(frame: RespFrame) -> RespFrame {
+    match frame {
+        RespFrame::Array(Some(items)) => RespFrame::Set(Some(items)),
+        other => other,
+    }
+}
+
+/// Pair up an alternating `[k, v, k, v, ...]` array into a RESP3 Map,
+/// preserving order. Used for the leaf `spec` sub-objects of a key_spec
+/// (e.g. `{index: 2}`, `{lastkey, keystep, limit}`).
+fn command_info_array_to_plain_map(frame: RespFrame) -> RespFrame {
+    let RespFrame::Array(Some(items)) = frame else {
+        return frame;
+    };
+    let mut pairs = Vec::with_capacity(items.len() / 2);
+    let mut it = items.into_iter();
+    while let (Some(k), Some(v)) = (it.next(), it.next()) {
+        pairs.push((k, v));
+    }
+    RespFrame::Map(Some(pairs))
+}
+
+/// Convert a key_spec `begin_search` / `find_keys` sub-object from its
+/// RESP2 alternating-array form `[type, <t>, spec, <specarr>]` into a
+/// RESP3 Map, recursing the nested `spec` array into a Map. (frankenredis-u3x8o)
+fn command_info_begin_find_to_resp3(frame: RespFrame) -> RespFrame {
+    let RespFrame::Array(Some(items)) = frame else {
+        return frame;
+    };
+    let mut pairs = Vec::with_capacity(items.len() / 2);
+    let mut it = items.into_iter();
+    while let (Some(k), Some(v)) = (it.next(), it.next()) {
+        let conv = if command_info_field_name(&k) == Some("spec") {
+            command_info_array_to_plain_map(v)
+        } else {
+            v
+        };
+        pairs.push((k, conv));
+    }
+    RespFrame::Map(Some(pairs))
+}
+
+/// Convert one key_spec from its RESP2 alternating-array form into the
+/// RESP3 Map shape upstream emits via server.c::addReplyCommandKeySpecs:
+/// the spec is a Map, its `flags` value a Set, and its `begin_search` /
+/// `find_keys` values Maps (with their own nested `spec` Maps).
+/// (frankenredis-u3x8o)
+fn command_info_keyspec_to_resp3(frame: RespFrame) -> RespFrame {
+    let RespFrame::Array(Some(items)) = frame else {
+        return frame;
+    };
+    let mut pairs = Vec::with_capacity(items.len() / 2);
+    let mut it = items.into_iter();
+    while let (Some(k), Some(v)) = (it.next(), it.next()) {
+        let conv = match command_info_field_name(&k) {
+            Some("flags") => command_info_array_to_set(v),
+            Some("begin_search") | Some("find_keys") => command_info_begin_find_to_resp3(v),
+            _ => v,
+        };
+        pairs.push((k, conv));
+    }
+    RespFrame::Map(Some(pairs))
+}
+
+/// Transform a fully-built RESP2 COMMAND INFO entry (a fixed 10-element
+/// positional array) into its RESP3 shape: `flags`, `acl_categories`,
+/// `tips`, `key_specs`, and `subcommands` become Sets; each key_spec
+/// becomes a Map; subcommand entries are transformed recursively. The
+/// outer 10-element array tag is unchanged. RESP2 callers never touch
+/// this path, so the legacy wire is byte-for-byte preserved.
+/// (frankenredis-u3x8o)
+fn command_info_entry_to_resp3(frame: RespFrame) -> RespFrame {
+    let RespFrame::Array(Some(items)) = frame else {
+        return frame;
+    };
+    if items.len() != 10 {
+        return RespFrame::Array(Some(items));
+    }
+    let mut it = items.into_iter();
+    let name = it.next().unwrap();
+    let arity = it.next().unwrap();
+    let flags = it.next().unwrap();
+    let first_key = it.next().unwrap();
+    let last_key = it.next().unwrap();
+    let step = it.next().unwrap();
+    let acl = it.next().unwrap();
+    let tips = it.next().unwrap();
+    let key_specs = it.next().unwrap();
+    let subcommands = it.next().unwrap();
+
+    let key_specs = match key_specs {
+        RespFrame::Array(Some(specs)) => RespFrame::Set(Some(
+            specs
+                .into_iter()
+                .map(command_info_keyspec_to_resp3)
+                .collect(),
+        )),
+        other => other,
+    };
+    // Upstream server.c::addReplyCommandSubCommands has an asymmetry: a
+    // command with NO subcommands replies an empty Set (`~0`), but a
+    // populated subcommands field is an Array (`*N`) whose entries are
+    // each recursively in RESP3 shape. (frankenredis-u3x8o)
+    let subcommands = match subcommands {
+        RespFrame::Array(Some(subs)) if subs.is_empty() => RespFrame::Set(Some(Vec::new())),
+        RespFrame::Array(Some(subs)) => RespFrame::Array(Some(
+            subs.into_iter().map(command_info_entry_to_resp3).collect(),
+        )),
+        other => other,
+    };
+    RespFrame::Array(Some(vec![
+        name,
+        arity,
+        command_info_array_to_set(flags),
+        first_key,
+        last_key,
+        step,
+        command_info_array_to_set(acl),
+        command_info_array_to_set(tips),
+        key_specs,
+        subcommands,
+    ]))
+}
+
 /// Build a Redis COMMAND INFO entry.
 fn command_info_entry(
     name: &str,
@@ -17056,7 +18488,23 @@ fn command_docs_entry(
     let arguments = command_docs_arguments(name, arity, first_key, last_key, step);
     if !arguments.is_empty() {
         entry.push(hello_bulk("arguments"));
-        entry.push(RespFrame::Array(Some(arguments)));
+        // (frankenredis-8lgn3) Upstream server.c::addReplyCommandArgList
+        // wraps each per-argument entry in addReplyMapLen — the RESP3 wire
+        // shape is an Array of per-arg Maps; RESP2 stays the flat 2N
+        // alternating-element Array per arg. The builders (command_docs_arg
+        // / json_arg_to_resp / arity fallback) always emit the RESP2 flat
+        // shape; convert each arg (recursing into oneof/block subargs) to a
+        // Map when RESP3 is negotiated.
+        if resp_protocol_version == 3 {
+            entry.push(RespFrame::Array(Some(
+                arguments
+                    .into_iter()
+                    .map(command_docs_arg_to_resp3)
+                    .collect(),
+            )));
+        } else {
+            entry.push(RespFrame::Array(Some(arguments)));
+        }
     }
     // (frankenredis-bpf4q) Containers emit a "subcommands" field after
     // arguments. RESP2 wire: flat 2N alternating array of (name, docs);
@@ -17094,12 +18542,68 @@ fn command_docs_entry(
         let mut pairs = Vec::with_capacity(entry.len() / 2);
         let mut iter = entry.into_iter();
         while let (Some(k), Some(v)) = (iter.next(), iter.next()) {
+            // Upstream server.c::commandDocsCommand emits the `history` and
+            // `doc_flags` field values via addReplySetLen, so under RESP3
+            // they are Sets (~), not Arrays. (frankenredis-8lgn3 follow-up)
+            let v = match &k {
+                RespFrame::BulkString(Some(name))
+                    if matches!(name.as_slice(), b"history" | b"doc_flags") =>
+                {
+                    match v {
+                        RespFrame::Array(Some(items)) => RespFrame::Set(Some(items)),
+                        other => other,
+                    }
+                }
+                _ => v,
+            };
             pairs.push((k, v));
         }
         RespFrame::Map(Some(pairs))
     } else {
         RespFrame::Array(Some(entry))
     }
+}
+
+/// (frankenredis-8lgn3) Convert one COMMAND DOCS argument from its RESP2
+/// flat-array shape (alternating k/v) into the RESP3 Map shape that
+/// upstream server.c::addReplyCommandArgList emits via addReplyMapLen.
+/// Recurses into the nested `arguments` sub-array (oneof/block subargs)
+/// so every level of the tree becomes a Map. Non-array inputs and
+/// odd-length entries are passed through untouched.
+fn command_docs_arg_to_resp3(arg: RespFrame) -> RespFrame {
+    let entry = match arg {
+        RespFrame::Array(Some(v)) if v.len().is_multiple_of(2) => v,
+        other => return other,
+    };
+    let mut pairs = Vec::with_capacity(entry.len() / 2);
+    let mut iter = entry.into_iter();
+    while let (Some(key), Some(value)) = (iter.next(), iter.next()) {
+        // The `arguments` field of a oneof/block arg carries a nested
+        // Array of sub-args; each sub-arg is itself a Map in RESP3.
+        let is_subargs =
+            matches!(&key, RespFrame::BulkString(Some(b)) if b.as_slice() == b"arguments");
+        // Upstream server.c::addReplyCommandArgList emits each arg's `flags`
+        // value (optional/multiple/multiple-token) via addReplySetLen, so it
+        // is a Set (~) in RESP3, not an Array. (frankenredis-8lgn3 follow-up)
+        let is_flags = matches!(&key, RespFrame::BulkString(Some(b)) if b.as_slice() == b"flags");
+        let value = if is_subargs {
+            match value {
+                RespFrame::Array(Some(subargs)) => RespFrame::Array(Some(
+                    subargs.into_iter().map(command_docs_arg_to_resp3).collect(),
+                )),
+                other => other,
+            }
+        } else if is_flags {
+            match value {
+                RespFrame::Array(Some(flags)) => RespFrame::Set(Some(flags)),
+                other => other,
+            }
+        } else {
+            value
+        };
+        pairs.push((key, value));
+    }
+    RespFrame::Map(Some(pairs))
 }
 
 fn command_docs_arguments(
@@ -18690,12 +20194,15 @@ pub fn client_trackinginfo_frame(
     // Mirror upstream networking.c::trackingInfoCommand which uses
     // addReplyMapLen(c, 3) — RESP3 wire shape is a Map, RESP2 a flat
     // Array of alternating k/v pairs. Same pattern as hgetall.
-    // (frankenredis-i40x2)
+    // The `flags` value is emitted via setDeferredSetLen, so in RESP3
+    // it is a Set (~) — not a plain Array; only `prefixes` stays an
+    // Array. In RESP2 a Set degrades to an Array, matching the legacy
+    // wire shape below. (frankenredis-i40x2)
     if resp_protocol_version == 3 {
         RespFrame::Map(Some(vec![
             (
                 RespFrame::BulkString(Some(b"flags".to_vec())),
-                RespFrame::Array(Some(client_tracking_flags(state))),
+                RespFrame::Set(Some(client_tracking_flags(state))),
             ),
             (
                 RespFrame::BulkString(Some(b"redirect".to_vec())),
@@ -18806,6 +20313,17 @@ pub fn parse_client_tracking_state(argv: &[Vec<u8>]) -> Result<ClientTrackingSta
         return Err(CommandError::Custom(
             CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT.to_string(),
         ));
+    }
+
+    // Upstream tracking.c::enableTracking registers the empty prefix ""
+    // for BCAST clients that pass no explicit PREFIX:
+    //   `if (numprefix == 0) enableBcastTrackingForPrefix(c,"",0);`
+    // The empty prefix is a true match-all (every key starts_with ""),
+    // and it is stored in client_tracking_prefixes so CLIENT TRACKINGINFO
+    // reports `prefixes` as a one-element array holding "". Mirror that
+    // here so the stored state — and its info reply — match byte-for-byte.
+    if bcast && prefixes.is_empty() {
+        prefixes.insert(Vec::new());
     }
 
     Ok(ClientTrackingState {
@@ -20599,14 +22117,25 @@ pub fn pubsub_message_to_frame(msg: PubSubMessage) -> RespFrame {
             RespFrame::BulkString(Some(channel)),
             RespFrame::BulkString(Some(data)),
         ])),
-        PubSubMessage::Invalidate { keys } => RespFrame::Array(Some(vec![
-            RespFrame::BulkString(Some(b"invalidate".to_vec())),
-            RespFrame::Array(Some(
-                keys.into_iter()
-                    .map(|key| RespFrame::BulkString(Some(key)))
-                    .collect(),
-            )),
-        ])),
+        PubSubMessage::Invalidate { keys } => {
+            // (frankenredis-o90ga) An empty key set is the flush-all sentinel:
+            // upstream's FLUSHALL/FLUSHDB invalidation is `invalidate` + a NULL
+            // payload (rendered `_\r\n` for RESP3 clients) meaning "drop your
+            // whole cache". The per-key path never produces an empty set.
+            let payload = if keys.is_empty() {
+                RespFrame::BulkString(None)
+            } else {
+                RespFrame::Array(Some(
+                    keys.into_iter()
+                        .map(|key| RespFrame::BulkString(Some(key)))
+                        .collect(),
+                ))
+            };
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"invalidate".to_vec())),
+                payload,
+            ]))
+        }
     }
 }
 
@@ -21042,7 +22571,11 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     });
     // (gauntlet B5) WITHSCORES emits RESP3 Double + nested pairs under HELLO 3,
     // flat bulk-string array under RESP2 — same shape as ZRANGE WITHSCORES.
-    zrange_emit_with_resp(result, withscores, store.dispatch_client_ctx.resp_protocol_version)
+    zrange_emit_with_resp(
+        result,
+        withscores,
+        store.dispatch_client_ctx.resp_protocol_version,
+    )
 }
 
 fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -21115,7 +22648,7 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
     let w0 = weights.first().copied().unwrap_or(1.0);
     for (member, score) in first_members {
-        let mut combined = score * w0;
+        let mut combined = normalize_weighted_score_cmd(score, w0);
         let mut in_all = true;
         for (i, &key) in keys[1..].iter().enumerate() {
             match store.zget_score_or_set_member(key, &member, now_ms)? {
@@ -21140,7 +22673,11 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             .then_with(|| a.0.cmp(&b.0))
     });
     // (gauntlet B5) WITHSCORES: RESP3 Double + nested pairs under HELLO 3.
-    zrange_emit_with_resp(result, withscores, store.dispatch_client_ctx.resp_protocol_version)
+    zrange_emit_with_resp(
+        result,
+        withscores,
+        store.dispatch_client_ctx.resp_protocol_version,
+    )
 }
 
 fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -21169,7 +22706,7 @@ fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         let w = weights.get(i).copied().unwrap_or(1.0);
         let members = store.zget_members_with_scores(key, now_ms)?;
         for (member, score) in members {
-            let weighted = score * w;
+            let weighted = normalize_weighted_score_cmd(score, w);
             use std::collections::hash_map::Entry as HEntry;
             match combined.entry(member) {
                 HEntry::Vacant(e) => {
@@ -21192,7 +22729,11 @@ fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             .then_with(|| a.0.cmp(&b.0))
     });
     // (gauntlet B5) WITHSCORES: RESP3 Double + nested pairs under HELLO 3.
-    zrange_emit_with_resp(entries, withscores, store.dispatch_client_ctx.resp_protocol_version)
+    zrange_emit_with_resp(
+        entries,
+        withscores,
+        store.dispatch_client_ctx.resp_protocol_version,
+    )
 }
 
 fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -22710,21 +24251,22 @@ fn mix_debug_object_digest(store: &mut Store, key: &[u8], now_ms: u64, digest: &
     mix_digest(digest, &debug_object_type_code(&value).to_be_bytes());
     match value {
         Value::String(bytes) => mix_digest(digest, &bytes),
+        Value::Integer(value) => mix_digest(digest, value.to_string().as_bytes()),
         Value::List(items) => {
-            for item in items {
-                mix_digest(digest, &item);
+            for item in items.iter() {
+                mix_digest(digest, item);
             }
         }
         Value::Set(members) => {
-            for member in members {
-                xor_digest(digest, &member);
+            for member in members.iter() {
+                xor_digest(digest, member.as_ref());
             }
         }
         Value::Hash(fields) => {
-            for (field, value) in fields {
+            for (field, value) in fields.iter() {
                 let mut element_digest = [0u8; 20];
-                mix_digest(&mut element_digest, &field);
-                mix_digest(&mut element_digest, &value);
+                mix_digest(&mut element_digest, field);
+                mix_digest(&mut element_digest, value);
                 xor_digest(digest, &element_digest);
             }
         }
@@ -22758,7 +24300,7 @@ fn mix_debug_object_digest(store: &mut Store, key: &[u8], now_ms: u64, digest: &
 
 fn debug_object_type_code(value: &Value) -> u32 {
     match value {
-        Value::String(_) => 0,
+        Value::String(_) | Value::Integer(_) => 0,
         Value::List(_) => 1,
         Value::Set(_) => 2,
         Value::SortedSet(_) => 3,
@@ -22899,10 +24441,17 @@ fn move_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     if !store.exists(&source, now_ms) || store.exists(&destination, now_ms) {
         return Ok(RespFrame::Integer(0));
     }
+    let dirty_before = store.dirty;
     store
         .copy(&source, &destination, false, now_ms)
         .map_err(CommandError::Store)?;
     store.del(&[source], now_ms);
+    // (frankenredis-movedirty) Upstream db.c::moveCommand does `server.dirty++`
+    // exactly once for the whole transfer. fr implements MOVE as copy + del,
+    // and each helper bumps the dirty counter, so the move double-counted —
+    // diverging rdb_changes_since_last_save and the auto-save threshold from
+    // vendored. Normalize to a single dirty unit.
+    store.dirty = dirty_before.saturating_add(1);
     Ok(RespFrame::Integer(1))
 }
 
@@ -23610,8 +25159,17 @@ fn aggregate_scores_for_cmd(a: f64, b: f64, aggregate: &[u8]) -> f64 {
     } else if aggregate.eq_ignore_ascii_case(b"MAX") {
         a.max(b)
     } else {
-        a + b
+        // SUM. Upstream zunionInterAggregate resolves +inf + -inf (NaN) to 0.0.
+        let r = a + b;
+        if r.is_nan() { 0.0 } else { r }
     }
+}
+
+/// (frankenredis-zsetnan) Mirrors upstream `if (isnan(score)) score = 0;` on
+/// each weighted source score — 0 * ±inf is NaN, which Redis stores as 0.0.
+fn normalize_weighted_score_cmd(score: f64, weight: f64) -> f64 {
+    let s = score * weight;
+    if s.is_nan() { 0.0 } else { s }
 }
 
 fn swapdb_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
@@ -23988,6 +25546,7 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         }
         idx += 1;
     }
+    let resp = store.dispatch_client_ctx.resp_protocol_version;
     for ki in 0..numkeys {
         let key = &argv[3 + ki];
         let popped = if use_min {
@@ -24002,7 +25561,7 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                     .map(|(member, score)| {
                         RespFrame::Array(Some(vec![
                             RespFrame::BulkString(Some(member)),
-                            RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
+                            zpop_score_frame(score, resp),
                         ]))
                     })
                     .collect();
@@ -24313,6 +25872,7 @@ fn sort_generic(
     }
 
     // ── Apply LIMIT ──────────────────────────────────────────────────
+    // In-place LIMIT avoids second allocation. (frankenredis-5qwm6)
     let total = elements.len();
     let start = if limit_offset <= 0 {
         0
@@ -24326,7 +25886,13 @@ fn sort_generic(
         let count = usize::try_from(limit_count).map_err(|_| CommandError::InvalidInteger)?;
         count.min(total.saturating_sub(start))
     };
-    let sliced: Vec<Vec<u8>> = elements.into_iter().skip(start).take(count).collect();
+    if start > 0 && start < elements.len() {
+        elements.drain(0..start);
+    } else if start >= elements.len() {
+        elements.clear();
+    }
+    elements.truncate(count);
+    let sliced = elements;
 
     // ── Build output with GET patterns ───────────────────────────────
     let use_store = store_dest.is_some();
@@ -24540,6 +26106,53 @@ mod tests {
     use std::time::Instant;
 
     use fr_protocol::RespFrame;
+
+    /// command_table_index (O(1) hash) must return exactly what the previous
+    /// `COMMAND_TABLE.iter().find(|n| n.eq_ignore_ascii_case(name))` linear scan
+    /// returned — same index (first occurrence) for every name, any case, and
+    /// None for unknowns/non-ASCII. (frankenredis-yaxr7 hot-path lever)
+    #[test]
+    fn command_table_index_matches_linear_scan() {
+        let linear = |name: &[u8]| -> Option<usize> {
+            let s = std::str::from_utf8(name).ok()?;
+            super::COMMAND_TABLE
+                .iter()
+                .position(|&(n, ..)| n.eq_ignore_ascii_case(s))
+        };
+        // Every table entry, in its own case and upper/lower/mixed variants.
+        for &(name, ..) in super::COMMAND_TABLE {
+            for variant in [
+                name.to_string(),
+                name.to_ascii_uppercase(),
+                name.to_ascii_lowercase(),
+            ] {
+                let b = variant.as_bytes();
+                assert_eq!(
+                    super::command_table_index(b),
+                    linear(b),
+                    "mismatch for {variant:?}"
+                );
+            }
+        }
+        // Unknowns and edge inputs resolve identically (None).
+        for bad in [
+            &b"definitely-not-a-command"[..],
+            b"",
+            b"\xff\xfe",
+            b"GET\0",
+            &[b'x'; 200][..],
+        ] {
+            assert_eq!(
+                super::command_table_index(bad),
+                linear(bad),
+                "mismatch for {bad:?}"
+            );
+        }
+        // Sanity: a known command resolves and the arity field is reachable.
+        let idx = super::command_table_index(b"set").expect("SET present");
+        assert!(super::COMMAND_TABLE[idx].0.eq_ignore_ascii_case("set"));
+    }
+
     use fr_store::{
         SCRIPT_PROPAGATE_ALL, SCRIPT_PROPAGATE_AOF, SCRIPT_PROPAGATE_REPLICA, Store, StoreError,
         StreamGroupReadCursor, StreamGroupReadOptions,
@@ -24552,12 +26165,14 @@ mod tests {
         CLIENT_TRACKING_OPT_SWITCH_REQUIRES_DISABLE, CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT,
         CLIENT_TRACKING_PREFIX_REQUIRES_BCAST, CLIENT_TRACKING_REDIRECT_MISSING,
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
-        SCRIPT_NOSCRIPT_ERROR, SUBCOMMAND_TABLE, acl_command_selectors_for_argv, classify_command,
-        client_wrong_subcommand_arity, cluster_disabled_error, cluster_reset_with_keys_error,
-        cluster_wrong_subcommand_arity, command_acl_categories, commands_in_acl_category,
-        dispatch_argv, drain_pubsub_messages, eq_ascii_command, eval_script, execute_migrate,
-        format_coord_human, format_eval_read_only_script_error, frame_to_argv, hello_bulk,
-        hello_simple, is_known_acl_command_selector, is_write_command,
+        SCRIPT_NOSCRIPT_ERROR, SUBCOMMAND_TABLE, acl_command_selectors_for_argv,
+        check_command_arity, classify_command, client_wrong_subcommand_arity,
+        cluster_disabled_error, cluster_reset_with_keys_error, cluster_wrong_subcommand_arity,
+        command_acl_categories, command_acl_key_access, command_has_acl_subcommands,
+        command_key_indexes, commands_in_acl_category, dispatch_argv, drain_pubsub_messages,
+        eq_ascii_command, eval_script, execute_migrate, format_coord_human,
+        format_eval_read_only_script_error, frame_to_argv, geo_coord_frame, get_command_flags,
+        hello_bulk, hello_simple, is_known_acl_command_selector, is_write_command,
         parse_blocking_deadline_milliseconds, parse_migrate_request, pubsub_message_to_frame,
         pubsub_message_to_frame_for_protocol, stream_full_group_lag_frame,
     };
@@ -25010,6 +26625,842 @@ mod tests {
     }
 
     #[test]
+    fn lcs_len_bitparallel_matches_scalar_and_reports_ab_ratio() {
+        use super::{compute_lcs_len, compute_lcs_len_scalar};
+        // Known cases. (frankenredis-t8veh)
+        assert_eq!(compute_lcs_len(b"AB", b"AB"), 2);
+        assert_eq!(compute_lcs_len(b"AB", b"BA"), 1);
+        assert_eq!(compute_lcs_len(b"AC", b"ABC"), 2);
+        assert_eq!(compute_lcs_len(b"", b"abc"), 0);
+        assert_eq!(compute_lcs_len(b"abcde", b"abcde"), 5);
+        assert_eq!(compute_lcs_len(b"abc", b"xyz"), 0);
+        assert_eq!(compute_lcs_len(b"ohmytext", b"mynewtext"), 6); // redis LCS doc example
+
+        // Equivalence vs the scalar DP across all length classes, incl. the m==64
+        // boundary and the m>64 fallback. compute_lcs_len_scalar expects the
+        // shorter string first.
+        let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..4000 {
+            let la = (next() % 90) as usize;
+            let lb = (next() % 90) as usize;
+            let na = 1 + (next() % 4) as usize; // small alphabet => non-trivial LCS
+            let nb = 1 + (next() % 4) as usize;
+            let a: Vec<u8> = (0..la).map(|_| b'a' + (next() % na as u64) as u8).collect();
+            let b: Vec<u8> = (0..lb).map(|_| b'a' + (next() % nb as u64) as u8).collect();
+            let (s, l) = if a.len() < b.len() {
+                (&a, &b)
+            } else {
+                (&b, &a)
+            };
+            assert_eq!(
+                compute_lcs_len(&a, &b),
+                compute_lcs_len_scalar(s, l),
+                "a={a:?} b={b:?}"
+            );
+        }
+
+        // A/B: LCS LEN of two ~60-byte strings (m=60 <= 64 -> bit-parallel).
+        let mut mk = |len: usize, alpha: u64| -> Vec<u8> {
+            (0..len).map(|_| b'a' + (next() % alpha) as u8).collect()
+        };
+        let a = mk(60, 4);
+        let b = mk(900, 4);
+        let (s, l) = (&a, &b);
+        let expected = compute_lcs_len_scalar(s, l);
+        assert_eq!(compute_lcs_len(&a, &b), expected);
+        let reps = 20000;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc.wrapping_add(compute_lcs_len_scalar(
+                std::hint::black_box(s),
+                std::hint::black_box(l),
+            ));
+        }
+        let scalar_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 = acc2.wrapping_add(compute_lcs_len(
+                std::hint::black_box(&a),
+                std::hint::black_box(&b),
+            ));
+        }
+        let bitpar_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        let ratio = scalar_ns as f64 / bitpar_ns as f64;
+        println!(
+            "LCS-LEN A/B (m=60,n=900 x{reps}): scalar={scalar_ns}ns bitpar={bitpar_ns}ns ratio={ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn lcs_reconstruction_bitparallel_matches_scalar_and_reports_ab_ratio() {
+        use super::{compute_lcs, compute_lcs_matches};
+
+        // Independent full-matrix scalar oracles (force the O(n*m) path that the
+        // bit-parallel `build_lcs_dp` replaces for min-len <= 64). Identical
+        // tie-break to the production backtrack, so equality proves isomorphism.
+        fn full_lcs(a: &[u8], b: &[u8]) -> Vec<u8> {
+            let (m, n) = (a.len(), b.len());
+            if m == 0 || n == 0 {
+                return Vec::new();
+            }
+            let cols = n + 1;
+            let mut dp = vec![0u32; (m + 1) * cols];
+            for i in 1..=m {
+                for j in 1..=n {
+                    if a[i - 1] == b[j - 1] {
+                        dp[i * cols + j] = dp[(i - 1) * cols + (j - 1)] + 1;
+                    } else {
+                        dp[i * cols + j] = dp[(i - 1) * cols + j].max(dp[i * cols + (j - 1)]);
+                    }
+                }
+            }
+            let mut result = Vec::new();
+            let (mut i, mut j) = (m, n);
+            while i > 0 && j > 0 {
+                if a[i - 1] == b[j - 1] {
+                    result.push(a[i - 1]);
+                    i -= 1;
+                    j -= 1;
+                } else if dp[(i - 1) * cols + j] > dp[i * cols + (j - 1)] {
+                    i -= 1;
+                } else {
+                    j -= 1;
+                }
+            }
+            result.reverse();
+            result
+        }
+        type Seg = (usize, usize, usize, usize, usize);
+        fn full_matches(a: &[u8], b: &[u8], min_match_len: usize) -> Vec<Seg> {
+            let (m, n) = (a.len(), b.len());
+            if m == 0 || n == 0 {
+                return Vec::new();
+            }
+            let cols = n + 1;
+            let mut dp = vec![0u32; (m + 1) * cols];
+            for i in 1..=m {
+                for j in 1..=n {
+                    if a[i - 1] == b[j - 1] {
+                        dp[i * cols + j] = dp[(i - 1) * cols + (j - 1)] + 1;
+                    } else {
+                        dp[i * cols + j] = dp[(i - 1) * cols + j].max(dp[i * cols + (j - 1)]);
+                    }
+                }
+            }
+            let mut segs = Vec::new();
+            let (mut i, mut j) = (m, n);
+            while i > 0 && j > 0 {
+                if a[i - 1] == b[j - 1] {
+                    let (end_a, end_b) = (i - 1, j - 1);
+                    while i > 0 && j > 0 && a[i - 1] == b[j - 1] {
+                        i -= 1;
+                        j -= 1;
+                    }
+                    let len = end_a - i + 1;
+                    if len >= min_match_len {
+                        segs.push((i, end_a, j, end_b, len));
+                    }
+                } else if dp[(i - 1) * cols + j] > dp[i * cols + (j - 1)] {
+                    i -= 1;
+                } else {
+                    j -= 1;
+                }
+            }
+            segs
+        }
+
+        // Known cases (redis LCS doc example "ohmytext"/"mynewtext" => "mytext").
+        assert_eq!(compute_lcs(b"ohmytext", b"mynewtext").unwrap(), b"mytext");
+        assert_eq!(compute_lcs(b"AB", b"BA").unwrap(), b"B");
+        assert_eq!(compute_lcs(b"", b"abc").unwrap(), b"");
+
+        // Equivalence vs the full-matrix oracle across all length classes, biased
+        // to cover ColBits (m<=64), RowBits (m>64,n<=64) and Full (both>64),
+        // including the 64-byte boundary, for both reconstruction entry points.
+        let mut state: u64 = 0x0BAD_F00D_1357_9BDFu64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let lens = [0usize, 1, 2, 5, 17, 63, 64, 65, 80, 130];
+        for _ in 0..6000 {
+            let la = lens[(next() as usize) % lens.len()];
+            let lb = lens[(next() as usize) % lens.len()];
+            let na = 1 + (next() % 4);
+            let nb = 1 + (next() % 4);
+            let a: Vec<u8> = (0..la).map(|_| b'a' + (next() % na) as u8).collect();
+            let b: Vec<u8> = (0..lb).map(|_| b'a' + (next() % nb) as u8).collect();
+            assert_eq!(
+                compute_lcs(&a, &b).unwrap(),
+                full_lcs(&a, &b),
+                "compute_lcs a={a:?} b={b:?}"
+            );
+            for &mml in &[1usize, 2, 3] {
+                let got: Vec<Seg> = compute_lcs_matches(&a, &b, mml)
+                    .unwrap()
+                    .into_iter()
+                    .map(|m| (m.a_start, m.a_end, m.b_start, m.b_end, m.len))
+                    .collect();
+                assert_eq!(
+                    got,
+                    full_matches(&a, &b, mml),
+                    "matches a={a:?} b={b:?} mml={mml}"
+                );
+            }
+        }
+
+        // A/B: reconstruct LCS of a 64-byte pattern vs a 2000-byte text
+        // (m=64 -> ColBits: O(n) build + O(n+m) backtrack vs O(n*m) full matrix).
+        let mut mk = |len: usize, alpha: u64| -> Vec<u8> {
+            (0..len).map(|_| b'a' + (next() % alpha) as u8).collect()
+        };
+        let a = mk(64, 5);
+        let b = mk(2000, 5);
+        assert_eq!(compute_lcs(&a, &b).unwrap(), full_lcs(&a, &b));
+        let reps = 2000;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc
+                .wrapping_add(full_lcs(std::hint::black_box(&a), std::hint::black_box(&b)).len());
+        }
+        let scalar_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 = acc2.wrapping_add(
+                compute_lcs(std::hint::black_box(&a), std::hint::black_box(&b))
+                    .unwrap()
+                    .len(),
+            );
+        }
+        let bitpar_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        let ratio = scalar_ns as f64 / bitpar_ns as f64;
+        println!(
+            "LCS-RECON A/B (m=64,n=2000 x{reps}): scalar={scalar_ns}ns bitpar={bitpar_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(
+            ratio > 2.0 || cfg!(debug_assertions),
+            "expected >2x, got {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn geo_radius_bbox_is_a_superset_and_speeds_up_search() {
+        use super::{
+            GeoSort, geo_decode_score, geo_distance_m, geo_encode_wgs84, geo_radius_bbox,
+            geo_search_core,
+        };
+
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut unit = || (next() >> 11) as f64 / (1u64 << 53) as f64; // [0,1)
+
+        // SAFETY INVARIANT: every point within the radius lies inside the box.
+        // Sweep centers (incl. high latitude and near-antimeridian), radii from
+        // metres to thousands of km, and random probe points.
+        for _ in 0..200_000 {
+            let clat = (unit() * 170.0) - 85.0;
+            let clon = (unit() * 360.0) - 180.0;
+            let radius = 1.0 + unit() * 5_000_000.0;
+            let plat = (unit() * 170.0) - 85.0;
+            let plon = (unit() * 360.0) - 180.0;
+            let (lat_min, lat_max, lon_min, lon_max, lon_wrap) =
+                geo_radius_bbox(clon, clat, radius);
+            if geo_distance_m(clon, clat, plon, plat) <= radius {
+                assert!(
+                    plat >= lat_min && plat <= lat_max,
+                    "lat outside box: c=({clon},{clat}) r={radius} p=({plon},{plat})"
+                );
+                assert!(
+                    lon_wrap || (plon >= lon_min && plon <= lon_max),
+                    "lon outside box: c=({clon},{clat}) r={radius} p=({plon},{plat})"
+                );
+            }
+        }
+
+        // Integration A/B: build a large geo set, search a small radius, and
+        // confirm geo_search_core returns exactly the no-prune result set.
+        let key = b"geo";
+        let mut store = Store::new();
+        let n = 100_000usize;
+        let mut adds: Vec<(f64, Vec<u8>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let lon = (unit() * 360.0) - 180.0;
+            let lat = (unit() * 170.0) - 85.0;
+            if let Some(bits) = geo_encode_wgs84(lon, lat) {
+                adds.push((bits as f64, format!("m{i}").into_bytes()));
+            }
+        }
+        store.zadd(key, &adds, 0).unwrap();
+        let (clon, clat, radius) = (0.0f64, 0.0f64, 50_000.0f64);
+
+        let no_prune = |store: &mut Store| -> Vec<(Vec<u8>, f64)> {
+            let members = store.zrange_withscores(key, 0, -1, 0).unwrap();
+            let mut r = Vec::new();
+            for (m, s) in members {
+                if let Some((lon, lat)) = geo_decode_score(s) {
+                    let d = geo_distance_m(clon, clat, lon, lat);
+                    if d <= radius {
+                        r.push((m, d));
+                    }
+                }
+            }
+            r
+        };
+
+        let mut ref_set: Vec<(Vec<u8>, f64)> = no_prune(&mut store);
+        let mut got: Vec<(Vec<u8>, f64)> = geo_search_core(
+            &mut store,
+            key,
+            clon,
+            clat,
+            radius,
+            None,
+            GeoSort::Unspecified,
+            false,
+            0,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|(m, _s, d, _lon, _lat)| (m, d))
+        .collect();
+        ref_set.sort_by(|a, b| a.0.cmp(&b.0));
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            got, ref_set,
+            "pruned search must match the full scan exactly"
+        );
+
+        let reps = 200;
+        let t0 = std::time::Instant::now();
+        let mut a0 = 0usize;
+        for _ in 0..reps {
+            a0 = a0.wrapping_add(no_prune(&mut store).len());
+        }
+        let full_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(a0);
+        let t1 = std::time::Instant::now();
+        let mut a1 = 0usize;
+        for _ in 0..reps {
+            a1 = a1.wrapping_add(
+                geo_search_core(
+                    &mut store,
+                    key,
+                    clon,
+                    clat,
+                    radius,
+                    None,
+                    GeoSort::Unspecified,
+                    false,
+                    0,
+                )
+                .unwrap()
+                .len(),
+            );
+        }
+        let prune_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(a1);
+        let ratio = full_ns as f64 / prune_ns as f64;
+        println!(
+            "GEO radius A/B (n={n}, r={radius}m, x{reps}): full-scan={full_ns}ns bbox-prune={prune_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(
+            ratio > 2.0 || cfg!(debug_assertions),
+            "expected >2x, got {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn geo_neighbor_cell_scan_matches_full_scan_and_speeds_up_radius() {
+        use super::{
+            GeoSort, geo_collect_candidate, geo_encode_wgs84, geo_radius_bbox, geo_search_core,
+        };
+
+        let key = b"geo";
+        let mut store = Store::new();
+        let mut state: u64 = 0x243F_6A88_85A3_08D3;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut unit = || (next() >> 11) as f64 / (1u64 << 53) as f64;
+
+        let n = 60_000usize;
+        let mut adds: Vec<(f64, Vec<u8>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let lon = (unit() * 360.0) - 180.0;
+            let lat = (unit() * 170.0) - 85.0;
+            if let Some(bits) = geo_encode_wgs84(lon, lat) {
+                adds.push((bits as f64, format!("m{i}").into_bytes()));
+            }
+        }
+        store.zadd(key, &adds, 0).unwrap();
+
+        // Oracle: the full bbox+borrow scan (ascending score,member order).
+        fn oracle(
+            store: &mut Store,
+            key: &[u8],
+            clon: f64,
+            clat: f64,
+            radius: f64,
+        ) -> Vec<(Vec<u8>, f64)> {
+            let bb = geo_radius_bbox(clon, clat, radius);
+            let mut r: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
+            store
+                .zset_for_each_asc(key, 0, |m, s| {
+                    geo_collect_candidate(m, s, clon, clat, radius, bb, &mut r)
+                })
+                .unwrap();
+            r.into_iter().map(|(m, _s, d, _lo, _la)| (m, d)).collect()
+        }
+
+        // Coverage + order: the neighbour-cell scan must match the full scan
+        // exactly, across small/medium/large radii, high latitudes, and the
+        // antimeridian (where longitude cells wrap).
+        let radii = [50.0, 1_000.0, 25_000.0, 200_000.0, 1_500_000.0, 9_000_000.0];
+        let centers = [
+            (0.0, 0.0),
+            (179.9, 0.0),
+            (-179.9, 12.0),
+            (0.0, 84.5),
+            (0.0, -84.5),
+            (45.0, 70.0),
+        ];
+        for &(clon, clat) in &centers {
+            for &radius in &radii {
+                let got = geo_search_core(
+                    &mut store,
+                    key,
+                    clon,
+                    clat,
+                    radius,
+                    None,
+                    GeoSort::Unspecified,
+                    false,
+                    0,
+                )
+                .unwrap()
+                .into_iter()
+                .map(|(m, _s, d, _lo, _la)| (m, d))
+                .collect::<Vec<_>>();
+                let exp = oracle(&mut store, key, clon, clat, radius);
+                assert_eq!(
+                    got, exp,
+                    "neighbour scan mismatch at c=({clon},{clat}) r={radius}"
+                );
+            }
+        }
+        // Random fuzz over centers/radii.
+        for _ in 0..1500 {
+            let clon = (unit() * 360.0) - 180.0;
+            let clat = (unit() * 168.0) - 84.0;
+            let radius = 10f64.powf(1.0 + unit() * 6.0); // ~10m .. 10000km
+            let got = geo_search_core(
+                &mut store,
+                key,
+                clon,
+                clat,
+                radius,
+                None,
+                GeoSort::Unspecified,
+                false,
+                0,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|(m, _s, d, _lo, _la)| (m, d))
+            .collect::<Vec<_>>();
+            let exp = oracle(&mut store, key, clon, clat, radius);
+            assert_eq!(
+                got, exp,
+                "neighbour scan fuzz mismatch c=({clon},{clat}) r={radius}"
+            );
+        }
+
+        // A/B: small radius over the whole set — neighbour scan touches only a
+        // few cells, the full scan decodes every member.
+        let (clon, clat, radius) = (10.0f64, 40.0f64, 30_000.0f64);
+        let reps = 300;
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            c0 = c0.wrapping_add(oracle(&mut store, key, clon, clat, radius).len());
+        }
+        let full_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            c1 = c1.wrapping_add(
+                geo_search_core(
+                    &mut store,
+                    key,
+                    clon,
+                    clat,
+                    radius,
+                    None,
+                    GeoSort::Unspecified,
+                    false,
+                    0,
+                )
+                .unwrap()
+                .len(),
+            );
+        }
+        let nbr_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        let ratio = full_ns as f64 / nbr_ns as f64;
+        println!(
+            "GEO radius neighbour A/B (n={n}, r={radius}m, x{reps}): full-scan={full_ns}ns neighbour={nbr_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(
+            ratio > 2.0 || cfg!(debug_assertions),
+            "expected >2x, got {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn geo_box_neighbor_cell_scan_matches_full_scan_and_speeds_up_bybox() {
+        use super::{
+            geo_box_bbox, geo_box_cell_ranges, geo_collect_box_candidate, geo_encode_wgs84,
+        };
+
+        let key = b"geo";
+        let mut store = Store::new();
+        let mut state: u64 = 0xB5C0_FBCF_EC4D_3B2F;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut unit = || (next() >> 11) as f64 / (1u64 << 53) as f64;
+
+        let n = 60_000usize;
+        let mut adds: Vec<(f64, Vec<u8>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let lon = (unit() * 360.0) - 180.0;
+            let lat = (unit() * 170.0) - 85.0;
+            if let Some(bits) = geo_encode_wgs84(lon, lat) {
+                adds.push((bits as f64, format!("m{i}").into_bytes()));
+            }
+        }
+        store.zadd(key, &adds, 0).unwrap();
+
+        fn oracle(
+            store: &mut Store,
+            key: &[u8],
+            cx: f64,
+            cy: f64,
+            hw: f64,
+            hh: f64,
+        ) -> Vec<(Vec<u8>, f64)> {
+            let bb = geo_box_bbox(cx, cy, hw, hh);
+            let mut r: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
+            store
+                .zset_for_each_asc(key, 0, |m, s| {
+                    geo_collect_box_candidate(m, s, cx, cy, hw, hh, bb, &mut r)
+                })
+                .unwrap();
+            r.into_iter().map(|(m, _s, d, _lo, _la)| (m, d)).collect()
+        }
+        fn neighbor(
+            store: &mut Store,
+            key: &[u8],
+            cx: f64,
+            cy: f64,
+            hw: f64,
+            hh: f64,
+        ) -> Vec<(Vec<u8>, f64)> {
+            let bb = geo_box_bbox(cx, cy, hw, hh);
+            let mut r: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
+            match geo_box_cell_ranges(cx, cy, hw, hh) {
+                Some(ranges) => {
+                    store
+                        .zset_for_each_in_score_ranges(key, &ranges, 0, |m, s| {
+                            geo_collect_box_candidate(m, s, cx, cy, hw, hh, bb, &mut r)
+                        })
+                        .unwrap();
+                    r.sort_by(|a, b| {
+                        a.1.partial_cmp(&b.1)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| a.0.cmp(&b.0))
+                    });
+                }
+                None => {
+                    store
+                        .zset_for_each_asc(key, 0, |m, s| {
+                            geo_collect_box_candidate(m, s, cx, cy, hw, hh, bb, &mut r)
+                        })
+                        .unwrap();
+                }
+            }
+            r.into_iter().map(|(m, _s, d, _lo, _la)| (m, d)).collect()
+        }
+
+        let halfs = [25.0, 1_000.0, 30_000.0, 400_000.0, 2_000_000.0, 9_000_000.0];
+        let centers = [
+            (0.0, 0.0),
+            (179.8, 0.0),
+            (-179.8, 10.0),
+            (0.0, 84.0),
+            (30.0, 72.0),
+        ];
+        for &(cx, cy) in &centers {
+            for &hw in &halfs {
+                for &hh in &halfs {
+                    let got = neighbor(&mut store, key, cx, cy, hw, hh);
+                    let exp = oracle(&mut store, key, cx, cy, hw, hh);
+                    assert_eq!(
+                        got, exp,
+                        "box neighbour mismatch c=({cx},{cy}) hw={hw} hh={hh}"
+                    );
+                }
+            }
+        }
+        for _ in 0..1500 {
+            let cx = (unit() * 360.0) - 180.0;
+            let cy = (unit() * 168.0) - 84.0;
+            let hw = 10f64.powf(1.0 + unit() * 6.0);
+            let hh = 10f64.powf(1.0 + unit() * 6.0);
+            let got = neighbor(&mut store, key, cx, cy, hw, hh);
+            let exp = oracle(&mut store, key, cx, cy, hw, hh);
+            assert_eq!(
+                got, exp,
+                "box neighbour fuzz mismatch c=({cx},{cy}) hw={hw} hh={hh}"
+            );
+        }
+
+        // A/B: small box over the whole set.
+        let (cx, cy, hw, hh) = (10.0f64, 40.0f64, 20_000.0f64, 20_000.0f64);
+        let reps = 300;
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            c0 = c0.wrapping_add(oracle(&mut store, key, cx, cy, hw, hh).len());
+        }
+        let full_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            c1 = c1.wrapping_add(neighbor(&mut store, key, cx, cy, hw, hh).len());
+        }
+        let nbr_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        let ratio = full_ns as f64 / nbr_ns as f64;
+        println!(
+            "GEO BYBOX neighbour A/B (n={n}, 40km box, x{reps}): full-scan={full_ns}ns neighbour={nbr_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(
+            ratio > 2.0 || cfg!(debug_assertions),
+            "expected >2x, got {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn geo_box_bbox_is_a_superset_and_speeds_up_bybox() {
+        use super::{
+            geo_box_bbox, geo_decode_score, geo_distance_m, geo_encode_wgs84, geo_point_in_box,
+        };
+
+        let mut state: u64 = 0xD1B5_4A32_D192_ED03;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut unit = || (next() >> 11) as f64 / (1u64 << 53) as f64;
+
+        // SAFETY INVARIANT: every point inside the search rectangle lies inside
+        // the bounding box, swept over high latitudes and near the antimeridian.
+        for _ in 0..200_000 {
+            let cy = (unit() * 170.0) - 85.0;
+            let cx = (unit() * 360.0) - 180.0;
+            let half_w = 1.0 + unit() * 4_000_000.0;
+            let half_h = 1.0 + unit() * 4_000_000.0;
+            let plat = (unit() * 170.0) - 85.0;
+            let plon = (unit() * 360.0) - 180.0;
+            let (lat_min, lat_max, lon_min, lon_max, lon_wrap) =
+                geo_box_bbox(cx, cy, half_w, half_h);
+            if geo_point_in_box(cx, cy, plon, plat, half_w, half_h) {
+                assert!(
+                    plat >= lat_min && plat <= lat_max,
+                    "lat outside box: c=({cx},{cy}) hw={half_w} hh={half_h} p=({plon},{plat})"
+                );
+                assert!(
+                    lon_wrap || (plon >= lon_min && plon <= lon_max),
+                    "lon outside box: c=({cx},{cy}) hw={half_w} hh={half_h} p=({plon},{plat})"
+                );
+            }
+        }
+
+        // A/B: large geo set, small box. Old = clone every member + box-test all;
+        // new = bbox pre-filter via borrow-scan, clone only survivors.
+        let key = b"geo";
+        let mut store = Store::new();
+        let n = 100_000usize;
+        let mut adds: Vec<(f64, Vec<u8>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let lon = (unit() * 360.0) - 180.0;
+            let lat = (unit() * 170.0) - 85.0;
+            if let Some(bits) = geo_encode_wgs84(lon, lat) {
+                adds.push((bits as f64, format!("m{i}").into_bytes()));
+            }
+        }
+        store.zadd(key, &adds, 0).unwrap();
+        let (cx, cy, half_w, half_h) = (0.0f64, 0.0f64, 50_000.0f64, 50_000.0f64);
+
+        let old_scan = |store: &mut Store| -> Vec<(Vec<u8>, f64)> {
+            let members = store.zrange_withscores(key, 0, -1, 0).unwrap();
+            let mut r = Vec::new();
+            for (m, s) in members {
+                if let Some((lon, lat)) = geo_decode_score(s) {
+                    let dist = geo_distance_m(cx, cy, lon, lat);
+                    if geo_point_in_box(cx, cy, lon, lat, half_w, half_h) {
+                        r.push((m, dist));
+                    }
+                }
+            }
+            r
+        };
+        let new_scan = |store: &mut Store| -> Vec<(Vec<u8>, f64)> {
+            let (la0, la1, lo0, lo1, lw) = geo_box_bbox(cx, cy, half_w, half_h);
+            let mut r = Vec::new();
+            store
+                .zset_for_each_asc(key, 0, |member, score| {
+                    let Some((lon, lat)) = geo_decode_score(score) else {
+                        return;
+                    };
+                    if lat < la0 || lat > la1 {
+                        return;
+                    }
+                    if !lw && (lon < lo0 || lon > lo1) {
+                        return;
+                    }
+                    if geo_point_in_box(cx, cy, lon, lat, half_w, half_h) {
+                        r.push((member.to_vec(), geo_distance_m(cx, cy, lon, lat)));
+                    }
+                })
+                .unwrap();
+            r
+        };
+
+        let mut a = old_scan(&mut store);
+        let mut b = new_scan(&mut store);
+        a.sort_by(|x, y| x.0.cmp(&y.0));
+        b.sort_by(|x, y| x.0.cmp(&y.0));
+        assert_eq!(
+            a, b,
+            "bbox+borrow BYBOX scan must match the full scan exactly"
+        );
+
+        let reps = 200;
+        let t0 = std::time::Instant::now();
+        let mut c0 = 0usize;
+        for _ in 0..reps {
+            c0 = c0.wrapping_add(old_scan(&mut store).len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(c0);
+        let t1 = std::time::Instant::now();
+        let mut c1 = 0usize;
+        for _ in 0..reps {
+            c1 = c1.wrapping_add(new_scan(&mut store).len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(c1);
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "GEO BYBOX A/B (n={n}, 100km box, x{reps}): full-scan={old_ns}ns bbox-borrow={new_ns}ns ratio={ratio:.2}x"
+        );
+        assert!(
+            ratio > 2.0 || cfg!(debug_assertions),
+            "expected >2x, got {ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn geosearch_bybox_measures_longitude_at_point_latitude() {
+        use super::{geo_distance_m, geo_lat_distance_m, geo_point_in_box};
+
+        // The previous predicate measured the E-W distance at the CENTER's
+        // latitude instead of the point's latitude.
+        fn old_buggy(cx: f64, cy: f64, lon: f64, lat: f64, half_w: f64, half_h: f64) -> bool {
+            let lat_dist = geo_distance_m(cx, cy, cx, lat);
+            let lon_dist = geo_distance_m(cx, cy, lon, cy);
+            lat_dist <= half_h && lon_dist <= half_w
+        }
+
+        // Concrete divergence: center on the equator, point at 80degN, a tall
+        // box narrow in width. A degree of longitude at 80degN is ~cos(80deg)
+        // = 0.17x its equatorial length, so the point lies inside the width
+        // when measured at its own latitude but outside when (wrongly) measured
+        // at the equator.
+        let (cx, cy, lon, lat) = (0.0, 0.0, 1.0, 80.0);
+        let (half_w, half_h) = (50_000.0, 10_000_000.0);
+        assert!(
+            geo_point_in_box(cx, cy, lon, lat, half_w, half_h),
+            "fixed predicate must include the point"
+        );
+        assert!(
+            !old_buggy(cx, cy, lon, lat, half_w, half_h),
+            "old predicate wrongly excluded the point"
+        );
+
+        // N-S gate equals the pure latitude distance, independent of longitude.
+        let lat1_dist = geo_lat_distance_m(0.0, 1.0);
+        assert!(!geo_point_in_box(
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            f64::INFINITY,
+            lat1_dist - 1.0
+        ));
+        assert!(geo_point_in_box(
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            f64::INFINITY,
+            lat1_dist + 1.0
+        ));
+
+        // Points on the center parallel are unchanged by the fix.
+        for &dlon in &[0.5f64, 1.0, 2.0] {
+            assert_eq!(
+                geo_point_in_box(10.0, 45.0, 10.0 + dlon, 45.0, 80_000.0, 80_000.0),
+                old_buggy(10.0, 45.0, 10.0 + dlon, 45.0, 80_000.0, 80_000.0),
+                "on-parallel membership must be unaffected (dlon={dlon})"
+            );
+        }
+    }
+
+    #[test]
     fn ping_works() {
         let frame = RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"PING".to_vec()))]));
         let argv = frame_to_argv(&frame).expect("argv");
@@ -25047,6 +27498,7 @@ mod tests {
                 all_keys: false,
                 channel_patterns: vec![],
                 all_channels: false,
+                selectors: vec![],
             }),
             ..Default::default()
         };
@@ -25060,7 +27512,7 @@ mod tests {
         .expect_err("SET denied");
         match err {
             CommandError::Custom(msg) => assert!(
-                msg.contains("NOPERM this user has no permissions to run the 'SET' command"),
+                msg.contains("NOPERM User alice has no permissions to run the 'set' command"),
                 "{msg}"
             ),
             other => panic!("expected NOPERM command, got {other:?}"),
@@ -25141,6 +27593,7 @@ mod tests {
                 all_keys: false,
                 channel_patterns: vec![],
                 all_channels: false,
+                selectors: vec![],
             }),
             ..Default::default()
         };
@@ -25329,6 +27782,289 @@ mod tests {
         assert_eq!(
             resp,
             RespFrame::Error("ERR unknown command 'NOPE', with args beginning with: ".to_string())
+        );
+    }
+
+    // Reference: the original per-byte ASCII-uppercase fold compare that
+    // `eq_ascii_command` replaced. Kept here as the isomorphism oracle.
+    fn eq_ascii_command_byte_fold(lhs: &[u8], rhs: &[u8]) -> bool {
+        lhs.len() == rhs.len()
+            && lhs
+                .iter()
+                .zip(rhs.iter())
+                .all(|(l, r)| l.to_ascii_uppercase() == *r)
+    }
+
+    // Old dispatch shape: a linear chain of per-byte fold compares against
+    // compile-time literals (exactly how `classify_command` looked before).
+    #[inline(never)]
+    fn classify6_byte_fold(cmd: &[u8]) -> u32 {
+        let e = eq_ascii_command_byte_fold;
+        if e(cmd, b"EXPIRE") {
+            1
+        } else if e(cmd, b"EXISTS") {
+            2
+        } else if e(cmd, b"GETSET") {
+            3
+        } else if e(cmd, b"LPUSHX") {
+            4
+        } else if e(cmd, b"RPUSHX") {
+            5
+        } else if e(cmd, b"INCRBY") {
+            6
+        } else if e(cmd, b"DECRBY") {
+            7
+        } else if e(cmd, b"APPEND") {
+            8
+        } else if e(cmd, b"STRLEN") {
+            9
+        } else if e(cmd, b"RENAME") {
+            10
+        } else if e(cmd, b"GETDEL") {
+            11
+        } else if e(cmd, b"SUBSTR") {
+            12
+        } else if e(cmd, b"LRANGE") {
+            13
+        } else if e(cmd, b"LINDEX") {
+            14
+        } else if e(cmd, b"SINTER") {
+            15
+        } else if e(cmd, b"SUNION") {
+            16
+        } else if e(cmd, b"ZSCORE") {
+            17
+        } else if e(cmd, b"ZRANGE") {
+            18
+        } else if e(cmd, b"ZCOUNT") {
+            19
+        } else if e(cmd, b"HSETNX") {
+            20
+        } else if e(cmd, b"BITPOS") {
+            21
+        } else if e(cmd, b"DBSIZE") {
+            22
+        } else if e(cmd, b"MEMORY") {
+            23
+        } else if e(cmd, b"UNLINK") {
+            24
+        } else if e(cmd, b"PSETEX") {
+            25
+        } else if e(cmd, b"SETBIT") {
+            26
+        } else if e(cmd, b"GETBIT") {
+            27
+        } else if e(cmd, b"LOLWUT") {
+            28
+        } else if e(cmd, b"SCRIPT") {
+            29
+        } else if e(cmd, b"PUBSUB") {
+            30
+        } else {
+            0
+        }
+    }
+
+    // New dispatch shape: identical chain but each compare is the packed-u64
+    // `eq_ascii_command`. `pack(cmd)` is loop-invariant so the optimizer
+    // hoists it once and lowers the distinct-constant arms into a jump
+    // table — O(bucket) linear scan becomes effectively O(1).
+    #[inline(never)]
+    fn classify6_packed(cmd: &[u8]) -> u32 {
+        let e = super::eq_ascii_command;
+        if e(cmd, b"EXPIRE") {
+            1
+        } else if e(cmd, b"EXISTS") {
+            2
+        } else if e(cmd, b"GETSET") {
+            3
+        } else if e(cmd, b"LPUSHX") {
+            4
+        } else if e(cmd, b"RPUSHX") {
+            5
+        } else if e(cmd, b"INCRBY") {
+            6
+        } else if e(cmd, b"DECRBY") {
+            7
+        } else if e(cmd, b"APPEND") {
+            8
+        } else if e(cmd, b"STRLEN") {
+            9
+        } else if e(cmd, b"RENAME") {
+            10
+        } else if e(cmd, b"GETDEL") {
+            11
+        } else if e(cmd, b"SUBSTR") {
+            12
+        } else if e(cmd, b"LRANGE") {
+            13
+        } else if e(cmd, b"LINDEX") {
+            14
+        } else if e(cmd, b"SINTER") {
+            15
+        } else if e(cmd, b"SUNION") {
+            16
+        } else if e(cmd, b"ZSCORE") {
+            17
+        } else if e(cmd, b"ZRANGE") {
+            18
+        } else if e(cmd, b"ZCOUNT") {
+            19
+        } else if e(cmd, b"HSETNX") {
+            20
+        } else if e(cmd, b"BITPOS") {
+            21
+        } else if e(cmd, b"DBSIZE") {
+            22
+        } else if e(cmd, b"MEMORY") {
+            23
+        } else if e(cmd, b"UNLINK") {
+            24
+        } else if e(cmd, b"PSETEX") {
+            25
+        } else if e(cmd, b"SETBIT") {
+            26
+        } else if e(cmd, b"GETBIT") {
+            27
+        } else if e(cmd, b"LOLWUT") {
+            28
+        } else if e(cmd, b"SCRIPT") {
+            29
+        } else if e(cmd, b"PUBSUB") {
+            30
+        } else {
+            0
+        }
+    }
+
+    #[test]
+    fn eq_ascii_command_packed_is_isomorphic_to_byte_fold() {
+        // Packed compare must agree with the per-byte fold for EVERY
+        // (input, literal) pair — including non-letter bytes that a naive
+        // `& !0x20` fold would mishandle (e.g. '_' (0x5F) -> 'O' (0x4F)).
+        let literals: &[&[u8]] = &[
+            b"GET",
+            b"SET",
+            b"DEL",
+            b"TTL",
+            b"LCS",
+            b"PING",
+            b"HSET",
+            b"ZADD",
+            b"EXPIRE",
+            b"EXISTS",
+            b"GETSET",
+            b"LPUSH",
+            b"INCRBY",
+            b"CONFIG",
+            b"BZPOPMAX",
+            b"SMEMBERS",
+            b"GETRANGE",
+            b"SINTERCARD",
+        ];
+        let inputs: &[&[u8]] = &[
+            b"get",
+            b"GET",
+            b"GeT",
+            b"gett",
+            b"ge",
+            b"zzz",
+            b"set",
+            b"SET",
+            b"expire",
+            b"EXPIRE",
+            b"ExPiRe",
+            b"c_nfig",
+            b"CONFIG",
+            b"config",
+            b"_____",
+            b"GETSE_",
+            b"hset",
+            b"HSET",
+            b"\x00\x00\x00",
+            b"ZADD",
+            b"smembers",
+            b"GETRANGE",
+            b"getrang",
+            b"bzpopmax",
+            b"[\\]^_`",
+            b"SINTERCARD",
+            b"sintercard",
+            b"SINTERCAR",
+            b"",
+        ];
+        for lit in literals {
+            for inp in inputs {
+                assert_eq!(
+                    super::eq_ascii_command(inp, lit),
+                    eq_ascii_command_byte_fold(inp, lit),
+                    "mismatch: input {inp:?} vs literal {lit:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn classify_command_round_trips_every_known_command_after_packing() {
+        // Golden: every command in the real table classifies, and its
+        // lowercase form classifies identically (case-insensitive), and a
+        // shifted near-miss does not — guards against any pack collision.
+        // Note: some COMMAND_TABLE rows (MULTI/EXEC/SUBSCRIBE/…) are
+        // intercepted above classify_command and correctly return None
+        // here — so the invariant is *case-insensitivity*, not is_some:
+        // upper and lower forms must classify identically.
+        for &(name, ..) in super::COMMAND_TABLE {
+            let upper = name.to_ascii_uppercase();
+            let lower = name.to_ascii_lowercase();
+            let id_u = super::classify_command(upper.as_bytes());
+            let id_l = super::classify_command(lower.as_bytes());
+            assert_eq!(id_u, id_l, "case-insensitivity broke for {name}");
+        }
+        // Golden anchors: packing must not null out real dispatch targets,
+        // and must still reject a non-command of the same length.
+        use super::CommandId;
+        assert_eq!(super::classify_command(b"get"), Some(CommandId::Get));
+        assert_eq!(super::classify_command(b"SET"), Some(CommandId::Set));
+        assert_eq!(super::classify_command(b"ExPiRe"), Some(CommandId::Expire));
+        assert_eq!(
+            super::classify_command(b"sintercard"),
+            Some(CommandId::Sintercard)
+        );
+        assert_eq!(super::classify_command(b"ZZZZZZ"), None);
+    }
+
+    #[test]
+    fn eq_ascii_command_packed_dispatch_beats_byte_fold_ab() {
+        use std::time::Instant;
+        // Worst case: a 6-byte name that misses the whole bucket, forcing a
+        // full scan. (Real `classify_command`'s 6-byte bucket holds 49.)
+        let needle = b"ZZZZZZ";
+        let iters = 6_000_000u64;
+
+        let t0 = Instant::now();
+        let mut acc0 = 0u64;
+        for _ in 0..iters {
+            acc0 += classify6_byte_fold(std::hint::black_box(needle)) as u64;
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+
+        let t1 = Instant::now();
+        let mut acc1 = 0u64;
+        for _ in 0..iters {
+            acc1 += classify6_packed(std::hint::black_box(needle)) as u64;
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+
+        assert_eq!(acc0, acc1, "dispatch results diverged");
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "classify (6-byte bucket miss): byte-fold {} ms -> packed {} ms = {ratio:.2}x",
+            old_ns / 1_000_000,
+            new_ns / 1_000_000,
+        );
+        assert!(
+            ratio > 2.0 || cfg!(debug_assertions),
+            "expected >2x dispatch speedup, got {ratio:.2}x"
         );
     }
 
@@ -41083,6 +43819,95 @@ mod tests {
     }
 
     #[test]
+    fn zmpop_score_is_resp3_double_else_bulk() {
+        // (frankenredis-d77az) The popped member's score must be a RESP3
+        // Double (,) under HELLO 3 and a bulk string under RESP2 — same as
+        // ZPOPMIN/ZPOPMAX. Verified byte-exact vs vendored 7.2.4.
+        fn pop_score(resp: i64) -> RespFrame {
+            let mut store = Store::new();
+            store.dispatch_client_ctx.resp_protocol_version = resp;
+            dispatch_argv(
+                &[
+                    b"ZADD".to_vec(),
+                    b"z".to_vec(),
+                    b"1.5".to_vec(),
+                    b"a".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("zadd");
+            let out = dispatch_argv(
+                &[
+                    b"ZMPOP".to_vec(),
+                    b"1".to_vec(),
+                    b"z".to_vec(),
+                    b"MIN".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("zmpop");
+            // out = [key, [[member, score]]]
+            let RespFrame::Array(Some(top)) = out else {
+                panic!("zmpop shape"); // ubs:ignore — AI triage
+            };
+            let RespFrame::Array(Some(pairs)) = &top[1] else {
+                panic!("pairs shape"); // ubs:ignore — AI triage
+            };
+            let RespFrame::Array(Some(pair)) = &pairs[0] else {
+                panic!("pair shape"); // ubs:ignore — AI triage
+            };
+            pair[1].clone()
+        }
+        assert_eq!(pop_score(3), RespFrame::Double("1.5".to_string()));
+        assert_eq!(pop_score(2), RespFrame::BulkString(Some(b"1.5".to_vec())));
+    }
+
+    #[test]
+    fn xpending_summary_empty_group_consumers_is_null_array() {
+        // (frankenredis-b2okv) Upstream xpendingCommand summary form emits a
+        // NULL array for the consumers field when there are no pending
+        // entries (addReplyNullArray), not an empty array.
+        let mut store = Store::new();
+        for c in [
+            vec![
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"1-1".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            vec![
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"0".to_vec(),
+            ],
+        ] {
+            dispatch_argv(&c, &mut store, 0).expect("setup");
+        }
+        let out = dispatch_argv(
+            &[b"XPENDING".to_vec(), b"s".to_vec(), b"g".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("xpending");
+        let RespFrame::Array(Some(summary)) = out else {
+            panic!("summary shape"); // ubs:ignore — AI triage
+        };
+        assert_eq!(summary[0], RespFrame::Integer(0));
+        assert_eq!(summary[1], RespFrame::BulkString(None));
+        assert_eq!(summary[2], RespFrame::BulkString(None));
+        assert_eq!(
+            summary[3],
+            RespFrame::Array(None),
+            "consumers must be null array"
+        );
+    }
+
+    #[test]
     fn zmpop_basic() {
         let mut store = Store::new();
         dispatch_argv(
@@ -48441,6 +51266,413 @@ mod tests {
     }
 
     #[test]
+    fn move_bumps_dirty_exactly_once() {
+        // (frankenredis-movedirty) Upstream db.c::moveCommand does
+        // `server.dirty++` once; fr's copy+del implementation would
+        // double-count without the normalization in move_cmd.
+        let mut store = Store::new();
+        store.set(fr_store::encode_db_key(0, b"k"), b"v".to_vec(), None, 0);
+        let before = store.dirty;
+        let out = dispatch_argv(
+            &[b"MOVE".to_vec(), b"k".to_vec(), b"1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("move");
+        assert_eq!(out, RespFrame::Integer(1));
+        assert_eq!(store.dirty, before + 1);
+
+        // A no-op MOVE (destination already occupied) does not dirty.
+        store.set(fr_store::encode_db_key(0, b"k2"), b"v".to_vec(), None, 0);
+        store.set(fr_store::encode_db_key(1, b"k2"), b"x".to_vec(), None, 0);
+        let before = store.dirty;
+        let out = dispatch_argv(
+            &[b"MOVE".to_vec(), b"k2".to_vec(), b"1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("move noop");
+        assert_eq!(out, RespFrame::Integer(0));
+        assert_eq!(store.dirty, before);
+    }
+
+    #[test]
+    fn xadd_with_inline_trim_bumps_dirty_exactly_once() {
+        // (frankenredis-xaddtrimdirty) Upstream t_stream.c::xaddCommand does
+        // `server.dirty++` once for the add; its inline MAXLEN/MINID trim does
+        // NOT add to server.dirty (only standalone XTRIM does). fr's store.xtrim
+        // bumps dirty per removed entry, so XADD-with-trim must be normalized to
+        // exactly +1 regardless of how many entries the trim removes.
+        let mut store = Store::new();
+        for _ in 0..3 {
+            dispatch_argv(
+                &[
+                    b"XADD".to_vec(),
+                    b"s".to_vec(),
+                    b"*".to_vec(),
+                    b"f".to_vec(),
+                    b"v".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("xadd seed");
+        }
+        // XADD with MAXLEN 1 trims two entries; dirty must rise by exactly 1.
+        let before = store.dirty;
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"1".to_vec(),
+                b"*".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd maxlen");
+        assert_eq!(
+            store.dirty,
+            before + 1,
+            "XADD MAXLEN trim must net +1 dirty"
+        );
+        assert_eq!(store.xlen(b"s", 0).expect("xlen"), 1);
+
+        // MINID variant: seed back up, trim by id, still exactly +1.
+        for id in ["10-1", "11-1", "12-1"] {
+            dispatch_argv(
+                &[
+                    b"XADD".to_vec(),
+                    b"s".to_vec(),
+                    id.as_bytes().to_vec(),
+                    b"f".to_vec(),
+                    b"v".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("xadd seed minid");
+        }
+        let before = store.dirty;
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"MINID".to_vec(),
+                b"12".to_vec(),
+                b"13-1".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd minid");
+        assert_eq!(store.dirty, before + 1, "XADD MINID trim must net +1 dirty");
+    }
+
+    #[test]
+    fn xadd_sets_last_xadd_trimmed_only_when_trim_removed_entries() {
+        // (frankenredis-f7xy7) The XADD handler records whether its inline trim
+        // actually removed entries so the runtime can emit the secondary "xtrim"
+        // keyspace event (after "xadd") in the trimmed case only.
+        let mut store = Store::new();
+        for i in 0..3u64 {
+            dispatch_argv(
+                &[
+                    b"XADD".to_vec(),
+                    b"s".to_vec(),
+                    format!("{}-1", i + 1).into_bytes(),
+                    b"f".to_vec(),
+                    b"v".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("seed");
+        }
+        // Plain XADD (no trim clause) → flag false.
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"*".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("plain xadd");
+        assert!(!store.last_xadd_trimmed, "plain XADD must not flag a trim");
+
+        // MAXLEN above current length → no removal → flag false.
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"1000".to_vec(),
+                b"*".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd maxlen noop");
+        assert!(
+            !store.last_xadd_trimmed,
+            "MAXLEN above length must not flag a trim"
+        );
+
+        // MAXLEN below current length → removal → flag true.
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"1".to_vec(),
+                b"*".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd maxlen trim");
+        assert!(
+            store.last_xadd_trimmed,
+            "MAXLEN below length must flag the trim"
+        );
+    }
+
+    #[test]
+    fn rewrite_effect_command_for_propagation_resolves_nondeterministic_effects() {
+        // (frankenredis-x1225) The Lua/script effect-capture path must record the
+        // deterministic form so a script's XADD `*` / INCRBYFLOAT / SPOP doesn't
+        // propagate verbatim and diverge on a replica/AOF replay.
+        use fr_protocol::RespFrame;
+        let b = |s: &[u8]| RespFrame::BulkString(Some(s.to_vec()));
+        let v = |s: &[u8]| s.to_vec();
+        let mut store = Store::new();
+
+        // (frankenredis-9snkx) Relative-expire rewrite is folded in (so scripts /
+        // MULTI/EXEC get it): EXPIRE -> PEXPIREAT computed from now_ms.
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"EXPIRE"), v(b"k"), v(b"100")],
+                &b(b"1"),
+                &store,
+                1_000_000,
+            ),
+            Some(vec![v(b"PEXPIREAT"), v(b"k"), v(b"1100000")])
+        );
+        // SETEX -> SET key val PXAT <ms>.
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"SETEX"), v(b"k"), v(b"100"), v(b"val")],
+                &RespFrame::SimpleString("OK".to_string()),
+                &store,
+                1_000_000,
+            ),
+            Some(vec![
+                v(b"SET"),
+                v(b"k"),
+                v(b"val"),
+                v(b"PXAT"),
+                v(b"1100000")
+            ])
+        );
+
+        // XADD `*` -> concrete id from the reply.
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"XADD"), v(b"st"), v(b"*"), v(b"f"), v(b"x")],
+                &b(b"5-0"),
+                &store,
+                0,
+            ),
+            Some(vec![v(b"XADD"), v(b"st"), v(b"5-0"), v(b"f"), v(b"x")])
+        );
+        // INCRBYFLOAT -> SET <value>.
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"INCRBYFLOAT"), v(b"kf"), v(b"2.5")],
+                &b(b"12.5"),
+                &store,
+                0,
+            ),
+            Some(vec![v(b"SET"), v(b"kf"), v(b"12.5"), v(b"KEEPTTL")])
+        );
+        // GETDEL -> DEL.
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"GETDEL"), v(b"k")],
+                &b(b"x"),
+                &store,
+                0
+            ),
+            Some(vec![v(b"DEL"), v(b"k")])
+        );
+        // SPOP with the set still present -> SREM <members>.
+        store
+            .sadd(
+                &fr_store::encode_db_key(0, b"s"),
+                &[b"a".to_vec(), b"b".to_vec()],
+                0,
+            )
+            .expect("sadd");
+        let spop_reply = RespFrame::Array(Some(vec![b(b"a")]));
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"SPOP"), v(b"s"), v(b"1")],
+                &spop_reply,
+                &store,
+                0,
+            ),
+            Some(vec![v(b"SREM"), v(b"s"), v(b"a")])
+        );
+        // SPOP of an absent key (drained) -> DEL.
+        let drain_reply = RespFrame::Array(Some(vec![b(b"x")]));
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"SPOP"), v(b"gone"), v(b"1")],
+                &drain_reply,
+                &store,
+                0,
+            ),
+            Some(vec![v(b"DEL"), v(b"gone")])
+        );
+        // HINCRBYFLOAT -> HSET <value> (no KEEPTTL; HSET preserves the key TTL).
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"HINCRBYFLOAT"), v(b"h"), v(b"fld"), v(b"3.5")],
+                &b(b"13.5"),
+                &store,
+                0,
+            ),
+            Some(vec![v(b"HSET"), v(b"h"), v(b"fld"), v(b"13.5")])
+        );
+        // Blocking pops -> resolved non-blocking form (served key from reply).
+        let arr = |items: Vec<RespFrame>| RespFrame::Array(Some(items));
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"BLPOP"), v(b"a"), v(b"l"), v(b"0")],
+                &arr(vec![b(b"l"), b(b"x")]),
+                &store,
+                0,
+            ),
+            Some(vec![v(b"LPOP"), v(b"l")])
+        );
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"BRPOP"), v(b"l"), v(b"0")],
+                &arr(vec![b(b"l"), b(b"x")]),
+                &store,
+                0,
+            ),
+            Some(vec![v(b"RPOP"), v(b"l")])
+        );
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"BZPOPMIN"), v(b"z"), v(b"0")],
+                &arr(vec![b(b"z"), b(b"m"), b(b"1")]),
+                &store,
+                0,
+            ),
+            Some(vec![v(b"ZPOPMIN"), v(b"z")])
+        );
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"BRPOPLPUSH"), v(b"s"), v(b"d"), v(b"0")],
+                &b(b"x"),
+                &store,
+                0,
+            ),
+            Some(vec![v(b"RPOPLPUSH"), v(b"s"), v(b"d")])
+        );
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[
+                    v(b"BLMOVE"),
+                    v(b"s"),
+                    v(b"d"),
+                    v(b"LEFT"),
+                    v(b"RIGHT"),
+                    v(b"0")
+                ],
+                &b(b"x"),
+                &store,
+                0,
+            ),
+            Some(vec![v(b"LMOVE"), v(b"s"), v(b"d"), v(b"LEFT"), v(b"RIGHT")])
+        );
+        // (B)LMPOP / (B)ZMPOP -> LPOP/RPOP/ZPOPMIN/ZPOPMAX <served-key> <count>.
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[
+                    v(b"LMPOP"),
+                    v(b"2"),
+                    v(b"x"),
+                    v(b"l"),
+                    v(b"LEFT"),
+                    v(b"COUNT"),
+                    v(b"2")
+                ],
+                &arr(vec![b(b"l"), arr(vec![b(b"a"), b(b"b")])]),
+                &store,
+                0,
+            ),
+            Some(vec![v(b"LPOP"), v(b"l"), v(b"2")])
+        );
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[
+                    v(b"ZMPOP"),
+                    v(b"1"),
+                    v(b"z"),
+                    v(b"MIN"),
+                    v(b"COUNT"),
+                    v(b"2")
+                ],
+                &arr(vec![
+                    b(b"z"),
+                    arr(vec![
+                        arr(vec![b(b"a"), b(b"1")]),
+                        arr(vec![b(b"b"), b(b"2")])
+                    ]),
+                ]),
+                &store,
+                0,
+            ),
+            Some(vec![v(b"ZPOPMIN"), v(b"z"), v(b"2")])
+        );
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"BLMPOP"), v(b"0"), v(b"1"), v(b"l"), v(b"RIGHT")],
+                &arr(vec![b(b"l"), arr(vec![b(b"a")])]),
+                &store,
+                0,
+            ),
+            Some(vec![v(b"RPOP"), v(b"l"), v(b"1")])
+        );
+        // Non-targeted command -> verbatim (None).
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"SET"), v(b"k"), v(b"x")],
+                &b(b"OK"),
+                &store,
+                0
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn move_out_of_range_uses_upstream_wording() {
         // Upstream emits "ERR DB index is out of range" — not the
         // generic "ERR out of range" the prior stub used.
@@ -49029,6 +52261,21 @@ mod tests {
         assert!(format_coord_human(f64::NAN) == "nan");
         assert_eq!(format_coord_human(f64::INFINITY), "inf");
         assert_eq!(format_coord_human(f64::NEG_INFINITY), "-inf");
+    }
+
+    #[test]
+    fn geo_coord_frame_uses_resp3_double_else_bulk() {
+        // Upstream geo.c emits GEOPOS / GEOSEARCH WITHCOORD coordinates via
+        // addReplyHumanLongDouble: a RESP3 Double (`,`) under RESP3 and a bulk
+        // string under RESP2, with byte-identical textual payload. Verified
+        // byte-exact against vendored Redis 7.2.4.
+        let v = 13.361_389_338_970_184_f64;
+        let payload = format_coord_human(v);
+        assert_eq!(geo_coord_frame(v, true), RespFrame::Double(payload.clone()));
+        assert_eq!(
+            geo_coord_frame(v, false),
+            RespFrame::BulkString(Some(payload.into_bytes()))
+        );
     }
 
     #[test]
@@ -54979,6 +58226,60 @@ mod tests {
     }
 
     #[test]
+    fn command_docs_under_resp3_history_doc_flags_arg_flags_are_sets() {
+        // (frankenredis-mgzbz) Upstream server.c::commandDocsCommand and
+        // addReplyCommandArgList emit the `history`, `doc_flags`, and each
+        // argument's `flags` values via addReplySetLen — so under RESP3 they
+        // are Sets (~), not Arrays. Verified byte-exact vs vendored 7.2.4.
+        fn inner_field(cmd: &[u8], field: &[u8]) -> RespFrame {
+            let mut store = Store::new();
+            store.dispatch_client_ctx.resp_protocol_version = 3;
+            let out = dispatch_argv(
+                &[b"COMMAND".to_vec(), b"DOCS".to_vec(), cmd.to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("docs");
+            let RespFrame::Map(Some(outer)) = out else {
+                panic!("outer map"); // ubs:ignore — AI triage
+            };
+            let RespFrame::Map(Some(inner)) = &outer[0].1 else {
+                panic!("inner map"); // ubs:ignore — AI triage
+            };
+            inner
+                .iter()
+                .find(|(k, _)| *k == RespFrame::BulkString(Some(field.to_vec())))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("missing field {:?}", String::from_utf8_lossy(field)))
+        }
+        // SET has a `history` field.
+        assert!(
+            matches!(inner_field(b"SET", b"history"), RespFrame::Set(_)),
+            "history must be a Set under RESP3"
+        );
+        // SUBSTR is deprecated → has a `doc_flags` field.
+        assert!(
+            matches!(inner_field(b"SUBSTR", b"doc_flags"), RespFrame::Set(_)),
+            "doc_flags must be a Set under RESP3"
+        );
+        // SET's arguments carry per-arg `flags` Sets (e.g. the optional
+        // expiration/condition args).
+        let RespFrame::Array(Some(args)) = inner_field(b"SET", b"arguments") else {
+            panic!("arguments must be an Array of per-arg Maps"); // ubs:ignore — AI triage
+        };
+        let has_flags_set = args.iter().any(|a| {
+            let RespFrame::Map(Some(fields)) = a else {
+                return false;
+            };
+            fields.iter().any(|(k, v)| {
+                *k == RespFrame::BulkString(Some(b"flags".to_vec()))
+                    && matches!(v, RespFrame::Set(_))
+            })
+        });
+        assert!(has_flags_set, "at least one arg's flags must be a Set");
+    }
+
+    #[test]
     fn command_docs_under_resp2_stays_flat_outer_and_inner_array() {
         // (frankenredis-q11am) Companion pin under RESP2 — both outer
         // and inner stay flat alternating Arrays.
@@ -55007,6 +58308,131 @@ mod tests {
         assert_eq!(
             inner_items[1],
             RespFrame::BulkString(Some(b"Returns the string value of a key.".to_vec()))
+        );
+    }
+
+    #[test]
+    fn command_info_under_resp3_uses_sets_and_keyspec_maps() {
+        // (frankenredis-u3x8o) Upstream server.c::addReplyCommandInfo emits
+        // flags, acl_categories, tips, and key_specs as RESP3 Sets, each
+        // key_spec as a Map (with a Set `flags` and Map begin_search /
+        // find_keys), and an empty subcommands field as an empty Set.
+        // Verified byte-exact vs vendored 7.2.4.
+        let mut store = Store::new();
+        store.dispatch_client_ctx.resp_protocol_version = 3;
+        let out = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"INFO".to_vec(), b"GET".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("command info resp3");
+        let RespFrame::Array(Some(entries)) = out else {
+            panic!("outer must be Array"); // ubs:ignore — AI triage
+        };
+        let RespFrame::Array(Some(e)) = &entries[0] else {
+            panic!("entry must be 10-field Array"); // ubs:ignore — AI triage
+        };
+        assert_eq!(e.len(), 10);
+        assert!(matches!(e[2], RespFrame::Set(_)), "flags must be Set");
+        assert!(matches!(e[6], RespFrame::Set(_)), "acl cats must be Set");
+        assert!(matches!(e[7], RespFrame::Set(_)), "tips must be Set");
+        let RespFrame::Set(Some(specs)) = &e[8] else {
+            panic!("key_specs must be Set"); // ubs:ignore — AI triage
+        };
+        let RespFrame::Map(Some(spec0)) = &specs[0] else {
+            panic!("each key_spec must be Map"); // ubs:ignore — AI triage
+        };
+        // Within the key_spec map: flags -> Set, begin_search -> Map.
+        let flags_v = spec0
+            .iter()
+            .find(|(k, _)| *k == RespFrame::BulkString(Some(b"flags".to_vec())))
+            .map(|(_, v)| v)
+            .expect("key_spec has flags");
+        assert!(
+            matches!(flags_v, RespFrame::Set(_)),
+            "key_spec flags must be Set"
+        );
+        let bs_v = spec0
+            .iter()
+            .find(|(k, _)| *k == RespFrame::BulkString(Some(b"begin_search".to_vec())))
+            .map(|(_, v)| v)
+            .expect("key_spec has begin_search");
+        assert!(
+            matches!(bs_v, RespFrame::Map(_)),
+            "begin_search must be Map"
+        );
+        // GET has no subcommands -> empty Set.
+        assert!(
+            matches!(&e[9], RespFrame::Set(Some(v)) if v.is_empty()),
+            "empty subcommands must be empty Set"
+        );
+    }
+
+    #[test]
+    fn command_info_under_resp3_populated_subcommands_is_array() {
+        // (frankenredis-u3x8o) server.c::addReplyCommandSubCommands has an
+        // asymmetry: no subcommands -> empty Set, but a populated
+        // subcommands field is an Array of RESP3-shaped sub-entries (each
+        // with a Set `flags` and an empty Set for its own subcommands).
+        let mut store = Store::new();
+        store.dispatch_client_ctx.resp_protocol_version = 3;
+        let out = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"INFO".to_vec(), b"OBJECT".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("command info object resp3");
+        let RespFrame::Array(Some(entries)) = out else {
+            panic!("outer must be Array"); // ubs:ignore — AI triage
+        };
+        let RespFrame::Array(Some(e)) = &entries[0] else {
+            panic!("entry must be Array"); // ubs:ignore — AI triage
+        };
+        let RespFrame::Array(Some(subs)) = &e[9] else {
+            panic!("populated subcommands must be Array"); // ubs:ignore — AI triage
+        };
+        assert!(!subs.is_empty());
+        let RespFrame::Array(Some(se)) = &subs[0] else {
+            panic!("sub-entry must be Array"); // ubs:ignore — AI triage
+        };
+        assert!(
+            matches!(se[2], RespFrame::Set(_)),
+            "sub-entry flags must be Set"
+        );
+        assert!(
+            matches!(&se[9], RespFrame::Set(Some(v)) if v.is_empty()),
+            "sub-entry's own subcommands must be empty Set"
+        );
+    }
+
+    #[test]
+    fn command_info_under_resp2_stays_arrays() {
+        // (frankenredis-u3x8o) Companion pin: the RESP2 wire is unchanged —
+        // flags, key_specs, and subcommands all stay plain Arrays.
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"INFO".to_vec(), b"GET".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("command info resp2");
+        let RespFrame::Array(Some(entries)) = out else {
+            panic!("outer must be Array"); // ubs:ignore — AI triage
+        };
+        let RespFrame::Array(Some(e)) = &entries[0] else {
+            panic!("entry must be Array"); // ubs:ignore — AI triage
+        };
+        assert!(
+            matches!(e[2], RespFrame::Array(_)),
+            "RESP2 flags stay Array"
+        );
+        assert!(
+            matches!(e[8], RespFrame::Array(_)),
+            "RESP2 key_specs stay Array"
+        );
+        assert!(
+            matches!(e[9], RespFrame::Array(_)),
+            "RESP2 subcommands stay Array"
         );
     }
 
@@ -55679,6 +59105,223 @@ mod tests {
     }
 
     #[test]
+    fn command_getkeysandflags_georadius_store_uses_per_keyspec_flags() {
+        // (frankenredis-georadius-getkeysflags) Upstream geo.c declares two
+        // key specs for GEORADIUS/GEORADIUSBYMEMBER: the source key is
+        // RO/access and the optional STORE/STOREDIST destination is OW/update.
+        // fr previously fell through to the generic write-command flag set,
+        // tagging BOTH keys RW/access/update. Verified byte-exact vs
+        // vendored 7.2.4.
+        let mut store = Store::new();
+        let ro_access = RespFrame::Array(Some(vec![
+            RespFrame::SimpleString("RO".into()),
+            RespFrame::SimpleString("access".into()),
+        ]));
+        let ow_update = RespFrame::Array(Some(vec![
+            RespFrame::SimpleString("OW".into()),
+            RespFrame::SimpleString("update".into()),
+        ]));
+        for verb in [b"GEORADIUS".as_slice(), b"GEORADIUSBYMEMBER"] {
+            // STORE form: src RO/access, dst OW/update.
+            let argv: Vec<Vec<u8>> = [
+                b"COMMAND".as_slice(),
+                b"GETKEYSANDFLAGS",
+                verb,
+                b"src",
+                b"0",
+                b"0",
+                b"1",
+                b"m",
+                b"STORE",
+                b"dst",
+            ]
+            .iter()
+            .map(|a| a.to_vec())
+            .collect();
+            let frame = dispatch_argv(&argv, &mut store, 0).expect("getkeysandflags store");
+            let RespFrame::Array(Some(refs)) = frame else {
+                panic!("expected array, got {frame:?}"); // ubs:ignore — AI triage
+            };
+            assert_eq!(refs.len(), 2, "{verb:?} STORE should report 2 keys");
+            let RespFrame::Array(Some(src)) = &refs[0] else {
+                panic!("src ref shape"); // ubs:ignore — AI triage
+            };
+            assert_eq!(src[1], ro_access, "{verb:?} source must be RO/access");
+            let RespFrame::Array(Some(dst)) = &refs[1] else {
+                panic!("dst ref shape"); // ubs:ignore — AI triage
+            };
+            assert_eq!(dst[1], ow_update, "{verb:?} STORE dst must be OW/update");
+        }
+    }
+
+    #[test]
+    fn command_getkeysandflags_setrange_xsetid_restore_use_exact_flags() {
+        // (frankenredis-vc88p) The generic write-command fallback tagged
+        // every key RW/access/update. Upstream commands/*.json key_specs
+        // declare SETRANGE/XSETID as RW/update (no access) and RESTORE as
+        // OW/update (overwrite). Verified byte-exact vs vendored 7.2.4.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &[&str])] = &[
+            (b"SETRANGE", &["RW", "update"]),
+            (b"XSETID", &["RW", "update"]),
+            (b"RESTORE", &["OW", "update"]),
+        ];
+        for (verb, want) in cases {
+            let argv: Vec<Vec<u8>> = [
+                b"COMMAND".as_slice(),
+                b"GETKEYSANDFLAGS",
+                verb,
+                b"k",
+                b"0",
+                b"x",
+            ]
+            .iter()
+            .map(|a| a.to_vec())
+            .collect();
+            let frame = dispatch_argv(&argv, &mut store, 0).expect("getkeysandflags");
+            let RespFrame::Array(Some(refs)) = frame else {
+                panic!("expected array for {verb:?}"); // ubs:ignore — AI triage
+            };
+            let RespFrame::Array(Some(entry)) = &refs[0] else {
+                panic!("entry shape for {verb:?}"); // ubs:ignore — AI triage
+            };
+            let want_frame = RespFrame::Array(Some(
+                want.iter()
+                    .map(|f| RespFrame::SimpleString((*f).to_string()))
+                    .collect(),
+            ));
+            assert_eq!(entry[1], want_frame, "{verb:?} flags mismatch");
+        }
+    }
+
+    #[test]
+    fn command_acl_key_access_hget_is_single_read_key() {
+        let argv = vec![b"hget".to_vec(), b"hash".to_vec(), b"field".to_vec()];
+        let access = command_acl_key_access(&argv);
+
+        assert_eq!(access.len(), 1);
+        assert_eq!(access[0].index, 1);
+        assert!(access[0].read);
+        assert!(!access[0].write);
+    }
+
+    #[test]
+    fn command_acl_key_access_hget_wrong_arity_stays_empty() {
+        let argv = vec![b"HGET".to_vec(), b"hash".to_vec()];
+
+        assert!(command_acl_key_access(&argv).is_empty());
+    }
+
+    #[test]
+    fn hget_command_metadata_fast_paths_preserve_behavior() {
+        let upper = vec![b"HGET".to_vec(), b"hash".to_vec(), b"field".to_vec()];
+        let lower = vec![b"hget".to_vec(), b"hash".to_vec(), b"field".to_vec()];
+
+        assert_eq!(check_command_arity(b"HGET", upper.len()), Ok(()));
+        assert_eq!(check_command_arity(b"hget", lower.len()), Ok(()));
+        assert_eq!(get_command_flags(b"HGET"), Some("readonly fast"));
+        assert_eq!(get_command_flags(b"hget"), Some("readonly fast"));
+        assert_eq!(command_key_indexes(&upper), vec![1]);
+        assert_eq!(command_key_indexes(&lower), vec![1]);
+
+        let bare = vec![b"HGET".to_vec()];
+        let missing_field = vec![b"HGET".to_vec(), b"hash".to_vec()];
+        let extra_arg = vec![
+            b"hget".to_vec(),
+            b"hash".to_vec(),
+            b"field".to_vec(),
+            b"extra".to_vec(),
+        ];
+        assert!(command_key_indexes(&bare).is_empty());
+        for argv in [&missing_field, &extra_arg] {
+            assert_eq!(check_command_arity(&argv[0], argv.len()), Err("hget"));
+            assert_eq!(command_key_indexes(argv), vec![1]);
+        }
+    }
+
+    #[test]
+    fn command_key_indexes_georadius_skips_fixed_args_before_store_scan() {
+        // (frankenredis-u48rd) STORE/STOREDIST options only follow the fixed
+        // positional args, so the option scan must skip them — otherwise a
+        // GEORADIUSBYMEMBER member (argv[2]) literally named "STORE" is
+        // mis-read as the STORE option. Mirrors geo.c::georadiusGetKeys.
+        let argv: Vec<Vec<u8>> = [
+            b"GEORADIUSBYMEMBER".as_slice(),
+            b"src",
+            b"STORE",
+            b"1",
+            b"km",
+            b"STORE",
+            b"dst",
+        ]
+        .iter()
+        .map(|a| a.to_vec())
+        .collect();
+        // Source key at index 1 plus the genuine STORE dst at index 6; the
+        // member "STORE" at index 2 must NOT be treated as an option.
+        assert_eq!(command_key_indexes(&argv), vec![1, 6]);
+
+        // Normal forms still resolve correctly.
+        let g: Vec<Vec<u8>> = [
+            b"GEORADIUS".as_slice(),
+            b"src",
+            b"0",
+            b"0",
+            b"1",
+            b"m",
+            b"STORE",
+            b"dst",
+        ]
+        .iter()
+        .map(|a| a.to_vec())
+        .collect();
+        assert_eq!(command_key_indexes(&g), vec![1, 7]);
+        let plain: Vec<Vec<u8>> = [b"GEORADIUSBYMEMBER".as_slice(), b"src", b"m", b"1", b"km"]
+            .iter()
+            .map(|a| a.to_vec())
+            .collect();
+        assert_eq!(command_key_indexes(&plain), vec![1]);
+    }
+
+    #[test]
+    fn command_getkeysandflags_flags_are_set_under_resp3() {
+        // (frankenredis-cmdgkaf-set) Upstream server.c::getKeysCommand wraps
+        // each key's flag list in addReplySetLen — so under RESP3 the per-key
+        // flags are a Set (`~`), and under RESP2 a flat Array.
+        let argv = [b"COMMAND".as_slice(), b"GETKEYSANDFLAGS", b"GET", b"k"]
+            .iter()
+            .map(|a| a.to_vec())
+            .collect::<Vec<_>>();
+
+        let mut store3 = Store::new();
+        store3.dispatch_client_ctx.resp_protocol_version = 3;
+        let frame = dispatch_argv(&argv, &mut store3, 0).expect("resp3");
+        let RespFrame::Array(Some(refs)) = frame else {
+            panic!("expected array"); // ubs:ignore — AI triage
+        };
+        let RespFrame::Array(Some(entry)) = &refs[0] else {
+            panic!("entry shape"); // ubs:ignore — AI triage
+        };
+        assert!(
+            matches!(entry[1], RespFrame::Set(_)),
+            "RESP3 per-key flags must be a Set"
+        );
+
+        let mut store2 = Store::new();
+        let frame = dispatch_argv(&argv, &mut store2, 0).expect("resp2");
+        let RespFrame::Array(Some(refs)) = frame else {
+            panic!("expected array"); // ubs:ignore — AI triage
+        };
+        let RespFrame::Array(Some(entry)) = &refs[0] else {
+            panic!("entry shape"); // ubs:ignore — AI triage
+        };
+        assert!(
+            matches!(entry[1], RespFrame::Array(_)),
+            "RESP2 per-key flags stay an Array"
+        );
+    }
+
+    #[test]
     fn xread_xreadgroup_count_clamps_negative_and_zero_to_unbounded() {
         // Pins frankenredis-xreadcount. Upstream t_stream.c::xreadCommand
         // parses COUNT via getLongFromObjectOrReply then runs
@@ -56185,6 +59828,15 @@ mod tests {
         assert!(is_known_acl_command_selector("client|info"));
         assert!(is_known_acl_command_selector("get"));
         assert!(!is_known_acl_command_selector("client|notreal"));
+        assert!(command_has_acl_subcommands("CLIENT"));
+        assert!(!command_has_acl_subcommands("HGET"));
+        for &(name, ..) in SUBCOMMAND_TABLE {
+            let (parent, _subcommand) = name.split_once('|').expect("subcommand name");
+            assert!(
+                command_has_acl_subcommands(parent),
+                "subcommand parent {parent} must stay in the fast predicate"
+            );
+        }
 
         assert_eq!(
             acl_command_selectors_for_argv(&[b"CLIENT".to_vec(), b"INFO".to_vec()]),
@@ -56193,6 +59845,10 @@ mod tests {
         assert_eq!(
             acl_command_selectors_for_argv(&[b"GET".to_vec(), b"k".to_vec()]),
             vec!["get".to_string()]
+        );
+        assert_eq!(
+            acl_command_selectors_for_argv(&[b"HGET".to_vec(), b"hash".to_vec(), b"INFO".to_vec()]),
+            vec!["hget".to_string()]
         );
     }
 
@@ -56931,6 +60587,42 @@ mod tests {
                     RespFrame::Array(Some(vec![
                         RespFrame::SimpleString("OW".to_string()),
                         RespFrame::SimpleString("update".to_string()),
+                    ])),
+                ])),
+            ]))
+        );
+
+        // RENAMENX shares RENAME's source key_spec (RW/access/delete) but its
+        // destination is OW/INSERT, not OW/UPDATE — RENAMENX only renames when
+        // the destination does NOT already exist (commands/renamenx.json).
+        let renamenx = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"RENAMENX".to_vec(),
+                b"src".to_vec(),
+                b"dst".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            renamenx,
+            RespFrame::Array(Some(vec![
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"src".to_vec())),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::SimpleString("RW".to_string()),
+                        RespFrame::SimpleString("access".to_string()),
+                        RespFrame::SimpleString("delete".to_string()),
+                    ])),
+                ])),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"dst".to_vec())),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::SimpleString("OW".to_string()),
+                        RespFrame::SimpleString("insert".to_string()),
                     ])),
                 ])),
             ]))
@@ -57790,6 +61482,14 @@ mod tests {
         assert_eq!(
             func_pairs[2].0,
             RespFrame::BulkString(Some(b"flags".to_vec()))
+        );
+        // (frankenredis-z3v65) Upstream functions.c wraps the flag list in
+        // addReplySetLen, so the `flags` value is a Set under RESP3 (its
+        // elements are simple strings via addReplyStatus).
+        assert!(
+            matches!(func_pairs[2].1, RespFrame::Set(_)),
+            "RESP3 function flags must be a Set, got {:?}",
+            func_pairs[2].1
         );
     }
 
@@ -67830,7 +71530,14 @@ mod tests {
         impl ValidTrackingCase {
             fn expected_state(&self) -> ClientTrackingState {
                 let prefixes = if matches!(self.flavor, TrackingFlavor::Bcast) {
-                    self.prefixes.iter().cloned().collect::<BTreeSet<Vec<u8>>>()
+                    let mut set = self.prefixes.iter().cloned().collect::<BTreeSet<Vec<u8>>>();
+                    // BCAST with no explicit PREFIX gains the implicit empty
+                    // prefix "" (tracking.c::enableTracking), so the model must
+                    // carry it too or the round-trip parse will not match.
+                    if set.is_empty() {
+                        set.insert(Vec::new());
+                    }
+                    set
                 } else {
                     BTreeSet::new()
                 };
