@@ -1,0 +1,25 @@
+{
+  "bead": "frankenredis-5ciha",
+  "lever": "fused CRLF scan plus strict length validation for borrowed command lengths",
+  "decision": "rejected",
+  "reason": "candidate regressed paired hyperfine; baseline was 1.10x faster",
+  "baseline_paired": {
+    "command": "env MODE=borrowed-command FIELDS=16 VALUE_SIZE=64 ITERATIONS=200000 target-icywolf-w7fbs-baseline/release-perf/fr-ds9o7-parser-harness",
+    "mean_seconds": 0.15355526436000003,
+    "stddev_seconds": 0.016565759596474723
+  },
+  "candidate_paired": {
+    "command": "env MODE=borrowed-command FIELDS=16 VALUE_SIZE=64 ITERATIONS=200000 target-icywolf-5ciha-candidate/release-perf/fr-ds9o7-parser-harness",
+    "mean_seconds": 0.16883063006000004,
+    "stddev_seconds": 0.005178295622136164
+  },
+  "speedup": 0.91,
+  "score": {
+    "impact": 0.91,
+    "confidence": 0.9,
+    "effort": 1.0,
+    "value": 0.82
+  },
+  "golden_sha256": "468764ce7e7bcc2d2bcf29672fe3f5a2848eac2fa5972f769c58f8def1916d56",
+  "next_primitive": "inline small argv storage or runtime caller-reused argv wiring; do not repeat borrowed command length-line tuning"
+}

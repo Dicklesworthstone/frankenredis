@@ -1,0 +1,4 @@
+artifacts/optimization/frankenredis-5ciha/baseline-golden-borrowed.canon: OK
+artifacts/optimization/frankenredis-5ciha/baseline-golden-owned.canon: OK
+artifacts/optimization/frankenredis-5ciha/candidate-golden-borrowed.canon: OK
+artifacts/optimization/frankenredis-5ciha/candidate-golden-owned.canon: OK

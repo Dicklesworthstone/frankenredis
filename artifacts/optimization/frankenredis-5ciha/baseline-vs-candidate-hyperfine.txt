@@ -1,0 +1,11 @@
+Benchmark 1: env MODE=borrowed-command FIELDS=16 VALUE_SIZE=64 ITERATIONS=200000 target-icywolf-w7fbs-baseline/release-perf/fr-ds9o7-parser-harness
+  Time (mean ± σ):     153.6 ms ±  16.6 ms    [User: 147.8 ms, System: 4.7 ms]
+  Range (min … max):   137.1 ms … 181.3 ms    10 runs
+ 
+Benchmark 2: env MODE=borrowed-command FIELDS=16 VALUE_SIZE=64 ITERATIONS=200000 target-icywolf-5ciha-candidate/release-perf/fr-ds9o7-parser-harness
+  Time (mean ± σ):     168.8 ms ±   5.2 ms    [User: 163.5 ms, System: 4.6 ms]
+  Range (min … max):   161.3 ms … 175.8 ms    10 runs
+ 
+Summary
+  env MODE=borrowed-command FIELDS=16 VALUE_SIZE=64 ITERATIONS=200000 target-icywolf-w7fbs-baseline/release-perf/fr-ds9o7-parser-harness ran
+    1.10 ± 0.12 times faster than env MODE=borrowed-command FIELDS=16 VALUE_SIZE=64 ITERATIONS=200000 target-icywolf-5ciha-candidate/release-perf/fr-ds9o7-parser-harness
