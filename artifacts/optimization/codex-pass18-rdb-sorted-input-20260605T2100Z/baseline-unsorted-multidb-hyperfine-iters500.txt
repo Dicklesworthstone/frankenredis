@@ -1,0 +1,4 @@
+Benchmark 1: target-cod-pass18-baseline/release/fr-persist-rdb-multidb-bench --mode bench --dbs 4096 --entries-per-db 2 --iters 500
+  Time (mean ± σ):     188.1 ms ±  18.9 ms    [User: 181.1 ms, System: 4.8 ms]
+  Range (min … max):   156.9 ms … 217.3 ms    10 runs
+ 
