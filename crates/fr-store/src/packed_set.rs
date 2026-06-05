@@ -1032,9 +1032,192 @@ impl<'a> Iterator for ListValueIter<'a> {
     }
 }
 
+// ───────────────────────── packed sorted set (for small zsets) ──────────────
+
+/// Redis treats `+0.0` and `-0.0` as the same score (zslParseRange / score
+/// comparisons). Mirror `Store::canonicalize_zero_score`.
+fn canon_zero(score: f64) -> f64 {
+    if score == 0.0 { 0.0 } else { score }
+}
+
+/// Total order on `(score, member)` matching `ScoreMember`'s `Ord`: by
+/// canonical score (`total_cmp`), then member bytes ascending. A `PackedZSet`
+/// kept in this order iterates identically to the `SortedSet.ordered` BTreeMap,
+/// so ZRANGE/ZRANK output is byte-for-byte unchanged.
+fn zset_cmp(score_a: f64, member_a: &[u8], score_b: f64, member_b: &[u8]) -> std::cmp::Ordering {
+    canon_zero(score_a)
+        .total_cmp(&canon_zero(score_b))
+        .then_with(|| member_a.cmp(member_b))
+}
+
+/// Packed sorted set for SMALL zsets: a sequence of `[vint mlen][member][f64
+/// score, 8 LE bytes]` records kept in `(score, member)` sorted order, one
+/// allocation instead of a `BTreeMap` + member `HashMap` (+ lazy rank treap).
+/// All zset reads (ZRANGE/ZRANK/ZSCORE/ZRANGEBYSCORE) become an O(n) walk of a
+/// cache-resident buffer — the right trade below the zset-max-listpack threshold
+/// and matching redis's listpack zset node. (frankenredis-9mh3o step 5)
+///
+/// `allow(dead_code)`: the primitive + its sorted-order/ZADD/ZRANK proof land
+/// first; wiring it into `SortedSet`/`Value::SortedSet` is the follow-up.
+#[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
+pub struct PackedZSet {
+    buf: Vec<u8>,
+    len: usize,
+}
+
+#[allow(dead_code)]
+impl PackedZSet {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            len: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// Decode the record starting at `pos`: `(member, score, record_end)`.
+    fn record_at(&self, pos: usize) -> (&[u8], f64, usize) {
+        let (mlen, m_start) = read_varint(&self.buf, pos);
+        let m_end = m_start + mlen;
+        let score = f64::from_le_bytes(self.buf[m_end..m_end + 8].try_into().unwrap());
+        (&self.buf[m_start..m_end], score, m_end + 8)
+    }
+
+    /// `(record_start, record_end, score)` for `member`, or None.
+    fn locate(&self, member: &[u8]) -> Option<(usize, usize, f64)> {
+        let mut pos = 0;
+        while pos < self.buf.len() {
+            let (m, score, end) = self.record_at(pos);
+            if m == member {
+                return Some((pos, end, score));
+            }
+            pos = end;
+        }
+        None
+    }
+
+    fn encode(member: &[u8], score: f64) -> Vec<u8> {
+        let mut out = Vec::with_capacity(member.len() + 10);
+        write_varint(&mut out, member.len());
+        out.extend_from_slice(member);
+        out.extend_from_slice(&score.to_le_bytes());
+        out
+    }
+
+    /// Byte offset where a `(score, member)` record belongs to keep sort order.
+    fn insert_offset(&self, member: &[u8], score: f64) -> usize {
+        let mut pos = 0;
+        while pos < self.buf.len() {
+            let (m, s, end) = self.record_at(pos);
+            if zset_cmp(score, member, s, m) == std::cmp::Ordering::Less {
+                return pos;
+            }
+            pos = end;
+        }
+        self.buf.len()
+    }
+
+    #[must_use]
+    pub fn get_score(&self, member: &[u8]) -> Option<f64> {
+        self.locate(member).map(|(_, _, s)| s)
+    }
+
+    #[must_use]
+    pub fn contains(&self, member: &[u8]) -> bool {
+        self.locate(member).is_some()
+    }
+
+    /// ZADD a single member; returns true if it was newly added (false = score
+    /// updated). Re-positions the member to keep `(score, member)` order.
+    pub fn insert(&mut self, member: &[u8], score: f64) -> bool {
+        let existed = if let Some((rs, re, _)) = self.locate(member) {
+            self.buf.drain(rs..re);
+            self.len -= 1;
+            true
+        } else {
+            false
+        };
+        let off = self.insert_offset(member, score);
+        self.buf.splice(off..off, Self::encode(member, score));
+        self.len += 1;
+        !existed
+    }
+
+    /// ZREM a member; returns true if it was present.
+    pub fn remove(&mut self, member: &[u8]) -> bool {
+        if let Some((rs, re, _)) = self.locate(member) {
+            self.buf.drain(rs..re);
+            self.len -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 0-based rank of `member` in ascending `(score, member)` order (ZRANK).
+    #[must_use]
+    pub fn rank(&self, member: &[u8]) -> Option<usize> {
+        let mut pos = 0;
+        let mut idx = 0;
+        while pos < self.buf.len() {
+            let (m, _s, end) = self.record_at(pos);
+            if m == member {
+                return Some(idx);
+            }
+            idx += 1;
+            pos = end;
+        }
+        None
+    }
+
+    /// Iterate `(member, score)` in ascending `(score, member)` order.
+    #[must_use]
+    pub fn iter(&self) -> PackedZSetIter<'_> {
+        PackedZSetIter {
+            zset: self,
+            pos: 0,
+        }
+    }
+}
+
+/// Borrowing iterator over `(member, score)` in ascending order.
+#[allow(dead_code)]
+pub struct PackedZSetIter<'a> {
+    zset: &'a PackedZSet,
+    pos: usize,
+}
+
+impl<'a> Iterator for PackedZSetIter<'a> {
+    type Item = (&'a [u8], f64);
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.zset.buf.len() {
+            return None;
+        }
+        let (m, s, end) = self.zset.record_at(self.pos);
+        self.pos = end;
+        Some((m, s))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PackedList, PackedStrMap, PackedStrSet};
+    use super::{PackedList, PackedStrMap, PackedStrSet, PackedZSet, zset_cmp};
     use indexmap::{IndexMap, IndexSet};
     use std::collections::VecDeque;
     use proptest::prelude::*;
@@ -1210,6 +1393,79 @@ mod tests {
                 let p: Vec<&[u8]> = packed.iter().collect();
                 let o: Vec<&[u8]> = oracle.iter().map(|v| v.as_slice()).collect();
                 prop_assert_eq!(p, o);
+            }
+        }
+    }
+
+    #[test]
+    fn zset_basic_order_score_rank() {
+        let mut z = PackedZSet::new();
+        assert!(z.insert(b"b", 2.0));
+        assert!(z.insert(b"a", 1.0));
+        assert!(z.insert(b"c", 2.0)); // tie with b -> ordered by member
+        assert!(!z.insert(b"b", 0.5)); // update score, not new; repositions to front
+        let pairs: Vec<(&[u8], f64)> = z.iter().collect();
+        assert_eq!(pairs, vec![(&b"b"[..], 0.5), (b"a", 1.0), (b"c", 2.0)]);
+        assert_eq!(z.get_score(b"a"), Some(1.0));
+        assert_eq!(z.get_score(b"zzz"), None);
+        assert_eq!(z.rank(b"b"), Some(0));
+        assert_eq!(z.rank(b"c"), Some(2));
+        assert_eq!(z.rank(b"zzz"), None);
+        assert!(z.remove(b"a"));
+        assert!(!z.remove(b"a"));
+        assert_eq!(z.len(), 2);
+        // +0.0 and -0.0 are the same score (member tiebreak only).
+        let mut z2 = PackedZSet::new();
+        z2.insert(b"y", -0.0);
+        z2.insert(b"x", 0.0);
+        assert_eq!(
+            z2.iter().collect::<Vec<_>>(),
+            vec![(&b"x"[..], 0.0), (b"y", -0.0)]
+        );
+    }
+
+    proptest! {
+        /// PackedZSet must keep `(score, member)` sorted order and match ZADD/
+        /// ZREM/ZSCORE/ZRANK against a reference unique-member set sorted by the
+        /// SAME comparator (ScoreMember's order). The isomorphism the SortedSet
+        /// wiring relies on.
+        #[test]
+        fn zset_equivalent_to_sorted_reference(ops in proptest::collection::vec(
+            (0u8..3, proptest::collection::vec(0u8..3, 0..3), -3i8..4), 0..300)) {
+            let mut packed = PackedZSet::new();
+            let mut oracle: Vec<(Vec<u8>, f64)> = Vec::new();
+            for (op, member, raw_score) in ops {
+                let score = f64::from(raw_score);
+                match op {
+                    0 => {
+                        let was_new = !oracle.iter().any(|(m, _)| m == &member);
+                        if let Some(e) = oracle.iter_mut().find(|(m, _)| m == &member) {
+                            e.1 = score;
+                        } else {
+                            oracle.push((member.clone(), score));
+                        }
+                        prop_assert_eq!(packed.insert(&member, score), was_new);
+                    }
+                    1 => {
+                        let existed = oracle.iter().any(|(m, _)| m == &member);
+                        oracle.retain(|(m, _)| m != &member);
+                        prop_assert_eq!(packed.remove(&member), existed);
+                    }
+                    _ => {
+                        let os = oracle.iter().find(|(m, _)| m == &member).map(|(_, s)| *s);
+                        prop_assert_eq!(packed.get_score(&member), os);
+                    }
+                }
+                prop_assert_eq!(packed.len(), oracle.len());
+                let mut sorted = oracle.clone();
+                sorted.sort_by(|a, b| zset_cmp(a.1, &a.0, b.1, &b.0));
+                let got: Vec<(Vec<u8>, f64)> =
+                    packed.iter().map(|(m, s)| (m.to_vec(), s)).collect();
+                prop_assert_eq!(&got, &sorted);
+                // rank == index in the sorted reference
+                for (i, (m, _)) in sorted.iter().enumerate() {
+                    prop_assert_eq!(packed.rank(m), Some(i));
+                }
             }
         }
     }
