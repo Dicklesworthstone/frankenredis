@@ -1,0 +1,25 @@
+{
+  "bead": "frankenredis-w7fbs",
+  "lever": "direct max-bound arithmetic in borrowed command length parser",
+  "decision": "rejected",
+  "reason": "paired benchmark was only 1.03x faster and failed Score >= 2.0",
+  "baseline_paired": {
+    "command": "env MODE=borrowed-command FIELDS=16 VALUE_SIZE=64 ITERATIONS=200000 target-icywolf-w7fbs-baseline/release-perf/fr-ds9o7-parser-harness",
+    "mean_ms": 135.6,
+    "stddev_ms": 7.0
+  },
+  "candidate_paired": {
+    "command": "env MODE=borrowed-command FIELDS=16 VALUE_SIZE=64 ITERATIONS=200000 target-icywolf-w7fbs-candidate/release-perf/fr-ds9o7-parser-harness",
+    "mean_ms": 131.7,
+    "stddev_ms": 5.0
+  },
+  "speedup": 1.03,
+  "score": {
+    "impact": 1.03,
+    "confidence": 0.8,
+    "effort": 1.0,
+    "value": 0.82
+  },
+  "golden_sha256": "468764ce7e7bcc2d2bcf29672fe3f5a2848eac2fa5972f769c58f8def1916d56",
+  "next_primitive": "inline small argv storage or runtime caller-reused argv wiring; do not repeat length-parser micro-tuning"
+}

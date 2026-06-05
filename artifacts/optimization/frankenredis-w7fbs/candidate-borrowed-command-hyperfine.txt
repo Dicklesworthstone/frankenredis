@@ -1,0 +1,4 @@
+Benchmark 1: env MODE=borrowed-command FIELDS=16 VALUE_SIZE=64 ITERATIONS=200000 target-icywolf-w7fbs-candidate/release-perf/fr-ds9o7-parser-harness
+  Time (mean ± σ):     127.6 ms ±  11.0 ms    [User: 123.4 ms, System: 3.5 ms]
+  Range (min … max):   119.1 ms … 156.5 ms    10 runs
+ 

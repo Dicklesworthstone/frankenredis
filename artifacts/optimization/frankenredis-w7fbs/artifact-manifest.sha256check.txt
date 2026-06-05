@@ -1,0 +1,16 @@
+artifacts/optimization/frankenredis-w7fbs/REJECTION.md: OK
+artifacts/optimization/frankenredis-w7fbs/baseline-borrowed-command-hyperfine.json: OK
+artifacts/optimization/frankenredis-w7fbs/baseline-borrowed-command-hyperfine.txt: OK
+artifacts/optimization/frankenredis-w7fbs/baseline-golden-borrowed.canon: OK
+artifacts/optimization/frankenredis-w7fbs/baseline-golden-owned.canon: OK
+artifacts/optimization/frankenredis-w7fbs/baseline-golden.sha256: OK
+artifacts/optimization/frankenredis-w7fbs/baseline-vs-candidate-hyperfine.json: OK
+artifacts/optimization/frankenredis-w7fbs/baseline-vs-candidate-hyperfine.txt: OK
+artifacts/optimization/frankenredis-w7fbs/candidate-borrowed-command-hyperfine.json: OK
+artifacts/optimization/frankenredis-w7fbs/candidate-borrowed-command-hyperfine.txt: OK
+artifacts/optimization/frankenredis-w7fbs/candidate-golden-borrowed.canon: OK
+artifacts/optimization/frankenredis-w7fbs/candidate-golden-owned.canon: OK
+artifacts/optimization/frankenredis-w7fbs/golden.sha256: OK
+artifacts/optimization/frankenredis-w7fbs/golden.sha256check.txt: OK
+artifacts/optimization/frankenredis-w7fbs/paired-baseline-vs-candidate-hyperfine.json: OK
+artifacts/optimization/frankenredis-w7fbs/summary.json: OK
