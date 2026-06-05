@@ -208,9 +208,17 @@ def main():
         opv = tuple(str(x) for x in rng.choice(ops)())
         op.cmd(*opv)
         fp.cmd(*opv)
-        time.sleep(0.02)
+        # Async pmessages can arrive slightly after the command reply. Give both
+        # subscribers time to receive, then re-drain once after a settle to catch
+        # any straggler before declaring a mismatch — avoids false positives from
+        # an event landing in the next iteration's drain window.
+        time.sleep(0.03)
         oe = sorted(os_.drain_pmessages())
         fe = sorted(fs_.drain_pmessages())
+        if oe != fe:
+            time.sleep(0.05)
+            oe = sorted(oe + os_.drain_pmessages())
+            fe = sorted(fe + fs_.drain_pmessages())
         log.append(" ".join(opv) + "  => O:%d F:%d events" % (len(oe), len(fe)))
         if oe != fe:
             print("=== KEYSPACE-EVENT DIVERGENCE at iter %d ===" % it)
