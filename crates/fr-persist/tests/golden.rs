@@ -1,4 +1,8 @@
 use fr_persist::parse_aof_manifest;
+use fr_persist::{
+    RdbValue, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, decode_upstream_stream_payload,
+    encode_upstream_stream_listpacks3_payload,
+};
 use std::fs;
 use std::path::Path;
 
@@ -103,5 +107,51 @@ fn golden_manifest_invalid_seq_number() {
     parse_and_snapshot(
         "manifest_invalid_seq_number",
         "file appendonly.aof.1.base.rdb seq 01 type b\n",
+    );
+}
+
+/// Byte-exact regression vs vendored Redis 7.2.4 (frankenredis-ren6y).
+///
+/// `stream_type21_vendored_redis_724.dump` is the raw `DUMP` payload Redis
+/// 7.2.4 produced for a 250-entry stream (explicit IDs, mixed integer/string
+/// values, reused field names, a consumer group with a populated PEL) — large
+/// enough to force several `stream-node-max-bytes`/`-entries` macro-node
+/// splits. Decoding it and re-encoding through our type-21 synthesizer must
+/// reproduce the payload byte-for-byte: this locks in that our node packing,
+/// listpack integer encoding, and consumer-group serialization match upstream
+/// exactly (so a stream rebuilt from live state DUMPs identically and Redis
+/// can RESTORE our RDB).
+#[test]
+fn golden_stream_type21_byte_exact_vs_vendored_redis_724() {
+    let dump = fs::read(Path::new("tests/golden").join("stream_type21_vendored_redis_724.dump"))
+        .expect("read vendored redis stream dump fixture");
+    // A DUMP payload is `[type byte][value body][2-byte rdbver][8-byte crc64]`.
+    let body = &dump[1..dump.len() - 10];
+    assert_eq!(
+        dump[0], UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3,
+        "fixture must be a type-21 stream"
+    );
+
+    let (value, consumed) =
+        decode_upstream_stream_payload(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, body)
+            .expect("decode vendored stream body");
+    assert_eq!(consumed, body.len(), "decoder must consume the whole body");
+
+    let RdbValue::Stream(entries, watermark, groups, _metadata, entries_added) = value else {
+        panic!("expected a stream value");
+    };
+
+    let reencoded =
+        encode_upstream_stream_listpacks3_payload(&entries, watermark, &groups, entries_added)
+            .expect("re-encode synthesized type-21 payload");
+
+    assert_eq!(
+        reencoded.len(),
+        body.len(),
+        "re-encoded length must equal the vendored Redis body length"
+    );
+    assert_eq!(
+        reencoded, body,
+        "re-encoded type-21 bytes must equal vendored Redis byte-for-byte"
     );
 }
