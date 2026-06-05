@@ -10,9 +10,9 @@ use std::path::Path;
 use fr_protocol::{RespFrame, RespParseError};
 
 pub mod listpack;
-pub mod ziplist;
 #[allow(dead_code)]
 pub(crate) mod rdb_stream;
+pub mod ziplist;
 
 thread_local! {
     static LZF_SCRATCH: RefCell<LzfScratch> = const { RefCell::new(LzfScratch::new()) };
@@ -310,8 +310,8 @@ pub fn read_aof_manifest_dir(manifest_path: &Path) -> Result<MultipartAofLoad, P
         if data.is_empty() {
             continue;
         }
-        let is_rdb_base = entry.file_type == AofManifestFileType::Base
-            && entry.file_name.ends_with(".rdb");
+        let is_rdb_base =
+            entry.file_type == AofManifestFileType::Base && entry.file_name.ends_with(".rdb");
         if is_rdb_base {
             let decoded = decode_rdb_prefix(&data)?;
             out.base_rdb_entries = decoded.entries;
@@ -1790,7 +1790,12 @@ fn encode_private_stream_rdb_value(
             // Per-consumer seen_time (u64 LE) + active_time (i64 LE, -1 == None),
             // so fr's native stream RDB round-trips them too. (frankenredis-sq4ov)
             buf.extend_from_slice(&consumer.seen_time_ms.to_le_bytes());
-            buf.extend_from_slice(&consumer.active_time_ms.map_or(-1i64, |v| v as i64).to_le_bytes());
+            buf.extend_from_slice(
+                &consumer
+                    .active_time_ms
+                    .map_or(-1i64, |v| v as i64)
+                    .to_le_bytes(),
+            );
         }
         rdb_encode_length(buf, group.pending.len());
         for pe in &group.pending {
@@ -3056,7 +3061,8 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                         let (zl, consumed) =
                             rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        let items = ziplist::decode_ziplist(&zl).ok_or(PersistError::InvalidFrame)?;
+                        let items =
+                            ziplist::decode_ziplist(&zl).ok_or(PersistError::InvalidFrame)?;
                         RdbValue::List(items)
                     }
                     RDB_TYPE_LIST_QUICKLIST => {
@@ -3082,7 +3088,8 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                         let (zl, consumed) =
                             rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        let entries = ziplist::decode_ziplist(&zl).ok_or(PersistError::InvalidFrame)?;
+                        let entries =
+                            ziplist::decode_ziplist(&zl).ok_or(PersistError::InvalidFrame)?;
                         if !entries.len().is_multiple_of(2) {
                             return Err(PersistError::InvalidFrame);
                         }
@@ -3097,7 +3104,8 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                         let (zm, consumed) =
                             rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        let entries = ziplist::decode_zipmap(&zm).ok_or(PersistError::InvalidFrame)?;
+                        let entries =
+                            ziplist::decode_zipmap(&zm).ok_or(PersistError::InvalidFrame)?;
                         if !entries.len().is_multiple_of(2) {
                             return Err(PersistError::InvalidFrame);
                         }
@@ -3113,7 +3121,8 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                         let (zl, consumed) =
                             rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        let entries = ziplist::decode_ziplist(&zl).ok_or(PersistError::InvalidFrame)?;
+                        let entries =
+                            ziplist::decode_ziplist(&zl).ok_or(PersistError::InvalidFrame)?;
                         if !entries.len().is_multiple_of(2) {
                             return Err(PersistError::InvalidFrame);
                         }
@@ -4047,16 +4056,14 @@ mod tests {
     use super::{
         CompactRdbThresholds, RDB_CHECKSUM_LEN, RDB_OPCODE_AUX, RDB_OPCODE_EOF,
         RDB_OPCODE_EXPIRETIME_MS, RDB_OPCODE_FUNCTION2, RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB,
-        RDB_TYPE_HASH,
-        RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_WITH_TTLS, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST_2,
-        RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STRING, RDB_TYPE_ZSET_2,
-        RDB_TYPE_ZSET_LISTPACK, RdbEncodeOptions, RdbEntry, RdbStreamConsumer,
-        RdbStreamConsumerGroup, RdbStreamMetadata, RdbStreamPendingEntry, RdbValue,
-        UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3,
-        crc64_redis, decode_intset_members, decode_rdb, decode_rdb_prefix,
-        encode_listpack_strings_blob, encode_rdb, encode_rdb_with_functions,
-        encode_rdb_with_options, lzf_compress,
-        lzf_decompress, rdb_decode_string, rdb_encode_length, rdb_encode_string,
+        RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_WITH_TTLS, RDB_TYPE_LIST,
+        RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
+        RDB_TYPE_STRING, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RdbEncodeOptions, RdbEntry,
+        RdbStreamConsumer, RdbStreamConsumerGroup, RdbStreamMetadata, RdbStreamPendingEntry,
+        RdbValue, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, crc64_redis, decode_intset_members,
+        decode_rdb, decode_rdb_prefix, encode_listpack_strings_blob, encode_rdb,
+        encode_rdb_with_functions, encode_rdb_with_options, lzf_compress, lzf_decompress,
+        rdb_decode_string, rdb_encode_length, rdb_encode_string,
     };
 
     fn append_rdb_checksum(encoded: &mut Vec<u8>) {
@@ -6122,7 +6129,10 @@ mod tests {
         }];
         let mut encoded = encode_rdb(&entries, &[]);
         reversion_rdb(&mut encoded, b"0099");
-        assert_eq!(decode_rdb(&encoded).unwrap_err(), PersistError::InvalidFrame);
+        assert_eq!(
+            decode_rdb(&encoded).unwrap_err(),
+            PersistError::InvalidFrame
+        );
 
         // Version 0 is also out of range (redis rejects `rdbver < 1`).
         let mut zero = encode_rdb(&entries, &[]);
@@ -6191,10 +6201,7 @@ mod tests {
             vec![RdbEntry {
                 db: 0,
                 key: b"zset".to_vec(),
-                value: RdbValue::SortedSet(vec![
-                    (b"one".to_vec(), 1.0),
-                    (b"two".to_vec(), 2.0),
-                ]),
+                value: RdbValue::SortedSet(vec![(b"one".to_vec(), 1.0), (b"two".to_vec(), 2.0),]),
                 expire_ms: None,
             }]
         );

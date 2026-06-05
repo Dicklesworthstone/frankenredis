@@ -2940,6 +2940,16 @@ impl ServerState {
             .is_some_and(|v| v.eq_ignore_ascii_case("yes"))
     }
 
+    /// Whether appendonlydir history files are auto-collected after a rewrite.
+    /// Mirrors redis's `aof-disable-auto-gc` (default `no` -> gc enabled); set it
+    /// to `yes` to retain superseded base/incr files. (frankenredis-5jpn9)
+    fn aof_auto_gc_enabled(&self) -> bool {
+        !self
+            .config_overrides
+            .get("aof-disable-auto-gc")
+            .is_some_and(|v| v.eq_ignore_ascii_case("yes"))
+    }
+
     #[must_use]
     pub fn last_active_expire_cycle_stats(&self) -> Option<ActiveExpireCycleStats> {
         self.last_active_expire_cycle
@@ -3459,6 +3469,43 @@ fn aof_manifest_target(path: &std::path::Path) -> (std::path::PathBuf, String) {
 fn aof_manifest_path(path: &std::path::Path) -> std::path::PathBuf {
     let (dir, basename) = aof_manifest_target(path);
     dir.join(format!("{basename}.manifest"))
+}
+
+/// Parse the sequence number from an appendonlydir data-file name of the form
+/// `<basename>.<seq>.base.rdb` or `<basename>.<seq>.incr.aof`. Returns `None`
+/// for anything else (the manifest, a legacy single-file AOF, or unrelated
+/// files), so the gc sweep only ever matches files this layout owns.
+/// (frankenredis-5jpn9)
+fn parse_aof_history_seq(name: &str, basename: &str) -> Option<u64> {
+    let rest = name.strip_prefix(basename)?.strip_prefix('.')?;
+    let (seq_str, suffix) = rest.split_once('.')?;
+    if suffix != "base.rdb" && suffix != "incr.aof" {
+        return None;
+    }
+    seq_str.parse::<u64>().ok()
+}
+
+/// Remove superseded appendonlydir base/incr files (sequence `< current_seq`),
+/// scoped strictly to this appendonlydir's `<basename>` pattern. The just-written
+/// manifest references only `current_seq`, so every lower-sequence base/incr file
+/// is history and safe to drop — exactly what redis's auto-gc does after a
+/// rewrite. The manifest and any legacy single-file AOF are never matched.
+/// (frankenredis-5jpn9)
+fn gc_aof_history_files(dir: &std::path::Path, basename: &str, current_seq: u64) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if let Some(seq) = parse_aof_history_seq(name, basename)
+            && seq < current_seq
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn preserve_store_load_context(replacement: &mut Store, original: &Store) {
@@ -12427,6 +12474,14 @@ impl Runtime {
         // must resume appending only records captured after this rewrite, so
         // anchor the cursor at the current buffer length.
         self.server.aof_disk_flushed_records = self.server.aof_records.len();
+        // (frankenredis-5jpn9) The new manifest references only `seq`; superseded
+        // base/incr files of earlier sequences are now history. Match redis's
+        // auto-gc (aof.c::aofManifest) by removing them, unless
+        // `aof-disable-auto-gc` is set. Without this, every rewrite would leak a
+        // base+incr pair onto disk for the life of the appendonlydir.
+        if self.server.aof_auto_gc_enabled() {
+            gc_aof_history_files(&dir, &basename, seq);
+        }
         Ok(seq)
     }
 
@@ -15597,8 +15652,8 @@ mod tests {
         build_hello_response, canonical_static_config_param, canonicalize_acl_rules,
         classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
-        client_wrong_subcommand_arity, digest_bytes, parse_acl_key_selector, sha256_hex_bytes,
-        store_to_rdb_entries, wrong_arity_error,
+        client_wrong_subcommand_arity, digest_bytes, parse_acl_key_selector, parse_aof_history_seq,
+        sha256_hex_bytes, store_to_rdb_entries, wrong_arity_error,
     };
 
     fn command(parts: &[&[u8]]) -> RespFrame {
@@ -15608,6 +15663,24 @@ mod tests {
                 .map(|part| RespFrame::BulkString(Some((*part).to_vec())))
                 .collect(),
         ))
+    }
+
+    /// Remove every appendonlydir artifact for `basename` in `dir` (the single
+    /// file, the manifest, and all `<basename>.<seq>.base.rdb`/`.incr.aof`), so a
+    /// fixed-dir AOF test never inherits a prior run's files. The appendonlydir
+    /// layout (frankenredis-oe6qt) writes multiple files into a reused temp dir,
+    /// so cleaning only the legacy single file is no longer enough.
+    /// (frankenredis-5jpn9)
+    fn clean_aof_artifacts(dir: &std::path::Path, basename: &str) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str()
+                    && name.starts_with(basename)
+                {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
     }
 
     fn parse_all_resp_frames(bytes: &[u8]) -> Vec<RespFrame> {
@@ -19843,6 +19916,34 @@ mod tests {
     }
 
     #[test]
+    fn aof_history_seq_parser_only_matches_owned_base_and_incr_files() {
+        assert_eq!(
+            parse_aof_history_seq("appendonly.aof.1.base.rdb", "appendonly.aof"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_aof_history_seq("appendonly.aof.42.incr.aof", "appendonly.aof"),
+            Some(42)
+        );
+        assert_eq!(
+            parse_aof_history_seq("appendonly.aof.manifest", "appendonly.aof"),
+            None
+        );
+        assert_eq!(
+            parse_aof_history_seq("appendonly.aof.1.single.aof", "appendonly.aof"),
+            None
+        );
+        assert_eq!(
+            parse_aof_history_seq("appendonly.aof.not-a-seq.base.rdb", "appendonly.aof"),
+            None
+        );
+        assert_eq!(
+            parse_aof_history_seq("other.aof.1.base.rdb", "appendonly.aof"),
+            None
+        );
+    }
+
+    #[test]
     fn waitaof_appendfsync_always_reports_local_ack_immediately() {
         let mut rt = Runtime::default_strict();
         rt.set_aof_path(std::path::PathBuf::from("appendonly.aof"));
@@ -20101,6 +20202,81 @@ mod tests {
         assert!(
             manifest_text.contains("seq 2 type b"),
             "second rewrite must advance the base sequence, got:\n{manifest_text}"
+        );
+        assert!(
+            !dir.join("appendonly.aof.1.base.rdb").exists(),
+            "default auto-gc must remove stale base history"
+        );
+        assert!(
+            !dir.join("appendonly.aof.1.incr.aof").exists(),
+            "default auto-gc must remove stale incr history"
+        );
+        assert!(
+            dir.join("appendonly.aof.2.base.rdb").exists(),
+            "current base must remain"
+        );
+        assert!(
+            dir.join("appendonly.aof.2.incr.aof").exists(),
+            "current incr must remain"
+        );
+
+        for name in [
+            "appendonly.aof.manifest",
+            "appendonly.aof.1.base.rdb",
+            "appendonly.aof.1.incr.aof",
+            "appendonly.aof.2.base.rdb",
+            "appendonly.aof.2.incr.aof",
+        ] {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
+    }
+
+    #[test]
+    fn bgrewriteaof_respects_disabled_appendonlydir_auto_gc() {
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_appendonlydir_auto_gc_disabled_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        for name in [
+            "appendonly.aof.manifest",
+            "appendonly.aof.1.base.rdb",
+            "appendonly.aof.1.incr.aof",
+            "appendonly.aof.2.base.rdb",
+            "appendonly.aof.2.incr.aof",
+        ] {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(dir.join("appendonly.aof"));
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"aof-disable-auto-gc", b"yes"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.execute_frame(command(&[b"SET", b"layout:key", b"v"]), 1);
+        rt.execute_frame(command(&[b"BGREWRITEAOF"]), 2);
+        rt.execute_frame(command(&[b"SET", b"layout:key", b"v2"]), 3);
+        rt.execute_frame(command(&[b"BGREWRITEAOF"]), 4);
+
+        assert!(
+            dir.join("appendonly.aof.1.base.rdb").exists(),
+            "disabled auto-gc must preserve stale base history"
+        );
+        assert!(
+            dir.join("appendonly.aof.1.incr.aof").exists(),
+            "disabled auto-gc must preserve stale incr history"
+        );
+        assert!(
+            dir.join("appendonly.aof.2.base.rdb").exists(),
+            "current base must remain"
+        );
+        assert!(
+            dir.join("appendonly.aof.2.incr.aof").exists(),
+            "current incr must remain"
         );
 
         for name in [
@@ -26652,6 +26828,7 @@ mod tests {
     fn save_and_load_aof_round_trip() {
         let dir = std::env::temp_dir().join("fr_runtime_aof_test");
         let _ = std::fs::create_dir_all(&dir);
+        clean_aof_artifacts(&dir, "test_save.aof");
         let aof_path = dir.join("test_save.aof");
 
         // Populate a runtime with various data types
@@ -26707,6 +26884,7 @@ mod tests {
     fn save_and_load_aof_round_trip_with_streams_and_ttl() {
         let dir = std::env::temp_dir().join("fr_runtime_aof_stream_test");
         let _ = std::fs::create_dir_all(&dir);
+        clean_aof_artifacts(&dir, "test_stream.aof");
         let aof_path = dir.join("test_stream.aof");
 
         let mut rt = Runtime::default_strict();
@@ -26761,34 +26939,50 @@ mod tests {
     fn save_and_load_aof_round_trip_multi_db() {
         let dir = std::env::temp_dir().join("fr_runtime_aof_multidb_test");
         let _ = std::fs::create_dir_all(&dir);
+        clean_aof_artifacts(&dir, "test_multidb.aof");
         let aof_path = dir.join("test_multidb.aof");
 
         let mut rt = Runtime::default_strict();
         rt.set_aof_path(aof_path.clone());
 
         // DB 0: string
-        rt.execute_frame(command(&[b"SET", b"db0:key", b"zero"]), 100);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"db0:key", b"zero"]), 100),
+            RespFrame::SimpleString("OK".to_string())
+        );
 
         // DB 1: hash
         rt.execute_frame(command(&[b"SELECT", b"1"]), 100);
-        rt.execute_frame(
-            command(&[b"HSET", b"db1:hash", b"f1", b"v1", b"f2", b"v2"]),
-            100,
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"HSET", b"db1:hash", b"f1", b"v1", b"f2", b"v2"]),
+                100,
+            ),
+            RespFrame::Integer(2)
         );
 
         // DB 2: list
         rt.execute_frame(command(&[b"SELECT", b"2"]), 100);
-        rt.execute_frame(command(&[b"RPUSH", b"db2:list", b"a", b"b", b"c"]), 100);
+        assert_eq!(
+            rt.execute_frame(command(&[b"RPUSH", b"db2:list", b"a", b"b", b"c"]), 100),
+            RespFrame::Integer(3)
+        );
 
         // DB 3: set
         rt.execute_frame(command(&[b"SELECT", b"3"]), 100);
-        rt.execute_frame(command(&[b"SADD", b"db3:set", b"x", b"y", b"z"]), 100);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SADD", b"db3:set", b"x", b"y", b"z"]), 100),
+            RespFrame::Integer(3)
+        );
 
         // DB 4: sorted set
         rt.execute_frame(command(&[b"SELECT", b"4"]), 100);
-        rt.execute_frame(
-            command(&[b"ZADD", b"db4:zset", b"1", b"a", b"2", b"b"]),
-            100,
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ZADD", b"db4:zset", b"1", b"a", b"2", b"b"]),
+                100
+            ),
+            RespFrame::Integer(2)
         );
 
         // SAVE
@@ -26796,6 +26990,49 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"SAVE"]), 100),
             RespFrame::SimpleString("OK".to_string())
+        );
+        let manifest = dir.join("test_multidb.aof.manifest");
+        let loaded_manifest =
+            fr_persist::read_aof_manifest_dir(&manifest).expect("load manifest snapshot");
+        assert!(
+            loaded_manifest
+                .base_rdb_entries
+                .iter()
+                .any(|entry| entry.db == 1
+                    && entry.key == b"db1:hash"
+                    && matches!(entry.value, RdbValue::Hash(_))),
+            "SAVE manifest base RDB must include DB 1 hash, got {:?}",
+            loaded_manifest.base_rdb_entries
+        );
+        assert!(
+            loaded_manifest
+                .base_rdb_entries
+                .iter()
+                .any(|entry| entry.db == 2
+                    && entry.key == b"db2:list"
+                    && matches!(entry.value, RdbValue::List(_))),
+            "SAVE manifest base RDB must include DB 2 list, got {:?}",
+            loaded_manifest.base_rdb_entries
+        );
+        assert!(
+            loaded_manifest
+                .base_rdb_entries
+                .iter()
+                .any(|entry| entry.db == 3
+                    && entry.key == b"db3:set"
+                    && matches!(entry.value, RdbValue::Set(_))),
+            "SAVE manifest base RDB must include DB 3 set, got {:?}",
+            loaded_manifest.base_rdb_entries
+        );
+        assert!(
+            loaded_manifest
+                .base_rdb_entries
+                .iter()
+                .any(|entry| entry.db == 4
+                    && entry.key == b"db4:zset"
+                    && matches!(entry.value, RdbValue::SortedSet(_))),
+            "SAVE manifest base RDB must include DB 4 zset, got {:?}",
+            loaded_manifest.base_rdb_entries
         );
 
         // Load into fresh runtime
@@ -26853,6 +27090,7 @@ mod tests {
     fn save_and_load_aof_round_trip_preserves_move_and_swapdb_multi_db_state() {
         let dir = std::env::temp_dir().join("fr_runtime_aof_move_swapdb_test");
         let _ = std::fs::create_dir_all(&dir);
+        clean_aof_artifacts(&dir, "test_move_swapdb.aof");
         let aof_path = dir.join("test_move_swapdb.aof");
 
         let mut rt = Runtime::default_strict();
@@ -27377,6 +27615,7 @@ mod tests {
     fn bgrewriteaof_rewrites_multi_db_move_and_swapdb_state() {
         let dir = std::env::temp_dir().join("fr_runtime_bgrewriteaof_move_swapdb_test");
         let _ = std::fs::create_dir_all(&dir);
+        clean_aof_artifacts(&dir, "rewrite_move_swapdb.aof");
         let aof_path = dir.join("rewrite_move_swapdb.aof");
         let stale_records = vec![AofRecord {
             argv: vec![b"SET".to_vec(), b"stale".to_vec(), b"old".to_vec()],

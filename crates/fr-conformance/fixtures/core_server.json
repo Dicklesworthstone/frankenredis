@@ -169,14 +169,14 @@
       }
     },
     {
-      "name": "bgrewriteaof_errors_when_appendonlydir_is_missing",
+      "name": "bgrewriteaof_writes_appendonlydir_manifest",
       "now_ms": 8002,
       "argv": [
         "BGREWRITEAOF"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR error rewriting AOF file"
+        "kind": "simple",
+        "value": "Background append only file rewriting started"
       }
     },
     {
@@ -2309,8 +2309,8 @@
         "RELOAD"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR error saving dataset to disk"
+        "kind": "simple",
+        "value": "OK"
       }
     },
     {
