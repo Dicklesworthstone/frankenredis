@@ -11468,8 +11468,16 @@ impl Store {
                                 }
                             }
                             StreamGroupReadCursor::Id(start_id) => {
+                                // Upstream xreadCommand serves history with an
+                                // EXCLUSIVE start: it `streamIncrID(&start)`s the
+                                // user-supplied ID before the (inclusive) range
+                                // walk, "since we want only messages with IDs
+                                // greater than start" (t_stream.c). So a read
+                                // anchored at a pending entry's own ID must skip
+                                // that entry. Excluded(start_id) over the discrete
+                                // (ms,seq) keyspace is exactly streamIncrID + >=.
                                 for (id, pending_entry) in
-                                    group_state.pending.range((Included(start_id), Unbounded))
+                                    group_state.pending.range((Excluded(start_id), Unbounded))
                                 {
                                     if pending_entry.consumer.as_slice() != consumer {
                                         continue;
@@ -27673,6 +27681,59 @@ mod tests {
             store.dirty, before,
             "'>' read with no new entries must not dirty"
         );
+    }
+
+    #[test]
+    fn xreadgroup_history_read_start_id_is_exclusive() {
+        // Upstream xreadCommand `streamIncrID(&start)`s the user-supplied ID
+        // before the inclusive range walk, so a history read anchored at a
+        // pending entry's own ID skips that entry and returns only later ones
+        // (t_stream.c: "only messages with IDs greater than start").
+        let mut store = Store::new();
+        for i in 0..3u64 {
+            store
+                .xadd(b"s", (1000, i), &[(b"f".to_vec(), b"v".to_vec())], 0)
+                .unwrap();
+        }
+        assert!(store.xgroup_create(b"s", b"g", (0, 0), false, 0).unwrap());
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(3)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+
+        // Anchored exactly at the middle pending ID → excludes it, yields 1000-2.
+        let records = store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::Id((1000, 1)), false, Some(10)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        let ids: Vec<(u64, u64)> = records.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![(1000, 2)], "history start ID must be exclusive");
+
+        // Anchored at 0 → all three pending entries (none excluded).
+        let all = store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::Id((0, 0)), false, Some(10)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        let all_ids: Vec<(u64, u64)> = all.iter().map(|(id, _)| *id).collect();
+        assert_eq!(all_ids, vec![(1000, 0), (1000, 1), (1000, 2)]);
     }
 
     #[test]
