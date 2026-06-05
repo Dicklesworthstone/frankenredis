@@ -2307,7 +2307,16 @@
         "0"
       ],
       "expect": {
-        "kind": "null_array"
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "group_read_stream" },
+              { "kind": "array", "value": [] }
+            ]
+          }
+        ]
       }
     },
     {
@@ -2512,7 +2521,16 @@
         "0"
       ],
       "expect": {
-        "kind": "null_array"
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "group_noack_stream" },
+              { "kind": "array", "value": [] }
+            ]
+          }
+        ]
       }
     },
     {
