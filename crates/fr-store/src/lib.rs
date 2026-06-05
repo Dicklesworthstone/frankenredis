@@ -5313,7 +5313,24 @@ impl Store {
                 // (`list-max-listpack-value`, frankenredis-udxy) exists in
                 // upstream — both fr-only configs remain read/write through
                 // CONFIG SET as benign no-ops.
-                if self.list_fits_legacy_listpack_size(l) {
+                //
+                // Crucially, redis decides the transition at ADD time on the
+                // RAW byte length of the newly-pushed element (not its encoded
+                // listpack size), making the result construction-order
+                // dependent and sticky — a stateless re-encode of the final
+                // contents over-counts the boundary element by
+                // `encoded_len - raw_len` and flips ~±1 element early
+                // (frankenredis-rc49s). For the default `-2` budget we consult
+                // the order-faithful decision tracked incrementally on the
+                // value; non-default budgets fall back to the stateless
+                // byte-budget estimate.
+                if self.list_max_listpack_size == -2 {
+                    if l.reports_quicklist_default() {
+                        "quicklist"
+                    } else {
+                        "listpack"
+                    }
+                } else if self.list_fits_legacy_listpack_size(l) {
                     "listpack"
                 } else {
                     "quicklist"
@@ -7117,9 +7134,15 @@ impl Store {
                 }
                 match &mut entry.value {
                     Value::List(l) => {
+                        // redis decides listpack→quicklist ONCE per command over
+                        // the batch's raw total (frankenredis-rc49s).
+                        let lp_pre = l.listpack_byte_len();
+                        let mut raw_add = 0u64;
                         for v in values {
+                            raw_add += v.len() as u64;
                             l.push_front(v.clone());
                         }
+                        l.note_command_grow(lp_pre, raw_add);
                         let len = l.len();
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
@@ -7133,14 +7156,17 @@ impl Store {
                 }
             }
             None => {
-                let mut l = VecDeque::new();
+                let mut l = ListValue::default();
+                let mut raw_add = 0u64;
                 for v in values {
+                    raw_add += v.len() as u64;
                     l.push_front(v.clone());
                 }
+                l.note_command_grow(ListValue::empty_listpack_bytes(), raw_add);
                 let len = l.len();
                 self.internal_entries_insert(
                     key.to_vec(),
-                    Entry::new(Value::List(Box::new(l.into())), None, now_ms),
+                    Entry::new(Value::List(Box::new(l)), None, now_ms),
                 );
                 self.dirty = self.dirty.saturating_add(values.len() as u64);
                 Ok(len)
@@ -7170,9 +7196,15 @@ impl Store {
                 }
                 match &mut entry.value {
                     Value::List(l) => {
+                        // redis decides listpack→quicklist ONCE per command over
+                        // the batch's raw total (frankenredis-rc49s).
+                        let lp_pre = l.listpack_byte_len();
+                        let mut raw_add = 0u64;
                         for v in values {
+                            raw_add += v.len() as u64;
                             l.push_back(v.clone());
                         }
+                        l.note_command_grow(lp_pre, raw_add);
                         let len = l.len();
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
@@ -7186,14 +7218,17 @@ impl Store {
                 }
             }
             None => {
-                let mut l = VecDeque::new();
+                let mut l = ListValue::default();
+                let mut raw_add = 0u64;
                 for v in values {
+                    raw_add += v.len() as u64;
                     l.push_back(v.clone());
                 }
+                l.note_command_grow(ListValue::empty_listpack_bytes(), raw_add);
                 let len = l.len();
                 self.internal_entries_insert(
                     key.to_vec(),
-                    Entry::new(Value::List(Box::new(l.into())), None, now_ms),
+                    Entry::new(Value::List(Box::new(l)), None, now_ms),
                 );
                 self.dirty = self.dirty.saturating_add(values.len() as u64);
                 Ok(len)
@@ -7690,7 +7725,10 @@ impl Store {
                 match &mut entry.value {
                     Value::List(l) => {
                         if let Some(pos) = l.iter().position(|v| v == pivot) {
+                            let lp_pre = l.listpack_byte_len();
+                            let raw_add = value.len() as u64;
                             l.insert(pos, value);
+                            l.note_command_grow(lp_pre, raw_add);
                             let len = l.len();
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
@@ -7734,7 +7772,10 @@ impl Store {
                 match &mut entry.value {
                     Value::List(l) => {
                         if let Some(pos) = l.iter().position(|v| v == pivot) {
+                            let lp_pre = l.listpack_byte_len();
+                            let raw_add = value.len() as u64;
                             l.insert(pos + 1, value);
+                            l.note_command_grow(lp_pre, raw_add);
                             let len = l.len();
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
@@ -7898,7 +7939,9 @@ impl Store {
         match self.entries.get_mut(destination) {
             Some(entry) => match &mut entry.value {
                 Value::List(l) => {
+                    let lp_pre = l.listpack_byte_len();
                     l.push_front(val.clone());
+                    l.note_command_grow(lp_pre, val.len() as u64);
                     Self::mark_digest_stale_fields(
                         &mut self.digest_stale,
                         &mut self.digest_mutations,
@@ -7908,11 +7951,12 @@ impl Store {
                 _ => return Err(StoreError::WrongType),
             },
             None => {
-                let mut l = VecDeque::new();
+                let mut l = ListValue::default();
                 l.push_front(val.clone());
+                l.note_command_grow(ListValue::empty_listpack_bytes(), val.len() as u64);
                 self.internal_entries_insert(
                     destination.to_vec(),
-                    Entry::new(Value::List(Box::new(l.into())), source_ttl, now_ms),
+                    Entry::new(Value::List(Box::new(l)), source_ttl, now_ms),
                 );
             }
         }
@@ -8021,9 +8065,13 @@ impl Store {
                 }
                 match &mut entry.value {
                     Value::List(l) => {
+                        let lp_pre = l.listpack_byte_len();
+                        let mut raw_add = 0u64;
                         for v in values {
+                            raw_add += v.len() as u64;
                             l.push_front(v.clone());
                         }
+                        l.note_command_grow(lp_pre, raw_add);
                         let len = l.len();
                         if !values.is_empty() {
                             Self::mark_digest_stale_fields(
@@ -8069,9 +8117,13 @@ impl Store {
                 }
                 match &mut entry.value {
                     Value::List(l) => {
+                        let lp_pre = l.listpack_byte_len();
+                        let mut raw_add = 0u64;
                         for v in values {
+                            raw_add += v.len() as u64;
                             l.push_back(v.clone());
                         }
+                        l.note_command_grow(lp_pre, raw_add);
                         let len = l.len();
                         if !values.is_empty() {
                             Self::mark_digest_stale_fields(
@@ -8190,11 +8242,13 @@ impl Store {
                 }
                 match &mut entry.value {
                     Value::List(l) => {
+                        let lp_pre = l.listpack_byte_len();
                         if eq_ascii_ci(whereto, b"LEFT") {
                             l.push_front(val.clone());
                         } else {
                             l.push_back(val.clone());
                         }
+                        l.note_command_grow(lp_pre, val.len() as u64);
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
@@ -8205,15 +8259,16 @@ impl Store {
                 }
             }
             None => {
-                let mut l = VecDeque::new();
+                let mut l = ListValue::default();
                 if eq_ascii_ci(whereto, b"LEFT") {
                     l.push_front(val.clone());
                 } else {
                     l.push_back(val.clone());
                 }
+                l.note_command_grow(ListValue::empty_listpack_bytes(), val.len() as u64);
                 self.internal_entries_insert(
                     destination.to_vec(),
-                    Entry::new(Value::List(Box::new(l.into())), source_ttl, now_ms),
+                    Entry::new(Value::List(Box::new(l)), source_ttl, now_ms),
                 );
             }
         }
@@ -20532,6 +20587,118 @@ mod tests {
         let big_chunk = vec![b'x'; 10_000];
         let _ = store.rpush(b"list", &[big_chunk], 0);
         assert_eq!(store.object_encoding(b"list", 0), Some("quicklist"));
+    }
+
+    /// (frankenredis-rc49s) The incremental `lp_bytes` tracked on the list value
+    /// must equal the byte-exact `encode_listpack_strings` length at every step,
+    /// across int-width boundaries, string-header boundaries, and through
+    /// pushes/pops/sets/inserts/removes/retain. This is the golden proof that the
+    /// O(1) tracking is isomorphic to a full re-encode of the contents.
+    #[test]
+    fn list_lp_bytes_matches_byte_exact_encoder() {
+        use crate::packed_set::ListValue;
+
+        let check = |l: &ListValue| {
+            let refs: Vec<&[u8]> = l.iter().collect();
+            let exact = encode_listpack_strings(&refs).unwrap().len() as u64;
+            assert_eq!(
+                l.listpack_byte_len(),
+                exact,
+                "lp_bytes drift for {:?}",
+                refs.iter().map(|r| r.len()).collect::<Vec<_>>()
+            );
+        };
+
+        // Elements spanning every int-encoding width plus string-header widths.
+        let samples: Vec<Vec<u8>> = vec![
+            b"0".to_vec(),
+            b"127".to_vec(),
+            b"128".to_vec(),
+            b"-1".to_vec(),
+            b"4095".to_vec(),
+            b"-4096".to_vec(),
+            b"32767".to_vec(),
+            b"-32768".to_vec(),
+            b"8388607".to_vec(),
+            b"2147483647".to_vec(),
+            b"9223372036854775807".to_vec(),
+            b"007".to_vec(),         // non-canonical int -> string-encoded
+            b"a".to_vec(),           // 1-byte string
+            vec![b'z'; 63],          // <64 header
+            vec![b'y'; 64],          // 2-byte header boundary
+            vec![b'w'; 4096],        // 5-byte header boundary
+        ];
+
+        let mut l = ListValue::default();
+        check(&l);
+        for s in &samples {
+            l.push_back(s.clone());
+            check(&l);
+        }
+        for s in samples.iter().rev() {
+            l.push_front(s.clone());
+            check(&l);
+        }
+        // LSET across widths.
+        l.set(0, b"4242".to_vec());
+        check(&l);
+        l.set(l.len() - 1, vec![b'q'; 200]);
+        check(&l);
+        // LINSERT in the middle.
+        l.insert(l.len() / 2, b"-9999999999".to_vec());
+        check(&l);
+        // Pops from both ends.
+        for _ in 0..5 {
+            let _ = l.pop_front();
+            check(&l);
+            let _ = l.pop_back();
+            check(&l);
+        }
+        // Arbitrary removal + retain.
+        let _ = l.remove(l.len() / 2);
+        check(&l);
+        l.retain(|e| e.len() != 1);
+        check(&l);
+        while l.pop_back().is_some() {
+            check(&l);
+        }
+    }
+
+    /// (frankenredis-rc49s) redis decides listpack→quicklist ONCE per command
+    /// over the batch's RAW total — a multi-element `RPUSH` whose raw lengths
+    /// keep `lpBytes(before) + Σraw <= 8192` stays listpack even though the
+    /// fully-encoded size exceeds the budget (a stateless re-encode over-counts
+    /// the encoded-vs-raw inflation of the batch's earlier elements and flips
+    /// early). This is the exact seed-99 shape.
+    #[test]
+    fn list_encoding_decided_per_command_not_per_element() {
+        let mut store = Store::new(); // default list_max_listpack_size = -2
+
+        // One RPUSH of many single-byte 'a' elements. Each 'a' encodes to 3
+        // listpack bytes (0x81 'a' + 1 backlen) but its raw length is 1, so the
+        // per-element-encoded model would convert ~2x sooner than redis.
+        let n = 4000usize; // raw total 4000 + 7 < 8192; encoded ~12007 > 8192
+        let batch: Vec<Vec<u8>> = (0..n).map(|_| b"a".to_vec()).collect();
+        let _ = store.rpush(b"l", &batch, 0).unwrap();
+        assert_eq!(
+            store.object_encoding(b"l", 0),
+            Some("listpack"),
+            "single-command raw total stays under budget -> listpack"
+        );
+
+        // Sticky AUTO hysteresis on a separate small list: a single huge add
+        // forces quicklist; removing it back below half the budget reverts.
+        let small: Vec<Vec<u8>> = (0..10).map(|_| b"a".to_vec()).collect();
+        let _ = store.rpush(b"s", &small, 0).unwrap();
+        assert_eq!(store.object_encoding(b"s", 0), Some("listpack"));
+        let _ = store.rpush(b"s", &[vec![b'x'; 9000]], 0).unwrap();
+        assert_eq!(store.object_encoding(b"s", 0), Some("quicklist"));
+        let _ = store.rpop(b"s", 0).unwrap(); // remove the huge element
+        assert_eq!(
+            store.object_encoding(b"s", 0),
+            Some("listpack"),
+            "shrink below half-budget reverts to listpack (AUTO hysteresis)"
+        );
     }
 
     #[test]

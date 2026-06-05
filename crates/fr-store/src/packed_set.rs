@@ -856,23 +856,211 @@ use std::collections::VecDeque;
 /// semantics, so LRANGE/LINDEX/LPOP/etc. output is byte-for-byte unchanged.
 /// (frankenredis-9mh3o step 4)
 #[derive(Clone, Debug)]
-pub enum ListValue {
+enum ListRepr {
     Packed(PackedList),
     Deque(VecDeque<Vec<u8>>),
 }
 
+impl Default for ListRepr {
+    fn default() -> Self {
+        ListRepr::Packed(PackedList::new())
+    }
+}
+
+// ── OBJECT ENCODING listpack/quicklist tracking (frankenredis-rc49s) ──
+//
+// Redis decides the listpack→quicklist transition at ADD time, not at query
+// time: `listTypeTryConvertListpack` (t_list.c) converts when
+// `quicklistNodeExceedsLimit(fill, lpBytes(existing) + sum(sdslen(added)),
+// count)` — the newly-pushed elements are counted by their RAW byte length,
+// while the existing listpack contributes its real encoded `lpBytes`. The
+// result is therefore construction-order dependent and sticky, and CANNOT be
+// reproduced by a stateless re-encode of the final contents (fr's old
+// `list_fits_legacy_listpack_size` over-counted the last element by
+// `encoded_len - raw_len`, flipping ~±1 element early/late at the 8 KiB
+// boundary). We mirror the real semantics by tracking, incrementally, the
+// exact `lpBytes` of the list and the sticky decision under the DEFAULT byte
+// budget (`list-max-listpack-size = -2` ⇒ 8192; the only value for which
+// `forced_quicklist` is consulted — other budgets fall back to the stateless
+// estimate in `Store::object_encoding`).
+const LIST_LP_OVERHEAD: u64 = 7; // 4-byte total-bytes + 2-byte count header + 0xFF EOF
+const LIST_DEFAULT_BUDGET: u64 = 8192; // quicklistNodeLimit(-2) sz_limit
+const LIST_DEFAULT_REVERT: u64 = LIST_DEFAULT_BUDGET / 2; // AUTO hysteresis (count_limit == 0)
+
+/// Decimal integer that round-trips to its canonical form — mirrors
+/// `parse_listpack_integer` in `lib.rs` so listpack int-encoding decisions
+/// (and thus byte sizing) match the byte-exact encoder.
+fn list_lp_int(entry: &[u8]) -> Option<i64> {
+    if entry.is_empty() || entry.len() >= 21 {
+        return None;
+    }
+    let value: i64 = std::str::from_utf8(entry).ok()?.parse().ok()?;
+    if value.to_string().as_bytes() == entry {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+/// Number of bytes `encode_listpack_backlen` emits for a `data_len`.
+fn list_lp_backlen_bytes(data_len: u64) -> u64 {
+    if data_len <= 127 {
+        1
+    } else if data_len < 16_383 {
+        2
+    } else if data_len < 2_097_151 {
+        3
+    } else if data_len < 268_435_455 {
+        4
+    } else {
+        5
+    }
+}
+
+/// Exact number of listpack bytes one element occupies (encoding header/int
+/// width + payload + backlen) — mirrors `encode_listpack_entry` /
+/// `encode_listpack_integer_entry` in `lib.rs`.
+fn list_lp_entry_bytes(elem: &[u8]) -> u64 {
+    let data_len: u64 = if let Some(v) = list_lp_int(elem) {
+        if (0..=127).contains(&v) {
+            1
+        } else if (-4096..=4095).contains(&v) {
+            2
+        } else if i16::try_from(v).is_ok() {
+            3
+        } else if (-8_388_608..=8_388_607).contains(&v) {
+            4
+        } else if i32::try_from(v).is_ok() {
+            5
+        } else {
+            9
+        }
+    } else {
+        let header = if elem.len() < 64 {
+            1
+        } else if elem.len() < 4096 {
+            2
+        } else {
+            5
+        };
+        header + elem.len() as u64
+    };
+    data_len + list_lp_backlen_bytes(data_len)
+}
+
+/// A list value plus the incrementally-maintained state backing its OBJECT
+/// ENCODING report. The public method surface (push/pop/insert/set/remove/
+/// retain/iter/...) is unchanged, so callers are unaffected. (frankenredis-rc49s)
+#[derive(Clone, Debug)]
+pub struct ListValue {
+    repr: ListRepr,
+    /// Exact `lpBytes` of this list encoded as a single listpack.
+    lp_bytes: u64,
+    /// Sticky listpack→quicklist decision under the default (-2) byte budget.
+    forced_quicklist: bool,
+}
+
 impl Default for ListValue {
     fn default() -> Self {
-        ListValue::Packed(PackedList::new())
+        ListValue {
+            repr: ListRepr::default(),
+            lp_bytes: LIST_LP_OVERHEAD,
+            forced_quicklist: false,
+        }
     }
 }
 
 impl ListValue {
+    /// Add `elem`'s encoded size to the running `lpBytes`. The sticky
+    /// listpack→quicklist decision is NOT made here — redis decides once per
+    /// command over the batch's RAW total via `note_command_grow`, so that
+    /// multi-element commands (`RPUSH k a b c …`) are not over-counted by the
+    /// per-element encoded inflation of earlier batch members.
+    fn add_entry_bytes(&mut self, elem: &[u8]) {
+        self.lp_bytes += list_lp_entry_bytes(elem);
+    }
+
+    /// Empty-listpack `lpBytes` (header + EOF) — the `lpBytes(existing)` term a
+    /// command on a fresh key starts from.
+    #[must_use]
+    pub const fn empty_listpack_bytes() -> u64 {
+        LIST_LP_OVERHEAD
+    }
+
+    /// Apply redis's ADD-time listpack→quicklist conversion for ONE command:
+    /// `listTypeTryConvertListpack` converts (stickily) when
+    /// `lpBytes(list before the command) + Σ sdslen(added) > sz_limit` under the
+    /// default `-2` budget. `lp_before_command` is the list's `lpBytes`
+    /// snapshotted BEFORE the command's pushes; `raw_add` is the sum of the RAW
+    /// byte lengths of the newly-added elements. (frankenredis-rc49s)
+    pub fn note_command_grow(&mut self, lp_before_command: u64, raw_add: u64) {
+        if !self.forced_quicklist && lp_before_command + raw_add > LIST_DEFAULT_BUDGET {
+            self.forced_quicklist = true;
+        }
+    }
+
+    /// Apply redis's AUTO shrink hysteresis: convert quicklist→listpack only
+    /// once well below the limit, avoiding flapping. (t_list.c
+    /// listTypeTryConvertQuicklist, LIST_CONV_AUTO)
+    fn shrink_hysteresis(&mut self) {
+        if self.is_empty() {
+            self.lp_bytes = LIST_LP_OVERHEAD;
+        }
+        if self.forced_quicklist && self.lp_bytes <= LIST_DEFAULT_REVERT {
+            self.forced_quicklist = false;
+        }
+    }
+
+    /// Account for a single element (with the given encoded size) leaving the
+    /// listpack, in O(1).
+    fn on_remove_one(&mut self, removed: &[u8]) {
+        self.lp_bytes = self
+            .lp_bytes
+            .saturating_sub(list_lp_entry_bytes(removed))
+            .max(LIST_LP_OVERHEAD);
+        self.shrink_hysteresis();
+    }
+
+    /// Account for an arbitrary bulk removal (LREM/LTRIM) by recomputing
+    /// `lp_bytes` from the survivors, then applying hysteresis.
+    fn on_remove_bulk(&mut self) {
+        self.lp_bytes =
+            LIST_LP_OVERHEAD + self.iter().map(list_lp_entry_bytes).sum::<u64>();
+        self.shrink_hysteresis();
+    }
+
+    /// Re-derive `lp_bytes` and `forced_quicklist` for a freshly-built list
+    /// (load / RESTORE / internal bulk-build). The construction history is not
+    /// available, so we treat the whole contents as a single bulk insertion:
+    /// `forced` iff the total raw bytes would have exceeded the budget in one
+    /// shot — the same test redis's bulk listpack→quicklist conversion applies.
+    fn rebuild_growth_state(&mut self) {
+        let (raw_total, enc_total): (u64, u64) = self.iter().fold((0, 0), |(r, e), elem| {
+            (r + elem.len() as u64, e + list_lp_entry_bytes(elem))
+        });
+        self.lp_bytes = LIST_LP_OVERHEAD + enc_total;
+        self.forced_quicklist = LIST_LP_OVERHEAD + raw_total > LIST_DEFAULT_BUDGET;
+    }
+
+    /// OBJECT ENCODING hint under the default byte budget: `true` when redis
+    /// would report `quicklist`. Consulted only when `list_max_listpack_size`
+    /// is the default `-2`. (frankenredis-rc49s)
+    #[must_use]
+    pub fn reports_quicklist_default(&self) -> bool {
+        self.forced_quicklist
+    }
+
+    /// Exact `lpBytes` of this list as a single listpack (for tests/debug).
+    #[must_use]
+    pub fn listpack_byte_len(&self) -> u64 {
+        self.lp_bytes
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
-        match self {
-            ListValue::Packed(p) => p.len(),
-            ListValue::Deque(d) => d.len(),
+        match &self.repr {
+            ListRepr::Packed(p) => p.len(),
+            ListRepr::Deque(d) => d.len(),
         }
     }
 
@@ -883,24 +1071,24 @@ impl ListValue {
 
     #[must_use]
     pub fn get(&self, idx: usize) -> Option<&[u8]> {
-        match self {
-            ListValue::Packed(p) => p.get(idx),
-            ListValue::Deque(d) => d.get(idx).map(|v| v.as_slice()),
+        match &self.repr {
+            ListRepr::Packed(p) => p.get(idx),
+            ListRepr::Deque(d) => d.get(idx).map(|v| v.as_slice()),
         }
     }
 
     fn promote(&mut self) {
-        if let ListValue::Packed(p) = self {
+        if let ListRepr::Packed(p) = &self.repr {
             let mut d: VecDeque<Vec<u8>> = VecDeque::with_capacity(p.len() + 1);
             for e in p.iter() {
                 d.push_back(e.to_vec());
             }
-            *self = ListValue::Deque(d);
+            self.repr = ListRepr::Deque(d);
         }
     }
 
     fn maybe_promote(&mut self, added_len: usize) {
-        if let ListValue::Packed(p) = self
+        if let ListRepr::Packed(p) = &self.repr
             && (p.len() >= PACKED_MAX_ENTRIES || added_len > PACKED_MAX_VALUE)
         {
             self.promote();
@@ -908,40 +1096,61 @@ impl ListValue {
     }
 
     pub fn push_back(&mut self, elem: Vec<u8>) {
+        self.add_entry_bytes(&elem);
         self.maybe_promote(elem.len());
-        match self {
-            ListValue::Packed(p) => p.push_back(&elem),
-            ListValue::Deque(d) => d.push_back(elem),
+        match &mut self.repr {
+            ListRepr::Packed(p) => p.push_back(&elem),
+            ListRepr::Deque(d) => d.push_back(elem),
         }
     }
 
     pub fn push_front(&mut self, elem: Vec<u8>) {
+        self.add_entry_bytes(&elem);
         self.maybe_promote(elem.len());
-        match self {
-            ListValue::Packed(p) => p.push_front(&elem),
-            ListValue::Deque(d) => d.push_front(elem),
+        match &mut self.repr {
+            ListRepr::Packed(p) => p.push_front(&elem),
+            ListRepr::Deque(d) => d.push_front(elem),
         }
     }
 
     pub fn pop_front(&mut self) -> Option<Vec<u8>> {
-        match self {
-            ListValue::Packed(p) => p.pop_front(),
-            ListValue::Deque(d) => d.pop_front(),
+        let removed = match &mut self.repr {
+            ListRepr::Packed(p) => p.pop_front(),
+            ListRepr::Deque(d) => d.pop_front(),
+        };
+        if let Some(ref r) = removed {
+            self.on_remove_one(r);
         }
+        removed
     }
 
     pub fn pop_back(&mut self) -> Option<Vec<u8>> {
-        match self {
-            ListValue::Packed(p) => p.pop_back(),
-            ListValue::Deque(d) => d.pop_back(),
+        let removed = match &mut self.repr {
+            ListRepr::Packed(p) => p.pop_back(),
+            ListRepr::Deque(d) => d.pop_back(),
+        };
+        if let Some(ref r) = removed {
+            self.on_remove_one(r);
         }
+        removed
     }
 
     /// Replace the element at `idx` (LSET); false if out of range.
     pub fn set(&mut self, idx: usize, elem: Vec<u8>) -> bool {
-        match self {
-            ListValue::Packed(p) => p.set(idx, &elem),
-            ListValue::Deque(d) => {
+        // LSET is a single-element command: model it as removing the old entry
+        // and adding the new one by its RAW length (the same ADD-time test
+        // `note_command_grow` applies, with the post-removal listpack as the
+        // "before" size). (frankenredis-rc49s)
+        let old_entry_bytes = self.get(idx).map(list_lp_entry_bytes);
+        let Some(old_entry_bytes) = old_entry_bytes else {
+            return false;
+        };
+        let base = self.lp_bytes - old_entry_bytes;
+        self.note_command_grow(base, elem.len() as u64);
+        self.lp_bytes = base + list_lp_entry_bytes(&elem);
+        match &mut self.repr {
+            ListRepr::Packed(p) => p.set(idx, &elem),
+            ListRepr::Deque(d) => {
                 if let Some(slot) = d.get_mut(idx) {
                     *slot = elem;
                     true
@@ -953,25 +1162,35 @@ impl ListValue {
     }
 
     /// Insert before index `idx` (`idx >= len` appends), matching `VecDeque::insert`.
+    /// The caller (LINSERT) makes the conversion decision via `note_command_grow`.
     pub fn insert(&mut self, idx: usize, elem: Vec<u8>) {
+        self.add_entry_bytes(&elem);
         self.maybe_promote(elem.len());
-        match self {
-            ListValue::Packed(p) => p.insert(idx, &elem),
-            ListValue::Deque(d) => d.insert(idx, elem),
+        match &mut self.repr {
+            ListRepr::Packed(p) => p.insert(idx, &elem),
+            ListRepr::Deque(d) => d.insert(idx, elem),
         }
     }
 
     pub fn remove(&mut self, idx: usize) -> Option<Vec<u8>> {
-        match self {
-            ListValue::Packed(p) => p.remove(idx),
-            ListValue::Deque(d) => d.remove(idx),
+        let removed = match &mut self.repr {
+            ListRepr::Packed(p) => p.remove(idx),
+            ListRepr::Deque(d) => d.remove(idx),
+        };
+        if let Some(ref r) = removed {
+            self.on_remove_one(r);
         }
+        removed
     }
 
     pub fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
-        match self {
-            ListValue::Packed(p) => p.retain(&mut keep),
-            ListValue::Deque(d) => d.retain(|v| keep(v)),
+        let before = self.len();
+        match &mut self.repr {
+            ListRepr::Packed(p) => p.retain(&mut keep),
+            ListRepr::Deque(d) => d.retain(|v| keep(v)),
+        }
+        if self.len() != before {
+            self.on_remove_bulk();
         }
     }
 
@@ -981,24 +1200,31 @@ impl ListValue {
 
     #[must_use]
     pub fn iter(&self) -> ListValueIter<'_> {
-        match self {
-            ListValue::Packed(p) => ListValueIter::Packed(p.iter()),
-            ListValue::Deque(d) => ListValueIter::Deque(d.iter()),
+        match &self.repr {
+            ListRepr::Packed(p) => ListValueIter::Packed(p.iter()),
+            ListRepr::Deque(d) => ListValueIter::Deque(d.iter()),
         }
     }
 }
 
 impl From<VecDeque<Vec<u8>>> for ListValue {
     fn from(d: VecDeque<Vec<u8>>) -> Self {
-        if d.len() > PACKED_MAX_ENTRIES || d.iter().any(|e| e.len() > PACKED_MAX_VALUE) {
-            ListValue::Deque(d)
+        let repr = if d.len() > PACKED_MAX_ENTRIES || d.iter().any(|e| e.len() > PACKED_MAX_VALUE) {
+            ListRepr::Deque(d)
         } else {
             let mut p = PackedList::new();
             for e in &d {
                 p.push_back(e);
             }
-            ListValue::Packed(p)
-        }
+            ListRepr::Packed(p)
+        };
+        let mut list = ListValue {
+            repr,
+            lp_bytes: LIST_LP_OVERHEAD,
+            forced_quicklist: false,
+        };
+        list.rebuild_growth_state();
+        list
     }
 }
 
