@@ -11081,15 +11081,21 @@ fn zrangestore_cmd(
         ));
     }
 
-    let mut pairs: Vec<(Vec<u8>, f64)> = if byscore {
+    let pairs: Vec<(Vec<u8>, f64)> = if byscore {
         let min = parse_score_bound(&argv[3])?;
         let max = parse_score_bound(&argv[4])?;
         let (lo, hi) = if rev { (max, min) } else { (min, max) };
-        let mut result = store.zrangebyscore_withscores(src, lo, hi, now_ms)?;
-        if rev {
-            result.reverse();
-        }
-        result
+        // LIMIT/REV pushed into the range walk — O(offset+count), not O(range)
+        // (mirrors the ZRANGE BYSCORE path; frankenredis-qchm7).
+        store.zrangebyscore_withscores_limited(
+            src,
+            lo,
+            hi,
+            rev,
+            limit_offset.unwrap_or(0),
+            limit_count,
+            now_ms,
+        )?
     } else if bylex {
         let min_lex = &argv[3];
         let max_lex = &argv[4];
@@ -11120,26 +11126,10 @@ fn zrangestore_cmd(
         }
     };
 
-    // (frankenredis-qsd9p) Apply LIMIT only in BYSCORE/BYLEX mode.
-    // In rank mode, the BYSCORE/BYLEX guard above already rejected
-    // any LIMIT with a real count, so the only way to reach here in
-    // rank mode is `LIMIT N -1` — and upstream's zrangeGenericCommand
-    // skips the LIMIT clause entirely for rank-mode ranges (the
-    // offset/count fields are only consumed in the BYSCORE/BYLEX
-    // paths). Mirroring that here means `LIMIT 1 -1` doesn't drop
-    // the first element from a rank-mode ZRANGESTORE.
-    // In-place LIMIT avoids second allocation. (frankenredis-5qwm6)
-    if byscore && let Some(offset) = limit_offset {
-        if offset > 0 && offset < pairs.len() {
-            pairs.drain(0..offset);
-        } else if offset >= pairs.len() {
-            pairs.clear();
-        }
-        if let Some(count) = limit_count {
-            pairs.truncate(count);
-        }
-    }
-
+    // LIMIT is now pushed down into both BYSCORE (zrangebyscore_withscores_limited)
+    // and BYLEX (zrangebylex_withscores_limited) range walks, so no post-collect
+    // slice remains. Rank mode never carries a real-count LIMIT (rejected above),
+    // matching upstream zrangeGenericCommand. (frankenredis-qchm7, qsd9p, 5qwm6)
     let count = pairs.len() as i64;
     if pairs.is_empty() {
         // Delete dst if it exists
@@ -64753,6 +64743,125 @@ mod tests {
                 .expect("source cardinality"),
             RespFrame::Integer(2)
         );
+    }
+
+    /// (frankenredis-qchm7) ZRANGESTORE BYSCORE now pushes LIMIT/REV down into
+    /// the range walk via `zrangebyscore_withscores_limited`. Prove it is
+    /// byte-identical to the prior full-collect + reverse + in-place LIMIT over
+    /// a grid of REV / bound / offset / count combinations (incl. exclusive
+    /// bounds, empty ranges, and offsets/counts past the end).
+    #[test]
+    fn zrangestore_byscore_limit_rev_pushdown_isomorphic() {
+        let seed = |store: &mut Store| {
+            let data: &[(&str, &str)] = &[
+                ("1", "a"),
+                ("1", "b"),
+                ("2", "c"),
+                ("3", "d"),
+                ("3", "e"),
+                ("5", "f"),
+                ("8", "g"),
+                ("8", "h"),
+                ("8", "i"),
+                ("10", "j"),
+            ];
+            let mut zadd = vec![b"ZADD".to_vec(), b"src".to_vec()];
+            for (s, m) in data {
+                zadd.push(s.as_bytes().to_vec());
+                zadd.push(m.as_bytes().to_vec());
+            }
+            dispatch_argv(&zadd, store, 0).unwrap();
+        };
+        let read_dst = |store: &mut Store| {
+            dispatch_argv(
+                &[
+                    b"ZRANGE".to_vec(),
+                    b"dst".to_vec(),
+                    b"0".to_vec(),
+                    b"-1".to_vec(),
+                    b"WITHSCORES".to_vec(),
+                ],
+                store,
+                0,
+            )
+            .unwrap()
+        };
+
+        // (low, high) bound pairs in natural order; for REV we feed them as
+        // (high, low) to argv, exactly as a redis client does.
+        let bounds: &[(&str, &str)] = &[
+            ("-inf", "+inf"),
+            ("2", "8"),
+            ("(2", "8"),
+            ("2", "(8"),
+            ("3", "3"),
+            ("100", "200"),
+            ("-inf", "3"),
+        ];
+        for &rev in &[false, true] {
+            for &(low, high) in bounds {
+                let (a3, a4) = if rev { (high, low) } else { (low, high) };
+                for &offset in &[0usize, 1, 3, 9, 25] {
+                    for &count in &[-1i64, 0, 1, 2, 5, 100] {
+                        let mut act = Store::new();
+                        let mut refs = Store::new();
+                        seed(&mut act);
+                        seed(&mut refs);
+
+                        // Actual: the new pushdown command path.
+                        let mut cmd = vec![
+                            b"ZRANGESTORE".to_vec(),
+                            b"dst".to_vec(),
+                            b"src".to_vec(),
+                            a3.as_bytes().to_vec(),
+                            a4.as_bytes().to_vec(),
+                            b"BYSCORE".to_vec(),
+                        ];
+                        if rev {
+                            cmd.push(b"REV".to_vec());
+                        }
+                        cmd.push(b"LIMIT".to_vec());
+                        cmd.push(offset.to_string().into_bytes());
+                        cmd.push(count.to_string().into_bytes());
+                        let act_count = dispatch_argv(&cmd, &mut act, 0).unwrap();
+
+                        // Reference: prior full-collect + reverse + in-place LIMIT.
+                        let min_b = super::parse_score_bound(a3.as_bytes()).unwrap();
+                        let max_b = super::parse_score_bound(a4.as_bytes()).unwrap();
+                        let (lo, hi) = if rev { (max_b, min_b) } else { (min_b, max_b) };
+                        let mut pairs = refs.zrangebyscore_withscores(b"src", lo, hi, 0).unwrap();
+                        if rev {
+                            pairs.reverse();
+                        }
+                        if offset > 0 && offset < pairs.len() {
+                            pairs.drain(0..offset);
+                        } else if offset >= pairs.len() {
+                            pairs.clear();
+                        }
+                        if count >= 0 {
+                            pairs.truncate(count as usize);
+                        }
+                        let ref_count = pairs.len() as i64;
+                        let dst_key = b"dst".to_vec();
+                        if pairs.is_empty() {
+                            refs.del(std::slice::from_ref(&dst_key), 0);
+                        } else {
+                            refs.zstore_from_pairs(dst_key, pairs, 0);
+                        }
+
+                        let ctx = format!(
+                            "rev={rev} a3={a3} a4={a4} off={offset} cnt={count}"
+                        );
+                        assert_eq!(
+                            act_count,
+                            RespFrame::Integer(ref_count),
+                            "count mismatch {ctx}"
+                        );
+                        assert_eq!(read_dst(&mut act), read_dst(&mut refs), "dst mismatch {ctx}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
