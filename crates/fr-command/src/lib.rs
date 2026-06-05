@@ -8114,12 +8114,19 @@ fn stream_lag_range_has_tombstones(
     start_id <= max_deleted_id
 }
 
+/// Faithful port of upstream t_stream.c `streamReplyWithCGLag`. Returns the
+/// group's lag (entries yet to be delivered) as an Integer, or a null bulk
+/// string when the value can't be determined (SCG_INVALID — e.g. the group's
+/// position falls inside a tombstoned range).
 fn stream_full_group_lag_frame(
     stream: StreamLagInfo,
     last_delivered_id: StreamId,
     entries_read: Option<u64>,
 ) -> RespFrame {
-    if let Some(entries_read) = entries_read
+    let lag: Option<i64> = if stream.entries_added == 0 {
+        // The lag of a newly-initialized stream is 0.
+        Some(0)
+    } else if let Some(read) = entries_read
         && !stream_lag_range_has_tombstones(
             stream.len,
             stream.first_id,
@@ -8127,54 +8134,63 @@ fn stream_full_group_lag_frame(
             last_delivered_id,
         )
     {
-        let len = i64::try_from(stream.entries_added).unwrap_or(i64::MAX);
-        let read = i64::try_from(entries_read).unwrap_or(i64::MAX);
-        return RespFrame::Integer(len.saturating_sub(read));
-    }
-    // (frankenredis-h3vkq) If the group's position sits within the tombstone
-    // range, the lag can't be determined — upstream streamCGLag returns nil
-    // (the same condition that invalidates entries-read). The structural
-    // fallback below must not fabricate a concrete lag here.
-    if stream_lag_range_has_tombstones(
-        stream.len,
-        stream.first_id,
-        stream.max_deleted_id,
-        last_delivered_id,
-    ) {
-        return RespFrame::BulkString(None);
-    }
-    // (frankenredis-ren6y) An EMPTY stream still has a last-generated-id
-    // watermark (e.g. after XSETID lowered it). Upstream reports lag=nil when the
-    // group's last-delivered-id is AHEAD of that watermark (the group is beyond
-    // the stream — lag is undeterminable); otherwise the group is caught up so
-    // lag=0. fr previously always returned 0 for an empty stream.
-    let empty_stream_lag = || match stream.last_generated_id {
-        Some(lg) if last_delivered_id > lg => RespFrame::BulkString(None),
-        _ => RespFrame::Integer(0),
-    };
-    let Some(first_id) = stream.first_id else {
-        return empty_stream_lag();
-    };
-    let Some(last_id) = stream.last_id else {
-        return empty_stream_lag();
-    };
-    if last_delivered_id > last_id {
-        return RespFrame::BulkString(None);
-    }
-    if last_delivered_id == last_id {
-        return RespFrame::Integer(0);
-    }
-    if stream.max_deleted_id != (0, 0) && stream.max_deleted_id >= first_id {
-        return RespFrame::BulkString(None);
-    }
-    let lag = if last_delivered_id < first_id {
-        stream.len
-    } else if last_delivered_id == first_id {
-        stream.len.saturating_sub(1)
+        // No fragmentation ahead → the group's logical reads counter is valid.
+        Some(
+            i64::try_from(stream.entries_added)
+                .unwrap_or(i64::MAX)
+                .saturating_sub(i64::try_from(read).unwrap_or(i64::MAX)),
+        )
     } else {
-        return RespFrame::BulkString(None);
+        // Estimate the group's logical read counter from its last-delivered-id.
+        stream_estimate_distance_from_first_ever(&stream, last_delivered_id).map(|read| {
+            i64::try_from(stream.entries_added)
+                .unwrap_or(i64::MAX)
+                .saturating_sub(i64::try_from(read).unwrap_or(i64::MAX))
+        })
     };
-    RespFrame::Integer(i64::try_from(lag).unwrap_or(i64::MAX))
+    match lag {
+        Some(value) => RespFrame::Integer(value),
+        None => RespFrame::BulkString(None),
+    }
+}
+
+/// Port of upstream `streamEstimateDistanceFromFirstEverEntry(s, id)`, where
+/// `id` is the group's last-delivered-id. Crucially this uses the
+/// last-GENERATED-id watermark as the stream's last ID (upstream `s->last_id`,
+/// which survives an emptied or XSETID-lowered stream and may sit AHEAD of the
+/// last live entry), not the last live entry — so a group caught up to the
+/// watermark reports the exact `entries_added` counter (lag 0) even when the
+/// last physical entry is older. `None` is the SCG_INVALID sentinel.
+fn stream_estimate_distance_from_first_ever(stream: &StreamLagInfo, id: StreamId) -> Option<u64> {
+    if stream.entries_added == 0 {
+        return Some(0);
+    }
+    // `s->last_id` is the watermark; fall back to the last live entry only when
+    // no watermark was supplied (synthetic callers / never-XSETID'd streams).
+    let last_id = stream.last_generated_id.or(stream.last_id).unwrap_or((0, 0));
+    let len = u64::try_from(stream.len).unwrap_or(u64::MAX);
+    // In an empty stream, an ID at or before the last ID maps to entries_added.
+    if stream.len == 0 && id <= last_id {
+        return Some(stream.entries_added);
+    }
+    match id.cmp(&last_id) {
+        std::cmp::Ordering::Equal => return Some(stream.entries_added),
+        std::cmp::Ordering::Greater => return None, // a future ID is unknown
+        std::cmp::Ordering::Less => {}
+    }
+    let first_id = stream.first_id.unwrap_or((0, 0));
+    // No fragmentation ahead iff there are no tombstones, or the last tombstone
+    // is strictly below the current first entry.
+    if stream.max_deleted_id == (0, 0) || stream.max_deleted_id < first_id {
+        match id.cmp(&first_id) {
+            std::cmp::Ordering::Less => return Some(stream.entries_added.saturating_sub(len)),
+            std::cmp::Ordering::Equal => {
+                return Some(stream.entries_added.saturating_sub(len).saturating_add(1));
+            }
+            std::cmp::Ordering::Greater => {}
+        }
+    }
+    None
 }
 
 fn stream_pending_delivery_time(now_ms: u64, idle_ms: u64) -> i64 {
