@@ -8376,7 +8376,13 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
 
     let mut out = Vec::new();
     for (key, id_arg) in keys.iter().zip(ids.iter()) {
-        let cursor = if id_arg.as_slice() == b">" {
+        // (frankenredis-xrgrphist) A history read (explicit id, not '>') always
+        // includes the stream in the reply — with an empty entry list when the
+        // consumer has no matching pending entries — matching upstream
+        // t_stream.c::xreadCommand. Only the '>' (new-entries) cursor omits an
+        // empty stream (and yields nil when every requested stream is empty).
+        let is_new_entries = id_arg.as_slice() == b">";
+        let cursor = if is_new_entries {
             StreamGroupReadCursor::NewEntries
         } else {
             let parsed = match parse_xread_id(id_arg) {
@@ -8394,7 +8400,7 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         let Some(records) = store.xreadgroup(key, group, consumer, read_options, now_ms)? else {
             return Ok(xreadgroup_nogroup_error(key, group));
         };
-        if records.is_empty() {
+        if records.is_empty() && is_new_entries {
             continue;
         }
 
@@ -36185,7 +36191,16 @@ mod tests {
             0,
         )
         .expect("other consumer replay");
-        assert_eq!(replay_for_other_consumer, RespFrame::Array(None));
+        // (frankenredis-xrgrphist) A history read (explicit id, not '>') always
+        // includes the stream with an empty entry list when the consumer has no
+        // matching pending entries — it does NOT collapse to a nil array.
+        assert_eq!(
+            replay_for_other_consumer,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"s".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
+            ]))]))
+        );
 
         let noack_read = dispatch_argv(
             &[
