@@ -6232,6 +6232,19 @@ impl Runtime {
         };
         let elapsed_us = start.elapsed().as_micros() as u64;
         let dirty_after = self.server.store.dirty;
+        // Capture the keys DEL/UNLINK actually removed, so the keyspace
+        // dispatcher fires "del"/"unlink" only for real removals (never for a
+        // missing or duplicate key argument — matching upstream delGenericCommand
+        // which notifies per successful dbDelete). Taken now, before lazy-expiry
+        // handling might run its own store.del and overwrite the record.
+        let del_removed_keys = if argv
+            .first()
+            .is_some_and(|c| c.eq_ignore_ascii_case(b"DEL") || c.eq_ignore_ascii_case(b"UNLINK"))
+        {
+            self.server.store.take_last_del_removed()
+        } else {
+            Vec::new()
+        };
         // (frankenredis-rot3d) Upstream server.c::processCommand rejects
         // unknown commands via commandCheckExistence BEFORE call() runs,
         // so SLOWLOG / INFO commandstats / latency histograms never see
@@ -6507,6 +6520,18 @@ impl Runtime {
                                         &cmd_keys[0],
                                         target_db,
                                     );
+                                }
+                            } else if argv.first().is_some_and(|c| {
+                                c.eq_ignore_ascii_case(b"DEL") || c.eq_ignore_ascii_case(b"UNLINK")
+                            }) {
+                                // DEL/UNLINK fire "del"/"unlink" ONLY for keys
+                                // actually removed (captured above), not for
+                                // missing or duplicate key arguments — the
+                                // generic per-key loop would over-fire.
+                                for key in &del_removed_keys {
+                                    self.server
+                                        .store
+                                        .notify_keyspace_event(event_type, event, key, db);
                                 }
                             } else {
                                 for key in &cmd_keys {

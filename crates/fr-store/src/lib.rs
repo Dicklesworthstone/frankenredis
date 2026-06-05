@@ -2827,6 +2827,10 @@ pub struct Store {
     /// Keyspace notification flags (parsed from notify-keyspace-events config).
     pub notify_keyspace_events: u32,
 
+    /// Keys actually removed by the most recent `del()` call, so the command
+    /// layer fires a "del"/"unlink" keyspace event per real removal only.
+    last_del_removed: Vec<Vec<u8>>,
+
     /// Pending keyspace notification messages (channel, message) to deliver
     /// via the pub/sub system after command execution.
     pub keyspace_notifications: Vec<(Vec<u8>, Vec<u8>)>,
@@ -3197,6 +3201,7 @@ impl Default for Store {
             cached_memory_usage_bytes: std::cell::Cell::new(0),
             cached_memory_usage_dirty: std::cell::Cell::new(0),
             notify_keyspace_events: 0,
+            last_del_removed: Vec::new(),
             keyspace_notifications: Vec::new(),
             lazy_expired_propagation: Vec::new(),
             last_xadd_trimmed: false,
@@ -4072,16 +4077,28 @@ impl Store {
 
     pub fn del(&mut self, keys: &[Vec<u8>], now_ms: u64) -> u64 {
         let mut removed = 0_u64;
+        self.last_del_removed.clear();
         for key in keys {
             self.drop_if_expired(key, now_ms);
             if self.internal_entries_remove(key.as_slice()).is_some() {
                 self.stream_groups.remove(key.as_slice());
                 self.stream_last_ids.remove(key.as_slice());
+                // Record the key actually removed so the command layer fires a
+                // "del"/"unlink" keyspace event ONLY for real removals — upstream
+                // delGenericCommand notifies per successful dbDelete, never for
+                // a missing (or already-removed duplicate) key argument.
+                self.last_del_removed.push(key.clone());
                 removed = removed.saturating_add(1);
             }
         }
         self.dirty = self.dirty.saturating_add(removed);
         removed
+    }
+
+    /// Drain the keys removed by the most recent `del()` call (see the field).
+    #[must_use]
+    pub fn take_last_del_removed(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.last_del_removed)
     }
 
     pub fn exists(&mut self, key: &[u8], now_ms: u64) -> bool {
