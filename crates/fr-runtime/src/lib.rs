@@ -30,7 +30,7 @@ use fr_eventloop::{
 };
 use fr_persist::{
     AofRecord, PersistError, RdbEntry, RdbValue, argv_to_aof_records, decode_aof_stream,
-    decode_rdb, encode_aof_stream, read_rdb_file, write_aof_file,
+    encode_aof_stream, read_rdb_file, write_aof_file,
 };
 use fr_protocol::{RespFrame, RespParseError};
 use fr_repl::{
@@ -3892,9 +3892,18 @@ impl Runtime {
                 );
             }
             PsyncReply::FullResync { replid, offset } => {
-                let (entries, _aux) = decode_rdb(payload)?;
+                let decoded = fr_persist::decode_rdb_prefix(payload)?;
+                if decoded.consumed != payload.len() {
+                    return Err(PersistError::InvalidFrame);
+                }
                 let mut store = Store::new();
-                let counts = apply_rdb_entries_to_store(&mut store, &entries, now_ms)?;
+                let counts = apply_rdb_entries_to_store(&mut store, &decoded.entries, now_ms)?;
+                // (frankenredis-t1yxa) Re-register FUNCTION libraries carried in
+                // the full-sync snapshot so FCALL / FUNCTION LIST work on the
+                // replica too, matching the master.
+                for code in &decoded.functions {
+                    let _ = store.function_load(code, true);
+                }
                 store.stat_rdb_last_load_keys_expired =
                     u64::try_from(counts.expired).unwrap_or(u64::MAX);
                 store.stat_rdb_last_load_keys_loaded =
@@ -22101,6 +22110,46 @@ mod tests {
                 RespFrame::BulkString(Some(b"connected".to_vec())),
                 RespFrame::Integer(i64::try_from(fullresync_offset).unwrap_or(i64::MAX)),
             ]))
+        );
+    }
+
+    #[test]
+    fn replication_fullresync_reregisters_function_libraries_on_replica() {
+        // (frankenredis-t1yxa) A replica that full-syncs from a master with
+        // FUNCTION libraries must re-register them — the master's snapshot
+        // carries the FUNCTION2 records, the replica's apply path used to drop
+        // them (decode_rdb), leaving FUNCTION LIST empty / FCALL broken.
+        let mut primary = Runtime::default_strict();
+        let lib =
+            b"#!lua name=replib\nredis.register_function('rf', function() return 'synced' end)";
+        primary.execute_frame(command(&[b"FUNCTION", b"LOAD", lib.as_slice()]), 1);
+        primary.execute_frame(command(&[b"SET", b"k", b"v"]), 2);
+        let reply = match primary.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 3) {
+            RespFrame::SimpleString(line) => line,
+            other => unreachable!("expected fullresync, got {other:?}"),
+        };
+        let snapshot = primary.encoded_rdb_snapshot(3);
+
+        let mut replica = Runtime::default_strict();
+        replica.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 4);
+        replica
+            .apply_replication_sync_payload(&reply, &snapshot, 5)
+            .expect("apply fullresync");
+
+        // Key data and the function both arrive on the replica.
+        assert_eq!(
+            replica.execute_frame(command(&[b"GET", b"k"]), 6),
+            RespFrame::BulkString(Some(b"v".to_vec()))
+        );
+        let RespFrame::Array(Some(libs)) =
+            replica.execute_frame(command(&[b"FUNCTION", b"LIST"]), 7)
+        else {
+            panic!("FUNCTION LIST should be an array");
+        };
+        assert_eq!(libs.len(), 1, "replica must register the master's library");
+        assert_eq!(
+            replica.execute_frame(command(&[b"FCALL", b"rf", b"0"]), 8),
+            RespFrame::BulkString(Some(b"synced".to_vec()))
         );
     }
 
