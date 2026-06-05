@@ -78,12 +78,18 @@ pub fn decode_ziplist(data: &[u8]) -> Option<Vec<Vec<u8>>> {
             _ => {
                 // Integer encodings (top two bits are 11).
                 let (val, adv): (i64, usize) = match enc {
-                    0xC0 => (i16::from_le_bytes([*data.get(i + 1)?, *data.get(i + 2)?]) as i64, 3),
+                    0xC0 => (
+                        i16::from_le_bytes([*data.get(i + 1)?, *data.get(i + 2)?]) as i64,
+                        3,
+                    ),
                     0xD0 => {
                         let h = data.get(i + 1..i + 5)?;
                         (i32::from_le_bytes([h[0], h[1], h[2], h[3]]) as i64, 5)
                     }
-                    0xE0 => (i64::from_le_bytes(data.get(i + 1..i + 9)?.try_into().ok()?), 9),
+                    0xE0 => (
+                        i64::from_le_bytes(data.get(i + 1..i + 9)?.try_into().ok()?),
+                        9,
+                    ),
                     0xF0 => {
                         // 24-bit signed little-endian.
                         let h = data.get(i + 1..i + 4)?;
@@ -199,26 +205,37 @@ mod tests {
         // Mirrors the redis hash-ziplist fixture's entry shapes.
         let zl = assemble_ziplist(&[str6(b"one"), vec![0xF2], str6(b"two"), vec![0xF3]]);
         let entries = decode_ziplist(&zl).expect("decode");
-        assert_eq!(entries, vec![b"one".to_vec(), b"1".to_vec(), b"two".to_vec(), b"2".to_vec()]);
+        assert_eq!(
+            entries,
+            vec![
+                b"one".to_vec(),
+                b"1".to_vec(),
+                b"two".to_vec(),
+                b"2".to_vec()
+            ]
+        );
     }
 
     #[test]
     fn ziplist_decodes_every_integer_width() {
         let zl = assemble_ziplist(&[
-            vec![0xFE, 0xFB],                                  // int8 = -5
-            vec![0xC0, 0x2E, 0xFB],                            // int16 LE = -1234
-            vec![0xF0, 0x2E, 0xFB, 0xFF],                      // int24 LE = -1234
-            vec![0xD0, 0x15, 0xCD, 0x5B, 0x07],                // int32 LE = 123456789
+            vec![0xFE, 0xFB],                                           // int8 = -5
+            vec![0xC0, 0x2E, 0xFB],                                     // int16 LE = -1234
+            vec![0xF0, 0x2E, 0xFB, 0xFF],                               // int24 LE = -1234
+            vec![0xD0, 0x15, 0xCD, 0x5B, 0x07],                         // int32 LE = 123456789
             vec![0xE0, 0x15, 0x81, 0xE9, 0x7D, 0xF4, 0x10, 0x22, 0x11], // int64 LE
-            vec![0xF1],                                        // immediate 0
-            vec![0xFD],                                        // immediate 12
+            vec![0xF1],                                                 // immediate 0
+            vec![0xFD],                                                 // immediate 12
         ]);
         let entries = decode_ziplist(&zl).expect("decode");
         assert_eq!(entries[0], b"-5");
         assert_eq!(entries[1], b"-1234");
         assert_eq!(entries[2], b"-1234");
         assert_eq!(entries[3], b"123456789");
-        assert_eq!(entries[4], 0x1122_10f4_7de9_8115_i64.to_string().into_bytes());
+        assert_eq!(
+            entries[4],
+            0x1122_10f4_7de9_8115_i64.to_string().into_bytes()
+        );
         assert_eq!(entries[5], b"0");
         assert_eq!(entries[6], b"12");
     }
@@ -229,7 +246,13 @@ mod tests {
         let mut e14 = vec![0x40 | ((300 >> 8) as u8), (300 & 0xFF) as u8];
         e14.extend_from_slice(&big);
         let huge = vec![b'q'; 70_000]; // needs 32-bit length
-        let mut e32 = vec![0x80, 0, (70_000 >> 16) as u8, (70_000 >> 8) as u8, (70_000 & 0xFF) as u8];
+        let mut e32 = vec![
+            0x80,
+            0,
+            (70_000 >> 16) as u8,
+            (70_000 >> 8) as u8,
+            (70_000 & 0xFF) as u8,
+        ];
         e32.extend_from_slice(&huge);
         let zl = assemble_ziplist(&[e14, e32]);
         let entries = decode_ziplist(&zl).expect("decode");
@@ -249,11 +272,19 @@ mod tests {
     fn zipmap_decodes_field_value_pairs() {
         // zmlen=2, then (len f1)(len free v1)(len f2)(len free v2) 0xFF.
         let blob = [
-            0x02, 0x02, b'f', b'1', 0x02, 0x00, b'v', b'1', 0x02, b'f', b'2', 0x02, 0x00, b'v', b'2',
-            0xFF,
+            0x02, 0x02, b'f', b'1', 0x02, 0x00, b'v', b'1', 0x02, b'f', b'2', 0x02, 0x00, b'v',
+            b'2', 0xFF,
         ];
         let entries = decode_zipmap(&blob).expect("decode");
-        assert_eq!(entries, vec![b"f1".to_vec(), b"v1".to_vec(), b"f2".to_vec(), b"v2".to_vec()]);
+        assert_eq!(
+            entries,
+            vec![
+                b"f1".to_vec(),
+                b"v1".to_vec(),
+                b"f2".to_vec(),
+                b"v2".to_vec()
+            ]
+        );
     }
 
     #[test]

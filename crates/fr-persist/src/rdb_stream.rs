@@ -1066,9 +1066,9 @@ mod tests {
                 last_delivered_id_seq: 1,
                 entries_read: Some(2),
                 consumers: vec![
-                RdbStreamConsumer::named(b"alice".to_vec()),
-                RdbStreamConsumer::named(b"bob".to_vec()),
-            ],
+                    RdbStreamConsumer::named(b"alice".to_vec()),
+                    RdbStreamConsumer::named(b"bob".to_vec()),
+                ],
                 pending: vec![
                     RdbStreamPendingEntry {
                         entry_id_ms: 1000,
