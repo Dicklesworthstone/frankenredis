@@ -1,0 +1,4 @@
+Benchmark 1: MODE=borrowed-command FIELDS=16 VALUE_SIZE=64 ITERATIONS=200000 target-icywolf-m09ka-cleanbaseline/release-perf/fr-ds9o7-parser-harness
+  Time (mean ± σ):     130.5 ms ±   3.4 ms    [User: 128.2 ms, System: 1.7 ms]
+  Range (min … max):   125.6 ms … 136.1 ms    12 runs
+ 

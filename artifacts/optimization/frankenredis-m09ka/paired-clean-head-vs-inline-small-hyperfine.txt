@@ -1,0 +1,11 @@
+Benchmark 1: MODE=borrowed-command FIELDS=16 VALUE_SIZE=64 ITERATIONS=200000 /data/projects/.scratch/frankenredis-m09ka-baseline-ae6a38804-icywolf/target-icywolf-m09ka-cleanbaseline/release-perf/fr-ds9o7-parser-harness
+  Time (mean ± σ):     133.5 ms ±   6.4 ms    [User: 132.0 ms, System: 0.8 ms]
+  Range (min … max):   125.9 ms … 151.1 ms    12 runs
+ 
+Benchmark 2: MODE=borrowed-command FIELDS=16 VALUE_SIZE=64 ITERATIONS=200000 target-icywolf-m09ka-candidate/release-perf/fr-ds9o7-parser-harness
+  Time (mean ± σ):     161.3 ms ±   9.7 ms    [User: 159.1 ms, System: 1.3 ms]
+  Range (min … max):   148.9 ms … 178.6 ms    12 runs
+ 
+Summary
+  MODE=borrowed-command FIELDS=16 VALUE_SIZE=64 ITERATIONS=200000 /data/projects/.scratch/frankenredis-m09ka-baseline-ae6a38804-icywolf/target-icywolf-m09ka-cleanbaseline/release-perf/fr-ds9o7-parser-harness ran
+    1.21 ± 0.09 times faster than MODE=borrowed-command FIELDS=16 VALUE_SIZE=64 ITERATIONS=200000 target-icywolf-m09ka-candidate/release-perf/fr-ds9o7-parser-harness

@@ -1,0 +1,4 @@
+artifacts/optimization/frankenredis-m09ka/golden-clean-head-owned.txt: OK
+artifacts/optimization/frankenredis-m09ka/golden-clean-head-borrowed.txt: OK
+artifacts/optimization/frankenredis-m09ka/golden-candidate-owned.txt: OK
+artifacts/optimization/frankenredis-m09ka/golden-candidate-borrowed.txt: OK
