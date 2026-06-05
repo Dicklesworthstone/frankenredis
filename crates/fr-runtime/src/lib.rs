@@ -6528,10 +6528,17 @@ impl Runtime {
                                 // actually removed (captured above), not for
                                 // missing or duplicate key arguments — the
                                 // generic per-key loop would over-fire.
+                                // last_del_removed holds STORE keys, which are
+                                // db-prefixed on a non-zero db; strip the prefix
+                                // so the event carries the LOGICAL key
+                                // (notify_keyspace_event re-applies the db).
                                 for key in &del_removed_keys {
+                                    let logical = decode_db_key(key)
+                                        .map(|(_, lk)| lk)
+                                        .unwrap_or(key.as_slice());
                                     self.server
                                         .store
-                                        .notify_keyspace_event(event_type, event, key, db);
+                                        .notify_keyspace_event(event_type, event, logical, db);
                                 }
                             } else {
                                 for key in &cmd_keys {
