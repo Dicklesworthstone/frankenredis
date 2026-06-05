@@ -202,6 +202,33 @@ def main():
         lambda: ("ZINCRBY", k(), "1", v()),
         lambda: ("ZPOPMIN", k()),
         lambda: ("XADD", k(), "*", "f", v()),
+        # ── broadened event-edge coverage ──
+        lambda: ("DECR", k()),
+        lambda: ("DECRBY", k(), str(rng.randint(-5, 5))),
+        lambda: ("INCRBYFLOAT", k(), rng.choice(["1", "2.5", "-1"])),
+        lambda: ("SETNX", k(), v()),
+        lambda: ("MSET", k(), v(), k(), v()),
+        lambda: ("SETBIT", k(), str(rng.randint(0, 20)), str(rng.randint(0, 1))),
+        lambda: ("GETEX", k()) + rng.choice([(), ("PERSIST",), ("EX", "100"), ("EXAT", "1")]),
+        lambda: ("EXPIRE", k(), "500", rng.choice(["NX", "XX", "GT", "LT"])),
+        lambda: ("PEXPIRE", k(), "500000"),
+        lambda: ("EXPIREAT", k(), "9999999999"),
+        lambda: ("RENAMENX", k(), k()),
+        lambda: ("COPY", k(), k()),
+        lambda: ("ZADD", k(), rng.choice(["GT", "LT", "NX", "XX"]), str(rng.randint(-3, 3)), v()),
+        lambda: ("ZADD", k(), "INCR", "1", v()),
+        lambda: ("ZRANGESTORE", k(), k(), "0", "-1"),
+        lambda: ("ZREMRANGEBYRANK", k(), "0", "0"),
+        lambda: ("ZPOPMAX", k()),
+        lambda: ("HSETNX", k(), v(), v()),
+        lambda: ("HINCRBYFLOAT", k(), v(), "1.5"),
+        lambda: ("SMOVE", k(), k(), v()),
+        # SPOP excluded: random member removal desyncs set state → downstream
+        # event false positives (its own "spop" event payload is just the key).
+        lambda: ("SUNIONSTORE", k(), k(), k()),
+        lambda: ("LMOVE", k(), k(), rng.choice(["LEFT", "RIGHT"]), rng.choice(["LEFT", "RIGHT"])),
+        lambda: ("SORT", k(), "STORE", k()),
+        lambda: ("BITFIELD", k(), "SET", "u8", "0", str(rng.randint(0, 255))),
     ]
 
     for it in range(args.iters):
