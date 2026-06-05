@@ -8981,20 +8981,19 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         if argv.len() != 5 && argv.len() != 7 {
             return Err(setid_subcommand_syntax());
         }
-        if argv.len() == 7 && !eq_ascii_command(&argv[5], b"ENTRIESREAD") {
-            return Err(setid_subcommand_syntax());
+        // (frankenredis-b7jra) Upstream xgroupCommand resolves the key and the
+        // consumer group BEFORE parsing the id/ENTRIESREAD args, so a missing
+        // key or group reports its own error rather than "Invalid stream ID".
+        // Use the no-stat precheck (matches `lookupKeyWrite`: no keyspace-hit
+        // accounting) so the existence ordering is fixed without perturbing
+        // INFO keyspace stats.
+        match store.stream_group_precheck(&argv[2], &argv[3], now_ms) {
+            Ok(true) => {}
+            Ok(false) => return Ok(xgroup_nogroup_error(&argv[2], &argv[3])),
+            Err(StoreError::KeyNotFound) => return Ok(xgroup_key_required_error()),
+            Err(err) => return Err(CommandError::Store(err)),
         }
-        let entries_read = if argv.len() == 7 {
-            let parsed = parse_i64_arg(&argv[6])?;
-            if parsed < 0 && parsed != -1 {
-                return Err(CommandError::Custom(
-                    "ERR value for ENTRIESREAD must be positive or -1".to_string(),
-                ));
-            }
-            u64::try_from(parsed).ok()
-        } else {
-            None
-        };
+        // Id is parsed before ENTRIESREAD, matching upstream's argument order.
         let last_delivered_id = if eq_ascii_command(&argv[4], b"$") {
             store.xlast_id(&argv[2], now_ms)?.unwrap_or((0, 0))
         } else {
@@ -9013,6 +9012,20 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                 Err(reply) => return Ok(reply),
             }
         };
+        if argv.len() == 7 && !eq_ascii_command(&argv[5], b"ENTRIESREAD") {
+            return Err(setid_subcommand_syntax());
+        }
+        let entries_read = if argv.len() == 7 {
+            let parsed = parse_i64_arg(&argv[6])?;
+            if parsed < 0 && parsed != -1 {
+                return Err(CommandError::Custom(
+                    "ERR value for ENTRIESREAD must be positive or -1".to_string(),
+                ));
+            }
+            u64::try_from(parsed).ok()
+        } else {
+            None
+        };
         return match store.xgroup_setid_with_entries_read(
             &argv[2],
             &argv[3],
@@ -9021,8 +9034,9 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             now_ms,
         ) {
             Ok(true) => Ok(RespFrame::SimpleString("OK".to_string())),
+            // The precheck already guaranteed key+group exist, so these arms are
+            // defensive (e.g. a concurrent expiry between precheck and apply).
             Ok(false) => Ok(xgroup_nogroup_error(&argv[2], &argv[3])),
-            // (br-frankenredis-qcmh)
             Err(StoreError::KeyNotFound) => Ok(xgroup_key_required_error()),
             Err(err) => Err(CommandError::Store(err)),
         };
@@ -39579,6 +39593,23 @@ mod tests {
             RespFrame::Error("NOGROUP No such consumer group 'g1' for key name 's'".to_string())
         );
 
+        // (frankenredis-b7jra) The "Invalid stream ID" error is only reached
+        // once the key AND group exist — upstream xgroupCommand resolves both
+        // before parsing the id. With the group absent the previous case shows
+        // NOGROUP takes precedence; create the group here to exercise the
+        // id-parse error path itself.
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup create for invalid-id path");
         let invalid_id = dispatch_argv(
             &[
                 b"XGROUP".to_vec(),
@@ -39596,6 +39627,42 @@ mod tests {
             RespFrame::Error(
                 "ERR Invalid stream ID specified as stream command argument".to_string()
             )
+        );
+        // Group missing + bad id → NOGROUP wins (existence precedes id parse).
+        let nogroup_bad_id = dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"SETID".to_vec(),
+                b"s".to_vec(),
+                b"g_absent".to_vec(),
+                b"bad-id".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup setid nogroup precedes bad id");
+        assert_eq!(
+            nogroup_bad_id,
+            RespFrame::Error(
+                "NOGROUP No such consumer group 'g_absent' for key name 's'".to_string()
+            )
+        );
+        // Key missing + bad id → key-required wins.
+        let nokey_bad_id = dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"SETID".to_vec(),
+                b"absent_key".to_vec(),
+                b"g1".to_vec(),
+                b"bad-id".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup setid key-required precedes bad id");
+        assert_eq!(
+            nokey_bad_id,
+            RespFrame::Error("ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.".to_string())
         );
 
         let arity = dispatch_argv(

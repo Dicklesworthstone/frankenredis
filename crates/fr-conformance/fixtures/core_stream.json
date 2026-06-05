@@ -1877,6 +1877,7 @@
     {
       "name": "xgroup_setid_invalid_id_error",
       "now_ms": 1000,
+      "comment": "(frankenredis-b7jra) Group g1 is absent on read1 in this sequence; upstream XGROUP SETID resolves key+group BEFORE parsing the id, so it returns NOGROUP — not 'Invalid stream ID'. (Prior fixture value captured the pre-fix order.)",
       "argv": [
         "XGROUP",
         "SETID",
@@ -1886,7 +1887,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Invalid stream ID specified as stream command argument"
+        "value": "NOGROUP No such consumer group 'g1' for key name 'read1'"
       }
     },
     {

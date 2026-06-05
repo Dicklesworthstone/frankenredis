@@ -12081,6 +12081,33 @@ impl Store {
         self.xgroup_setid_with_entries_read(key, group, last_delivered_id, None, now_ms)
     }
 
+    /// Existence precheck for XGROUP subcommands that must report the redis
+    /// error precedence (key-required / WRONGTYPE / NOGROUP) BEFORE parsing an
+    /// id argument. Drops an expired key but records NO keyspace-hit stat —
+    /// matching upstream's `lookupKeyWrite` (write path, no hit/miss accounting),
+    /// so it never perturbs INFO keyspace stats. Returns Ok(true) if the group
+    /// exists, Ok(false) if the (stream) key exists but the group does not,
+    /// Err(KeyNotFound) if the key is absent, Err(WrongType) otherwise.
+    /// (frankenredis-b7jra)
+    pub fn stream_group_precheck(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            None => Err(StoreError::KeyNotFound),
+            Some(entry) => match &entry.value {
+                Value::Stream(_) => Ok(self
+                    .stream_groups
+                    .get(key)
+                    .is_some_and(|groups| groups.contains_key(group))),
+                _ => Err(StoreError::WrongType),
+            },
+        }
+    }
+
     pub fn xgroup_setid_with_entries_read(
         &mut self,
         key: &[u8],
