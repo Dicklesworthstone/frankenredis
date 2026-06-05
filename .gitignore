@@ -214,3 +214,6 @@ codex.mcp.json
 cursor.mcp.json
 gemini.mcp.json
 .opencode.json.*.bak
+
+# Ephemeral agent/skill scratch (repo-janitor 2026-06-04)
+*.mcp.json
