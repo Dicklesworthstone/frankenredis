@@ -71,17 +71,26 @@ proptest! {
         let retrieved = store.getrange(&key, start, end, 0).unwrap();
 
         let len = value.len() as i64;
-        let mut s = if start < 0 { len + start } else { start };
-        let mut e = if end < 0 { len + end } else { end };
-
-        if s < 0 { s = 0; }
-        if e < 0 { e = 0; }
-
-        let expected = if s > e || len == 0 || s >= len {
+        // Upstream t_string.c::getrangeCommand short-circuits to an empty reply
+        // when BOTH offsets are negative and inverted (start > end), BEFORE
+        // resolving them against the length — so e.g. GETRANGE "a" -1 -2 -> ""
+        // even though the resolved range would be non-empty. The oracle must
+        // model this or it diverges from correct fr/redis behaviour.
+        let expected = if start < 0 && end < 0 && start > end {
             Vec::new()
         } else {
-            let e_idx = std::cmp::min(e, len - 1) as usize;
-            value[s as usize..e_idx + 1].to_vec()
+            let mut s = if start < 0 { len + start } else { start };
+            let mut e = if end < 0 { len + end } else { end };
+
+            if s < 0 { s = 0; }
+            if e < 0 { e = 0; }
+
+            if s > e || len == 0 || s >= len {
+                Vec::new()
+            } else {
+                let e_idx = std::cmp::min(e, len - 1) as usize;
+                value[s as usize..e_idx + 1].to_vec()
+            }
         };
 
         prop_assert_eq!(retrieved, expected);
