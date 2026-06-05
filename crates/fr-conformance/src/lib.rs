@@ -2534,9 +2534,19 @@ fn live_oracle_client_id_drift_matches(
 
 /// HELLO replies are `[server, redis, version, X, proto, N, id, ID, ...]`.
 /// The `id` field is the same per-connection counter canonicalized above.
-/// Accept matching shape with positive IDs while requiring the version field
+/// Accept matching shape with non-zero IDs while requiring the version field
 /// to match the vendored 7.2.4 oracle. (br-frankenredis-w579,
 /// frankenredis-1ihzb)
+///
+/// (AmberFox 2026-06-05) The id must be accepted regardless of SIGN, not just
+/// when positive: a real fr-server mints positive client ids (verified: 2/4/6),
+/// but the conformance harness drives fr-runtime via `swap_session`/`execute_frame`
+/// rather than the server accept path, so its per-case session ids are negative
+/// while the live oracle's are positive. The id is nondeterministic either way;
+/// the only constraint is that both are valid (non-zero) ids. The previous
+/// `> 0` check left HELLO `id`-drift unmasked (6 false-positive mismatches across
+/// core_connection/core_client). `proto` (the other HELLO integer) is unaffected
+/// — it always matches exactly (2==2 / 3==3) so it never enters the drift arm.
 fn live_oracle_hello_id_drift_matches(
     case: &ConformanceCase,
     runtime_actual: &RespFrame,
@@ -2567,7 +2577,10 @@ fn live_oracle_hello_id_drift_matches(
                 }
             }
             (RespFrame::Integer(xi), RespFrame::Integer(yi)) => {
-                if xi != yi && !(*xi > 0 && *yi > 0) {
+                // Accept id-drift when both are valid (non-zero) client ids —
+                // the harness mints negative ids, the oracle positive. `proto`
+                // matches exactly so it never reaches this branch.
+                if xi != yi && !(*xi != 0 && *yi != 0) {
                     return false;
                 }
             }
