@@ -1011,13 +1011,16 @@ pub enum RdbValue {
     /// RDB_TYPE_HASH_WITH_TTLS (100). (br-frankenredis-th7q)
     HashWithTtls(Vec<(Vec<u8>, Vec<u8>, Option<u64>)>),
     SortedSet(Vec<(Vec<u8>, f64)>),
-    /// Stream: entries + optional watermark + consumer groups.
+    /// Stream: entries + optional watermark + consumer groups + raw upstream
+    /// metadata (for byte-exact replay) + entries-added counter +
+    /// max-deleted-entry-id watermark (`None` == `0-0`, i.e. nothing deleted).
     Stream(
         Vec<StreamEntry>,
         Option<(u64, u64)>,
         Vec<RdbStreamConsumerGroup>,
         Option<RdbStreamMetadata>,
         Option<u64>,
+        Option<(u64, u64)>,
     ),
 }
 
@@ -1030,8 +1033,15 @@ pub fn encode_upstream_stream_listpacks3_payload(
     watermark: Option<(u64, u64)>,
     groups: &[RdbStreamConsumerGroup],
     entries_added: Option<u64>,
+    max_deleted: Option<(u64, u64)>,
 ) -> Option<Vec<u8>> {
-    rdb_stream::encode_upstream_stream_listpacks3(entries, watermark, groups, entries_added)
+    rdb_stream::encode_upstream_stream_listpacks3(
+        entries,
+        watermark,
+        groups,
+        entries_added,
+        max_deleted,
+    )
 }
 
 /// Decode an upstream stream DUMP payload starting after the type byte.
@@ -1462,15 +1472,25 @@ fn encode_rdb_internal(
                         }
                     }
                 }
-                RdbValue::Stream(stream_entries, watermark, groups, metadata, entries_added) => {
+                RdbValue::Stream(
+                    stream_entries,
+                    watermark,
+                    groups,
+                    metadata,
+                    entries_added,
+                    max_deleted,
+                ) => {
                     encode_stream_rdb_value(
                         &mut buf,
                         &entry.key,
-                        stream_entries,
-                        *watermark,
-                        groups,
-                        metadata,
-                        *entries_added,
+                        StreamRdbValueParts {
+                            entries: stream_entries,
+                            watermark: *watermark,
+                            groups,
+                            metadata,
+                            entries_added: *entries_added,
+                            max_deleted: *max_deleted,
+                        },
                     );
                 }
             }
@@ -1665,16 +1685,17 @@ fn encode_compact_list_quicklist2(
     Some(buf)
 }
 
-fn encode_stream_rdb_value(
-    buf: &mut Vec<u8>,
-    key: &[u8],
-    stream_entries: &[StreamEntry],
+struct StreamRdbValueParts<'a> {
+    entries: &'a [StreamEntry],
     watermark: Option<(u64, u64)>,
-    groups: &[RdbStreamConsumerGroup],
-    metadata: &Option<RdbStreamMetadata>,
+    groups: &'a [RdbStreamConsumerGroup],
+    metadata: &'a Option<RdbStreamMetadata>,
     entries_added: Option<u64>,
-) {
-    if let Some(metadata) = metadata {
+    max_deleted: Option<(u64, u64)>,
+}
+
+fn encode_stream_rdb_value(buf: &mut Vec<u8>, key: &[u8], stream: StreamRdbValueParts<'_>) {
+    if let Some(metadata) = stream.metadata {
         buf.push(metadata.upstream_type_byte);
         rdb_encode_string(buf, key);
         buf.extend_from_slice(&metadata.upstream_payload);
@@ -1683,12 +1704,13 @@ fn encode_stream_rdb_value(
 
     #[cfg(feature = "upstream-stream-rdb")]
     {
-        if can_encode_upstream_stream_losslessly(stream_entries, watermark, groups)
+        if can_encode_upstream_stream_losslessly(stream.entries, stream.watermark, stream.groups)
             && let Some(payload) = rdb_stream::encode_upstream_stream_listpacks3(
-                stream_entries,
-                watermark,
-                groups,
-                entries_added,
+                stream.entries,
+                stream.watermark,
+                stream.groups,
+                stream.entries_added,
+                stream.max_deleted,
             )
         {
             buf.push(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3);
@@ -1698,7 +1720,15 @@ fn encode_stream_rdb_value(
         }
     }
 
-    encode_private_stream_rdb_value(buf, key, stream_entries, watermark, groups, entries_added);
+    encode_private_stream_rdb_value(
+        buf,
+        key,
+        stream.entries,
+        stream.watermark,
+        stream.groups,
+        stream.entries_added,
+        stream.max_deleted,
+    );
 }
 
 #[cfg(feature = "upstream-stream-rdb")]
@@ -1758,6 +1788,7 @@ fn encode_private_stream_rdb_value(
     watermark: Option<(u64, u64)>,
     groups: &[RdbStreamConsumerGroup],
     entries_added: Option<u64>,
+    max_deleted: Option<(u64, u64)>,
 ) {
     buf.push(RDB_TYPE_STREAM);
     rdb_encode_string(buf, key);
@@ -1767,6 +1798,10 @@ fn encode_private_stream_rdb_value(
     let entries_added =
         entries_added.unwrap_or(u64::try_from(stream_entries.len()).unwrap_or(u64::MAX));
     buf.extend_from_slice(&entries_added.to_le_bytes());
+    // max-deleted-entry-id watermark (frankenredis-fplrm); 0-0 == nothing deleted.
+    let (md_ms, md_seq) = max_deleted.unwrap_or((0, 0));
+    buf.extend_from_slice(&md_ms.to_le_bytes());
+    buf.extend_from_slice(&md_seq.to_le_bytes());
     rdb_encode_length(buf, stream_entries.len());
     for (ms, seq, fields) in stream_entries {
         buf.extend_from_slice(&ms.to_le_bytes());
@@ -2754,8 +2789,9 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                         RdbValue::SortedSet(members)
                     }
                     RDB_TYPE_STREAM => {
-                        // Decode watermark plus private stream entries-added counter.
-                        if cursor + 24 > data.len() {
+                        // Decode watermark, private entries-added counter, and the
+                        // max-deleted-entry-id watermark (frankenredis-fplrm).
+                        if cursor + 40 > data.len() {
                             return Err(PersistError::InvalidFrame);
                         }
                         let wm_ms = u64::from_le_bytes(
@@ -2781,6 +2817,23 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                                 .map_err(|_| PersistError::InvalidFrame)?,
                         );
                         cursor += 8;
+                        let md_ms = u64::from_le_bytes(
+                            data[cursor..cursor + 8]
+                                .try_into()
+                                .map_err(|_| PersistError::InvalidFrame)?,
+                        );
+                        cursor += 8;
+                        let md_seq = u64::from_le_bytes(
+                            data[cursor..cursor + 8]
+                                .try_into()
+                                .map_err(|_| PersistError::InvalidFrame)?,
+                        );
+                        cursor += 8;
+                        let max_deleted = if md_ms == 0 && md_seq == 0 {
+                            None
+                        } else {
+                            Some((md_ms, md_seq))
+                        };
                         let (count, consumed) =
                             rdb_decode_length(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
@@ -2946,6 +2999,7 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                             groups,
                             None,
                             Some(entries_added),
+                            max_deleted,
                         )
                     }
                     UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2 | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3 => {
@@ -6294,7 +6348,7 @@ mod tests {
     /// the data, so normalize that transient metadata away.
     fn strip_stream_metadata(mut entries: Vec<RdbEntry>) -> Vec<RdbEntry> {
         for entry in &mut entries {
-            if let RdbValue::Stream(_, _, _, metadata, _) = &mut entry.value {
+            if let RdbValue::Stream(_, _, _, metadata, _, _) = &mut entry.value {
                 *metadata = None;
             }
         }
@@ -6317,13 +6371,14 @@ mod tests {
                 Vec::new(),
                 None,
                 Some(1),
+                None,
             ),
             expire_ms: None,
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         match &decoded[0].value {
-            RdbValue::Stream(_, _, _, Some(md), _) => {
+            RdbValue::Stream(_, _, _, Some(md), _, _) => {
                 assert_eq!(
                     md.upstream_type_byte, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3,
                     "stream must SAVE as type 21 (STREAM_LISTPACKS_3)"
@@ -6354,6 +6409,27 @@ mod tests {
                 Vec::new(),
                 None,
                 Some(2),
+                None,
+            ),
+            expire_ms: None,
+        }];
+        let encoded = encode_rdb(&entries, &[]);
+        let (decoded, _) = decode_rdb(&encoded).expect("decode");
+        assert_eq!(strip_stream_metadata(decoded), entries);
+    }
+
+    #[test]
+    fn rdb_round_trip_stream_preserves_max_deleted_entry_id() {
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"mystream".to_vec(),
+            value: RdbValue::Stream(
+                vec![(1001, 0, vec![(b"name".to_vec(), b"Bob".to_vec())])],
+                Some((1001, 0)),
+                Vec::new(),
+                None,
+                Some(2),
+                Some((1000, 0)),
             ),
             expire_ms: None,
         }];
@@ -6367,7 +6443,7 @@ mod tests {
         let entries = vec![RdbEntry {
             db: 0,
             key: b"emptystream".to_vec(),
-            value: RdbValue::Stream(vec![], None, Vec::new(), None, Some(0)),
+            value: RdbValue::Stream(vec![], None, Vec::new(), None, Some(0), None),
             expire_ms: None,
         }];
         let encoded = encode_rdb(&entries, &[]);
@@ -6386,6 +6462,7 @@ mod tests {
                 Vec::new(),
                 None,
                 Some(1),
+                None,
             ),
             expire_ms: Some(9_999_999),
         }];
@@ -6433,6 +6510,7 @@ mod tests {
                 }],
                 None,
                 Some(2),
+                None,
             ),
             expire_ms: None,
         }];
@@ -6466,6 +6544,7 @@ mod tests {
                 }],
                 None,
                 Some(1),
+                None,
             ),
             expire_ms: None,
         }];
@@ -6483,6 +6562,7 @@ mod tests {
             decoded_groups,
             metadata,
             decoded_entries_added,
+            _,
         ) = &decoded[0].value
         else {
             panic!("expected decoded stream");
@@ -6493,6 +6573,7 @@ mod tests {
             expected_groups,
             _,
             expected_entries_added,
+            _,
         ) = &entries[0].value
         else {
             panic!("expected source stream");
@@ -6566,6 +6647,7 @@ mod tests {
                         groups,
                         None,
                         Some(2),
+                        None,
                     ),
                     expire_ms: None,
                 }
@@ -6724,6 +6806,7 @@ mod tests {
                         upstream_payload: payload.clone(),
                     }),
                     Some(1),
+                    None,
                 ),
                 expire_ms: None,
             }]
@@ -6741,6 +6824,7 @@ mod tests {
                 Vec::new(),
                 None,
                 Some(1),
+                None,
             ),
             expire_ms: None,
         }];
@@ -6788,6 +6872,7 @@ mod tests {
                     Vec::new(),
                     None,
                     Some(1),
+                    None,
                 ),
                 expire_ms: Some(1_000_000),
             },
@@ -7098,7 +7183,7 @@ mod tests {
             let entries = vec![RdbEntry {
                 db: 0,
                 key: b"mystream".to_vec(),
-                value: RdbValue::Stream(vec![], None, Vec::new(), None, Some(0)),
+                value: RdbValue::Stream(vec![], None, Vec::new(), None, Some(0), None),
                 expire_ms: None,
             }];
             let encoded = encode_rdb(&entries, &[]);
@@ -7254,7 +7339,14 @@ mod tests {
                 )
                     .prop_map(|(entries, watermark, groups)| {
                         let entries_added = u64::try_from(entries.len()).unwrap_or(u64::MAX);
-                        RdbValue::Stream(entries, watermark, groups, None, Some(entries_added))
+                        RdbValue::Stream(
+                            entries,
+                            watermark,
+                            groups,
+                            None,
+                            Some(entries_added),
+                            None,
+                        )
                     }),
             ]
         }
@@ -7302,7 +7394,7 @@ mod tests {
                     }
                     // (frankenredis-wt4eo) Drop the transient lossless
                     // re-encode payload a decoded type-21 stream carries.
-                    RdbValue::Stream(_, _, _, metadata, _) => *metadata = None,
+                    RdbValue::Stream(_, _, _, metadata, _, _) => *metadata = None,
                     _ => {}
                 }
             }
@@ -7575,7 +7667,14 @@ mod tests {
                 )
                     .prop_map(|(entries, watermark, groups)| {
                         let entries_added = u64::try_from(entries.len()).unwrap_or(u64::MAX);
-                        RdbValue::Stream(entries, watermark, groups, None, Some(entries_added))
+                        RdbValue::Stream(
+                            entries,
+                            watermark,
+                            groups,
+                            None,
+                            Some(entries_added),
+                            None,
+                        )
                     }),
             ]
         }

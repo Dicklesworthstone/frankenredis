@@ -15346,6 +15346,7 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
                     .collect();
                 let watermark = store.stream_watermark(&key).unwrap_or(None);
                 let entries_added = Some(store.stream_entries_added(&key, entries_map.len()));
+                let max_deleted = store.stream_max_deleted_id(&key);
                 let groups = store
                     .stream_consumer_groups(&key)
                     .map(|gs| {
@@ -15382,7 +15383,14 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
                             .collect()
                     })
                     .unwrap_or_default();
-                RdbValue::Stream(stream_entries, watermark, groups, None, entries_added)
+                RdbValue::Stream(
+                    stream_entries,
+                    watermark,
+                    groups,
+                    None,
+                    entries_added,
+                    max_deleted,
+                )
             }
         };
         entries.push(RdbEntry {
@@ -15499,7 +15507,14 @@ fn apply_rdb_entries_to_store(
                     );
                 }
             }
-            RdbValue::Stream(stream_entries, watermark, groups, _metadata, entries_added) => {
+            RdbValue::Stream(
+                stream_entries,
+                watermark,
+                groups,
+                _metadata,
+                entries_added,
+                max_deleted,
+            ) => {
                 for (ms, seq, fields) in stream_entries {
                     let field_pairs: Vec<(Vec<u8>, Vec<u8>)> =
                         fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
@@ -15510,11 +15525,14 @@ fn apply_rdb_entries_to_store(
                         &key,
                         (*wm_ms, *wm_seq),
                         *entries_added,
-                        None,
+                        *max_deleted,
                         now_ms,
                     );
                 } else if let Some(entries_added) = entries_added {
                     store.restore_stream_entries_added(&key, *entries_added);
+                }
+                if let Some(max_deleted) = max_deleted {
+                    store.restore_stream_max_deleted_id(&key, *max_deleted);
                 }
                 // Restore consumer groups from RDB snapshot.
                 for group in groups {

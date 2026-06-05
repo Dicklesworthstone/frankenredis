@@ -12381,7 +12381,7 @@ mod tests {
         );
         for entry in decoded_stream_corpus {
             match &entry.value {
-                RdbValue::Stream(stream_entries, watermark, groups, _, _) => {
+                RdbValue::Stream(stream_entries, watermark, groups, _, _, _) => {
                     assert!(
                         !stream_entries.is_empty(),
                         "decoded stream corpus entry {:?} had no live entries",

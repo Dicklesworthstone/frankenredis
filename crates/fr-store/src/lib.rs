@@ -9143,11 +9143,7 @@ impl Store {
     /// sorted-set and set are valid (sets are scored 1 by the zset ops), any
     /// other type is WRONGTYPE. Lets the command layer validate every source
     /// up front so an empty first source can't mask a wrong-type later one.
-    pub fn ensure_zset_or_set_source(
-        &mut self,
-        key: &[u8],
-        now_ms: u64,
-    ) -> Result<(), StoreError> {
+    pub fn ensure_zset_or_set_source(&mut self, key: &[u8], now_ms: u64) -> Result<(), StoreError> {
         self.drop_if_expired(key, now_ms);
         match self.entries.get(key) {
             None => Ok(()),
@@ -12047,6 +12043,15 @@ impl Store {
     pub fn restore_stream_entries_added(&mut self, key: &[u8], entries_added: u64) {
         self.stream_entries_added
             .insert(key.to_vec(), entries_added);
+    }
+
+    pub fn restore_stream_max_deleted_id(&mut self, key: &[u8], max_deleted_id: StreamId) {
+        if max_deleted_id == (0, 0) {
+            self.stream_max_deleted_ids.remove(key);
+        } else {
+            self.stream_max_deleted_ids
+                .insert(key.to_vec(), max_deleted_id);
+        }
     }
 
     pub fn xgroup_create(
@@ -15623,11 +15628,13 @@ impl Store {
                     .or(Some((0, 0)));
                 let entries_added = Some(self.stream_entries_added_value(key, entries.len()));
                 let groups = self.dump_stream_consumer_groups(key);
+                let max_deleted = self.stream_max_deleted_id(key);
                 let payload = fr_persist::encode_upstream_stream_listpacks3_payload(
                     &stream_entries,
                     watermark,
                     &groups,
                     entries_added,
+                    max_deleted,
                 )?;
                 buf.push(RDB_TYPE_STREAM_LISTPACKS_3);
                 buf.extend_from_slice(&payload);
@@ -15688,6 +15695,7 @@ impl Store {
         let data_end = payload.len() - DUMP_TRAILER_LEN;
         let mut restored_stream_last_id = None;
         let mut restored_stream_entries_added = None;
+        let mut restored_stream_max_deleted_id = None;
         let mut restored_stream_groups = None;
         let mut force_set_listpack_encoding = false;
         let mut force_set_hashtable_encoding = false;
@@ -15803,6 +15811,7 @@ impl Store {
                     groups,
                     _,
                     entries_added,
+                    max_deleted,
                 ) = stream_value
                 else {
                     return Err(StoreError::InvalidDumpPayload);
@@ -15815,6 +15824,7 @@ impl Store {
                 }
                 restored_stream_last_id = watermark.or_else(|| entries.keys().next_back().copied());
                 restored_stream_entries_added = entries_added;
+                restored_stream_max_deleted_id = max_deleted;
                 restored_stream_groups = Some(restore_stream_groups(groups)?);
                 Value::Stream(entries)
             }
@@ -15967,6 +15977,7 @@ impl Store {
         self.stream_groups.remove(key);
         self.stream_last_ids.remove(key);
         self.stream_entries_added.remove(key);
+        self.stream_max_deleted_ids.remove(key);
         let mut entry = Entry::new(value, expires_at_ms, now_ms);
         entry.force_set_listpack_encoding = force_set_listpack_encoding;
         entry.force_set_hashtable_encoding = force_set_hashtable_encoding;
@@ -15977,6 +15988,9 @@ impl Store {
         if let Some(entries_added) = restored_stream_entries_added {
             self.stream_entries_added
                 .insert(key.to_vec(), entries_added);
+        }
+        if let Some(max_deleted_id) = restored_stream_max_deleted_id {
+            self.restore_stream_max_deleted_id(key, max_deleted_id);
         }
         if let Some(groups) = restored_stream_groups
             && !groups.is_empty()
@@ -23647,7 +23661,10 @@ mod tests {
             .expect("getex on int-encoded string must not be WRONGTYPE");
         assert_eq!(got, Some(b"2".to_vec()));
         // GETEX with PERSIST likewise.
-        assert_eq!(store.getex(b"n", Some(None), 0).unwrap(), Some(b"2".to_vec()));
+        assert_eq!(
+            store.getex(b"n", Some(None), 0).unwrap(),
+            Some(b"2".to_vec())
+        );
         // BITOP over int-encoded operands treats them as their string bytes.
         store.set(b"a".to_vec(), b"5".to_vec(), None, 0);
         store.set(b"b".to_vec(), b"3".to_vec(), None, 0);
@@ -28265,7 +28282,10 @@ mod tests {
         store.zadd(b"zs", &[(1.0, b"m".to_vec())], 0).unwrap();
         assert_eq!(store.ensure_zset_or_set_source(b"zs", 0), Ok(()));
         // All-missing diff is still empty (not an error).
-        assert_eq!(store.sdiff(&[b"a", b"b"], 0).unwrap(), Vec::<Vec<u8>>::new());
+        assert_eq!(
+            store.sdiff(&[b"a", b"b"], 0).unwrap(),
+            Vec::<Vec<u8>>::new()
+        );
     }
 
     #[test]
@@ -31060,6 +31080,45 @@ mod tests {
     }
 
     #[test]
+    fn dump_restore_stream_preserves_max_deleted_entry_id() {
+        let mut store = Store::new();
+        store
+            .xadd(
+                b"s",
+                (1000, 0),
+                &[(b"name".to_vec(), b"alice".to_vec())],
+                100,
+            )
+            .unwrap();
+        store
+            .xadd(b"s", (1000, 1), &[(b"name".to_vec(), b"bob".to_vec())], 100)
+            .unwrap();
+        store
+            .xadd(
+                b"s",
+                (1001, 0),
+                &[(b"name".to_vec(), b"cara".to_vec())],
+                100,
+            )
+            .unwrap();
+        assert_eq!(store.xdel(b"s", &[(1000, 1)], 100).unwrap(), 1);
+        assert_eq!(store.stream_max_deleted_id(b"s"), Some((1000, 1)));
+
+        let payload = store.dump_key(b"s", 100).unwrap();
+        assert_eq!(payload[0], RDB_TYPE_STREAM_LISTPACKS_3);
+
+        let mut restored = Store::new();
+        restored.restore_key(b"s", 0, &payload, false, 100).unwrap();
+        assert_eq!(restored.stream_max_deleted_id(b"s"), Some((1000, 1)));
+        let entries = restored
+            .xrange(b"s", (0, 0), (u64::MAX, u64::MAX), None, 100)
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, (1000, 0));
+        assert_eq!(entries[1].0, (1001, 0));
+    }
+
+    #[test]
     fn restore_rejects_duplicate_stream_groups_and_consumers() -> Result<(), String> {
         fn group(name: &[u8], consumers: &[&[u8]]) -> fr_persist::RdbStreamConsumerGroup {
             fr_persist::RdbStreamConsumerGroup {
@@ -31084,6 +31143,7 @@ mod tests {
                 Some((1, 0)),
                 &groups,
                 Some(1),
+                None,
             )
             .ok_or_else(|| "stream payload encoding failed".to_string())?;
             let mut body = vec![RDB_TYPE_STREAM_LISTPACKS_3];
@@ -31156,6 +31216,7 @@ mod tests {
                 Some((1, 0)),
                 &groups,
                 Some(1),
+                None,
             )
             .ok_or_else(|| "stream payload encoding failed".to_string())?;
             let mut body = vec![RDB_TYPE_STREAM_LISTPACKS_3];
@@ -31207,6 +31268,7 @@ mod tests {
                 entries.last().map(|entry| (entry.0, entry.1)),
                 &[],
                 Some(entries_added),
+                None,
             )
             .ok_or_else(|| "stream payload encoding failed".to_string())?;
             let mut body = vec![RDB_TYPE_STREAM_LISTPACKS_3];

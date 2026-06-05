@@ -1,6 +1,6 @@
 use fr_persist::parse_aof_manifest;
 use fr_persist::{
-    RdbValue, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, decode_upstream_stream_payload,
+    RdbValue, StreamEntry, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, decode_upstream_stream_payload,
     encode_upstream_stream_listpacks3_payload,
 };
 use std::fs;
@@ -137,13 +137,19 @@ fn golden_stream_type21_byte_exact_vs_vendored_redis_724() {
             .expect("decode vendored stream body");
     assert_eq!(consumed, body.len(), "decoder must consume the whole body");
 
-    let RdbValue::Stream(entries, watermark, groups, _metadata, entries_added) = value else {
+    let RdbValue::Stream(entries, watermark, groups, _metadata, entries_added, max_deleted) = value
+    else {
         panic!("expected a stream value");
     };
 
-    let reencoded =
-        encode_upstream_stream_listpacks3_payload(&entries, watermark, &groups, entries_added)
-            .expect("re-encode synthesized type-21 payload");
+    let reencoded = encode_upstream_stream_listpacks3_payload(
+        &entries,
+        watermark,
+        &groups,
+        entries_added,
+        max_deleted,
+    )
+    .expect("re-encode synthesized type-21 payload");
 
     assert_eq!(
         reencoded.len(),
@@ -154,4 +160,48 @@ fn golden_stream_type21_byte_exact_vs_vendored_redis_724() {
         reencoded, body,
         "re-encoded type-21 bytes must equal vendored Redis byte-for-byte"
     );
+}
+
+/// Persistence round-trip proof for the max-deleted-entry-id watermark
+/// (frankenredis-fplrm). A stream synthesized from live state — i.e. with no
+/// raw upstream metadata, as `store_to_rdb_entries` produces for an fr-native
+/// stream — must carry its max-deleted-entry-id through type-21 encode→decode.
+/// Before fplrm the encoder hardcoded `0-0`, so an XDEL'd fr-native stream
+/// reloaded with max-deleted-entry-id `0-0`, corrupting XINFO lag/tombstone
+/// logic. Here `7-3` must survive; a stream that deleted nothing stays `None`.
+#[test]
+fn type21_round_trips_max_deleted_entry_id_fplrm() {
+    let entries: Vec<StreamEntry> = vec![
+        (10, 0, vec![(b"f".to_vec(), b"v1".to_vec())]),
+        (20, 0, vec![(b"f".to_vec(), b"v2".to_vec())]),
+    ];
+    let groups: Vec<fr_persist::RdbStreamConsumerGroup> = Vec::new();
+
+    for max_deleted in [Some((7u64, 3u64)), None] {
+        let payload = encode_upstream_stream_listpacks3_payload(
+            &entries,
+            Some((20, 0)),
+            &groups,
+            Some(2),
+            max_deleted,
+        )
+        .expect("encode type-21 payload");
+
+        let (value, consumed) =
+            decode_upstream_stream_payload(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, &payload)
+                .expect("decode type-21 payload");
+        assert_eq!(
+            consumed,
+            payload.len(),
+            "decoder consumes the whole payload"
+        );
+
+        let RdbValue::Stream(_, _, _, _, _, decoded_max_deleted) = value else {
+            panic!("expected a stream value");
+        };
+        assert_eq!(
+            decoded_max_deleted, max_deleted,
+            "max-deleted-entry-id must round-trip through type-21 persistence"
+        );
+    }
 }
