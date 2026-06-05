@@ -3314,6 +3314,8 @@ pub struct Runtime {
     execution_source: ExecutionSource,
     dispatch_acl_snapshot_user: Option<Vec<u8>>,
     dispatch_acl_snapshot_generation: u64,
+    dispatch_peer_addr_cache: String,
+    dispatch_peer_addr_cache_source: Option<std::net::SocketAddr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3415,6 +3417,8 @@ impl Runtime {
             execution_source: ExecutionSource::Client,
             dispatch_acl_snapshot_user: None,
             dispatch_acl_snapshot_generation: 0,
+            dispatch_peer_addr_cache: "127.0.0.1:0".to_string(),
+            dispatch_peer_addr_cache_source: None,
         }
     }
 
@@ -7177,6 +7181,8 @@ impl Runtime {
     }
 
     fn refresh_current_dispatch_client_context(&mut self, now_ms: u64) {
+        let peer_addr = self.session.peer_addr;
+        self.refresh_dispatch_peer_addr_cache(peer_addr);
         let session = &self.session;
         let client_id = session.client_id;
         let channel_subscriptions = self
@@ -7238,12 +7244,7 @@ impl Runtime {
             } else {
                 "N"
             });
-        ctx.peer_addr.clear();
-        if let Some(addr) = session.peer_addr {
-            write!(&mut ctx.peer_addr, "{addr}").expect("writing to String cannot fail");
-        } else {
-            ctx.peer_addr.push_str("127.0.0.1:0");
-        }
+        ctx.peer_addr.clone_from(&self.dispatch_peer_addr_cache);
         // (frankenredis-lxccd) Mirror the real socket fd into the
         // dispatch context so CLIENT INFO / CLIENT LIST emit it
         // through fr-command's client_info_line wrapper too.
@@ -7527,6 +7528,20 @@ impl Runtime {
             result = Ok(reply);
         }
         result
+    }
+
+    fn refresh_dispatch_peer_addr_cache(&mut self, peer_addr: Option<std::net::SocketAddr>) {
+        if self.dispatch_peer_addr_cache_source == peer_addr {
+            return;
+        }
+        self.dispatch_peer_addr_cache.clear();
+        if let Some(addr) = peer_addr {
+            write!(&mut self.dispatch_peer_addr_cache, "{addr}")
+                .expect("writing to String cannot fail");
+        } else {
+            self.dispatch_peer_addr_cache.push_str("127.0.0.1:0");
+        }
+        self.dispatch_peer_addr_cache_source = peer_addr;
     }
 
     fn handle_deferred_store_runtime_action(&mut self, now_ms: u64) -> Option<RespFrame> {
@@ -12095,11 +12110,12 @@ impl Runtime {
 
     /// Record a command execution in the slow log if it exceeded the threshold.
     fn record_slowlog(&mut self, argv: &[Vec<u8>], duration_us: u64, now_ms: u64) {
-        let client_address = self
-            .session
-            .peer_addr
-            .map(|addr| addr.to_string().into_bytes())
-            .unwrap_or_default();
+        let client_address = if self.session.peer_addr.is_some() {
+            self.refresh_dispatch_peer_addr_cache(self.session.peer_addr);
+            self.dispatch_peer_addr_cache.as_bytes().to_vec()
+        } else {
+            Vec::new()
+        };
         let client_name = self.session.client_name.clone().unwrap_or_default();
         self.server.store.record_slowlog_with_client(
             argv,
@@ -20476,6 +20492,29 @@ mod tests {
         assert!(!trimmed.contains("watch="), "{trimmed}");
         // CLIENT TRACKING is off by default → redir should be -1.
         assert!(trimmed.contains("redir=-1 "), "{trimmed}");
+    }
+
+    #[test]
+    fn dispatch_peer_addr_cache_tracks_active_session_addr_changes() {
+        let mut rt = Runtime::default_strict();
+
+        rt.session.peer_addr = Some("10.0.0.9:7777".parse().expect("socket addr"));
+        rt.refresh_current_dispatch_client_context(1_000);
+        assert_eq!(
+            rt.server.store.dispatch_client_ctx.peer_addr,
+            "10.0.0.9:7777"
+        );
+
+        rt.session.peer_addr = Some("127.0.0.1:54636".parse().expect("socket addr"));
+        rt.refresh_current_dispatch_client_context(2_000);
+        assert_eq!(
+            rt.server.store.dispatch_client_ctx.peer_addr,
+            "127.0.0.1:54636"
+        );
+
+        rt.session.peer_addr = None;
+        rt.refresh_current_dispatch_client_context(3_000);
+        assert_eq!(rt.server.store.dispatch_client_ctx.peer_addr, "127.0.0.1:0");
     }
 
     #[test]
