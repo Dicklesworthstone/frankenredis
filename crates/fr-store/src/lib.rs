@@ -18762,6 +18762,9 @@ fn canonicalize_zero_score(score: f64) -> f64 {
 fn lex_in_range(member: &[u8], min: &[u8], max: &[u8]) -> bool {
     let above_min = if min == b"-" {
         true
+    } else if min == b"+" {
+        // Positive infinity as the MIN bound: nothing is at or above it.
+        false
     } else if min.starts_with(b"(") {
         member > &min[1..]
     } else if min.starts_with(b"[") {
@@ -18771,6 +18774,9 @@ fn lex_in_range(member: &[u8], min: &[u8], max: &[u8]) -> bool {
     };
     let below_max = if max == b"+" {
         true
+    } else if max == b"-" {
+        // Negative infinity as the MAX bound: nothing is at or below it.
+        false
     } else if max.starts_with(b"(") {
         member < &max[1..]
     } else if max.starts_with(b"[") {
