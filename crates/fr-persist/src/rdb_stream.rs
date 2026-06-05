@@ -11,8 +11,11 @@
 //! `StreamEntry` tuples in `RdbValue::Stream`. Tombstoned entries (flag
 //! bit 1) are dropped. Type-19/type-21 consumer-group payloads are reified
 //! into `RdbStreamConsumerGroup` values with consumer-local PEL ownership.
-//! Type-21 encoding (br-frankenredis-6zk9) emits one listpack macro-node per
-//! live entry to avoid delta overflow and to keep field metadata local.
+//! Type-21 encoding (br-frankenredis-6zk9) groups live entries into listpack
+//! macro-nodes exactly as upstream `streamAppendItem` does — bounded by
+//! `stream-node-max-bytes` (4096) and `stream-node-max-entries` (100), with a
+//! per-node master entry and delta+SAMEFIELDS-compressed members — so DUMP/RDB
+//! bytes match what sequential XADD would have produced (frankenredis-ren6y).
 //!
 //! (br-frankenredis-hjub, br-frankenredis-qi6z, br-frankenredis-6zk9)
 
@@ -27,10 +30,22 @@ use crate::{
 use super::{rdb_decode_length, rdb_decode_string};
 
 /// Upstream stream entry flags (matches upstream's `streamFlags`).
+const STREAM_ITEM_FLAG_NONE: i64 = 0;
 const STREAM_ITEM_FLAG_DELETED: i64 = 1;
 const STREAM_ITEM_FLAG_SAMEFIELDS: i64 = 2;
 const LISTPACK_HEADER_SIZE: usize = 6;
 const LISTPACK_EOF: u8 = 0xFF;
+/// Upstream `lpGetNumElements` sentinel: a listpack with >= this many elements
+/// stores the count as "unknown" and forces a full scan on read.
+const LISTPACK_NUMELE_UNKNOWN: usize = 0xFFFF;
+/// Defaults of `stream-node-max-bytes` / `stream-node-max-entries`. These bound
+/// each radix-tree macro-node exactly as upstream `streamAppendItem` does, so a
+/// stream rebuilt from these entries lands on the same node boundaries — and
+/// therefore the same DUMP/RDB bytes — that sequential XADD would have produced.
+const STREAM_NODE_MAX_BYTES: usize = 4096;
+const STREAM_NODE_MAX_ENTRIES: u64 = 100;
+/// Hard ceiling upstream applies when `stream-node-max-bytes` is 0/huge.
+const STREAM_LISTPACK_MAX_SIZE: usize = 1 << 30;
 
 /// Upstream-layout decode failure modes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,11 +97,17 @@ pub(crate) fn encode_upstream_stream_listpacks3(
     let mut sorted_entries = entries.to_vec();
     sorted_entries.sort_by_key(|entry| (entry.0, entry.1));
 
-    super::rdb_encode_length(&mut buf, sorted_entries.len());
-    for entry in &sorted_entries {
-        super::rdb_encode_string(&mut buf, &stream_id_bytes(entry.0, entry.1));
-        let listpack = encode_single_entry_listpack(entry)?;
-        super::rdb_encode_string(&mut buf, &listpack);
+    // Group entries into listpack macro-nodes mirroring upstream
+    // `streamAppendItem`'s split rules, then emit one master-entry listpack per
+    // node (subsequent entries delta+SAMEFIELDS compressed against the master).
+    // This reproduces the exact node layout — and DUMP/RDB bytes — that
+    // sequential XADD would have built, instead of one listpack per entry.
+    let nodes = pack_stream_nodes(&sorted_entries)?;
+
+    super::rdb_encode_length(&mut buf, nodes.len());
+    for node in &nodes {
+        super::rdb_encode_string(&mut buf, &stream_id_bytes(node.master.0, node.master.1));
+        super::rdb_encode_string(&mut buf, &node.listpack);
     }
 
     super::rdb_encode_length(&mut buf, sorted_entries.len());
@@ -114,39 +135,180 @@ pub(crate) fn encode_upstream_stream_listpacks3(
     Some(buf)
 }
 
-fn encode_single_entry_listpack(entry: &StreamEntry) -> Option<Vec<u8>> {
-    let mut encoded_entries = Vec::new();
-    encode_listpack_int(&mut encoded_entries, 1);
-    encode_listpack_int(&mut encoded_entries, 0);
-    encode_listpack_int(&mut encoded_entries, i64::try_from(entry.2.len()).ok()?);
-    for (field, _) in &entry.2 {
-        encode_listpack_bytes(&mut encoded_entries, field)?;
+/// A finished radix-tree macro-node: its master (first-entry) ID and the fully
+/// serialized listpack blob holding the master entry plus all node members.
+struct StreamNode {
+    master: (u64, u64),
+    listpack: Vec<u8>,
+}
+
+/// Accumulator for the node currently being filled.
+struct NodeBuilder<'a> {
+    master: (u64, u64),
+    master_fields: Vec<&'a [u8]>,
+    /// Encoded bytes of the member entries appended so far (without the master
+    /// entry header, which is rebuilt at finalize when `count` is known).
+    members: Vec<u8>,
+    /// Number of member entries appended so far (== the master `count` field;
+    /// `deleted` is always 0 here since fr-store keeps no listpack tombstones).
+    count: u64,
+    /// Running listpack element count, for the 16-bit header `num-elements`.
+    num_elements: usize,
+}
+
+/// Byte length of the master-entry header for `fields` and the given live
+/// `count` (deleted is always 0). Used to evaluate upstream's
+/// `lpBytes(lp) + totelelen >= node_max_bytes` split test exactly.
+fn master_entry_bytes(fields: &[&[u8]], count: u64) -> Option<usize> {
+    let mut tmp = Vec::new();
+    encode_listpack_int(&mut tmp, i64::try_from(count).ok()?);
+    encode_listpack_int(&mut tmp, 0); // deleted
+    encode_listpack_int(&mut tmp, i64::try_from(fields.len()).ok()?);
+    for field in fields {
+        encode_listpack_bytes(&mut tmp, field)?;
     }
-    encode_listpack_int(&mut encoded_entries, 0);
-    encode_listpack_int(&mut encoded_entries, STREAM_ITEM_FLAG_SAMEFIELDS);
-    encode_listpack_int(&mut encoded_entries, 0);
-    encode_listpack_int(&mut encoded_entries, 0);
-    for (_, value) in &entry.2 {
-        encode_listpack_bytes(&mut encoded_entries, value)?;
+    encode_listpack_int(&mut tmp, 0); // master zero terminator
+    Some(tmp.len())
+}
+
+/// True when `entry`'s field names match the node master's, in order — the
+/// condition upstream uses to set `STREAM_ITEM_FLAG_SAMEFIELDS`.
+fn entry_same_fields(entry: &StreamEntry, master_fields: &[&[u8]]) -> bool {
+    entry.2.len() == master_fields.len()
+        && entry
+            .2
+            .iter()
+            .zip(master_fields)
+            .all(|((field, _), master)| field.as_slice() == *master)
+}
+
+/// Append one member entry to `builder` in upstream's listpack item layout.
+fn append_member(builder: &mut NodeBuilder, entry: &StreamEntry) -> Option<()> {
+    let numfields = entry.2.len();
+    let same_fields = entry_same_fields(entry, &builder.master_fields);
+    let flags = if same_fields {
+        STREAM_ITEM_FLAG_SAMEFIELDS
+    } else {
+        STREAM_ITEM_FLAG_NONE
+    };
+    let buf = &mut builder.members;
+    encode_listpack_int(buf, flags);
+    // ms/seq delta vs the master ID. Upstream computes these as wrapping u64
+    // subtraction reinterpreted as i64, so seq deltas may be negative when a
+    // later ms carries a smaller seq.
+    encode_listpack_int(buf, entry.0.wrapping_sub(builder.master.0) as i64);
+    encode_listpack_int(buf, entry.1.wrapping_sub(builder.master.1) as i64);
+    if !same_fields {
+        encode_listpack_int(buf, i64::try_from(numfields).ok()?);
     }
-    encode_listpack_int(
-        &mut encoded_entries,
-        i64::try_from(entry.2.len().checked_add(3)?).ok()?,
-    );
+    for (field, value) in &entry.2 {
+        if !same_fields {
+            encode_listpack_bytes(buf, field)?;
+        }
+        encode_listpack_bytes(buf, value)?;
+    }
+    // lp-count: number of listpack pieces composing this entry (for reverse
+    // traversal). 3 fixed (flags + ms + seq) + numfields values, plus the
+    // num-fields element and the field names when fields aren't reused.
+    let mut lp_count = numfields.checked_add(3)?;
+    if !same_fields {
+        lp_count = lp_count.checked_add(numfields.checked_add(1)?)?;
+    }
+    encode_listpack_int(buf, i64::try_from(lp_count).ok()?);
+
+    builder.count = builder.count.checked_add(1)?;
+    // Element accounting mirrors the pieces emitted above.
+    let elements = if same_fields {
+        numfields.checked_add(4)? // flags, ms, seq, lp-count + values
+    } else {
+        numfields.checked_mul(2)?.checked_add(5)? // flags, ms, seq, numfields, lp-count + field/value pairs
+    };
+    builder.num_elements = builder.num_elements.checked_add(elements)?;
+    Some(())
+}
+
+/// Serialize a finished node into its on-disk listpack blob.
+fn finalize_node(builder: &NodeBuilder) -> Option<StreamNode> {
+    let mut body = Vec::new();
+    encode_listpack_int(&mut body, i64::try_from(builder.count).ok()?);
+    encode_listpack_int(&mut body, 0); // deleted
+    encode_listpack_int(&mut body, i64::try_from(builder.master_fields.len()).ok()?);
+    for field in &builder.master_fields {
+        encode_listpack_bytes(&mut body, field)?;
+    }
+    encode_listpack_int(&mut body, 0); // master zero terminator
+    body.extend_from_slice(&builder.members);
 
     let total_bytes = LISTPACK_HEADER_SIZE
-        .checked_add(encoded_entries.len())?
+        .checked_add(body.len())?
         .checked_add(1)?;
     let total_bytes = u32::try_from(total_bytes).ok()?;
-    let capacity = usize::try_from(total_bytes).ok()?;
-    let mut listpack = Vec::with_capacity(capacity);
+    let mut listpack = Vec::with_capacity(usize::try_from(total_bytes).ok()?);
     listpack.extend_from_slice(&total_bytes.to_le_bytes());
-    let entry_count = 8usize.checked_add(entry.2.len().checked_mul(2)?)?;
-    let entry_count = u16::try_from(entry_count).unwrap_or(u16::MAX);
-    listpack.extend_from_slice(&entry_count.to_le_bytes());
-    listpack.extend_from_slice(&encoded_entries);
+    let num_elements = if builder.num_elements >= LISTPACK_NUMELE_UNKNOWN {
+        LISTPACK_NUMELE_UNKNOWN as u16
+    } else {
+        builder.num_elements as u16
+    };
+    listpack.extend_from_slice(&num_elements.to_le_bytes());
+    listpack.extend_from_slice(&body);
     listpack.push(LISTPACK_EOF);
-    Some(listpack)
+    Some(StreamNode {
+        master: builder.master,
+        listpack,
+    })
+}
+
+/// Group sorted stream entries into listpack macro-nodes, reproducing upstream
+/// `streamAppendItem`'s incremental split decisions.
+fn pack_stream_nodes(entries: &[StreamEntry]) -> Option<Vec<StreamNode>> {
+    let mut nodes = Vec::new();
+    let mut current: Option<NodeBuilder> = None;
+
+    for entry in entries {
+        let totelelen: usize = entry
+            .2
+            .iter()
+            .map(|(field, value)| field.len() + value.len())
+            .sum();
+
+        let need_new_node = match &current {
+            None => true,
+            Some(builder) => {
+                let lp_bytes = LISTPACK_HEADER_SIZE
+                    + master_entry_bytes(&builder.master_fields, builder.count)?
+                    + builder.members.len()
+                    + 1; // EOF
+                lp_bytes.saturating_add(totelelen)
+                    >= STREAM_NODE_MAX_BYTES.min(STREAM_LISTPACK_MAX_SIZE)
+                    || builder.count >= STREAM_NODE_MAX_ENTRIES
+            }
+        };
+
+        if need_new_node {
+            if let Some(builder) = current.take() {
+                nodes.push(finalize_node(&builder)?);
+            }
+            let master_fields: Vec<&[u8]> =
+                entry.2.iter().map(|(field, _)| field.as_slice()).collect();
+            let num_elements = master_fields.len().checked_add(4)?; // count, deleted, numfields, fields, terminator
+            current = Some(NodeBuilder {
+                master: (entry.0, entry.1),
+                master_fields,
+                members: Vec::new(),
+                count: 0,
+                num_elements,
+            });
+        }
+
+        let builder = current.as_mut()?;
+        append_member(builder, entry)?;
+    }
+
+    if let Some(builder) = current.take() {
+        nodes.push(finalize_node(&builder)?);
+    }
+    Some(nodes)
 }
 
 fn encode_consumer_group(buf: &mut Vec<u8>, group: &RdbStreamConsumerGroup) -> Option<()> {
@@ -211,24 +373,105 @@ fn stream_id_bytes(ms: u64, seq: u64) -> Vec<u8> {
     bytes
 }
 
+/// Encode `value` as a listpack integer element, byte-for-byte matching
+/// upstream `lpEncodeIntegerGetType` across all six width buckets (7-bit, 13-,
+/// 16-, 24-, 32-, 64-bit) plus the trailing backlen.
 fn encode_listpack_int(buf: &mut Vec<u8>, value: i64) {
     let start = buf.len();
     if (0..=127).contains(&value) {
         buf.push(value as u8);
-    } else if let Ok(value) = i16::try_from(value) {
+    } else if (-4096..=4095).contains(&value) {
+        let n = if value < 0 {
+            (1i64 << 13) + value
+        } else {
+            value
+        };
+        buf.push(((n >> 8) as u8) | 0xC0);
+        buf.push((n & 0xFF) as u8);
+    } else if (-32768..=32767).contains(&value) {
+        let n = if value < 0 {
+            (1i64 << 16) + value
+        } else {
+            value
+        };
         buf.push(0xF1);
-        buf.extend_from_slice(&value.to_le_bytes());
-    } else if let Ok(value) = i32::try_from(value) {
+        buf.push((n & 0xFF) as u8);
+        buf.push((n >> 8) as u8);
+    } else if (-8_388_608..=8_388_607).contains(&value) {
+        let n = if value < 0 {
+            (1i64 << 24) + value
+        } else {
+            value
+        };
+        buf.push(0xF2);
+        buf.push((n & 0xFF) as u8);
+        buf.push(((n >> 8) & 0xFF) as u8);
+        buf.push((n >> 16) as u8);
+    } else if (-2_147_483_648..=2_147_483_647).contains(&value) {
+        let n = if value < 0 {
+            (1i64 << 32) + value
+        } else {
+            value
+        };
         buf.push(0xF3);
-        buf.extend_from_slice(&value.to_le_bytes());
+        buf.push((n & 0xFF) as u8);
+        buf.push(((n >> 8) & 0xFF) as u8);
+        buf.push(((n >> 16) & 0xFF) as u8);
+        buf.push((n >> 24) as u8);
     } else {
         buf.push(0xF4);
-        buf.extend_from_slice(&value.to_le_bytes());
+        buf.extend_from_slice(&(value as u64).to_le_bytes());
     }
     encode_listpack_backlen(buf, buf.len() - start);
 }
 
+/// Mirror upstream `lpStringToInt64`: `Some(v)` iff `s` is the canonical decimal
+/// form of an i64 that `lpAppend` would store as an integer rather than a
+/// string (no leading zeros, optional single `-`, no `-0`, fits in i64).
+fn listpack_string_to_int64(s: &[u8]) -> Option<i64> {
+    if s.is_empty() || s.len() >= 21 {
+        return None;
+    }
+    if s.len() == 1 && s[0] == b'0' {
+        return Some(0);
+    }
+    let (negative, digits) = match s.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        _ => (false, s),
+    };
+    let (first, rest) = digits.split_first()?;
+    if !(b'1'..=b'9').contains(first) {
+        return None;
+    }
+    let mut v: u64 = (first - b'0') as u64;
+    for &c in rest {
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        let d = (c - b'0') as u64;
+        v = v.checked_mul(10)?.checked_add(d)?;
+    }
+    if negative {
+        // Allow magnitude up to 2^63 (i64::MIN); larger overflows.
+        if v > (1u64 << 63) {
+            return None;
+        }
+        Some(-(v as i128) as i64)
+    } else {
+        if v > i64::MAX as u64 {
+            return None;
+        }
+        Some(v as i64)
+    }
+}
+
+/// Append a stream field/value element exactly as upstream `lpAppend` does:
+/// integer-encode when the bytes are a canonical i64, otherwise string-encode.
 fn encode_listpack_bytes(buf: &mut Vec<u8>, data: &[u8]) -> Option<()> {
+    if let Some(value) = listpack_string_to_int64(data) {
+        encode_listpack_int(buf, value);
+        return Some(());
+    }
     let start = buf.len();
     if data.len() < 64 {
         buf.push(0x80 | u8::try_from(data.len()).ok()?);

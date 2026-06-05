@@ -8005,6 +8005,16 @@ struct StreamFullGroupFrameInfo {
     lag: RespFrame,
 }
 
+#[derive(Clone, Copy)]
+struct StreamLagInfo {
+    entries_added: u64,
+    len: usize,
+    first_id: Option<StreamId>,
+    last_id: Option<StreamId>,
+    max_deleted_id: StreamId,
+    last_generated_id: Option<StreamId>,
+}
+
 fn stream_full_group_info_to_frame(
     info: StreamFullGroupFrameInfo,
     pending_frames: Vec<RespFrame>,
@@ -8105,18 +8115,19 @@ fn stream_lag_range_has_tombstones(
 }
 
 fn stream_full_group_lag_frame(
-    stream_entries_added: u64,
-    stream_len: usize,
-    first_id: Option<StreamId>,
-    last_id: Option<StreamId>,
-    max_deleted_id: StreamId,
+    stream: StreamLagInfo,
     last_delivered_id: StreamId,
     entries_read: Option<u64>,
 ) -> RespFrame {
     if let Some(entries_read) = entries_read
-        && !stream_lag_range_has_tombstones(stream_len, first_id, max_deleted_id, last_delivered_id)
+        && !stream_lag_range_has_tombstones(
+            stream.len,
+            stream.first_id,
+            stream.max_deleted_id,
+            last_delivered_id,
+        )
     {
-        let len = i64::try_from(stream_entries_added).unwrap_or(i64::MAX);
+        let len = i64::try_from(stream.entries_added).unwrap_or(i64::MAX);
         let read = i64::try_from(entries_read).unwrap_or(i64::MAX);
         return RespFrame::Integer(len.saturating_sub(read));
     }
@@ -8124,14 +8135,28 @@ fn stream_full_group_lag_frame(
     // range, the lag can't be determined — upstream streamCGLag returns nil
     // (the same condition that invalidates entries-read). The structural
     // fallback below must not fabricate a concrete lag here.
-    if stream_lag_range_has_tombstones(stream_len, first_id, max_deleted_id, last_delivered_id) {
+    if stream_lag_range_has_tombstones(
+        stream.len,
+        stream.first_id,
+        stream.max_deleted_id,
+        last_delivered_id,
+    ) {
         return RespFrame::BulkString(None);
     }
-    let Some(first_id) = first_id else {
-        return RespFrame::Integer(0);
+    // (frankenredis-ren6y) An EMPTY stream still has a last-generated-id
+    // watermark (e.g. after XSETID lowered it). Upstream reports lag=nil when the
+    // group's last-delivered-id is AHEAD of that watermark (the group is beyond
+    // the stream — lag is undeterminable); otherwise the group is caught up so
+    // lag=0. fr previously always returned 0 for an empty stream.
+    let empty_stream_lag = || match stream.last_generated_id {
+        Some(lg) if last_delivered_id > lg => RespFrame::BulkString(None),
+        _ => RespFrame::Integer(0),
     };
-    let Some(last_id) = last_id else {
-        return RespFrame::Integer(0);
+    let Some(first_id) = stream.first_id else {
+        return empty_stream_lag();
+    };
+    let Some(last_id) = stream.last_id else {
+        return empty_stream_lag();
     };
     if last_delivered_id > last_id {
         return RespFrame::BulkString(None);
@@ -8139,13 +8164,13 @@ fn stream_full_group_lag_frame(
     if last_delivered_id == last_id {
         return RespFrame::Integer(0);
     }
-    if max_deleted_id != (0, 0) && max_deleted_id >= first_id {
+    if stream.max_deleted_id != (0, 0) && stream.max_deleted_id >= first_id {
         return RespFrame::BulkString(None);
     }
     let lag = if last_delivered_id < first_id {
-        stream_len
+        stream.len
     } else if last_delivered_id == first_id {
-        stream_len.saturating_sub(1)
+        stream.len.saturating_sub(1)
     } else {
         return RespFrame::BulkString(None);
     };
@@ -9280,6 +9305,17 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         };
         let entries_added = store.stream_entries_added(&argv[2], len);
         let max_deleted_id = store.stream_max_deleted_id(&argv[2]).unwrap_or((0, 0));
+        // (frankenredis-ren6y) The last-generated-id watermark (survives an
+        // emptied stream) — needed so lag is nil when a group is ahead of it.
+        let stream_last_generated_id = store.stream_watermark(&argv[2]).unwrap_or(None);
+        let lag_info = StreamLagInfo {
+            entries_added,
+            len,
+            first_id: first.as_ref().map(|(id, _)| *id),
+            last_id: last.as_ref().map(|(id, _)| *id),
+            max_deleted_id,
+            last_generated_id: stream_last_generated_id,
+        };
         let resp = store.dispatch_client_ctx.resp_protocol_version;
         let mut out = Vec::with_capacity(groups.len());
         for (name, consumers, pending, last_delivered_id, entries_read) in groups {
@@ -9289,15 +9325,7 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                 pending,
                 last_delivered_id,
                 entries_read,
-                stream_full_group_lag_frame(
-                    entries_added,
-                    len,
-                    first.as_ref().map(|(id, _)| *id),
-                    last.as_ref().map(|(id, _)| *id),
-                    max_deleted_id,
-                    last_delivered_id,
-                    entries_read,
-                ),
+                stream_full_group_lag_frame(lag_info, last_delivered_id, entries_read),
                 resp,
             ));
         }
@@ -9398,6 +9426,14 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let (radix_tree_keys, radix_tree_nodes) = stream_radix_tree_metrics(len, entries_added);
     let max_deleted_id = store.stream_max_deleted_id(&argv[2]).unwrap_or((0, 0));
     let max_deleted_entry_id = format_stream_id(max_deleted_id);
+    let lag_info = StreamLagInfo {
+        entries_added,
+        len,
+        first_id: first.as_ref().map(|(id, _)| *id),
+        last_id: last.as_ref().map(|(id, _)| *id),
+        max_deleted_id,
+        last_generated_id: stream_watermark,
+    };
 
     if full_mode {
         // FULL mode: include entries and detailed group info
@@ -9459,15 +9495,7 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                     pending_count: *pending_count,
                     last_delivered_id: *last_delivered_id,
                     entries_read: *entries_read,
-                    lag: stream_full_group_lag_frame(
-                        entries_added,
-                        len,
-                        first.as_ref().map(|(id, _)| *id),
-                        last.as_ref().map(|(id, _)| *id),
-                        max_deleted_id,
-                        *last_delivered_id,
-                        *entries_read,
-                    ),
+                    lag: stream_full_group_lag_frame(lag_info, *last_delivered_id, *entries_read),
                 },
                 group_pending,
                 consumer_frames,
@@ -26248,7 +26276,7 @@ mod tests {
         CLIENT_TRACKING_OPT_SWITCH_REQUIRES_DISABLE, CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT,
         CLIENT_TRACKING_PREFIX_REQUIRES_BCAST, CLIENT_TRACKING_REDIRECT_MISSING,
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
-        SCRIPT_NOSCRIPT_ERROR, SUBCOMMAND_TABLE, acl_command_selectors_for_argv,
+        SCRIPT_NOSCRIPT_ERROR, SUBCOMMAND_TABLE, StreamLagInfo, acl_command_selectors_for_argv,
         check_command_arity, classify_command, client_wrong_subcommand_arity,
         cluster_disabled_error, cluster_reset_with_keys_error, cluster_wrong_subcommand_arity,
         command_acl_categories, command_acl_key_access, command_has_acl_subcommands,
@@ -36090,21 +36118,41 @@ mod tests {
         let mut store = Store::new();
         for id in [b"1-0".as_slice(), b"2-0", b"3-0"] {
             dispatch_argv(
-                &[b"XADD".to_vec(), b"st".to_vec(), id.to_vec(), b"f".to_vec(), b"v".to_vec()],
+                &[
+                    b"XADD".to_vec(),
+                    b"st".to_vec(),
+                    id.to_vec(),
+                    b"f".to_vec(),
+                    b"v".to_vec(),
+                ],
                 &mut store,
                 0,
             )
             .unwrap();
         }
         dispatch_argv(
-            &[b"XGROUP".to_vec(), b"CREATE".to_vec(), b"st".to_vec(), b"g1".to_vec(), b"0".to_vec()],
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"st".to_vec(),
+                b"g1".to_vec(),
+                b"0".to_vec(),
+            ],
             &mut store,
             0,
         )
         .unwrap();
         // deliver all 3 to c1 (now pending)
         dispatch_argv(
-            &[b"XREADGROUP".to_vec(), b"GROUP".to_vec(), b"g1".to_vec(), b"c1".to_vec(), b"STREAMS".to_vec(), b"st".to_vec(), b">".to_vec()],
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"st".to_vec(),
+                b">".to_vec(),
+            ],
             &mut store,
             0,
         )
@@ -36117,7 +36165,15 @@ mod tests {
         )
         .unwrap();
         let hist = dispatch_argv(
-            &[b"XREADGROUP".to_vec(), b"GROUP".to_vec(), b"g1".to_vec(), b"c1".to_vec(), b"STREAMS".to_vec(), b"st".to_vec(), b"0".to_vec()],
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"st".to_vec(),
+                b"0".to_vec(),
+            ],
             &mut store,
             0,
         )
@@ -39536,14 +39592,26 @@ mod tests {
         // ID". The id is still parsed before the BUSYGROUP check.
         let mut store = Store::new();
         dispatch_argv(
-            &[b"XADD".to_vec(), b"s".to_vec(), b"1-0".to_vec(), b"f".to_vec(), b"v".to_vec()],
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"1-0".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
             &mut store,
             0,
         )
         .unwrap();
         store.set(b"str".to_vec(), b"hello".to_vec(), None, 0);
         dispatch_argv(
-            &[b"XGROUP".to_vec(), b"CREATE".to_vec(), b"s".to_vec(), b"gexists".to_vec(), b"0".to_vec()],
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"gexists".to_vec(),
+                b"0".to_vec(),
+            ],
             &mut store,
             0,
         )
@@ -39561,7 +39629,13 @@ mod tests {
         );
         // Wrong-type key + bad id -> WRONGTYPE (even with MKSTREAM).
         for extra in [Vec::new(), vec![b"MKSTREAM".to_vec()]] {
-            let mut argv = vec![b"XGROUP".to_vec(), b"CREATE".to_vec(), b"str".to_vec(), b"g1".to_vec(), b"bad-id".to_vec()];
+            let mut argv = vec![
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"str".to_vec(),
+                b"g1".to_vec(),
+                b"bad-id".to_vec(),
+            ];
             argv.extend(extra);
             assert!(matches!(
                 dispatch_argv(&argv, &mut store, 0).expect_err("wrongtype bad id"),
@@ -39571,17 +39645,31 @@ mod tests {
         // Existing group + bad id -> id parse precedes BUSYGROUP (Invalid id).
         assert_eq!(
             dispatch_argv(
-                &[b"XGROUP".to_vec(), b"CREATE".to_vec(), b"s".to_vec(), b"gexists".to_vec(), b"bad-id".to_vec()],
+                &[
+                    b"XGROUP".to_vec(),
+                    b"CREATE".to_vec(),
+                    b"s".to_vec(),
+                    b"gexists".to_vec(),
+                    b"bad-id".to_vec()
+                ],
                 &mut store,
                 0,
             )
             .expect("busygroup bad id"),
-            RespFrame::Error("ERR Invalid stream ID specified as stream command argument".to_string())
+            RespFrame::Error(
+                "ERR Invalid stream ID specified as stream command argument".to_string()
+            )
         );
         // Existing group + good id -> BUSYGROUP.
         assert_eq!(
             dispatch_argv(
-                &[b"XGROUP".to_vec(), b"CREATE".to_vec(), b"s".to_vec(), b"gexists".to_vec(), b"0".to_vec()],
+                &[
+                    b"XGROUP".to_vec(),
+                    b"CREATE".to_vec(),
+                    b"s".to_vec(),
+                    b"gexists".to_vec(),
+                    b"0".to_vec()
+                ],
                 &mut store,
                 0,
             )
@@ -39591,14 +39679,27 @@ mod tests {
         // MKSTREAM + missing key + bad id -> Invalid id, no key created.
         assert_eq!(
             dispatch_argv(
-                &[b"XGROUP".to_vec(), b"CREATE".to_vec(), b"newk".to_vec(), b"g1".to_vec(), b"bad-id".to_vec(), b"MKSTREAM".to_vec()],
+                &[
+                    b"XGROUP".to_vec(),
+                    b"CREATE".to_vec(),
+                    b"newk".to_vec(),
+                    b"g1".to_vec(),
+                    b"bad-id".to_vec(),
+                    b"MKSTREAM".to_vec()
+                ],
                 &mut store,
                 0,
             )
             .expect("mkstream bad id"),
-            RespFrame::Error("ERR Invalid stream ID specified as stream command argument".to_string())
+            RespFrame::Error(
+                "ERR Invalid stream ID specified as stream command argument".to_string()
+            )
         );
-        assert_eq!(store.key_type(b"newk", 0), None, "MKSTREAM must not create the key on a bad id");
+        assert_eq!(
+            store.key_type(b"newk", 0),
+            None,
+            "MKSTREAM must not create the key on a bad id"
+        );
     }
 
     #[test]
@@ -54780,7 +54881,13 @@ mod tests {
         let mut store = Store::new();
         let xadd = |st: &mut Store, id: &[u8]| {
             dispatch_argv(
-                &[b"XADD".to_vec(), b"s".to_vec(), id.to_vec(), b"f".to_vec(), b"v".to_vec()],
+                &[
+                    b"XADD".to_vec(),
+                    b"s".to_vec(),
+                    id.to_vec(),
+                    b"f".to_vec(),
+                    b"v".to_vec(),
+                ],
                 st,
                 0,
             )
@@ -54788,7 +54895,12 @@ mod tests {
         };
         xadd(&mut store, b"5-0");
         dispatch_argv(
-            &[b"XTRIM".to_vec(), b"s".to_vec(), b"MAXLEN".to_vec(), b"0".to_vec()],
+            &[
+                b"XTRIM".to_vec(),
+                b"s".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"0".to_vec(),
+            ],
             &mut store,
             0,
         )
@@ -66940,32 +67052,76 @@ mod tests {
 
     #[test]
     fn stream_full_group_lag_frame_matches_redis_estimable_cases() {
+        let base = StreamLagInfo {
+            entries_added: 3,
+            len: 3,
+            first_id: Some((1, 1)),
+            last_id: Some((3, 1)),
+            max_deleted_id: (0, 0),
+            last_generated_id: None,
+        };
         assert_eq!(
-            stream_full_group_lag_frame(3, 3, Some((1, 1)), Some((3, 1)), (0, 0), (0, 0), None),
+            stream_full_group_lag_frame(base, (0, 0), None),
             RespFrame::Integer(3)
         );
         assert_eq!(
-            stream_full_group_lag_frame(3, 3, Some((1, 1)), Some((3, 1)), (0, 0), (1, 1), None),
+            stream_full_group_lag_frame(base, (1, 1), None),
             RespFrame::Integer(2)
         );
         assert_eq!(
-            stream_full_group_lag_frame(3, 3, Some((1, 1)), Some((3, 1)), (2, 1), (3, 1), None),
+            stream_full_group_lag_frame(
+                StreamLagInfo {
+                    max_deleted_id: (2, 1),
+                    ..base
+                },
+                (3, 1),
+                None
+            ),
             RespFrame::Integer(0)
         );
         assert_eq!(
-            stream_full_group_lag_frame(3, 3, Some((1, 1)), Some((3, 1)), (2, 1), (2, 1), None),
+            stream_full_group_lag_frame(
+                StreamLagInfo {
+                    max_deleted_id: (2, 1),
+                    ..base
+                },
+                (2, 1),
+                None
+            ),
             RespFrame::BulkString(None)
         );
         assert_eq!(
-            stream_full_group_lag_frame(10, 3, Some((1, 1)), Some((3, 1)), (0, 0), (2, 1), Some(2)),
+            stream_full_group_lag_frame(
+                StreamLagInfo {
+                    entries_added: 10,
+                    ..base
+                },
+                (2, 1),
+                Some(2)
+            ),
             RespFrame::Integer(8)
         );
+        let shifted = StreamLagInfo {
+            entries_added: 4,
+            len: 3,
+            first_id: Some((2, 0)),
+            last_id: Some((4, 0)),
+            max_deleted_id: (1, 0),
+            last_generated_id: None,
+        };
         assert_eq!(
-            stream_full_group_lag_frame(4, 3, Some((2, 0)), Some((4, 0)), (1, 0), (3, 0), Some(3)),
+            stream_full_group_lag_frame(shifted, (3, 0), Some(3)),
             RespFrame::Integer(1)
         );
         assert_eq!(
-            stream_full_group_lag_frame(4, 3, Some((2, 0)), Some((4, 0)), (3, 0), (2, 0), Some(2)),
+            stream_full_group_lag_frame(
+                StreamLagInfo {
+                    max_deleted_id: (3, 0),
+                    ..shifted
+                },
+                (2, 0),
+                Some(2)
+            ),
             RespFrame::BulkString(None)
         );
     }
@@ -68588,7 +68744,12 @@ mod tests {
         .unwrap();
         for cmd in [b"GETRANGE".as_slice(), b"SUBSTR".as_slice()] {
             let err = dispatch_argv(
-                &[cmd.to_vec(), b"lst".to_vec(), b"-1".to_vec(), b"-2".to_vec()],
+                &[
+                    cmd.to_vec(),
+                    b"lst".to_vec(),
+                    b"-1".to_vec(),
+                    b"-2".to_vec(),
+                ],
                 &mut store,
                 0,
             )
@@ -68607,7 +68768,12 @@ mod tests {
         .unwrap();
         assert_eq!(
             dispatch_argv(
-                &[b"GETRANGE".to_vec(), b"s".to_vec(), b"-1".to_vec(), b"-2".to_vec()],
+                &[
+                    b"GETRANGE".to_vec(),
+                    b"s".to_vec(),
+                    b"-1".to_vec(),
+                    b"-2".to_vec()
+                ],
                 &mut store,
                 0,
             )
