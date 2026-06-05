@@ -8167,7 +8167,10 @@ fn stream_estimate_distance_from_first_ever(stream: &StreamLagInfo, id: StreamId
     }
     // `s->last_id` is the watermark; fall back to the last live entry only when
     // no watermark was supplied (synthetic callers / never-XSETID'd streams).
-    let last_id = stream.last_generated_id.or(stream.last_id).unwrap_or((0, 0));
+    let last_id = stream
+        .last_generated_id
+        .or(stream.last_id)
+        .unwrap_or((0, 0));
     let len = u64::try_from(stream.len).unwrap_or(u64::MAX);
     // In an empty stream, an ID at or before the last ID maps to entries_added.
     if stream.len == 0 && id <= last_id {
@@ -24980,6 +24983,12 @@ fn bitfield_cmd(
                 overflow_mode,
             );
             if overflowed && overflow_mode == BitfieldOverflow::Fail {
+                // Upstream still ran lookupStringForBitCommand, so the key is
+                // created/extended to this write's offset even though the value
+                // isn't written (FAIL). (frankenredis bitfield-fail-extend)
+                store
+                    .bitfield_reserve_for_write(key, bit_offset, bits, now_ms)
+                    .map_err(CommandError::Store)?;
                 results.push(RespFrame::BulkString(None));
                 i += 4;
                 continue;
@@ -25028,6 +25037,11 @@ fn bitfield_cmd(
                 bitfield_clamp_with_overflow(new_val, i64_overflowed, bits, signed, overflow_mode);
 
             if overflowed && overflow_mode == BitfieldOverflow::Fail {
+                // As with SET: the key is created/extended upfront even when the
+                // INCRBY aborts under FAIL. (frankenredis bitfield-fail-extend)
+                store
+                    .bitfield_reserve_for_write(key, bit_offset, bits, now_ms)
+                    .map_err(CommandError::Store)?;
                 results.push(RespFrame::BulkString(None));
             } else {
                 store
@@ -25191,17 +25205,16 @@ fn bitfield_parse_offset(arg: &[u8], bits: u8) -> Option<u64> {
     Some(offset)
 }
 
-/// Sign-extend a value from `bits` width to i64.
+/// Sign-extend a `bits`-wide value to i64. Uses a shift-left/arithmetic-shift-
+/// right pair, which sign-extends in one step and avoids the overflow that the
+/// mask form `(1i64 << bits) - 1` hit at `bits == 63` (`1i64 << 63` is i64::MIN,
+/// so `- 1` panicked under overflow checks / wrapped in release).
 fn bitfield_sign_extend(value: i64, bits: u8) -> i64 {
     if bits >= 64 {
         return value;
     }
-    let mask = 1i64 << (bits - 1);
-    if value & mask != 0 {
-        value | !((1i64 << bits) - 1) // sign extend: set all bits above width
-    } else {
-        value & ((1i64 << bits) - 1) // mask to width
-    }
+    let shift = 64 - u32::from(bits); // 1..=63 here
+    (value << shift) >> shift
 }
 
 /// Clamp a value and report whether overflow occurred.

@@ -4785,6 +4785,55 @@ impl Store {
     }
 
     /// Write an arbitrary-width integer field to the string at `key`.
+    /// Create/zero-extend the string backing `key` so a write of `bits` at
+    /// `bit_offset` would fit, WITHOUT writing a value. Mirrors upstream
+    /// `lookupStringForBitCommand`, which grows the key to the highest write
+    /// offset of a BITFIELD before any subcommand runs — so even a SET/INCRBY
+    /// whose `OVERFLOW FAIL` aborts the write still leaves the key created and
+    /// extended (`EXISTS`/`STRLEN` reflect it). The size guard matches
+    /// `bitfield_set`/`checkStringLength`.
+    pub fn bitfield_reserve_for_write(
+        &mut self,
+        key: &[u8],
+        bit_offset: u64,
+        bits: u8,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        self.drop_if_expired(key, now_ms);
+        let end_bit = bit_offset.saturating_add(u64::from(bits));
+        let needed_bytes = end_bit.div_ceil(8) as usize;
+        if needed_bytes > 512 * 1024 * 1024 {
+            return Err(StoreError::GenericError(
+                "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
+            ));
+        }
+        if let Some(entry) = self.entries.get_mut(key) {
+            let Some(bytes) = entry.value.materialize_string() else {
+                return Err(StoreError::WrongType);
+            };
+            let grew = bytes.len() < needed_bytes;
+            if grew {
+                bytes.resize(needed_bytes, 0);
+            }
+            entry.last_access_ms = now_ms;
+            entry.lfu_freq = LFU_INIT_VAL;
+            entry.lfu_last_touch_min = now_ms / 60_000;
+            entry.modification_count = entry.modification_count.wrapping_add(1);
+            entry.force_raw_encoding = true;
+            entry.force_string_encoding = false;
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+            if grew {
+                self.dirty = self.dirty.saturating_add(1);
+            }
+            return Ok(());
+        }
+        let mut entry = Entry::new(Value::String(vec![0u8; needed_bytes].into()), None, now_ms);
+        entry.force_raw_encoding = true;
+        self.internal_entries_insert(key.to_vec(), entry);
+        self.dirty = self.dirty.saturating_add(1);
+        Ok(())
+    }
+
     /// Returns the old value at that field position.
     /// Auto-creates/extends the string as needed.
     pub fn bitfield_set(
