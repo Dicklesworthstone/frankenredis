@@ -9778,10 +9778,14 @@ fn xsetid_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
                 .to_string(),
         ));
     }
-    // Upstream t_stream.c::xsetidCommand rejects with the verbose
-    // 'smaller than the target stream top item' wording when
-    // last-id < current top stream id. (br-frankenredis-xsetid-top)
-    if let Ok(Some(top)) = store.xlast_id(key, now_ms)
+    // Upstream t_stream.c::xsetidCommand only runs the "smaller than the target
+    // stream top item" check when the stream has entries (s->length > 0), and
+    // compares against the max ACTUAL entry id (streamLastValidID) — NOT the
+    // persisted last-generated-id. So an emptied stream (e.g. after XTRIM MAXLEN
+    // 0) accepts XSETID to a smaller id. Using xlast_id here wrongly folded in
+    // the surviving watermark and rejected those. (frankenredis-xsetidempty,
+    // supersedes br-frankenredis-xsetid-top)
+    if let Ok(Some(top)) = store.stream_last_entry_id(key)
         && last_id < top
     {
         return Ok(RespFrame::Error(
@@ -54688,6 +54692,57 @@ mod tests {
     }
 
     // ── XSETID tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn xsetid_emptied_stream_accepts_smaller_id_xsetidempty() {
+        // (frankenredis-xsetidempty) Upstream only runs the "smaller than the
+        // target stream top item" check when the stream has entries, comparing
+        // against the max ACTUAL entry — not the persisted last-generated-id. A
+        // stream emptied by XTRIM MAXLEN 0 (max_deleted stays 0) therefore
+        // accepts XSETID to a smaller id. Found via randomized differential fuzz.
+        let mut store = Store::new();
+        let xadd = |st: &mut Store, id: &[u8]| {
+            dispatch_argv(
+                &[b"XADD".to_vec(), b"s".to_vec(), id.to_vec(), b"f".to_vec(), b"v".to_vec()],
+                st,
+                0,
+            )
+            .unwrap();
+        };
+        xadd(&mut store, b"5-0");
+        dispatch_argv(
+            &[b"XTRIM".to_vec(), b"s".to_vec(), b"MAXLEN".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(store.xlen(b"s", 0).unwrap(), 0);
+        assert_eq!(store.stream_last_entry_id(b"s").unwrap(), None);
+        // Smaller id now accepted (stream empty).
+        assert_eq!(
+            dispatch_argv(
+                &[b"XSETID".to_vec(), b"s".to_vec(), b"2".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // Non-empty stream still rejects a smaller-than-top id.
+        xadd(&mut store, b"9-0");
+        assert_eq!(
+            dispatch_argv(
+                &[b"XSETID".to_vec(), b"s".to_vec(), b"3".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::Error(
+                "ERR The ID specified in XSETID is smaller than the target stream top item"
+                    .to_string()
+            )
+        );
+    }
 
     #[test]
     fn xsetid_on_stream() {

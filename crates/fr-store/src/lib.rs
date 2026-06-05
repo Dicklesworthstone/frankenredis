@@ -11014,6 +11014,22 @@ impl Store {
         Ok(last_id)
     }
 
+    /// The id of the last ACTUAL entry in the stream (max entry id), or None when
+    /// the stream is empty — ignoring the persisted last-generated-id watermark.
+    /// XSETID's "smaller than the target stream top item" check compares against
+    /// this (upstream streamLastValidID), so an emptied stream (length 0) skips
+    /// the check entirely, unlike `xlast_id`/`stream_watermark` which fold in the
+    /// surviving last-generated-id. (frankenredis-xsetidempty)
+    pub fn stream_last_entry_id(&self, key: &[u8]) -> Result<Option<StreamId>, StoreError> {
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(entries) => Ok(entries.last_key_value().map(|(id, _)| *id)),
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
     pub fn stream_watermark(&self, key: &[u8]) -> Result<Option<StreamId>, StoreError> {
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
