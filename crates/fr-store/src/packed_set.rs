@@ -1194,6 +1194,80 @@ impl PackedZSet {
             pos: 0,
         }
     }
+
+    /// `(member, score)` pairs in DESCENDING order (mirrors SortedSet::iter_desc).
+    pub fn iter_desc(&self) -> std::iter::Rev<std::vec::IntoIter<(&[u8], f64)>> {
+        self.iter().collect::<Vec<_>>().into_iter().rev()
+    }
+
+    /// `count` (member, score) pairs starting at ascending index `start_idx`.
+    #[must_use]
+    pub fn index_slice_asc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
+        self.iter()
+            .skip(start_idx)
+            .take(count)
+            .map(|(m, s)| (m.to_vec(), s))
+            .collect()
+    }
+
+    /// `count` (member, score) pairs starting at descending index `start_idx`
+    /// (0 = highest), in descending order.
+    #[must_use]
+    pub fn index_slice_desc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
+        self.iter_desc()
+            .skip(start_idx)
+            .take(count)
+            .map(|(m, s)| (m.to_vec(), s))
+            .collect()
+    }
+
+    /// Invoke `f(member, score)` for each member whose canonical score lies in
+    /// the INCLUSIVE range `[lo, hi]`, ascending (mirrors
+    /// SortedSet::for_each_in_score_range, which ranges
+    /// `min_for_score(lo)..=max_for_score(hi)`).
+    pub fn for_each_in_score_range(&self, lo: f64, hi: f64, mut f: impl FnMut(&[u8], f64)) {
+        let (lo, hi) = (canon_zero(lo), canon_zero(hi));
+        for (member, score) in self.iter() {
+            let c = canon_zero(score);
+            if c.total_cmp(&lo) != std::cmp::Ordering::Less
+                && c.total_cmp(&hi) != std::cmp::Ordering::Greater
+            {
+                f(member, score);
+            }
+        }
+    }
+
+    /// Remove and return the lowest-ranked `(member, score)` (ZPOPMIN).
+    pub fn pop_min(&mut self) -> Option<(Vec<u8>, f64)> {
+        if self.buf.is_empty() {
+            return None;
+        }
+        let (m, score, end) = self.record_at(0);
+        let out = (m.to_vec(), score);
+        self.buf.drain(0..end);
+        self.len -= 1;
+        Some(out)
+    }
+
+    /// Remove and return the highest-ranked `(member, score)` (ZPOPMAX).
+    pub fn pop_max(&mut self) -> Option<(Vec<u8>, f64)> {
+        if self.buf.is_empty() {
+            return None;
+        }
+        // Walk to the last record's start.
+        let mut pos = 0;
+        let mut last_start = 0;
+        while pos < self.buf.len() {
+            last_start = pos;
+            let (_m, _s, end) = self.record_at(pos);
+            pos = end;
+        }
+        let (m, score, _end) = self.record_at(last_start);
+        let out = (m.to_vec(), score);
+        self.buf.truncate(last_start);
+        self.len -= 1;
+        Some(out)
+    }
 }
 
 /// Borrowing iterator over `(member, score)` in ascending order.
@@ -1466,7 +1540,65 @@ mod tests {
                 for (i, (m, _)) in sorted.iter().enumerate() {
                     prop_assert_eq!(packed.rank(m), Some(i));
                 }
+                // iter_desc == reversed sorted
+                let desc: Vec<(Vec<u8>, f64)> =
+                    packed.iter_desc().map(|(m, s)| (m.to_vec(), s)).collect();
+                let mut sorted_rev = sorted.clone();
+                sorted_rev.reverse();
+                prop_assert_eq!(&desc, &sorted_rev);
+                // index_slice_asc / _desc == sorted/reversed skip+take
+                for (start, count) in [(0usize, 2usize), (1, 3), (0, 100), (5, 1)] {
+                    let asc_want: Vec<(Vec<u8>, f64)> =
+                        sorted.iter().skip(start).take(count).cloned().collect();
+                    prop_assert_eq!(packed.index_slice_asc(start, count), asc_want);
+                    let desc_want: Vec<(Vec<u8>, f64)> =
+                        sorted_rev.iter().skip(start).take(count).cloned().collect();
+                    prop_assert_eq!(packed.index_slice_desc(start, count), desc_want);
+                }
+                // for_each_in_score_range == sorted filtered to [lo, hi]
+                for (lo, hi) in [(-2.0, 2.0), (0.0, 0.0), (1.0, 3.0)] {
+                    let mut got_range: Vec<(Vec<u8>, f64)> = Vec::new();
+                    packed.for_each_in_score_range(lo, hi, |m, s| got_range.push((m.to_vec(), s)));
+                    let want_range: Vec<(Vec<u8>, f64)> = sorted
+                        .iter()
+                        .filter(|(_, s)| *s >= lo && *s <= hi)
+                        .cloned()
+                        .collect();
+                    prop_assert_eq!(got_range, want_range);
+                }
             }
+        }
+
+        /// pop_min/pop_max drain the ends in sorted order (ZPOPMIN/ZPOPMAX).
+        #[test]
+        fn zset_pop_min_max(members in proptest::collection::vec(
+            (proptest::collection::vec(0u8..4, 1..3), -3i8..4), 0..20)) {
+            let mut packed = PackedZSet::new();
+            let mut oracle: Vec<(Vec<u8>, f64)> = Vec::new();
+            for (m, raw) in members {
+                let s = f64::from(raw);
+                if let Some(e) = oracle.iter_mut().find(|(om, _)| om == &m) {
+                    e.1 = s;
+                } else {
+                    oracle.push((m.clone(), s));
+                }
+                packed.insert(&m, s);
+            }
+            oracle.sort_by(|a, b| zset_cmp(a.1, &a.0, b.1, &b.0));
+            // pop from both ends, alternating, comparing to the reference deque.
+            let mut deque: std::collections::VecDeque<(Vec<u8>, f64)> = oracle.into();
+            let mut take_min = true;
+            while !deque.is_empty() {
+                if take_min {
+                    prop_assert_eq!(packed.pop_min(), deque.pop_front());
+                } else {
+                    prop_assert_eq!(packed.pop_max(), deque.pop_back());
+                }
+                take_min = !take_min;
+            }
+            prop_assert_eq!(packed.pop_min(), None);
+            prop_assert_eq!(packed.pop_max(), None);
+            prop_assert_eq!(packed.len(), 0);
         }
     }
 
