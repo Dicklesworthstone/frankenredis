@@ -20,7 +20,8 @@ use std::collections::BTreeMap;
 
 use crate::listpack::{ListpackEntry, ListpackError, decode_listpack};
 use crate::{
-    RdbStreamConsumerGroup, RdbStreamMetadata, RdbStreamPendingEntry, RdbValue, StreamEntry,
+    RdbStreamConsumer, RdbStreamConsumerGroup, RdbStreamMetadata, RdbStreamPendingEntry, RdbValue,
+    StreamEntry,
 };
 
 use super::{rdb_decode_length, rdb_decode_string};
@@ -177,7 +178,7 @@ fn encode_consumer_group(buf: &mut Vec<u8>, group: &RdbStreamConsumerGroup) -> O
         if !group
             .consumers
             .iter()
-            .any(|known| known.as_slice() == *consumer)
+            .any(|known| known.name.as_slice() == *consumer)
         {
             return None;
         }
@@ -185,15 +186,14 @@ fn encode_consumer_group(buf: &mut Vec<u8>, group: &RdbStreamConsumerGroup) -> O
 
     super::rdb_encode_length(buf, group.consumers.len());
     for consumer in &group.consumers {
-        super::rdb_encode_string(buf, consumer);
-        let seen_time = pending_by_consumer
-            .get(consumer.as_slice())
-            .and_then(|pending| pending.iter().map(|entry| entry.last_delivered_ms).max())
-            .unwrap_or(0);
-        buf.extend_from_slice(&seen_time.to_le_bytes());
-        buf.extend_from_slice(&seen_time.to_le_bytes());
+        super::rdb_encode_string(buf, &consumer.name);
+        // seen_time, then active_time — both mstime_t (i64 LE). `None` active
+        // time is upstream's `-1` sentinel. (frankenredis-sq4ov)
+        buf.extend_from_slice(&consumer.seen_time_ms.to_le_bytes());
+        let active = consumer.active_time_ms.map_or(-1i64, |v| v as i64);
+        buf.extend_from_slice(&active.to_le_bytes());
         let pending = pending_by_consumer
-            .get(consumer.as_slice())
+            .get(consumer.name.as_slice())
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         super::rdb_encode_length(buf, pending.len());
@@ -397,15 +397,25 @@ pub(crate) fn decode_upstream_stream_skeleton(
             let (consumer_name, c) =
                 rdb_decode_string(&data[cursor..]).ok_or(UpstreamStreamError::InvalidString)?;
             cursor += c;
-            consumers.push(consumer_name.clone());
+            // seen_time (type 19+), then active_time (type 21+); both mstime_t.
+            // An active_time of -1 is upstream's "never actively consumed"
+            // sentinel. (frankenredis-sq4ov)
+            let mut seen_time_ms = 0u64;
+            let mut active_time_ms: Option<u64> = None;
             if is_v2_or_later {
-                let _seen_time_ms = take_millisecond_time(data, cursor)?;
+                seen_time_ms = take_millisecond_time(data, cursor)?;
                 cursor += 8;
             }
             if is_v3 {
-                let _active_time_ms = take_millisecond_time(data, cursor)?;
+                let raw = take_millisecond_time(data, cursor)?;
                 cursor += 8;
+                active_time_ms = if raw as i64 == -1 { None } else { Some(raw) };
             }
+            consumers.push(RdbStreamConsumer {
+                name: consumer_name.clone(),
+                seen_time_ms,
+                active_time_ms,
+            });
             let (cpel_count, c) =
                 rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
             cursor += c;
@@ -992,7 +1002,10 @@ mod tests {
             last_delivered_id_ms: 1001,
             last_delivered_id_seq: 1,
             entries_read: Some(2),
-            consumers: vec![b"alice".to_vec(), b"bob".to_vec()],
+            consumers: vec![
+                RdbStreamConsumer::named(b"alice".to_vec()),
+                RdbStreamConsumer::named(b"bob".to_vec()),
+            ],
             pending: vec![
                 RdbStreamPendingEntry {
                     entry_id_ms: 1001,
@@ -1052,7 +1065,10 @@ mod tests {
                 last_delivered_id_ms: 1001,
                 last_delivered_id_seq: 1,
                 entries_read: Some(2),
-                consumers: vec![b"alice".to_vec(), b"bob".to_vec()],
+                consumers: vec![
+                RdbStreamConsumer::named(b"alice".to_vec()),
+                RdbStreamConsumer::named(b"bob".to_vec()),
+            ],
                 pending: vec![
                     RdbStreamPendingEntry {
                         entry_id_ms: 1000,
@@ -1081,7 +1097,7 @@ mod tests {
             last_delivered_id_ms: 1000,
             last_delivered_id_seq: 0,
             entries_read: None,
-            consumers: vec![b"alice".to_vec()],
+            consumers: vec![RdbStreamConsumer::named(b"alice".to_vec())],
             pending: vec![RdbStreamPendingEntry {
                 entry_id_ms: 1000,
                 entry_id_seq: 0,
@@ -1131,7 +1147,7 @@ mod tests {
                     last_delivered_id_ms: watermark.0,
                     last_delivered_id_seq: watermark.1,
                     entries_read: None,
-                    consumers: vec![b"consumer".to_vec()],
+                    consumers: vec![RdbStreamConsumer::named(b"consumer".to_vec())],
                     pending: vec![RdbStreamPendingEntry {
                         entry_id_ms: pending_id.0,
                         entry_id_seq: pending_id.1,
@@ -1289,7 +1305,21 @@ mod tests {
         assert_eq!(group.name, b"g".to_vec());
         assert_eq!(group.last_delivered_id_ms, 42);
         assert_eq!(group.last_delivered_id_seq, 7);
-        assert_eq!(group.consumers, vec![b"alice".to_vec(), b"bob".to_vec()]);
+        assert_eq!(
+            group.consumers,
+            vec![
+                RdbStreamConsumer {
+                    name: b"alice".to_vec(),
+                    seen_time_ms: 1100,
+                    active_time_ms: Some(1200),
+                },
+                RdbStreamConsumer {
+                    name: b"bob".to_vec(),
+                    seen_time_ms: 1300,
+                    active_time_ms: Some(1400),
+                },
+            ]
+        );
         assert_eq!(
             group.pending,
             vec![RdbStreamPendingEntry {
@@ -1321,7 +1351,14 @@ mod tests {
 
         let group = &groups[0];
         assert_eq!(group.name, b"g".to_vec());
-        assert_eq!(group.consumers, vec![b"alice".to_vec()]);
+        assert_eq!(
+            group.consumers,
+            vec![RdbStreamConsumer {
+                name: b"alice".to_vec(),
+                seen_time_ms: 1100,
+                active_time_ms: None,
+            }]
+        );
         assert_eq!(
             group.pending,
             vec![RdbStreamPendingEntry {
@@ -1360,7 +1397,7 @@ mod tests {
             last_delivered_id_ms: 10,
             last_delivered_id_seq: 0,
             entries_read: None,
-            consumers: vec![b"alice".to_vec()],
+            consumers: vec![RdbStreamConsumer::named(b"alice".to_vec())],
             pending: vec![
                 RdbStreamPendingEntry {
                     entry_id_ms: 10,

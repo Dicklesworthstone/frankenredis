@@ -19,10 +19,9 @@
 #     FR_BIN defaults to $CARGO_TARGET_DIR/debug/frankenredis (build first:
 #     CARGO_TARGET_DIR=/data/tmp/cargo-target cargo build -p fr-server).
 #
-# KNOWN divergence (reported, not a hard fail — see bead frankenredis-sq4ov):
-#   - stream consumer-group seen_time / active_time are dropped on RDB load:
-#     fr XINFO shows inactive=-1 and re-derives idle from the PEL. Upstream
-#     restores both independently. Fix spans fr-persist + fr-store.
+# Previously-known divergences now FIXED and hard-gated below: FUNCTION library
+# load/save round-trip (vd0ii/tm139/c0u9q) and stream consumer-group
+# seen_time/active_time round-trip (sq4ov).
 set -u
 
 RS=${RS:-legacy_redis_code/redis/src/redis-server}
@@ -125,21 +124,17 @@ chk "XRANGE stream:s" "$(O xrange stream:s - +|md5sum)" "$(F xrange stream:s - +
 chk "XINFO GROUPS stream:s" "$(O xinfo groups stream:s|md5sum)" "$(F xinfo groups stream:s|md5sum)"
 chk "XPENDING stream:s grp count" "$(O xpending stream:s grp|head -1)" "$(F xpending stream:s grp|head -1)"
 
-# ── known divergence: consumer active_time dropped on load (sq4ov) ───────────
-fr_inactive=$(F xinfo consumers stream:s grp | awk '/^inactive$/{getline; print}')
-if [ "$fr_inactive" = "-1" ]; then
-  echo "KNOWN [frankenredis-sq4ov] stream consumer active_time dropped on RDB load (fr inactive=-1)"
-  known=$((known+1))
-fi
+# ── consumer seen/active_time round-trip (frankenredis-sq4ov, FIXED) ─────────
+# The stream consumer read entries, so `inactive` must be a real value (never
+# -1) on both — fr used to drop active_time and show -1 after load.
+o_inactive=$(O xinfo consumers stream:s grp | awk '/^inactive$/{getline; print; exit}')
+f_inactive=$(F xinfo consumers stream:s grp | awk '/^inactive$/{getline; print; exit}')
+chk "XINFO CONSUMERS inactive is-set(active consumer)" \
+  "$([ "$o_inactive" != "-1" ] && echo set || echo unset)" \
+  "$([ "$f_inactive" != "-1" ] && echo set || echo unset)"
 
-# ── known divergence: FUNCTION libraries not re-registered on load (tm139) ────
-# The data-loss part (vd0ii) is a HARD check above — DBSIZE includes every key
-# even though a FUNCTION2 payload precedes them. The library itself is captured
-# but not yet re-registered into the engine, so FUNCTION LIST stays empty.
-if [ -n "$(O function list 2>/dev/null)" ] && [ -z "$(F function list 2>/dev/null)" ]; then
-  echo "KNOWN [frankenredis-tm139] FUNCTION library not re-registered on RDB load (FUNCTION LIST empty)"
-  known=$((known+1))
-fi
+# ── FUNCTION library re-registration (frankenredis-tm139, FIXED) ─────────────
+chk "FUNCTION LIST library count" "$(O function list|grep -c library_name)" "$(F function list|grep -c library_name)"
 
 echo "------------------------------------------------------------"
 echo "corpus: $DBSIZE keys | hard divergences: $fails | known issues: $known"

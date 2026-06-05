@@ -870,6 +870,31 @@ pub struct RdbStreamPendingEntry {
     pub last_delivered_ms: u64,
 }
 
+/// A single consumer within a persisted consumer group, carrying the
+/// per-consumer timestamps redis stores in the RDB (STREAM_LISTPACKS_2 adds
+/// `seen_time`, _3 adds `active_time`). `active_time_ms` is `None` for the
+/// upstream `-1` sentinel ("never actively consumed"). (frankenredis-sq4ov)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RdbStreamConsumer {
+    pub name: Vec<u8>,
+    pub seen_time_ms: u64,
+    pub active_time_ms: Option<u64>,
+}
+
+impl RdbStreamConsumer {
+    /// Construct a consumer whose `seen_time`/`active_time` are unknown
+    /// (defaults to 0 / never-active). Convenience for callers/tests that only
+    /// have the name.
+    #[must_use]
+    pub fn named(name: Vec<u8>) -> Self {
+        Self {
+            name,
+            seen_time_ms: 0,
+            active_time_ms: None,
+        }
+    }
+}
+
 /// A consumer group persisted in an RDB snapshot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RdbStreamConsumerGroup {
@@ -877,7 +902,7 @@ pub struct RdbStreamConsumerGroup {
     pub last_delivered_id_ms: u64,
     pub last_delivered_id_seq: u64,
     pub entries_read: Option<u64>,
-    pub consumers: Vec<Vec<u8>>,
+    pub consumers: Vec<RdbStreamConsumer>,
     pub pending: Vec<RdbStreamPendingEntry>,
 }
 
@@ -1619,7 +1644,7 @@ fn consumer_group_is_lossless_type21(group: &RdbStreamConsumerGroup) -> bool {
         if !group
             .consumers
             .iter()
-            .any(|consumer| consumer.as_slice() == pending.consumer.as_slice())
+            .any(|consumer| consumer.name.as_slice() == pending.consumer.as_slice())
         {
             return false;
         }
@@ -1634,7 +1659,7 @@ fn consumer_group_is_lossless_type21(group: &RdbStreamConsumerGroup) -> bool {
             group
                 .pending
                 .iter()
-                .filter(|pending| pending.consumer.as_slice() == consumer.as_slice()),
+                .filter(|pending| pending.consumer.as_slice() == consumer.name.as_slice()),
         );
     }
 
@@ -1676,7 +1701,11 @@ fn encode_private_stream_rdb_value(
         buf.extend_from_slice(&group.entries_read.unwrap_or(u64::MAX).to_le_bytes());
         rdb_encode_length(buf, group.consumers.len());
         for consumer in &group.consumers {
-            rdb_encode_string(buf, consumer);
+            rdb_encode_string(buf, &consumer.name);
+            // Per-consumer seen_time (u64 LE) + active_time (i64 LE, -1 == None),
+            // so fr's native stream RDB round-trips them too. (frankenredis-sq4ov)
+            buf.extend_from_slice(&consumer.seen_time_ms.to_le_bytes());
+            buf.extend_from_slice(&consumer.active_time_ms.map_or(-1i64, |v| v as i64).to_le_bytes());
         }
         rdb_encode_length(buf, group.pending.len());
         for pe in &group.pending {
@@ -2736,7 +2765,30 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                                 let (cname, cnc) = rdb_decode_string(&data[cursor..])
                                     .ok_or(PersistError::InvalidFrame)?;
                                 cursor += cnc;
-                                consumers.push(cname);
+                                if cursor + 16 > data.len() {
+                                    return Err(PersistError::InvalidFrame);
+                                }
+                                let seen_time_ms = u64::from_le_bytes(
+                                    data[cursor..cursor + 8]
+                                        .try_into()
+                                        .map_err(|_| PersistError::InvalidFrame)?,
+                                );
+                                cursor += 8;
+                                let active_raw = u64::from_le_bytes(
+                                    data[cursor..cursor + 8]
+                                        .try_into()
+                                        .map_err(|_| PersistError::InvalidFrame)?,
+                                );
+                                cursor += 8;
+                                consumers.push(RdbStreamConsumer {
+                                    name: cname,
+                                    seen_time_ms,
+                                    active_time_ms: if active_raw as i64 == -1 {
+                                        None
+                                    } else {
+                                        Some(active_raw)
+                                    },
+                                });
                             }
                             // Pending entries
                             let (pel_count, pc) = rdb_decode_length(&data[cursor..])
@@ -3823,8 +3875,9 @@ mod tests {
         RDB_TYPE_HASH,
         RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_WITH_TTLS, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST_2,
         RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STRING, RDB_TYPE_ZSET_2,
-        RDB_TYPE_ZSET_LISTPACK, RdbEncodeOptions, RdbEntry, RdbStreamConsumerGroup,
-        RdbStreamMetadata, RdbStreamPendingEntry, RdbValue, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3,
+        RDB_TYPE_ZSET_LISTPACK, RdbEncodeOptions, RdbEntry, RdbStreamConsumer,
+        RdbStreamConsumerGroup, RdbStreamMetadata, RdbStreamPendingEntry, RdbValue,
+        UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3,
         crc64_redis, decode_intset_members, decode_rdb, decode_rdb_prefix,
         encode_listpack_strings_blob, encode_rdb, encode_rdb_with_functions,
         encode_rdb_with_options, lzf_compress,
@@ -6175,7 +6228,10 @@ mod tests {
                     last_delivered_id_ms: 1001,
                     last_delivered_id_seq: 0,
                     entries_read: None,
-                    consumers: vec![b"alice".to_vec(), b"bob".to_vec()],
+                    consumers: vec![
+                        RdbStreamConsumer::named(b"alice".to_vec()),
+                        RdbStreamConsumer::named(b"bob".to_vec()),
+                    ],
                     pending: vec![
                         RdbStreamPendingEntry {
                             entry_id_ms: 1000,
@@ -6217,7 +6273,7 @@ mod tests {
                     last_delivered_id_ms: 1000,
                     last_delivered_id_seq: 0,
                     entries_read: None,
-                    consumers: vec![b"alice".to_vec()],
+                    consumers: vec![RdbStreamConsumer::named(b"alice".to_vec())],
                     pending: vec![RdbStreamPendingEntry {
                         entry_id_ms: 1000,
                         entry_id_seq: 0,
@@ -6296,7 +6352,7 @@ mod tests {
                         last_delivered_id_ms: ms,
                         last_delivered_id_seq: 1,
                         entries_read: Some(1),
-                        consumers: vec![b"alice".to_vec()],
+                        consumers: vec![RdbStreamConsumer::named(b"alice".to_vec())],
                         pending: vec![RdbStreamPendingEntry {
                             entry_id_ms: ms,
                             entry_id_seq: 0,
@@ -6468,7 +6524,11 @@ mod tests {
                         last_delivered_id_ms: 42,
                         last_delivered_id_seq: 7,
                         entries_read: Some(1),
-                        consumers: vec![b"alice".to_vec()],
+                        consumers: vec![RdbStreamConsumer {
+                            name: b"alice".to_vec(),
+                            seen_time_ms: 1100,
+                            active_time_ms: Some(1200),
+                        }],
                         pending: vec![RdbStreamPendingEntry {
                             entry_id_ms: 42,
                             entry_id_seq: 7,
@@ -6966,7 +7026,7 @@ mod tests {
                 non_empty_byte_vec_strategy(8),
                 0_u64..=10_000,
                 0_u64..=64,
-                prop::collection::vec(non_empty_byte_vec_strategy(8), 0..=3),
+                prop::collection::vec(stream_consumer_strategy(), 0..=3),
                 prop::collection::vec(stream_pending_entry_strategy(), 0..=3),
             )
                 .prop_map(
@@ -6981,6 +7041,19 @@ mod tests {
                         }
                     },
                 )
+        }
+
+        fn stream_consumer_strategy() -> impl Strategy<Value = RdbStreamConsumer> {
+            (
+                non_empty_byte_vec_strategy(8),
+                0_u64..=10_000,
+                prop::option::of(0_u64..=10_000),
+            )
+                .prop_map(|(name, seen_time_ms, active_time_ms)| RdbStreamConsumer {
+                    name,
+                    seen_time_ms,
+                    active_time_ms,
+                })
         }
 
         fn rdb_value_strategy() -> impl Strategy<Value = RdbValue> {
@@ -7274,7 +7347,7 @@ mod tests {
                 non_empty_byte_vec_strategy(8),
                 0_u64..=10_000,
                 0_u64..=64,
-                prop::collection::vec(non_empty_byte_vec_strategy(8), 0..=3),
+                prop::collection::vec(stream_consumer_strategy(), 0..=3),
                 prop::collection::vec(stream_pending_entry_strategy(), 0..=3),
             )
                 .prop_map(
@@ -7289,6 +7362,19 @@ mod tests {
                         }
                     },
                 )
+        }
+
+        fn stream_consumer_strategy() -> impl Strategy<Value = RdbStreamConsumer> {
+            (
+                non_empty_byte_vec_strategy(8),
+                0_u64..=10_000,
+                prop::option::of(0_u64..=10_000),
+            )
+                .prop_map(|(name, seen_time_ms, active_time_ms)| RdbStreamConsumer {
+                    name,
+                    seen_time_ms,
+                    active_time_ms,
+                })
         }
 
         fn rdb_value_strategy() -> impl Strategy<Value = RdbValue> {

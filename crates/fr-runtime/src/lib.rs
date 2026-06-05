@@ -15075,7 +15075,20 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
                                 last_delivered_id_ms: group.last_delivered_id.0,
                                 last_delivered_id_seq: group.last_delivered_id.1,
                                 entries_read: group.entries_read,
-                                consumers: group.consumers.iter().cloned().collect(),
+                                consumers: group
+                                    .consumers
+                                    .iter()
+                                    .map(|name| {
+                                        let meta = group.consumer_metadata.get(name).copied();
+                                        fr_persist::RdbStreamConsumer {
+                                            name: name.clone(),
+                                            seen_time_ms: meta
+                                                .map(|m| m.seen_time_ms)
+                                                .unwrap_or(0),
+                                            active_time_ms: meta.and_then(|m| m.active_time_ms),
+                                        }
+                                    })
+                                    .collect(),
                                 pending: group
                                     .pending
                                     .iter()
@@ -15227,8 +15240,25 @@ fn apply_rdb_entries_to_store(
                 }
                 // Restore consumer groups from RDB snapshot.
                 for group in groups {
-                    let consumers: std::collections::BTreeSet<Vec<u8>> =
-                        group.consumers.iter().cloned().collect();
+                    // (frankenredis-sq4ov) Carry per-consumer seen/active times
+                    // so XINFO CONSUMERS idle/inactive survive the reload. The
+                    // map keys are the consumer names.
+                    let consumer_metadata: std::collections::BTreeMap<
+                        Vec<u8>,
+                        fr_store::StreamConsumerMetadata,
+                    > = group
+                        .consumers
+                        .iter()
+                        .map(|c| {
+                            (
+                                c.name.clone(),
+                                fr_store::StreamConsumerMetadata {
+                                    seen_time_ms: c.seen_time_ms,
+                                    active_time_ms: c.active_time_ms,
+                                },
+                            )
+                        })
+                        .collect();
                     let mut pending = std::collections::BTreeMap::new();
                     for pe in &group.pending {
                         pending.insert(
@@ -15245,7 +15275,7 @@ fn apply_rdb_entries_to_store(
                         group.name.clone(),
                         (group.last_delivered_id_ms, group.last_delivered_id_seq),
                         group.entries_read,
-                        consumers,
+                        consumer_metadata,
                         pending,
                     );
                 }
