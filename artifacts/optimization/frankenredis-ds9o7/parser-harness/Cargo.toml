@@ -1,0 +1,17 @@
+[package]
+name = "fr-ds9o7-parser-harness"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+fr-protocol = { path = "../../../../crates/fr-protocol" }
+
+[profile.release-perf]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+strip = false

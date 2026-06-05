@@ -443,6 +443,31 @@ pub struct ParseResult {
     pub consumed: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BorrowedCommandParseResult<'a> {
+    pub frame: BorrowedCommandFrame<'a>,
+    pub consumed: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BorrowedCommandFrame<'a> {
+    NullArray,
+    Arguments(Vec<&'a [u8]>),
+    Owned(RespFrame),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BorrowedCommandArgsParseResult {
+    pub kind: BorrowedCommandArgsKind,
+    pub consumed: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorrowedCommandArgsKind {
+    NullArray,
+    Arguments,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParserConfig {
     pub max_bulk_len: usize,
@@ -581,6 +606,105 @@ pub fn parse_command_frame(
     }
     Ok(ParseResult {
         frame: RespFrame::Array(Some(items)),
+        consumed: cursor,
+    })
+}
+
+/// Parse a CLIENT -> SERVER command frame while borrowing multibulk arguments
+/// from `input`.
+///
+/// This mirrors [`parse_command_frame`] for validation and error behavior, but
+/// the normal `*N\r\n$...\r\n` command path returns `&[u8]` argument slices
+/// instead of allocating one `Vec<u8>` per bulk string. Non-multibulk input
+/// falls back to the generic owned parser for the same reason
+/// [`parse_command_frame`] does: callers may still be handling a non-command
+/// RESP frame on a shared parsing path.
+pub fn parse_command_frame_borrowed<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Result<BorrowedCommandParseResult<'a>, RespParseError> {
+    if input.first() != Some(&b'*') {
+        let parsed = parse_frame_with_config(input, config)?;
+        return Ok(BorrowedCommandParseResult {
+            frame: BorrowedCommandFrame::Owned(parsed.frame),
+            consumed: parsed.consumed,
+        });
+    }
+    let mut args = Vec::new();
+    let parsed = parse_command_args_borrowed_into(input, config, &mut args)?;
+    let frame = match parsed.kind {
+        BorrowedCommandArgsKind::NullArray => BorrowedCommandFrame::NullArray,
+        BorrowedCommandArgsKind::Arguments => BorrowedCommandFrame::Arguments(args),
+    };
+    Ok(BorrowedCommandParseResult {
+        frame,
+        consumed: parsed.consumed,
+    })
+}
+
+/// Parse a strict RESP multibulk command into a caller-reused borrowed argv
+/// buffer. This is the allocation-minimal primitive for future hot-path
+/// runtime wiring; it is multibulk-only, so non-`*` input is rejected instead
+/// of using the owned fallback in [`parse_command_frame_borrowed`].
+pub fn parse_command_args_borrowed_into<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+    args: &mut Vec<&'a [u8]>,
+) -> Result<BorrowedCommandArgsParseResult, RespParseError> {
+    args.clear();
+    match parse_command_args_borrowed_into_inner(input, config, args) {
+        Ok(parsed) => Ok(parsed),
+        Err(err) => {
+            args.clear();
+            Err(err)
+        }
+    }
+}
+
+fn parse_command_args_borrowed_into_inner<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+    args: &mut Vec<&'a [u8]>,
+) -> Result<BorrowedCommandArgsParseResult, RespParseError> {
+    match input.first() {
+        Some(b'*') => {}
+        Some(&other) => return Err(RespParseError::InvalidPrefix(other)),
+        None => return Err(RespParseError::Incomplete),
+    }
+    let (line, mut cursor) = read_line(input, 1)?;
+    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
+    if len == -1 {
+        return Ok(BorrowedCommandArgsParseResult {
+            kind: BorrowedCommandArgsKind::NullArray,
+            consumed: cursor,
+        });
+    }
+    if len < -1 {
+        return Err(RespParseError::InvalidMultibulkLength);
+    }
+    let count = usize::try_from(len).map_err(|_| RespParseError::InvalidMultibulkLength)?;
+    if count > config.max_array_len {
+        return Err(RespParseError::MultibulkLengthTooLarge);
+    }
+    let reserve = count.min(1024);
+    if args.capacity() < reserve {
+        args.reserve(reserve - args.capacity());
+    }
+    for _ in 0..count {
+        match input.get(cursor) {
+            None => return Err(RespParseError::Incomplete),
+            Some(&b'$') => {}
+            Some(&other) => return Err(RespParseError::ExpectedBulk(other)),
+        }
+        let (arg, consumed) = parse_bulk_slice(input, cursor + 1, config)?;
+        let Some(arg) = arg else {
+            return Err(RespParseError::InvalidBulkLength);
+        };
+        args.push(arg);
+        cursor = consumed;
+    }
+    Ok(BorrowedCommandArgsParseResult {
+        kind: BorrowedCommandArgsKind::Arguments,
         consumed: cursor,
     })
 }
@@ -840,6 +964,36 @@ fn parse_bulk(
     Ok((RespFrame::BulkString(Some(bytes)), end))
 }
 
+fn parse_bulk_slice<'a>(
+    input: &'a [u8],
+    start: usize,
+    config: &ParserConfig,
+) -> Result<(Option<&'a [u8]>, usize), RespParseError> {
+    let (line, consumed) = read_line(input, start)?;
+    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidBulkLength)?;
+    if len == -1 {
+        return Ok((None, consumed));
+    }
+    if len < -1 {
+        return Err(RespParseError::InvalidBulkLength);
+    }
+    let data_len = usize::try_from(len).map_err(|_| RespParseError::InvalidBulkLength)?;
+    if data_len > config.max_bulk_len {
+        return Err(RespParseError::BulkLengthTooLarge);
+    }
+    let end = consumed
+        .checked_add(data_len)
+        .and_then(|idx| idx.checked_add(2))
+        .ok_or(RespParseError::Incomplete)?;
+    if input.len() < end {
+        return Err(RespParseError::Incomplete);
+    }
+    if input[consumed + data_len] != b'\r' || input[consumed + data_len + 1] != b'\n' {
+        return Err(RespParseError::InvalidBulkLength);
+    }
+    Ok((Some(&input[consumed..consumed + data_len]), end))
+}
+
 fn parse_array(
     input: &[u8],
     start: usize,
@@ -948,8 +1102,9 @@ fn read_line(input: &[u8], start: usize) -> Result<(&[u8], usize), RespParseErro
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_LINE_LENGTH, ParserConfig, RespFrame, RespParseError, format_redis_double,
-        parse_command_frame, parse_frame, parse_frame_with_config,
+        BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig, RespFrame,
+        RespParseError, format_redis_double, parse_command_args_borrowed_into, parse_command_frame,
+        parse_command_frame_borrowed, parse_frame, parse_frame_with_config,
     };
 
     #[test]
@@ -992,6 +1147,194 @@ mod tests {
             RespParseError::ExpectedBulk(b'+').to_string(),
             "expected '$', got '+'"
         );
+    }
+
+    #[test]
+    fn parse_command_frame_borrowed_matches_owned_command_parser() {
+        let cfg = ParserConfig::default();
+        let input = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n+tail\r\n";
+        let owned = parse_command_frame(input, &cfg).expect("owned command parses");
+        let borrowed = parse_command_frame_borrowed(input, &cfg).expect("borrowed command parses");
+
+        assert_eq!(borrowed.consumed, owned.consumed);
+        assert_eq!(borrowed.consumed, input.len() - b"+tail\r\n".len());
+        assert_eq!(
+            borrowed.frame,
+            BorrowedCommandFrame::Arguments(vec![
+                b"SET".as_slice(),
+                b"key".as_slice(),
+                b"value".as_slice(),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_command_frame_borrowed_preserves_empty_and_null_multibulks() {
+        let cfg = ParserConfig::default();
+
+        let empty = parse_command_frame_borrowed(b"*0\r\n", &cfg).expect("empty array parses");
+        assert_eq!(empty.consumed, 4);
+        assert_eq!(empty.frame, BorrowedCommandFrame::Arguments(Vec::new()));
+
+        let null = parse_command_frame_borrowed(b"*-1\r\n", &cfg).expect("null array parses");
+        assert_eq!(null.consumed, 5);
+        assert_eq!(null.frame, BorrowedCommandFrame::NullArray);
+    }
+
+    #[test]
+    fn parse_command_frame_borrowed_preserves_fallback_and_error_semantics() {
+        let cfg = ParserConfig::default();
+
+        let simple = parse_command_frame_borrowed(b"+OK\r\n", &cfg).expect("fallback parses");
+        assert_eq!(simple.consumed, 5);
+        assert_eq!(
+            simple.frame,
+            BorrowedCommandFrame::Owned(RespFrame::SimpleString("OK".to_string()))
+        );
+
+        for (input, expected) in [
+            (&b"*1\r\n+PING\r\n"[..], RespParseError::ExpectedBulk(b'+')),
+            (&b"*1\r\n:5\r\n"[..], RespParseError::ExpectedBulk(b':')),
+            (&b"*1\r\n*0\r\n"[..], RespParseError::ExpectedBulk(b'*')),
+            (
+                &b"*2\r\n$3\r\nGET\r\n$-1\r\n"[..],
+                RespParseError::InvalidBulkLength,
+            ),
+            (
+                &b"*2\r\n$3\r\nGET\r\n$4\r\nkey\n"[..],
+                RespParseError::Incomplete,
+            ),
+        ] {
+            assert_eq!(
+                parse_command_frame_borrowed(input, &cfg).unwrap_err(),
+                expected,
+                "input {input:?}"
+            );
+            assert_eq!(
+                parse_command_frame(input, &cfg).unwrap_err(),
+                expected,
+                "owned input {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_command_args_borrowed_into_reuses_buffer_and_clears_on_error() {
+        let cfg = ParserConfig::default();
+        let mut args = Vec::with_capacity(8);
+        let capacity = args.capacity();
+        let input = b"*3\r\n$3\r\nSET\r\n$0\r\n\r\n$6\r\n\x00\xff\r\nzz\r\n";
+
+        let parsed =
+            parse_command_args_borrowed_into(input, &cfg, &mut args).expect("borrowed parses");
+        assert_eq!(parsed.kind, BorrowedCommandArgsKind::Arguments);
+        assert_eq!(parsed.consumed, input.len());
+        assert_eq!(
+            args,
+            vec![
+                b"SET".as_slice(),
+                b"".as_slice(),
+                b"\x00\xff\r\nzz".as_slice()
+            ]
+        );
+        assert_eq!(args.capacity(), capacity);
+
+        let err = parse_command_args_borrowed_into(b"*1\r\n+PING\r\n", &cfg, &mut args)
+            .expect_err("non-bulk arg must reject");
+        assert_eq!(err, RespParseError::ExpectedBulk(b'+'));
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn parse_command_args_borrowed_into_preserves_multibulk_error_semantics() {
+        let cfg = ParserConfig::default();
+        let allow_resp3 = ParserConfig {
+            allow_resp3: true,
+            ..ParserConfig::default()
+        };
+        let cases = [
+            &b"*1\r\n+PING\r\n"[..],
+            &b"*1\r\n:5\r\n"[..],
+            &b"*1\r\n_ \r\n"[..],
+            &b"*1\r\n#t\r\n"[..],
+            &b"*1\r\n*0\r\n"[..],
+            &b"*2\r\n$3\r\nGET\r\n$-1\r\n"[..],
+            &b"*-2\r\n"[..],
+            &b"*x\r\n"[..],
+            &b"*1\r\n$3\r\nfo"[..],
+            &b"*1\r\n$3\r\nfoo\rx"[..],
+            &b"*1\r\n$01\r\nx\r\n"[..],
+            &b"*1\r\n$-0\r\n"[..],
+        ];
+        let mut args = Vec::new();
+        for input in cases {
+            assert_eq!(
+                parse_command_args_borrowed_into(input, &cfg, &mut args).unwrap_err(),
+                parse_command_frame(input, &cfg).unwrap_err(),
+                "default config input {input:?}"
+            );
+            assert!(
+                args.is_empty(),
+                "default config left stale args for {input:?}"
+            );
+            assert_eq!(
+                parse_command_args_borrowed_into(input, &allow_resp3, &mut args).unwrap_err(),
+                parse_command_frame(input, &allow_resp3).unwrap_err(),
+                "allow_resp3 input {input:?}"
+            );
+            assert!(args.is_empty(), "allow_resp3 left stale args for {input:?}");
+        }
+    }
+
+    #[test]
+    fn parse_command_args_borrowed_into_preserves_config_limits() {
+        let mut args = Vec::new();
+        let bulk_limited = ParserConfig {
+            max_bulk_len: 4,
+            ..ParserConfig::default()
+        };
+        let at_limit =
+            parse_command_args_borrowed_into(b"*1\r\n$4\r\nxxxx\r\n", &bulk_limited, &mut args)
+                .expect("bulk at max_bulk_len parses");
+        assert_eq!(at_limit.kind, BorrowedCommandArgsKind::Arguments);
+        assert_eq!(args, vec![b"xxxx".as_slice()]);
+        assert_eq!(
+            parse_command_args_borrowed_into(b"*1\r\n$5\r\nxxxxx\r\n", &bulk_limited, &mut args)
+                .unwrap_err(),
+            RespParseError::BulkLengthTooLarge
+        );
+
+        let array_limited = ParserConfig {
+            max_array_len: 1,
+            ..ParserConfig::default()
+        };
+        assert_eq!(
+            parse_command_args_borrowed_into(
+                b"*2\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &array_limited,
+                &mut args
+            )
+            .unwrap_err(),
+            RespParseError::MultibulkLengthTooLarge
+        );
+    }
+
+    #[test]
+    fn parse_command_args_borrowed_into_preserves_null_and_empty_array_status() {
+        let cfg = ParserConfig::default();
+        let mut args = Vec::new();
+
+        let empty = parse_command_args_borrowed_into(b"*0\r\n", &cfg, &mut args)
+            .expect("empty array parses");
+        assert_eq!(empty.kind, BorrowedCommandArgsKind::Arguments);
+        assert_eq!(empty.consumed, 4);
+        assert!(args.is_empty());
+
+        let null = parse_command_args_borrowed_into(b"*-1\r\n", &cfg, &mut args)
+            .expect("null array parses");
+        assert_eq!(null.kind, BorrowedCommandArgsKind::NullArray);
+        assert_eq!(null.consumed, 5);
+        assert!(args.is_empty());
     }
 
     const PACKET_ID: &str = "FR-P2C-002";
@@ -1746,13 +2089,13 @@ mod tests {
             (3.0, "3"),
             (17179869184.0, "17179869184"),
             (-42.0, "-42"),
-            (3.14, "3.14"),
+            (2.75, "2.75"),
             (123.456, "123.456"),
             (-2.5, "-2.5"),
             (0.1, "0.1"),
             (0.000001, "0.000001"),
             (-0.0007, "-0.0007"),
-            (123456789.123456789, "1.2345678912345679e+8"),
+            (123_456_789.123_456_79, "1.2345678912345679e+8"),
             (1.5e300, "1.5e+300"),
             (1e20, "1e+20"),
             (1e308, "1e+308"),
@@ -1812,9 +2155,13 @@ mod tests {
             &b",-inf\r\n"[..],
             &b",nan\r\n"[..],
         ] {
-            let parsed = parse_frame_with_config(ok, &allow)
-                .unwrap_or_else(|err| panic!("canonical double {ok:?} should parse: {err:?}"));
-            assert!(matches!(parsed.frame, RespFrame::BulkString(Some(_))));
+            assert!(
+                matches!(
+                    parse_frame_with_config(ok, &allow),
+                    Ok(parsed) if matches!(parsed.frame, RespFrame::BulkString(Some(_)))
+                ),
+                "canonical double {ok:?} should parse"
+            );
         }
     }
 
@@ -1860,9 +2207,13 @@ mod tests {
             &b"(-42\r\n"[..],
             &b"(+99999999999999999999\r\n"[..],
         ] {
-            let parsed = parse_frame_with_config(ok, &allow)
-                .unwrap_or_else(|err| panic!("canonical big number {ok:?} should parse: {err:?}"));
-            assert!(matches!(parsed.frame, RespFrame::BulkString(Some(_))));
+            assert!(
+                matches!(
+                    parse_frame_with_config(ok, &allow),
+                    Ok(parsed) if matches!(parsed.frame, RespFrame::BulkString(Some(_)))
+                ),
+                "canonical big number {ok:?} should parse"
+            );
         }
     }
 
