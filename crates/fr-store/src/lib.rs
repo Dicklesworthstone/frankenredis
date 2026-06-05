@@ -13109,9 +13109,14 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
-                    Value::String(v) => v.to_vec(),
-                    _ => return Err(StoreError::WrongType),
+                // (frankenredis-getexint) Use string_bytes(), not a bare
+                // `Value::String` match: a numeric value like `SET k 2` is stored
+                // int-encoded as `Value::Integer`, which IS a string type. The
+                // bare match wrongly returned WRONGTYPE for GETEX on any
+                // integer-valued string (e.g. `GETEX counter EX 60`).
+                match entry.value.string_bytes() {
+                    Some(v) => v.into_owned(),
+                    None => return Err(StoreError::WrongType),
                 }
             }
             None => return Ok(None),
@@ -13258,17 +13263,20 @@ impl Store {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
                     entry.touch(now_ms);
-                    match &entry.value {
-                        Value::String(v) => {
+                    // (frankenredis-getexint) string_bytes() so int-encoded
+                    // numeric strings (Value::Integer) are treated as strings,
+                    // not rejected as WRONGTYPE.
+                    match entry.value.string_bytes() {
+                        Some(v) => {
                             total_bytes = total_bytes.saturating_add(v.len());
                             if total_bytes > MAX_BITOP_TOTAL_BYTES {
                                 return Err(StoreError::GenericError(
                                     "BITOP total input size exceeds limit".to_string(),
                                 ));
                             }
-                            values.push(v.to_vec());
+                            values.push(v.into_owned());
                         }
-                        _ => return Err(StoreError::WrongType),
+                        None => return Err(StoreError::WrongType),
                     }
                 }
                 None => values.push(Vec::new()),
@@ -23571,6 +23579,40 @@ mod tests {
             other => return Err(format!("LPOS FULL LFU mismatch: {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn getex_and_bitop_accept_int_encoded_strings_getexint() {
+        // (frankenredis-getexint) A numeric value is stored int-encoded as
+        // Value::Integer, which is a string type. GETEX (with an expiry option)
+        // and BITOP previously matched only Value::String and wrongly returned
+        // WRONGTYPE for int-encoded strings. Found via randomized differential
+        // fuzz (e.g. `SET counter 2; GETEX counter EX 60`).
+        let mut store = Store::new();
+        store.set(b"n".to_vec(), b"2".to_vec(), None, 0);
+        assert_eq!(store.object_encoding(b"n", 0), Some("int"));
+        // GETEX with a future expiry returns the value (not WRONGTYPE).
+        let got = store
+            .getex(b"n", Some(Some(u64::MAX / 2)), 0)
+            .expect("getex on int-encoded string must not be WRONGTYPE");
+        assert_eq!(got, Some(b"2".to_vec()));
+        // GETEX with PERSIST likewise.
+        assert_eq!(store.getex(b"n", Some(None), 0).unwrap(), Some(b"2".to_vec()));
+        // BITOP over int-encoded operands treats them as their string bytes.
+        store.set(b"a".to_vec(), b"5".to_vec(), None, 0);
+        store.set(b"b".to_vec(), b"3".to_vec(), None, 0);
+        let len = store
+            .bitop(b"AND", b"dst", &[b"a", b"b"], 0)
+            .expect("bitop on int-encoded strings must not be WRONGTYPE");
+        assert_eq!(len, 1);
+        // "5" AND "3" = 0x35 & 0x33 = 0x31 = '1'.
+        assert_eq!(store.get(b"dst", 0).unwrap(), Some(b"1".to_vec()));
+        // A real wrong type still errors.
+        store.rpush(b"lst", &[b"x".to_vec()], 0).unwrap();
+        assert!(matches!(
+            store.getex(b"lst", Some(Some(u64::MAX / 2)), 0),
+            Err(StoreError::WrongType)
+        ));
     }
 
     #[test]
