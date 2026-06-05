@@ -11804,11 +11804,17 @@ impl Store {
                 if !options.force {
                     continue;
                 }
+                // Upstream FORCE-create calls `streamCreateNACK(NULL)`, which
+                // initializes delivery_count to 1 — and then the shared claim
+                // path below still applies its `delivery_count++` (default) /
+                // `= retrycount` / no-op (JUSTID). So a default XCLAIM FORCE that
+                // creates the entry lands at 2, JUSTID at 1, RETRYCOUNT at n.
+                // Seeding at 0 here under-counted the default/JUSTID cases by one.
                 group_state.pending.insert(
                     *id,
                     StreamPendingEntry {
                         consumer: consumer_vec.clone(),
-                        deliveries: 0,
+                        deliveries: 1,
                         last_delivered_ms: now_ms,
                     },
                 );

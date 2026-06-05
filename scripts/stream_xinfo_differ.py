@@ -181,6 +181,15 @@ def main():
         lambda: ("XREADGROUP", "GROUP", rng.choice(groups), rng.choice(consumers), "COUNT", str(rng.randint(1, 4)), "STREAMS", rng.choice(keys), rng.choice([">", "0", rid()])),
         lambda: ("XACK", rng.choice(keys), rng.choice(groups), rid()),
         lambda: ("XADD", rng.choice(keys), "NOMKSTREAM", rid(), "f", "v"),
+        # XCLAIM with min-idle-time 0 (always claimable → deterministic, no
+        # wall-clock dependence). RETRYCOUNT/JUSTID/FORCE variants exercise the
+        # delivery-count + PEL-transfer + force-create paths.
+        lambda: ("XCLAIM", rng.choice(keys), rng.choice(groups), rng.choice(consumers), "0", rid()),
+        lambda: ("XCLAIM", rng.choice(keys), rng.choice(groups), rng.choice(consumers), "0", rid(), "JUSTID"),
+        lambda: ("XCLAIM", rng.choice(keys), rng.choice(groups), rng.choice(consumers), "0", rid(), "RETRYCOUNT", str(rng.randint(0, 5))),
+        lambda: ("XCLAIM", rng.choice(keys), rng.choice(groups), rng.choice(consumers), "0", rid(), "FORCE"),
+        lambda: ("XAUTOCLAIM", rng.choice(keys), rng.choice(groups), rng.choice(consumers), "0", rng.choice(["0-0", rid()]), "COUNT", str(rng.randint(1, 4))),
+        lambda: ("XAUTOCLAIM", rng.choice(keys), rng.choice(groups), rng.choice(consumers), "0", "0-0", "JUSTID"),
     ]
 
     for it in range(args.iters):
