@@ -4,7 +4,7 @@
 // `GenericSet` stores a small set in one packed buffer, promoting to an IndexSet
 // hashtable past the threshold. SMEMBERS/SSCAN/SPOP output is unchanged.
 mod packed_set;
-use packed_set::{GenericSet, HashFieldMap, ListValue};
+use packed_set::{GenericSet, HashFieldMap, ListValue, PackedZSet, PackedZSetIter};
 
 use fr_expire::evaluate_expiry;
 use std::borrow::Cow;
@@ -407,8 +407,22 @@ pub enum StoreError {
     GenericError(String),
 }
 
+const SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES: usize = 128;
+const SORTED_SET_PACKED_DEFAULT_MAX_VALUE: usize = 64;
+
 #[derive(Debug, Clone)]
 pub struct SortedSet {
+    inner: SortedSetInner,
+}
+
+#[derive(Debug, Clone)]
+enum SortedSetInner {
+    Packed(PackedZSet),
+    Full(FullSortedSet),
+}
+
+#[derive(Debug, Clone)]
+struct FullSortedSet {
     /// member -> score. foldhash (not SipHash) for fast ZSCORE/ZADD/ZINCRBY
     /// member lookups; this map's iteration order is never observed (all zset
     /// output is produced from `ordered`), so the hasher is invisible.
@@ -427,7 +441,10 @@ pub struct SortedSet {
 
 impl PartialEq for SortedSet {
     fn eq(&self, other: &Self) -> bool {
-        self.dict == other.dict && self.ordered == other.ordered
+        self.len() == other.len()
+            && self
+                .iter_asc()
+                .all(|(member, score)| other.get_score(member).is_some_and(|other| other == score))
     }
 }
 
@@ -499,10 +516,10 @@ impl ScoreMember {
     }
 }
 
-impl SortedSet {
-    fn new() -> Self {
+impl FullSortedSet {
+    fn with_capacity(cap: usize) -> Self {
         Self {
-            dict: HashMap::default(),
+            dict: HashMap::with_capacity_and_hasher(cap, foldhash::quality::RandomState::default()),
             ordered: BTreeMap::new(),
             rank_tree: None,
         }
@@ -510,10 +527,6 @@ impl SortedSet {
 
     fn len(&self) -> usize {
         self.dict.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.dict.is_empty()
     }
 
     fn insert(&mut self, member: Vec<u8>, score: f64) -> bool {
@@ -561,19 +574,6 @@ impl SortedSet {
         self.ordered
             .keys()
             .filter_map(|sm| sm.member.as_actual().map(|member| (member, &sm.score)))
-    }
-
-    /// Invoke `f` for each (member, score) whose score lies in the inclusive
-    /// range `[lo, hi]`, in ascending (score, member) order, borrowing members.
-    /// Uses the ordered index's range walk (O(log n + matched)). (frankenredis-7hg0r)
-    fn for_each_in_score_range(&self, lo: f64, hi: f64, mut f: impl FnMut(&[u8], f64)) {
-        let lo_bound = ScoreMember::min_for_score(canonicalize_zero_score(lo));
-        let hi_bound = ScoreMember::max_for_score(canonicalize_zero_score(hi));
-        for (sm, _) in self.ordered.range(lo_bound..=hi_bound) {
-            if let Some(member) = sm.member.as_actual() {
-                f(member, sm.score);
-            }
-        }
     }
 
     /// `count` (member, score) pairs starting at ascending index `start_idx`.
@@ -661,16 +661,6 @@ impl SortedSet {
         None
     }
 
-    /// Iterate over (member, score) pairs in hash-map order (unordered).
-    fn iter(&self) -> impl Iterator<Item = (&Vec<u8>, &f64)> {
-        self.dict.iter()
-    }
-
-    /// Return an iterator over the member keys.
-    fn keys(&self) -> impl Iterator<Item = &Vec<u8>> {
-        self.dict.keys()
-    }
-
     /// Ensure the order-statistic index exists, building it from `ordered`
     /// (the source of truth) on first use. O(n log n) one-time; thereafter it
     /// is maintained incrementally at the mutation choke points.
@@ -700,6 +690,405 @@ impl SortedSet {
         let target = ScoreMember::actual(score, member.to_vec());
         let asc = self.ensure_rank_tree().rank_of(&target);
         Some(len - 1 - asc)
+    }
+}
+
+impl SortedSet {
+    fn new() -> Self {
+        Self {
+            inner: SortedSetInner::Packed(PackedZSet::new()),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match &self.inner {
+            SortedSetInner::Packed(p) => p.len(),
+            SortedSetInner::Full(f) => f.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn promote(&mut self) {
+        let SortedSetInner::Packed(packed) = &mut self.inner else {
+            return;
+        };
+        let packed = std::mem::take(packed);
+        let mut full = FullSortedSet::with_capacity(packed.len());
+        for (member, score) in packed.iter() {
+            full.insert(member.to_vec(), score);
+        }
+        self.inner = SortedSetInner::Full(full);
+    }
+
+    fn maybe_promote_for_insert(
+        &mut self,
+        member: &[u8],
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) {
+        let SortedSetInner::Packed(p) = &self.inner else {
+            return;
+        };
+        let contains_member = p.contains(member);
+        let packed_exceeds_current_limits = p.len() > max_listpack_entries
+            || p.iter()
+                .any(|(existing_member, _)| existing_member.len() > max_listpack_value);
+        let insert_would_exceed_limits = !contains_member
+            && (p.len() >= max_listpack_entries || member.len() > max_listpack_value);
+        if packed_exceeds_current_limits || insert_would_exceed_limits {
+            self.promote();
+        }
+    }
+
+    fn insert(&mut self, member: Vec<u8>, score: f64) -> bool {
+        self.insert_with_limits(
+            member,
+            score,
+            SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES,
+            SORTED_SET_PACKED_DEFAULT_MAX_VALUE,
+        )
+    }
+
+    fn insert_with_limits(
+        &mut self,
+        member: Vec<u8>,
+        score: f64,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) -> bool {
+        let score = canonicalize_zero_score(score);
+        self.maybe_promote_for_insert(&member, max_listpack_entries, max_listpack_value);
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => p.insert(&member, score),
+            SortedSetInner::Full(f) => f.insert(member, score),
+        }
+    }
+
+    fn from_unique_pairs_with_limits(
+        pairs: Vec<(Vec<u8>, f64)>,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) -> Self {
+        if pairs.len() <= max_listpack_entries
+            && pairs
+                .iter()
+                .all(|(member, _)| member.len() <= max_listpack_value)
+        {
+            Self {
+                inner: SortedSetInner::Packed(PackedZSet::from_unique_pairs(pairs)),
+            }
+        } else {
+            let mut full = FullSortedSet::with_capacity(pairs.len());
+            for (member, score) in pairs {
+                full.insert(member, score);
+            }
+            Self {
+                inner: SortedSetInner::Full(full),
+            }
+        }
+    }
+
+    fn remove(&mut self, member: &[u8]) -> bool {
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => p.remove(member),
+            SortedSetInner::Full(f) => f.remove(member),
+        }
+    }
+
+    fn get_score(&self, member: &[u8]) -> Option<f64> {
+        match &self.inner {
+            SortedSetInner::Packed(p) => p.get_score(member),
+            SortedSetInner::Full(f) => f.get_score(member),
+        }
+    }
+
+    pub fn iter_asc(&self) -> SortedSetIterAsc<'_> {
+        let inner = match &self.inner {
+            SortedSetInner::Packed(p) => SortedSetIterAscInner::Packed(p.iter()),
+            SortedSetInner::Full(f) => SortedSetIterAscInner::Full(f.ordered.keys()),
+        };
+        SortedSetIterAsc { inner }
+    }
+
+    fn iter_desc(&self) -> SortedSetIterDesc<'_> {
+        match &self.inner {
+            SortedSetInner::Packed(p) => SortedSetIterDesc::Packed(p.iter_desc()),
+            SortedSetInner::Full(f) => SortedSetIterDesc::Full(f.ordered.keys().rev()),
+        }
+    }
+
+    /// Iterate over (member, score) pairs. The order is not part of any Redis
+    /// reply contract for callers that use this method; ascending order avoids
+    /// exposing the full variant's hash-map layout.
+    fn iter(&self) -> SortedSetIterAsc<'_> {
+        self.iter_asc()
+    }
+
+    /// Return an iterator over the member keys.
+    fn keys(&self) -> impl Iterator<Item = &[u8]> {
+        self.iter_asc().map(|(member, _)| member)
+    }
+
+    /// Invoke `f` for each (member, score) whose score lies in the inclusive
+    /// range `[lo, hi]`, in ascending (score, member) order, borrowing members.
+    fn for_each_in_score_range(&self, lo: f64, hi: f64, mut f: impl FnMut(&[u8], f64)) {
+        match &self.inner {
+            SortedSetInner::Packed(p) => p.for_each_in_score_range(lo, hi, f),
+            SortedSetInner::Full(full) => {
+                let lo_bound = ScoreMember::min_for_score(canonicalize_zero_score(lo));
+                let hi_bound = ScoreMember::max_for_score(canonicalize_zero_score(hi));
+                for (sm, _) in full.ordered.range(lo_bound..=hi_bound) {
+                    if let Some(member) = sm.member.as_actual() {
+                        f(member, sm.score);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `count` (member, score) pairs starting at ascending index `start_idx`.
+    fn index_slice_asc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
+        match &self.inner {
+            SortedSetInner::Packed(p) => p.index_slice_asc(start_idx, count),
+            SortedSetInner::Full(f) => f.index_slice_asc(start_idx, count),
+        }
+    }
+
+    /// `count` (member, score) pairs starting at descending index `start_idx`
+    /// (0 = highest score), in descending order.
+    fn index_slice_desc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
+        match &self.inner {
+            SortedSetInner::Packed(p) => p.index_slice_desc(start_idx, count),
+            SortedSetInner::Full(f) => f.index_slice_desc(start_idx, count),
+        }
+    }
+
+    fn pop_min(&mut self) -> Option<(Vec<u8>, f64)> {
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => p.pop_min(),
+            SortedSetInner::Full(f) => f.pop_min(),
+        }
+    }
+
+    fn pop_max(&mut self) -> Option<(Vec<u8>, f64)> {
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => p.pop_max(),
+            SortedSetInner::Full(f) => f.pop_max(),
+        }
+    }
+
+    fn rank(&mut self, member: &[u8]) -> Option<usize> {
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => p.rank(member),
+            SortedSetInner::Full(f) => f.rank(member),
+        }
+    }
+
+    fn rev_rank(&mut self, member: &[u8]) -> Option<usize> {
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => p.rank(member).map(|rank| p.len() - 1 - rank),
+            SortedSetInner::Full(f) => f.rev_rank(member),
+        }
+    }
+
+    fn score_bounds(
+        min: ScoreBound,
+        max: ScoreBound,
+    ) -> (std::ops::Bound<ScoreMember>, std::ops::Bound<ScoreMember>) {
+        let lower = match min {
+            ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
+            ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
+        };
+        let upper = match max {
+            ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
+            ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
+        };
+        (lower, upper)
+    }
+
+    fn score_bound_range_limited(
+        &self,
+        min: ScoreBound,
+        max: ScoreBound,
+        rev: bool,
+        offset: usize,
+        take: usize,
+    ) -> Vec<(Vec<u8>, f64)> {
+        match &self.inner {
+            SortedSetInner::Packed(p) => {
+                if rev {
+                    p.iter_desc()
+                        .filter(|(_, score)| score_in_range(*score, min, max))
+                        .skip(offset)
+                        .take(take)
+                        .map(|(member, score)| (member.to_vec(), score))
+                        .collect()
+                } else {
+                    p.iter()
+                        .filter(|(_, score)| score_in_range(*score, min, max))
+                        .skip(offset)
+                        .take(take)
+                        .map(|(member, score)| (member.to_vec(), score))
+                        .collect()
+                }
+            }
+            SortedSetInner::Full(full) => {
+                let (lower, upper) = Self::score_bounds(min, max);
+                if rev {
+                    full.ordered
+                        .range((lower, upper))
+                        .rev()
+                        .filter_map(|(sm, _)| {
+                            sm.member
+                                .as_actual()
+                                .map(|member| (member.clone(), sm.score))
+                        })
+                        .skip(offset)
+                        .take(take)
+                        .collect()
+                } else {
+                    full.ordered
+                        .range((lower, upper))
+                        .filter_map(|(sm, _)| {
+                            sm.member
+                                .as_actual()
+                                .map(|member| (member.clone(), sm.score))
+                        })
+                        .skip(offset)
+                        .take(take)
+                        .collect()
+                }
+            }
+        }
+    }
+
+    fn score_bound_range(
+        &self,
+        min: ScoreBound,
+        max: ScoreBound,
+        rev: bool,
+    ) -> Vec<(Vec<u8>, f64)> {
+        self.score_bound_range_limited(min, max, rev, 0, usize::MAX)
+    }
+
+    fn score_bound_members(&self, min: ScoreBound, max: ScoreBound, rev: bool) -> Vec<Vec<u8>> {
+        self.score_bound_range(min, max, rev)
+            .into_iter()
+            .map(|(member, _)| member)
+            .collect()
+    }
+
+    fn score_bound_count(&self, min: ScoreBound, max: ScoreBound) -> usize {
+        match &self.inner {
+            SortedSetInner::Packed(p) => p
+                .iter()
+                .filter(|(_, score)| score_in_range(*score, min, max))
+                .count(),
+            SortedSetInner::Full(full) => {
+                let (lower, upper) = Self::score_bounds(min, max);
+                full.ordered
+                    .range((lower, upper))
+                    .filter(|(sm, _)| sm.member.as_actual().is_some())
+                    .count()
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn is_packed_storage(&self) -> bool {
+        matches!(self.inner, SortedSetInner::Packed(_))
+    }
+
+    #[cfg(test)]
+    fn is_full_storage(&self) -> bool {
+        matches!(self.inner, SortedSetInner::Full(_))
+    }
+
+    #[cfg(test)]
+    fn insert_min_score_sentinel(&mut self, score: f64) {
+        self.promote();
+        if let SortedSetInner::Full(full) = &mut self.inner {
+            full.ordered.insert(ScoreMember::min_for_score(score), ());
+        }
+    }
+
+    #[cfg(test)]
+    fn insert_max_score_sentinel(&mut self, score: f64) {
+        self.promote();
+        if let SortedSetInner::Full(full) = &mut self.inner {
+            full.ordered.insert(ScoreMember::max_for_score(score), ());
+        }
+    }
+
+    #[cfg(test)]
+    fn contains_min_score_sentinel(&self, score: f64) -> bool {
+        matches!(
+            &self.inner,
+            SortedSetInner::Full(full)
+                if full.ordered.contains_key(&ScoreMember::min_for_score(score))
+        )
+    }
+
+    #[cfg(test)]
+    fn contains_max_score_sentinel(&self, score: f64) -> bool {
+        matches!(
+            &self.inner,
+            SortedSetInner::Full(full)
+                if full.ordered.contains_key(&ScoreMember::max_for_score(score))
+        )
+    }
+}
+
+pub struct SortedSetIterAsc<'a> {
+    inner: SortedSetIterAscInner<'a>,
+}
+
+enum SortedSetIterAscInner<'a> {
+    Packed(PackedZSetIter<'a>),
+    Full(std::collections::btree_map::Keys<'a, ScoreMember, ()>),
+}
+
+impl<'a> Iterator for SortedSetIterAsc<'a> {
+    type Item = (&'a [u8], f64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.inner {
+            SortedSetIterAscInner::Packed(iter) => iter.next(),
+            SortedSetIterAscInner::Full(keys) => {
+                for sm in keys.by_ref() {
+                    if let Some(member) = sm.member.as_actual() {
+                        return Some((member.as_slice(), sm.score));
+                    }
+                }
+                None
+            }
+        }
+    }
+}
+
+enum SortedSetIterDesc<'a> {
+    Packed(std::iter::Rev<std::vec::IntoIter<(&'a [u8], f64)>>),
+    Full(std::iter::Rev<std::collections::btree_map::Keys<'a, ScoreMember, ()>>),
+}
+
+impl<'a> Iterator for SortedSetIterDesc<'a> {
+    type Item = (&'a [u8], f64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            SortedSetIterDesc::Packed(iter) => iter.next(),
+            SortedSetIterDesc::Full(keys) => {
+                for sm in keys.by_ref() {
+                    if let Some(member) = sm.member.as_actual() {
+                        return Some((member.as_slice(), sm.score));
+                    }
+                }
+                None
+            }
+        }
     }
 }
 
@@ -6304,7 +6693,10 @@ impl Store {
                 }
                 entry.touch(now_ms);
                 match &entry.value {
-                    Value::Hash(m) => Ok(fields.iter().map(|f| m.get(f).map(<[u8]>::to_vec)).collect()),
+                    Value::Hash(m) => Ok(fields
+                        .iter()
+                        .map(|f| m.get(f).map(<[u8]>::to_vec))
+                        .collect()),
                     _ => Err(StoreError::WrongType),
                 }
             }
@@ -6986,8 +7378,12 @@ impl Store {
                         }
                         let s = s as usize;
                         let e = e as usize;
-                        let result: Vec<Vec<u8>> =
-                            l.iter().skip(s).take(e - s + 1).map(<[u8]>::to_vec).collect();
+                        let result: Vec<Vec<u8>> = l
+                            .iter()
+                            .skip(s)
+                            .take(e - s + 1)
+                            .map(<[u8]>::to_vec)
+                            .collect();
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -8750,6 +9146,46 @@ impl Store {
         members: &[(f64, Vec<u8>)],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        if !self.entries.contains_key(key) {
+            let zset_max_entries = self.zset_max_listpack_entries;
+            let zset_max_value = self.zset_max_listpack_value;
+            let mut latest: HashMap<Vec<u8>, f64, foldhash::quality::RandomState> =
+                HashMap::with_capacity_and_hasher(
+                    members.len(),
+                    foldhash::quality::RandomState::default(),
+                );
+            let mut added = 0_usize;
+            let mut changed = 0_usize;
+            for (score, member) in members {
+                let score = canonicalize_zero_score(*score);
+                match latest.insert(member.clone(), score) {
+                    Some(old_score) => {
+                        if !old_score.total_cmp(&score).is_eq() {
+                            changed += 1;
+                        }
+                    }
+                    None => added += 1,
+                }
+            }
+            if added == 0 {
+                return Ok(0);
+            }
+
+            let zs = SortedSet::from_unique_pairs_with_limits(
+                latest.into_iter().collect(),
+                zset_max_entries,
+                zset_max_value,
+            );
+            let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms);
+            entry.touch_write(now_ms);
+            Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
+            self.internal_entries_insert(key.to_vec(), entry);
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+            self.dirty = self.dirty.saturating_add((added + changed) as u64);
+            return Ok(added);
+        }
+
         self.zadd_with_options(key, members, ZaddOptions::default(), now_ms)
             .map(|(added, _changed)| added)
     }
@@ -8813,7 +9249,12 @@ impl Store {
                             let old_canonical = canonicalize_zero_score(old_score);
                             let new_canonical = canonicalize_zero_score(*score);
                             let score_changed = !old_canonical.total_cmp(&new_canonical).is_eq();
-                            zs.insert(member.clone(), *score);
+                            zs.insert_with_limits(
+                                member.clone(),
+                                *score,
+                                zset_max_entries,
+                                zset_max_value,
+                            );
                             if score_changed {
                                 changed += 1;
                             }
@@ -8824,7 +9265,12 @@ impl Store {
                         if opts.xx {
                             continue; // XX: don't add new
                         }
-                        zs.insert(member.clone(), *score);
+                        zs.insert_with_limits(
+                            member.clone(),
+                            *score,
+                            zset_max_entries,
+                            zset_max_value,
+                        );
                         added += 1;
                     }
                 }
@@ -8935,7 +9381,7 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
-                    let result = zs.iter_asc().map(|(m, s)| (m.clone(), *s)).collect();
+                    let result = zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
                     entry.touch(now_ms);
                     Ok(result)
                 }
@@ -9221,20 +9667,7 @@ impl Store {
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        let lower = match min {
-                            ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
-                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
-                        };
-                        let upper = match max {
-                            ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
-                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
-                        };
-
-                        let result: Vec<Vec<u8>> = zs
-                            .ordered
-                            .range((lower, upper))
-                            .filter_map(|(sm, _)| sm.member.as_actual().cloned())
-                            .collect();
+                        let result = zs.score_bound_members(min, max, false);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -9277,24 +9710,7 @@ impl Store {
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        let lower = match min {
-                            ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
-                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
-                        };
-                        let upper = match max {
-                            ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
-                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
-                        };
-
-                        let result: Vec<(Vec<u8>, f64)> = zs
-                            .ordered
-                            .range((lower, upper))
-                            .filter_map(|(sm, _)| {
-                                sm.member
-                                    .as_actual()
-                                    .map(|member| (member.clone(), sm.score))
-                            })
-                            .collect();
+                        let result = zs.score_bound_range(min, max, false);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -9345,38 +9761,8 @@ impl Store {
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        let lower = match min {
-                            ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
-                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
-                        };
-                        let upper = match max {
-                            ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
-                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
-                        };
                         let take = count.unwrap_or(usize::MAX);
-                        // `filter_map` drops the non-actual sentinel members; it is
-                        // position-independent, so applying it before skip/take on a
-                        // reversed range == reversing the filtered forward Vec.
-                        let result: Vec<(Vec<u8>, f64)> = if rev {
-                            zs.ordered
-                                .range((lower, upper))
-                                .rev()
-                                .filter_map(|(sm, _)| {
-                                    sm.member.as_actual().map(|m| (m.clone(), sm.score))
-                                })
-                                .skip(offset)
-                                .take(take)
-                                .collect()
-                        } else {
-                            zs.ordered
-                                .range((lower, upper))
-                                .filter_map(|(sm, _)| {
-                                    sm.member.as_actual().map(|m| (m.clone(), sm.score))
-                                })
-                                .skip(offset)
-                                .take(take)
-                                .collect()
-                        };
+                        let result = zs.score_bound_range_limited(min, max, rev, offset, take);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -9390,8 +9776,10 @@ impl Store {
     /// Create or overwrite a sorted set from member-score pairs.
     pub fn zstore_from_pairs(&mut self, key: Vec<u8>, pairs: Vec<(Vec<u8>, f64)>, now_ms: u64) {
         let mut zs = SortedSet::new();
+        let zset_max_entries = self.zset_max_listpack_entries;
+        let zset_max_value = self.zset_max_listpack_value;
         for (member, score) in pairs {
-            zs.insert(member, score);
+            zs.insert_with_limits(member, score, zset_max_entries, zset_max_value);
         }
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
@@ -9443,19 +9831,7 @@ impl Store {
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        let lower = match min {
-                            ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
-                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
-                        };
-                        let upper = match max {
-                            ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
-                            ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
-                        };
-                        let result = zs
-                            .ordered
-                            .range((lower, upper))
-                            .filter(|(sm, _)| sm.member.as_actual().is_some())
-                            .count();
+                        let result = zs.score_bound_count(min, max);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -9532,11 +9908,11 @@ impl Store {
                     if (opts.gt && new_score <= old) || (opts.lt && new_score >= old) {
                         Ok(None)
                     } else {
-                        zs.insert(member, new_score);
+                        zs.insert_with_limits(member, new_score, zset_max_entries, zset_max_value);
                         Ok(Some(new_score))
                     }
                 } else {
-                    zs.insert(member, new_score);
+                    zs.insert_with_limits(member, new_score, zset_max_entries, zset_max_value);
                     Ok(Some(new_score))
                 }
             };
@@ -9816,7 +10192,7 @@ impl Store {
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        for (member, &score) in zs.iter_asc() {
+                        for (member, score) in zs.iter_asc() {
                             f(member, score);
                         }
                         entry.touch(now_ms);
@@ -9940,15 +10316,11 @@ impl Store {
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        let lower = Included(ScoreMember::min_for_score(min));
-                        let upper = Included(ScoreMember::max_for_score(max));
-
-                        let result: Vec<Vec<u8>> = zs
-                            .ordered
-                            .range((lower, upper))
-                            .rev()
-                            .filter_map(|(sm, _)| sm.member.as_actual().cloned())
-                            .collect();
+                        let result = zs.score_bound_members(
+                            ScoreBound::Inclusive(min),
+                            ScoreBound::Inclusive(max),
+                            true,
+                        );
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -9986,7 +10358,7 @@ impl Store {
                         let result: Vec<Vec<u8>> = zs
                             .iter_asc()
                             .filter(|(m, _)| lex_in_range(m, min, max))
-                            .map(|(m, _)| m.clone())
+                            .map(|(m, _)| m.to_vec())
                             .collect();
                         entry.touch(now_ms);
                         Ok(result)
@@ -10027,7 +10399,7 @@ impl Store {
                         let result: Vec<(Vec<u8>, f64)> = zs
                             .iter_asc()
                             .filter(|(m, _)| lex_in_range(m, min, max))
-                            .map(|(m, s)| (m.clone(), *s))
+                            .map(|(m, s)| (m.to_vec(), s))
                             .collect();
                         entry.touch(now_ms);
                         Ok(result)
@@ -10084,14 +10456,14 @@ impl Store {
                                 .filter(|(m, _)| lex_in_range(m, min, max))
                                 .skip(offset)
                                 .take(take)
-                                .map(|(m, _)| m.clone())
+                                .map(|(m, _)| m.to_vec())
                                 .collect()
                         } else {
                             zs.iter_asc()
                                 .filter(|(m, _)| lex_in_range(m, min, max))
                                 .skip(offset)
                                 .take(take)
-                                .map(|(m, _)| m.clone())
+                                .map(|(m, _)| m.to_vec())
                                 .collect()
                         };
                         entry.touch(now_ms);
@@ -10133,19 +10505,11 @@ impl Store {
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        let lower = Included(ScoreMember::min_for_score(min));
-                        let upper = Included(ScoreMember::max_for_score(max));
-
-                        let result: Vec<(Vec<u8>, f64)> = zs
-                            .ordered
-                            .range((lower, upper))
-                            .rev()
-                            .filter_map(|(sm, _)| {
-                                sm.member
-                                    .as_actual()
-                                    .map(|member| (member.clone(), sm.score))
-                            })
-                            .collect();
+                        let result = zs.score_bound_range(
+                            ScoreBound::Inclusive(min),
+                            ScoreBound::Inclusive(max),
+                            true,
+                        );
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -10183,7 +10547,7 @@ impl Store {
                         let result: Vec<Vec<u8>> = zs
                             .iter_desc()
                             .filter(|(m, _)| lex_in_range(m, min, max))
-                            .map(|(m, _)| m.clone())
+                            .map(|(m, _)| m.to_vec())
                             .collect();
                         entry.touch(now_ms);
                         Ok(result)
@@ -10300,27 +10664,7 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::SortedSet(zs) => {
-                    let lower = match min {
-                        ScoreBound::Inclusive(s) => {
-                            std::ops::Bound::Included(ScoreMember::min_for_score(s))
-                        }
-                        ScoreBound::Exclusive(s) => {
-                            std::ops::Bound::Excluded(ScoreMember::max_for_score(s))
-                        }
-                    };
-                    let upper = match max {
-                        ScoreBound::Inclusive(s) => {
-                            std::ops::Bound::Included(ScoreMember::max_for_score(s))
-                        }
-                        ScoreBound::Exclusive(s) => {
-                            std::ops::Bound::Excluded(ScoreMember::min_for_score(s))
-                        }
-                    };
-                    let to_remove: Vec<Vec<u8>> = zs
-                        .ordered
-                        .range((lower, upper))
-                        .filter_map(|(sm, _)| sm.member.as_actual().cloned())
-                        .collect();
+                    let to_remove = zs.score_bound_members(min, max, false);
                     let removed_count = to_remove.len();
                     for m in &to_remove {
                         zs.remove(m);
@@ -10363,7 +10707,7 @@ impl Store {
                     let to_remove: Vec<Vec<u8>> = zs
                         .iter_asc()
                         .filter(|(m, _)| lex_in_range(m, min, max))
-                        .map(|(m, _)| m.clone())
+                        .map(|(m, _)| m.to_vec())
                         .collect();
                     let removed_count = to_remove.len();
                     for m in &to_remove {
@@ -10414,7 +10758,7 @@ impl Store {
                             return Ok(None);
                         }
                         let idx = (rand_val as usize) % zs.len();
-                        let member = zs.iter_asc().nth(idx).map(|(m, _)| m.clone());
+                        let member = zs.iter_asc().nth(idx).map(|(m, _)| m.to_vec());
                         entry.touch(now_ms);
                         Ok(member)
                     }
@@ -10452,7 +10796,7 @@ impl Store {
                 Value::SortedSet(zs) => {
                     if !zs.is_empty() {
                         let members: Vec<(Vec<u8>, f64)> =
-                            zs.iter_asc().map(|(m, s)| (m.clone(), *s)).collect();
+                            zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
                         entry.touch(now_ms);
                         result_data = Some(members);
                     }
@@ -12910,6 +13254,8 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
+        let zset_max_entries = self.zset_max_listpack_entries;
+        let zset_max_value = self.zset_max_listpack_value;
         let mut combined: HashMap<Vec<u8>, f64> = HashMap::new();
 
         for (i, &key) in keys.iter().enumerate() {
@@ -12940,7 +13286,7 @@ impl Store {
 
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        for (member, &score) in zs.iter() {
+                        for (member, score) in zs.iter() {
                             add_member(member, score);
                         }
                         entry.touch(now_ms);
@@ -12964,7 +13310,7 @@ impl Store {
         if count > 0 {
             let mut zs = SortedSet::new();
             for (m, s) in combined {
-                zs.insert(m, s);
+                zs.insert_with_limits(m, s, zset_max_entries, zset_max_value);
             }
             self.internal_entries_insert(
                 dest.to_vec(),
@@ -12999,6 +13345,8 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
+        let zset_max_entries = self.zset_max_listpack_entries;
+        let zset_max_value = self.zset_max_listpack_value;
 
         let mut min_card = usize::MAX;
         let mut min_idx = 0;
@@ -13066,9 +13414,8 @@ impl Store {
                 let w = weights.get(min_idx).copied().unwrap_or(1.0);
                 let res = match &entry.value {
                     Value::SortedSet(zs) => zs
-                        .dict
                         .iter()
-                        .map(|(m, &s)| (m.clone(), normalize_weighted_score(s, w)))
+                        .map(|(m, s)| (m.to_vec(), normalize_weighted_score(s, w)))
                         .collect(),
                     Value::Set(s) => s
                         .iter()
@@ -13116,7 +13463,7 @@ impl Store {
                     match &entry.value {
                         Value::SortedSet(zs) => {
                             result.retain(|member, score| {
-                                if let Some(&other_score) = zs.dict.get(member) {
+                                if let Some(other_score) = zs.get_score(member) {
                                     *score =
                                         aggregate_scores(*score, other_score * weight, aggregate);
                                     true
@@ -13154,7 +13501,7 @@ impl Store {
         if count > 0 {
             let mut zs = SortedSet::new();
             for (m, s) in result {
-                zs.insert(m, s);
+                zs.insert_with_limits(m, s, zset_max_entries, zset_max_value);
             }
             self.internal_entries_insert(
                 dest.to_vec(),
@@ -13570,7 +13917,7 @@ impl Store {
                                 .filter(|(member, _)| {
                                     pattern.is_none_or(|pat| glob_match(pat, member))
                                 })
-                                .map(|(m, s)| (m.clone(), *s))
+                                .map(|(m, s)| (m.to_vec(), s))
                                 .collect();
                             return Ok((0, result));
                         }
@@ -13595,7 +13942,7 @@ impl Store {
                                 }
                                 continue;
                             }
-                            result.push((member.clone(), *score));
+                            result.push((member.to_vec(), score));
                             if processed >= batch_size {
                                 break;
                             }
@@ -13725,7 +14072,7 @@ impl Store {
                     Ok(result)
                 }
                 Value::SortedSet(zs) => {
-                    let result = zs.iter_asc().map(|(m, _)| m.clone()).collect();
+                    let result = zs.iter_asc().map(|(m, _)| m.to_vec()).collect();
                     entry.touch(now_ms);
                     Ok(result)
                 }
@@ -13748,7 +14095,11 @@ impl Store {
         let stored = elements.len() as u64;
         self.internal_entries_insert(
             key,
-            Entry::new(Value::List(Box::new(elements.into_iter().collect())), None, 0),
+            Entry::new(
+                Value::List(Box::new(elements.into_iter().collect())),
+                None,
+                0,
+            ),
         );
         self.dirty = self.dirty.saturating_add(stored.max(1));
     }
@@ -13869,8 +14220,10 @@ impl Store {
         }
 
         let mut zs = SortedSet::new();
+        let zset_max_entries = self.zset_max_listpack_entries;
+        let zset_max_value = self.zset_max_listpack_value;
         for (m, s) in members {
-            zs.insert(m, s);
+            zs.insert_with_limits(m, s, zset_max_entries, zset_max_value);
         }
         self.internal_entries_insert(
             dest.to_vec(),
@@ -15075,8 +15428,8 @@ impl Store {
                     buf.push(RDB_TYPE_ZSET_LISTPACK);
                     let mut pairs = Vec::with_capacity(zs.len() * 2);
                     for (member, score) in zs.iter_asc() {
-                        pairs.push(member.clone());
-                        pairs.push(redis_score_to_string(*score).into_bytes());
+                        pairs.push(member.to_vec());
+                        pairs.push(redis_score_to_string(score).into_bytes());
                     }
                     let pair_refs: Vec<&[u8]> = pairs.iter().map(Vec::as_slice).collect();
                     encode_dump_bulk(&mut buf, &encode_listpack_strings(&pair_refs)?);
@@ -15233,6 +15586,8 @@ impl Store {
                     return Err(StoreError::InvalidDumpPayload);
                 }
                 let mut zs = SortedSet::new();
+                let zset_max_entries = self.zset_max_listpack_entries;
+                let zset_max_value = self.zset_max_listpack_value;
                 for _ in 0..count {
                     let (member, mc) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += mc;
@@ -15256,7 +15611,7 @@ impl Store {
                     if score.is_nan() {
                         return Err(StoreError::InvalidDumpPayload);
                     }
-                    if !zs.insert(member, score) {
+                    if !zs.insert_with_limits(member, score, zset_max_entries, zset_max_value) {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                 }
@@ -15610,17 +15965,17 @@ impl Store {
                 Value::SortedSet(zs) => {
                     if !zs.is_empty() {
                         // Sort by score then member for deterministic output.
-                        let mut pairs: Vec<(&Vec<u8>, &f64)> = zs.iter().collect();
+                        let mut pairs: Vec<(&[u8], f64)> = zs.iter().collect();
                         pairs.sort_by(|a, b| {
-                            a.1.partial_cmp(b.1)
+                            a.1.partial_cmp(&b.1)
                                 .unwrap_or(std::cmp::Ordering::Equal)
                                 .then_with(|| a.0.cmp(b.0))
                         });
                         for chunk in pairs.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
                             let mut argv = vec![b"ZADD".to_vec(), logical_key.clone()];
                             for (member, score) in chunk {
-                                argv.push(redis_score_to_string(**score).into_bytes());
-                                argv.push((*member).clone());
+                                argv.push(redis_score_to_string(*score).into_bytes());
+                                argv.push((*member).to_vec());
                             }
                             commands.push(argv);
                         }
@@ -17061,10 +17416,7 @@ fn estimate_hash_memory_usage_bytes(fields: &HashFieldMap) -> usize {
 }
 
 fn estimate_list_memory_usage_bytes(items: &ListValue) -> usize {
-    let payload: usize = items
-        .iter()
-        .map(estimate_listpack_entry_bytes)
-        .sum();
+    let payload: usize = items.iter().map(estimate_listpack_entry_bytes).sum();
     let listpack_bytes =
         redis_allocation_size(REDIS_LISTPACK_HEADER_AND_EOF_BYTES.saturating_add(payload));
     if listpack_bytes <= 8 * 1024 {
@@ -17113,7 +17465,7 @@ fn estimate_sorted_set_memory_usage_bytes(members: &SortedSet) -> usize {
             .iter()
             .map(|(member, score)| {
                 estimate_listpack_entry_bytes(member)
-                    .saturating_add(estimate_listpack_score_bytes(*score))
+                    .saturating_add(estimate_listpack_score_bytes(score))
             })
             .sum();
         return estimate_listpack_object_memory_usage_bytes(payload);
@@ -19275,8 +19627,8 @@ mod tests {
         RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST,
         RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET,
         RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET,
-        RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, ScoreBound, ScoreMember,
-        Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions,
+        RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, ScoreBound, Store,
+        StoreError, StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions,
         StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value,
         ValueType, decode_length, decode_listpack_strings, decode_rdb_string, encode_db_key,
         encode_intset, encode_length, encode_listpack_strings, hll_sparse_decode,
@@ -24775,6 +25127,89 @@ mod tests {
         assert_eq!(pairs, vec![(b"a".to_vec(), 0.0)]);
     }
 
+    #[test]
+    fn zset_uses_packed_storage_then_promotes_without_order_drift() {
+        fn is_packed(store: &Store, key: &[u8]) -> bool {
+            match store.entries.get(key).map(|entry| &entry.value) {
+                Some(Value::SortedSet(zs)) => zs.is_packed_storage(),
+                _ => false,
+            }
+        }
+
+        fn is_full(store: &Store, key: &[u8]) -> bool {
+            match store.entries.get(key).map(|entry| &entry.value) {
+                Some(Value::SortedSet(zs)) => zs.is_full_storage(),
+                _ => false,
+            }
+        }
+
+        let mut store = Store::new();
+        store.zset_max_listpack_entries = 2;
+        store.zset_max_listpack_value = 3;
+        store
+            .zadd(b"z", &[(2.0, b"b".to_vec()), (1.0, b"a".to_vec())], 0)
+            .unwrap();
+        assert!(is_packed(&store, b"z"));
+        assert_eq!(store.zrank(b"z", b"a", 0).unwrap(), Some(0));
+        assert_eq!(
+            store.zrange_withscores(b"z", 0, -1, 0).unwrap(),
+            vec![(b"a".to_vec(), 1.0), (b"b".to_vec(), 2.0)]
+        );
+
+        store.zadd(b"z", &[(1.0, b"c".to_vec())], 0).unwrap();
+        assert!(is_full(&store, b"z"));
+        assert_eq!(
+            store.zrange(b"z", 0, -1, 0).unwrap(),
+            vec![b"a".to_vec(), b"c".to_vec(), b"b".to_vec()]
+        );
+        assert_eq!(store.zrevrank(b"z", b"a", 0).unwrap(), Some(2));
+
+        store.zadd(b"long", &[(1.5, b"wide".to_vec())], 0).unwrap();
+        assert!(is_full(&store, b"long"));
+        assert_eq!(store.zscore(b"long", b"wide", 0).unwrap(), Some(1.5));
+    }
+
+    #[test]
+    fn zset_promotes_when_listpack_limits_tighten_on_existing_update() {
+        fn is_full(store: &Store, key: &[u8]) -> bool {
+            match store.entries.get(key).map(|entry| &entry.value) {
+                Some(Value::SortedSet(zs)) => zs.is_full_storage(),
+                _ => false,
+            }
+        }
+
+        let mut store = Store::new();
+        store.zset_max_listpack_entries = 8;
+        store
+            .zadd(b"z", &[(2.0, b"b".to_vec()), (1.0, b"a".to_vec())], 0)
+            .unwrap();
+        store.zset_max_listpack_entries = 1;
+        assert_eq!(store.zadd(b"z", &[(3.0, b"a".to_vec())], 0).unwrap(), 0);
+        assert!(is_full(&store, b"z"));
+        assert_eq!(
+            store.zrange_withscores(b"z", 0, -1, 0).unwrap(),
+            vec![(b"b".to_vec(), 2.0), (b"a".to_vec(), 3.0)]
+        );
+
+        let mut value_store = Store::new();
+        value_store.zset_max_listpack_value = 8;
+        value_store
+            .zadd(b"wide", &[(1.0, b"wide".to_vec())], 0)
+            .unwrap();
+        value_store.zset_max_listpack_value = 3;
+        assert_eq!(
+            value_store
+                .zadd(b"wide", &[(2.0, b"wide".to_vec())], 0)
+                .unwrap(),
+            0
+        );
+        assert!(is_full(&value_store, b"wide"));
+        assert_eq!(
+            value_store.zrange(b"wide", 0, -1, 0).unwrap(),
+            vec![b"wide".to_vec()]
+        );
+    }
+
     /// (frankenredis-xc0ty) Inverted score bounds (min > max) made
     /// BTreeMap::range panic with "range start is greater than range
     /// end in BTreeMap", taking the server down. Upstream
@@ -25075,7 +25510,10 @@ mod tests {
         };
 
         let bounds = [
-            (ScoreBound::Inclusive(f64::NEG_INFINITY), ScoreBound::Inclusive(f64::INFINITY)),
+            (
+                ScoreBound::Inclusive(f64::NEG_INFINITY),
+                ScoreBound::Inclusive(f64::INFINITY),
+            ),
             (ScoreBound::Inclusive(10.0), ScoreBound::Inclusive(40.0)),
             (ScoreBound::Exclusive(10.0), ScoreBound::Exclusive(40.0)),
             (ScoreBound::Inclusive(5.0), ScoreBound::Exclusive(5.0)), // empty
@@ -25173,8 +25611,8 @@ mod tests {
             Value::SortedSet(zs) => zs,
             _ => return,
         };
-        zs.ordered.insert(ScoreMember::min_for_score(2.0), ());
-        zs.ordered.insert(ScoreMember::max_for_score(3.0), ());
+        zs.insert_min_score_sentinel(2.0);
+        zs.insert_max_score_sentinel(3.0);
 
         let range = store
             .zrangebyscore(
@@ -25291,8 +25729,8 @@ mod tests {
             Value::SortedSet(zs) => zs,
             _ => return,
         };
-        zs.ordered.insert(ScoreMember::min_for_score(0.0), ());
-        zs.ordered.insert(ScoreMember::max_for_score(10.0), ());
+        zs.insert_min_score_sentinel(0.0);
+        zs.insert_max_score_sentinel(10.0);
 
         assert_eq!(
             store.zrange(b"z", 0, -1, 0).unwrap(),
@@ -25317,8 +25755,8 @@ mod tests {
             Value::SortedSet(zs) => zs,
             _ => return,
         };
-        assert!(!zs.ordered.contains_key(&ScoreMember::min_for_score(0.0)));
-        assert!(!zs.ordered.contains_key(&ScoreMember::max_for_score(10.0)));
+        assert!(!zs.contains_min_score_sentinel(0.0));
+        assert!(!zs.contains_max_score_sentinel(10.0));
         assert_eq!(store.zrange(b"z", 0, -1, 0).unwrap(), vec![b"b".to_vec()]);
     }
 
@@ -33698,7 +34136,7 @@ mod tests {
                             ),
                             crate::Value::SortedSet(zs) => AofValueSnapshot::SortedSet(
                                 zs.iter_asc()
-                                    .map(|(member, score)| (member.clone(), score.to_bits()))
+                                    .map(|(member, score)| (member.to_vec(), score.to_bits()))
                                     .collect(),
                             ),
                             crate::Value::Stream(entries) => {

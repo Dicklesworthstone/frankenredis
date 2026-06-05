@@ -1,0 +1,9 @@
+keys=8192
+members=48
+insert_ns=129912535
+read_ns=137200388
+pop_ns=6732322
+memory_before_pop=8449664
+memory_after_pop=8317440
+state_digest=324091d9da416741
+checksum=17527362544575379395

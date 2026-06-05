@@ -797,7 +797,11 @@ impl PackedList {
     }
 
     pub fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
-        let survivors: Vec<Vec<u8>> = self.iter().filter(|e| keep(e)).map(<[u8]>::to_vec).collect();
+        let survivors: Vec<Vec<u8>> = self
+            .iter()
+            .filter(|e| keep(e))
+            .map(<[u8]>::to_vec)
+            .collect();
         let mut nb = PackedList::with_capacity(self.buf.len());
         for e in &survivors {
             nb.push_back(e);
@@ -1057,10 +1061,10 @@ fn zset_cmp(score_a: f64, member_a: &[u8], score_b: f64, member_b: &[u8]) -> std
 /// cache-resident buffer — the right trade below the zset-max-listpack threshold
 /// and matching redis's listpack zset node. (frankenredis-9mh3o step 5)
 ///
-/// `allow(dead_code)`: the primitive + its sorted-order/ZADD/ZRANK proof land
-/// first; wiring it into `SortedSet`/`Value::SortedSet` is the follow-up.
+/// Packed sorted-set storage for SMALL zsets: `(member, score)` records sorted
+/// by Redis zset order in one contiguous buffer, promoting to the full
+/// hash-map/tree representation when thresholds are crossed.
 #[derive(Clone, Debug, Default)]
-#[allow(dead_code)]
 pub struct PackedZSet {
     buf: Vec<u8>,
     len: usize,
@@ -1091,11 +1095,36 @@ impl PackedZSet {
         self.buf.len()
     }
 
+    /// Build a packed zset from already de-duplicated `(member, score)` pairs.
+    /// The output buffer is encoded once in final sorted order; this is the
+    /// bulk-construction path for a missing-key `ZADD`.
+    #[must_use]
+    pub fn from_unique_pairs(mut pairs: Vec<(Vec<u8>, f64)>) -> Self {
+        pairs.sort_by(|(am, ascore), (bm, bscore)| zset_cmp(*ascore, am, *bscore, bm));
+        let cap = pairs
+            .iter()
+            .map(|(member, _)| member.len().saturating_add(10))
+            .sum();
+        let mut zset = Self {
+            buf: Vec::with_capacity(cap),
+            len: 0,
+        };
+        for (member, score) in pairs {
+            write_varint(&mut zset.buf, member.len());
+            zset.buf.extend_from_slice(&member);
+            zset.buf.extend_from_slice(&canon_zero(score).to_le_bytes());
+            zset.len += 1;
+        }
+        zset
+    }
+
     /// Decode the record starting at `pos`: `(member, score, record_end)`.
     fn record_at(&self, pos: usize) -> (&[u8], f64, usize) {
         let (mlen, m_start) = read_varint(&self.buf, pos);
         let m_end = m_start + mlen;
-        let score = f64::from_le_bytes(self.buf[m_end..m_end + 8].try_into().unwrap());
+        let mut score_bytes = [0; 8];
+        score_bytes.copy_from_slice(&self.buf[m_end..m_end + 8]);
+        let score = f64::from_le_bytes(score_bytes);
         (&self.buf[m_start..m_end], score, m_end + 8)
     }
 
@@ -1189,10 +1218,7 @@ impl PackedZSet {
     /// Iterate `(member, score)` in ascending `(score, member)` order.
     #[must_use]
     pub fn iter(&self) -> PackedZSetIter<'_> {
-        PackedZSetIter {
-            zset: self,
-            pos: 0,
-        }
+        PackedZSetIter { zset: self, pos: 0 }
     }
 
     /// `(member, score)` pairs in DESCENDING order (mirrors SortedSet::iter_desc).
@@ -1271,7 +1297,6 @@ impl PackedZSet {
 }
 
 /// Borrowing iterator over `(member, score)` in ascending order.
-#[allow(dead_code)]
 pub struct PackedZSetIter<'a> {
     zset: &'a PackedZSet,
     pos: usize,
@@ -1293,8 +1318,8 @@ impl<'a> Iterator for PackedZSetIter<'a> {
 mod tests {
     use super::{PackedList, PackedStrMap, PackedStrSet, PackedZSet, zset_cmp};
     use indexmap::{IndexMap, IndexSet};
-    use std::collections::VecDeque;
     use proptest::prelude::*;
+    use std::collections::VecDeque;
 
     #[test]
     fn insert_dedup_order_contains() {
@@ -1420,7 +1445,10 @@ mod tests {
         assert!(l.set(1, b"BBBBB")); // value-length change
         assert_eq!(l.get(1), Some(&b"BBBBB"[..]));
         l.insert(1, b"x"); // before index 1
-        assert_eq!(l.iter().collect::<Vec<_>>(), vec![&b"a"[..], b"x", b"BBBBB", b"c"]);
+        assert_eq!(
+            l.iter().collect::<Vec<_>>(),
+            vec![&b"a"[..], b"x", b"BBBBB", b"c"]
+        );
         assert_eq!(l.remove(0), Some(b"a".to_vec()));
         assert_eq!(l.pop_back(), Some(b"c".to_vec()));
         assert_eq!(l.pop_front(), Some(b"x".to_vec()));
@@ -1610,9 +1638,15 @@ mod tests {
         assert_eq!(m.insert(b"c".to_vec(), b"3".to_vec()), None);
         // updating an existing field keeps its position, returns the old value,
         // and handles a value-length change (1 -> 5 bytes).
-        assert_eq!(m.insert(b"b".to_vec(), b"22222".to_vec()), Some(b"2".to_vec()));
+        assert_eq!(
+            m.insert(b"b".to_vec(), b"22222".to_vec()),
+            Some(b"2".to_vec())
+        );
         let pairs: Vec<(&[u8], &[u8])> = m.iter().collect();
-        assert_eq!(pairs, vec![(&b"a"[..], &b"1"[..]), (b"b", b"22222"), (b"c", b"3")]);
+        assert_eq!(
+            pairs,
+            vec![(&b"a"[..], &b"1"[..]), (b"b", b"22222"), (b"c", b"3")]
+        );
         assert_eq!(m.get(b"b"), Some(&b"22222"[..]));
         assert_eq!(m.shift_remove(b"a"), Some(b"1".to_vec()));
         assert_eq!(m.get_index(0), Some((&b"b"[..], &b"22222"[..])));

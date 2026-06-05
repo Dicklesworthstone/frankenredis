@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "command": "env CARGO_TARGET_DIR=/tmp/rch_target_frankenredis_icywolf_9mh3o_hf cargo test -p fr-store zset_rank_treap_matches_oracle_and_reports_ab_ratio --profile release-perf -- --nocapture",
+      "mean": 0.79485894002,
+      "stddev": 0.04761489301971573,
+      "median": 0.79231719302,
+      "user": 0.69136286,
+      "system": 0.09900636,
+      "min": 0.73839427702,
+      "max": 0.84476779902,
+      "times": [
+        0.84476779902,
+        0.73839427702,
+        0.79231719302,
+        0.75853158202,
+        0.84028384902
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
