@@ -22597,6 +22597,12 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let keys: Vec<&[u8]> = (0..numkeys)
         .map(|i| argv[2_usize.saturating_add(i)].as_slice())
         .collect();
+    // (frankenredis-sdiffwt) Validate every source type up front: upstream
+    // checks all sources before computing, so an empty/missing first key must
+    // not mask a wrong-type later key (which the per-member loop would skip).
+    for &key in &keys {
+        store.ensure_zset_or_set_source(key, now_ms)?;
+    }
     // Compute difference: members in first set not in any other
     let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
     let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
@@ -22653,6 +22659,10 @@ fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     let keys: Vec<&[u8]> = (0..numkeys)
         .map(|i| argv[3_usize.saturating_add(i)].as_slice())
         .collect();
+    // (frankenredis-sdiffwt) Validate every source type up front (see zdiff).
+    for &key in &keys {
+        store.ensure_zset_or_set_source(key, now_ms)?;
+    }
     let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
     let mut result: std::collections::HashMap<Vec<u8>, f64> = std::collections::HashMap::new();
     for (member, score) in first_members {

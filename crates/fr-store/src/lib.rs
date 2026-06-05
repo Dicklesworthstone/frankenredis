@@ -8713,7 +8713,12 @@ impl Store {
                 }
                 _ => return Err(StoreError::WrongType),
             },
-            None => return Ok(Vec::new()),
+            // (frankenredis-sdiffwt) A missing first source does NOT short-circuit:
+            // upstream sdiffGenericCommand still lookupKeyRead+checkType's every
+            // remaining source, so a later wrong-type key reports WRONGTYPE rather
+            // than an empty result. Start empty and fall into the type-checking
+            // loop below (which skips missing and errors on non-set).
+            None => Box::new(SetValue::new()),
         };
         for key in keys.iter().skip(1) {
             if result.is_empty() {
@@ -9131,6 +9136,26 @@ impl Store {
             self.dirty = self.dirty.saturating_add(1);
         }
         Ok(count)
+    }
+
+    /// (frankenredis-sdiffwt) Type-check a ZDIFF/ZUNION/ZINTER source key
+    /// without materialising it or recording a keyspace stat: missing is OK,
+    /// sorted-set and set are valid (sets are scored 1 by the zset ops), any
+    /// other type is WRONGTYPE. Lets the command layer validate every source
+    /// up front so an empty first source can't mask a wrong-type later one.
+    pub fn ensure_zset_or_set_source(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            None => Ok(()),
+            Some(entry) => match &entry.value {
+                Value::SortedSet(_) | Value::Set(_) => Ok(()),
+                _ => Err(StoreError::WrongType),
+            },
+        }
     }
 
     pub fn sdiffstore(
@@ -28185,6 +28210,37 @@ mod tests {
             other => return Err(format!("SUNION should bump LFU for s2, got {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn sdiff_zdiff_typecheck_all_sources_when_first_missing_sdiffwt() {
+        // (frankenredis-sdiffwt) A missing/empty first source must NOT mask a
+        // wrong-type later source: upstream type-checks every source. Found via
+        // randomized differential fuzz (SDIFFSTORE/ZDIFFSTORE returned 0 where
+        // redis returns WRONGTYPE).
+        let mut store = Store::new();
+        store.rpush(b"lst", &[b"x".to_vec()], 0).unwrap();
+        // SDIFF: first source missing, second is a list -> WRONGTYPE.
+        assert!(matches!(
+            store.sdiff(&[b"nomiss", b"lst"], 0),
+            Err(StoreError::WrongType)
+        ));
+        assert!(matches!(
+            store.sdiffstore(b"dst", &[b"nomiss", b"lst"], 0),
+            Err(StoreError::WrongType)
+        ));
+        // ensure_zset_or_set_source backs the ZDIFF fix.
+        assert!(matches!(
+            store.ensure_zset_or_set_source(b"lst", 0),
+            Err(StoreError::WrongType)
+        ));
+        assert_eq!(store.ensure_zset_or_set_source(b"nomiss", 0), Ok(()));
+        store.sadd(b"st", &[b"a".to_vec()], 0).unwrap();
+        assert_eq!(store.ensure_zset_or_set_source(b"st", 0), Ok(()));
+        store.zadd(b"zs", &[(1.0, b"m".to_vec())], 0).unwrap();
+        assert_eq!(store.ensure_zset_or_set_source(b"zs", 0), Ok(()));
+        // All-missing diff is still empty (not an error).
+        assert_eq!(store.sdiff(&[b"a", b"b"], 0).unwrap(), Vec::<Vec<u8>>::new());
     }
 
     #[test]
