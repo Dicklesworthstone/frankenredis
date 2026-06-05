@@ -323,6 +323,49 @@ pub fn read_aof_manifest_dir(manifest_path: &Path) -> Result<MultipartAofLoad, P
     Ok(out)
 }
 
+/// Write a redis 7 multi-part AOF (`appendonlydir`) into `dir`: a base RDB
+/// snapshot, an incremental AOF file, and the manifest that points at both.
+///
+/// Files are named `<basename>.<seq>.base.rdb`, `<basename>.<seq>.incr.aof`,
+/// and `<basename>.manifest` — exactly the layout redis-server loads and the
+/// inverse of [`read_aof_manifest_dir`]. The data files are written (atomically,
+/// temp + rename + parent fsync) before the manifest, so a concurrent reader
+/// never sees a manifest referencing a not-yet-present file. (frankenredis-aofw1)
+pub fn write_aof_manifest_dir(
+    dir: &Path,
+    basename: &str,
+    seq: u64,
+    base_rdb: &[u8],
+    incr_records: &[AofRecord],
+) -> Result<(), PersistError> {
+    std::fs::create_dir_all(dir).map_err(PersistError::Io)?;
+    let base_file = format!("{basename}.{seq}.base.rdb");
+    let incr_file = format!("{basename}.{seq}.incr.aof");
+
+    write_rdb_bytes_atomically(&dir.join(&base_file), base_rdb)?;
+    write_rdb_bytes_atomically(&dir.join(&incr_file), &encode_aof_stream(incr_records))?;
+
+    let manifest = AofManifest {
+        base: Some(AofManifestEntry {
+            file_name: base_file,
+            file_seq: seq,
+            file_type: AofManifestFileType::Base,
+        }),
+        history: Vec::new(),
+        incremental: vec![AofManifestEntry {
+            file_name: incr_file,
+            file_seq: seq,
+            file_type: AofManifestFileType::Incremental,
+        }],
+        curr_base_file_seq: seq,
+        curr_incr_file_seq: seq,
+    };
+    write_rdb_bytes_atomically(
+        &dir.join(format!("{basename}.manifest")),
+        format_aof_manifest(&manifest).as_bytes(),
+    )
+}
+
 #[must_use]
 pub fn format_aof_manifest(manifest: &AofManifest) -> String {
     let mut out = String::new();
@@ -3906,6 +3949,48 @@ mod tests {
         let _ = std::fs::remove_file(dir.join("appendonly.aof.1.base.rdb"));
         let _ = std::fs::remove_file(dir.join("appendonly.aof.1.incr.aof"));
         let _ = std::fs::remove_file(&manifest_path);
+    }
+
+    #[test]
+    fn write_aof_manifest_dir_round_trips_through_read() {
+        // (frankenredis-aofw1) The appendonlydir written by write_aof_manifest_dir
+        // must load back through read_aof_manifest_dir: base RDB entries +
+        // FUNCTION libs + incr records, intact and in order.
+        let dir = std::env::temp_dir().join("fr_persist_aof_write_roundtrip_test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let base_entries = vec![RdbEntry {
+            db: 0,
+            key: b"base_key".to_vec(),
+            value: RdbValue::String(b"base_val".to_vec()),
+            expire_ms: None,
+        }];
+        let lib = b"#!lua name=ml\nredis.register_function('f', function() return 1 end)";
+        let base_rdb = encode_rdb_with_functions(&base_entries, &[], &[lib.as_slice()]);
+        let incr = vec![
+            AofRecord {
+                argv: vec![b"SET".to_vec(), b"incr_key".to_vec(), b"v".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"DEL".to_vec(), b"base_key".to_vec()],
+            },
+        ];
+
+        super::write_aof_manifest_dir(&dir, "appendonly.aof", 1, &base_rdb, &incr)
+            .expect("write appendonlydir");
+
+        // Manifest references both data files, which exist on disk.
+        let manifest_path = dir.join("appendonly.aof.manifest");
+        assert!(manifest_path.exists());
+        assert!(dir.join("appendonly.aof.1.base.rdb").exists());
+        assert!(dir.join("appendonly.aof.1.incr.aof").exists());
+
+        let loaded = super::read_aof_manifest_dir(&manifest_path).expect("read back");
+        assert_eq!(loaded.base_rdb_entries, base_entries);
+        assert_eq!(loaded.base_rdb_functions, vec![lib.to_vec()]);
+        assert_eq!(loaded.records, incr);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
