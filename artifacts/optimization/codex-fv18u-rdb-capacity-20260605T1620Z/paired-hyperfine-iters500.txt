@@ -1,0 +1,11 @@
+Benchmark 1: target-cod-fv18u-baseline/release/fr-persist-rdb-multidb-bench --mode bench --dbs 4096 --entries-per-db 2 --iters 500
+  Time (mean ± σ):     170.4 ms ±   6.0 ms    [User: 166.6 ms, System: 2.8 ms]
+  Range (min … max):   163.2 ms … 179.2 ms    10 runs
+ 
+Benchmark 2: target-cod-fv18u-candidate/release/fr-persist-rdb-multidb-bench --mode bench --dbs 4096 --entries-per-db 2 --iters 500
+  Time (mean ± σ):     175.3 ms ±   8.8 ms    [User: 171.7 ms, System: 2.8 ms]
+  Range (min … max):   165.9 ms … 196.2 ms    10 runs
+ 
+Summary
+  target-cod-fv18u-baseline/release/fr-persist-rdb-multidb-bench --mode bench --dbs 4096 --entries-per-db 2 --iters 500 ran
+    1.03 ± 0.06 times faster than target-cod-fv18u-candidate/release/fr-persist-rdb-multidb-bench --mode bench --dbs 4096 --entries-per-db 2 --iters 500
