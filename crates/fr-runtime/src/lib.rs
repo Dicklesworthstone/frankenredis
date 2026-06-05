@@ -1073,11 +1073,19 @@ impl AclUser {
             return None;
         }
 
-        for access in fr_command::command_acl_key_access(argv) {
-            if let Some(key) = argv.get(access.index)
-                && !self.is_key_access_allowed(key, access.read, access.write)
-            {
-                return Some(AclCommandPermissionError::Key(key.clone()));
+        // Fast-path the all-keys case (the default user, and the common one):
+        // `is_key_access_allowed` short-circuits to `true` under `all_keys`, so
+        // the key loop can never produce a Key denial. Skipping it avoids the
+        // per-command key extraction (`command_acl_key_access` + its key-index
+        // walk and allocations) on every command. Isomorphic: same result, no
+        // key check is dropped that could ever fail. (frankenredis-aclkeyfast)
+        if !self.all_keys {
+            for access in fr_command::command_acl_key_access(argv) {
+                if let Some(key) = argv.get(access.index)
+                    && !self.is_key_access_allowed(key, access.read, access.write)
+                {
+                    return Some(AclCommandPermissionError::Key(key.clone()));
+                }
             }
         }
 
