@@ -1,0 +1,11 @@
+Benchmark 1: target-cod-pass15-baseline/release/fr-persist-rdb-multidb-bench --mode bench --dbs 4096 --entries-per-db 2 --iters 500
+  Time (mean ± σ):     179.3 ms ±  13.6 ms    [User: 174.4 ms, System: 3.5 ms]
+  Range (min … max):   166.4 ms … 223.8 ms    20 runs
+ 
+Benchmark 2: target-cod-pass15-candidate2/release/fr-persist-rdb-multidb-bench --mode bench --dbs 4096 --entries-per-db 2 --iters 500
+  Time (mean ± σ):     155.7 ms ±   6.7 ms    [User: 152.1 ms, System: 3.2 ms]
+  Range (min … max):   145.3 ms … 170.4 ms    20 runs
+ 
+Summary
+  target-cod-pass15-candidate2/release/fr-persist-rdb-multidb-bench --mode bench --dbs 4096 --entries-per-db 2 --iters 500 ran
+    1.15 ± 0.10 times faster than target-cod-pass15-baseline/release/fr-persist-rdb-multidb-bench --mode bench --dbs 4096 --entries-per-db 2 --iters 500

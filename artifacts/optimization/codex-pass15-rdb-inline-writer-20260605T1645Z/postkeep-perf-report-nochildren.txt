@@ -1,0 +1,60 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 155  of event 'cycles:u'
+# Event count (approx.): 449527062
+#
+# Overhead  Command          Shared Object                 Symbol                                                                                                                                                            
+# ........  ...............  ............................  ..................................................................................................................................................................
+#
+    54.32%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] fr_persist::encode_rdb_internal
+            |
+            ---fr_persist::encode_rdb_internal
+               |          
+                --17.79%--0x6202dfd22f00
+
+    15.88%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] core::slice::sort::stable::drift::sort::<&fr_persist::RdbEntry, <[&fr_persist::RdbEntry]>::sort_by<fr_persist::encode_rdb_internal::{closure#0}>::{closure#0}>
+            |
+            ---core::slice::sort::stable::drift::sort::<&fr_persist::RdbEntry, <[&fr_persist::RdbEntry]>::sort_by<fr_persist::encode_rdb_internal::{closure#0}>::{closure#0}>
+
+     7.81%  fr-persist-rdb-  libc.so.6                     [.] __memcmp_avx2_movbe
+            |
+            ---__memcmp_avx2_movbe
+
+     7.78%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] fr_persist::rdb_encode_string
+            |
+            ---fr_persist::rdb_encode_string
+               |          
+               |--5.67%--0x6202dfd22f20
+               |          
+                --2.11%--0x6202dfd22f00
+
+     7.26%  fr-persist-rdb-  libc.so.6                     [.] __memmove_avx_unaligned_erms
+            |
+            ---__memmove_avx_unaligned_erms
+               |          
+               |--5.13%--0x6202dfd22f00
+               |          
+                --2.13%--0x6202dfd22f20
+
+     6.17%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] fr_persist::rdb_encode_length
+            |
+            ---fr_persist::rdb_encode_length
+               |          
+               |--4.24%--0x6202dfd22f00
+               |          
+                --1.92%--0x6202dfd22f20
+
+     0.72%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] fr_persist_rdb_multidb_bench::main
+            |
+            ---fr_persist_rdb_multidb_bench::main
+               <usize as core::fmt::Display>::fmt
+               0
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

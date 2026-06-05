@@ -1,0 +1,56 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 130  of event 'cycles:u'
+# Event count (approx.): 614124316
+#
+# Overhead  Command          Shared Object                 Symbol                                                                                                                                                            
+# ........  ...............  ............................  ..................................................................................................................................................................
+#
+    58.63%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] fr_persist::encode_rdb_internal
+            |
+            ---fr_persist::encode_rdb_internal
+               |          
+               |--13.68%--0x6550054f6f00
+               |          
+                --6.92%--0x6550054f6f20
+
+    11.53%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] core::slice::sort::stable::drift::sort::<&fr_persist::RdbEntry, <[&fr_persist::RdbEntry]>::sort_by<fr_persist::encode_rdb_internal::{closure#0}>::{closure#0}>
+            |
+            ---core::slice::sort::stable::drift::sort::<&fr_persist::RdbEntry, <[&fr_persist::RdbEntry]>::sort_by<fr_persist::encode_rdb_internal::{closure#0}>::{closure#0}>
+
+    10.54%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] fr_persist::rdb_encode_string
+            |
+            ---fr_persist::rdb_encode_string
+               |          
+               |--9.22%--0x6550054f6f00
+               |          
+                --1.31%--0x6550054f6f20
+
+     8.95%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] fr_persist::rdb_encode_length
+            |
+            ---fr_persist::rdb_encode_length
+               |          
+               |--4.25%--0x6550054f6f20
+               |          
+                --3.28%--0x6550054f6f00
+
+     6.01%  fr-persist-rdb-  libc.so.6                     [.] __memmove_avx_unaligned_erms
+            |
+            ---__memmove_avx_unaligned_erms
+               |          
+               |--3.88%--0x6550054f6f20
+               |          
+                --2.13%--0x6550054f6f00
+
+     3.90%  fr-persist-rdb-  libc.so.6                     [.] __memcmp_avx2_movbe
+            |
+            ---__memcmp_avx2_movbe
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

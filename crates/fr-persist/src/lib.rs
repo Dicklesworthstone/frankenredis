@@ -1095,23 +1095,27 @@ fn rdb_length_size(len: usize) -> usize {
 fn rdb_encode_string(buf: &mut Vec<u8>, data: &[u8]) {
     // Upstream skips LZF below this threshold because even a run of
     // repeated bytes cannot compress enough to beat the wire overhead.
-    if data.len() > 20 {
-        // Upstream's compressed-fits budget: `out_len = in_len - 4`.
-        // lzf_compress returns None if it can't fit within that.
-        let budget = data.len() - 4;
-        if let Some(compressed) = lzf_compress(data, budget) {
-            let raw_size = rdb_length_size(data.len()) + data.len();
-            let lzf_size = 1
-                + rdb_length_size(compressed.len())
-                + rdb_length_size(data.len())
-                + compressed.len();
-            if lzf_size < raw_size {
-                buf.push(0xC3);
-                rdb_encode_length(buf, compressed.len());
-                rdb_encode_length(buf, data.len());
-                buf.extend_from_slice(&compressed);
-                return;
-            }
+    if let Ok(len) = u8::try_from(data.len())
+        && len <= 20
+    {
+        buf.push(len);
+        buf.extend_from_slice(data);
+        return;
+    }
+
+    // Upstream's compressed-fits budget: `out_len = in_len - 4`.
+    // lzf_compress returns None if it can't fit within that.
+    let budget = data.len() - 4;
+    if let Some(compressed) = lzf_compress(data, budget) {
+        let raw_size = rdb_length_size(data.len()) + data.len();
+        let lzf_size =
+            1 + rdb_length_size(compressed.len()) + rdb_length_size(data.len()) + compressed.len();
+        if lzf_size < raw_size {
+            buf.push(0xC3);
+            rdb_encode_length(buf, compressed.len());
+            rdb_encode_length(buf, data.len());
+            buf.extend_from_slice(&compressed);
+            return;
         }
     }
     rdb_encode_length(buf, data.len());
