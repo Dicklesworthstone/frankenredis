@@ -15008,7 +15008,7 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
             }
             Value::SortedSet(zs) => {
                 let members: Vec<(Vec<u8>, f64)> =
-                    zs.iter_asc().map(|(m, s)| (m.clone(), *s)).collect();
+                    zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
                 RdbValue::SortedSet(members)
             }
             Value::Stream(entries_map) => {
