@@ -25924,15 +25924,25 @@ fn sort_generic(
 
     // ── Sort the elements ────────────────────────────────────────────
     if dontsort {
-        // BY nosort: preserve natural order (or force alpha-sort for sets with STORE)
+        // BY nosort: preserve natural order. (upstream sort.c)
         let is_set = store
             .value_type(key, now_ms)
             .is_some_and(|vt| vt == ValueType::Set);
         if is_set && store_dest.is_some() {
-            // Force deterministic ordering for sets with STORE
+            // A SET with STORE forces a deterministic ALPHA sort: upstream
+            // clears `dontsort`, sets `alpha=1`, drops `sortby`, then runs the
+            // real sort path — so DESC IS honored here (sort then reverse).
             elements.sort();
-        }
-        if desc {
+            if desc {
+                elements.reverse();
+            }
+        } else if desc && !is_set {
+            // dontsort fast path: lists and sorted sets are loaded in their
+            // natural order and DESC reverses that order (upstream iterates the
+            // list/zset backward). A plain SET has no intrinsic order, so
+            // upstream returns its internal iteration order unchanged and
+            // ASC/DESC is ignored — DON'T reverse it. (frankenredis SORT set
+            // nosort parity)
             elements.reverse();
         }
     } else {
@@ -25963,15 +25973,17 @@ fn sort_generic(
                 scored.push((score, idx));
             }
             scored.sort_by(|a, b| {
-                let cmp = a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal);
-                if cmp == std::cmp::Ordering::Equal {
-                    // Lexicographic tiebreaker for stability
-                    elements[a.1].cmp(&elements[b.1])
-                } else if desc {
-                    cmp.reverse()
-                } else {
-                    cmp
-                }
+                // Upstream sortCompare: compare by score, and on a tie compare
+                // the elements themselves (so the order is deterministic), then
+                // negate the WHOLE comparison under DESC (`sort_desc ? -cmp :
+                // cmp`). The tiebreaker must follow `desc` too — applying it
+                // ascending-only reversed only the score and left tied runs in
+                // forward order. (frankenredis SORT numeric-tie DESC parity)
+                let cmp =
+                    a.0.partial_cmp(&b.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| elements[a.1].cmp(&elements[b.1]));
+                if desc { cmp.reverse() } else { cmp }
             });
             let reordered: Vec<Vec<u8>> = scored
                 .iter()
@@ -53897,6 +53909,142 @@ mod tests {
         );
     }
 
+    /// (SORT set nosort parity) `SORT key BY <nostar> DESC` reverses LIST and
+    /// ZSET sources (loaded in natural order, iterated backward for DESC) but
+    /// must NOT reverse a SET: a set has no intrinsic order, so upstream returns
+    /// its internal iteration order unchanged and ignores ASC/DESC. The
+    /// SET+STORE case still forces a deterministic ALPHA sort with DESC honored.
+    #[test]
+    fn sort_by_nosort_desc_does_not_reverse_set() {
+        let mut store = Store::new();
+        // intset members are stored sorted ascending.
+        for v in ["3", "1", "2", "10", "5"] {
+            dispatch_argv(
+                &[b"SADD".to_vec(), b"s".to_vec(), v.as_bytes().to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+        }
+        let asc = dispatch_argv(
+            &[
+                b"SORT".to_vec(),
+                b"s".to_vec(),
+                b"BY".to_vec(),
+                b"x".to_vec(),
+                b"ASC".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let desc = dispatch_argv(
+            &[
+                b"SORT".to_vec(),
+                b"s".to_vec(),
+                b"BY".to_vec(),
+                b"x".to_vec(),
+                b"DESC".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // DESC on a SET in nosort mode is ignored: same order as ASC.
+        assert_eq!(desc, asc, "DESC must not reverse a SET in BY-nosort mode");
+        let want = RespFrame::Array(Some(
+            ["1", "2", "3", "5", "10"]
+                .into_iter()
+                .map(|v| RespFrame::BulkString(Some(v.as_bytes().to_vec())))
+                .collect(),
+        ));
+        assert_eq!(desc, want);
+
+        // SET + STORE still forces a deterministic ALPHA sort, DESC honored.
+        let n = dispatch_argv(
+            &[
+                b"SORT".to_vec(),
+                b"s".to_vec(),
+                b"BY".to_vec(),
+                b"x".to_vec(),
+                b"DESC".to_vec(),
+                b"STORE".to_vec(),
+                b"dst".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(n, RespFrame::Integer(5));
+        let stored = dispatch_argv(
+            &[
+                b"LRANGE".to_vec(),
+                b"dst".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ALPHA descending byte order: "5","3","2","10","1".
+        let want_store = RespFrame::Array(Some(
+            ["5", "3", "2", "10", "1"]
+                .into_iter()
+                .map(|v| RespFrame::BulkString(Some(v.as_bytes().to_vec())))
+                .collect(),
+        ));
+        assert_eq!(stored, want_store);
+    }
+
+    /// (SORT numeric-tie DESC parity) When a numeric BY sort produces equal
+    /// scores (here all weight keys are missing → score 0), upstream sortCompare
+    /// breaks the tie by comparing the elements and then negates the WHOLE
+    /// comparison under DESC. So DESC must yield reverse-element order among the
+    /// tied run, not forward order.
+    #[test]
+    fn sort_numeric_tie_desc_reverses_element_tiebreak() {
+        let mut store = Store::new();
+        for v in ["1", "2", "3", "5", "4"] {
+            dispatch_argv(
+                &[b"RPUSH".to_vec(), b"l".to_vec(), v.as_bytes().to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+        }
+        let run = |store: &mut Store, order: &[u8]| {
+            dispatch_argv(
+                &[
+                    b"SORT".to_vec(),
+                    b"l".to_vec(),
+                    b"BY".to_vec(),
+                    b"miss_*".to_vec(), // all missing -> score 0 -> every element ties
+                    order.to_vec(),
+                ],
+                store,
+                0,
+            )
+            .unwrap()
+        };
+        let asc = run(&mut store, b"ASC");
+        let desc = run(&mut store, b"DESC");
+        let want_asc = RespFrame::Array(Some(
+            ["1", "2", "3", "4", "5"]
+                .into_iter()
+                .map(|v| RespFrame::BulkString(Some(v.as_bytes().to_vec())))
+                .collect(),
+        ));
+        let want_desc = RespFrame::Array(Some(
+            ["5", "4", "3", "2", "1"]
+                .into_iter()
+                .map(|v| RespFrame::BulkString(Some(v.as_bytes().to_vec())))
+                .collect(),
+        ));
+        assert_eq!(asc, want_asc, "tied numeric ASC = element order");
+        assert_eq!(desc, want_desc, "tied numeric DESC = reversed element order");
+    }
+
     #[test]
     fn sort_numeric_error_non_numeric() {
         let mut store = Store::new();
@@ -64849,15 +64997,17 @@ mod tests {
                             refs.zstore_from_pairs(dst_key, pairs, 0);
                         }
 
-                        let ctx = format!(
-                            "rev={rev} a3={a3} a4={a4} off={offset} cnt={count}"
-                        );
+                        let ctx = format!("rev={rev} a3={a3} a4={a4} off={offset} cnt={count}");
                         assert_eq!(
                             act_count,
                             RespFrame::Integer(ref_count),
                             "count mismatch {ctx}"
                         );
-                        assert_eq!(read_dst(&mut act), read_dst(&mut refs), "dst mismatch {ctx}");
+                        assert_eq!(
+                            read_dst(&mut act),
+                            read_dst(&mut refs),
+                            "dst mismatch {ctx}"
+                        );
                     }
                 }
             }
