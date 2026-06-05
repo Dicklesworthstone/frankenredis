@@ -2274,8 +2274,17 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
         return Err(PersistError::InvalidFrame);
     }
 
-    let version = std::str::from_utf8(&data[5..9]).map_err(|_| PersistError::InvalidFrame)?;
-    if version != format!("{RDB_VERSION:04}") {
+    // Redis accepts any RDB whose version is in 1..=RDB_VERSION (rdb.c
+    // rdbLoadRioWithLoadingCtx rejects only `rdbver < 1 || rdbver > RDB_VERSION`).
+    // Match that range so dumps written by older redis releases (6.x = v9,
+    // 7.0/7.1 = v10) still load — RDB type tags are version-stable, and any
+    // encoding we don't recognise still fails closed at the per-type arm below.
+    // A newer version (> RDB_VERSION) is rejected: its format is unknown to us.
+    let version_str = std::str::from_utf8(&data[5..9]).map_err(|_| PersistError::InvalidFrame)?;
+    let version: u32 = version_str
+        .parse()
+        .map_err(|_| PersistError::InvalidFrame)?;
+    if !(1..=RDB_VERSION).contains(&version) {
         return Err(PersistError::InvalidFrame);
     }
     let mut cursor = 9; // Skip "REDIS" + 4-digit version
@@ -5629,18 +5638,55 @@ mod tests {
         assert!(decode_rdb(&encoded).is_err());
     }
 
+    /// Rewrite the 4-digit version header in-place and repair the trailing
+    /// CRC64 so the only thing under test is the version-range check (not an
+    /// incidental checksum mismatch).
+    fn reversion_rdb(encoded: &mut [u8], version: &[u8; 4]) {
+        encoded[5..9].copy_from_slice(version);
+        let crc_at = encoded.len() - RDB_CHECKSUM_LEN;
+        let crc = crc64_redis(&encoded[..crc_at]);
+        encoded[crc_at..].copy_from_slice(&crc.to_le_bytes());
+    }
+
     #[test]
-    fn rdb_rejects_unsupported_version() {
+    fn rdb_rejects_too_new_version() {
+        // A version greater than RDB_VERSION is a format we cannot know how to
+        // read — redis rejects `rdbver > RDB_VERSION` and so must we, even with
+        // a valid checksum.
         let entries = vec![RdbEntry {
             db: 0,
             key: b"version".to_vec(),
-            value: RdbValue::String(b"mismatch".to_vec()),
+            value: RdbValue::String(b"too-new".to_vec()),
             expire_ms: None,
         }];
         let mut encoded = encode_rdb(&entries, &[]);
-        encoded[5..9].copy_from_slice(b"0010");
+        reversion_rdb(&mut encoded, b"0099");
+        assert_eq!(decode_rdb(&encoded).unwrap_err(), PersistError::InvalidFrame);
 
-        assert!(decode_rdb(&encoded).is_err());
+        // Version 0 is also out of range (redis rejects `rdbver < 1`).
+        let mut zero = encode_rdb(&entries, &[]);
+        reversion_rdb(&mut zero, b"0000");
+        assert_eq!(decode_rdb(&zero).unwrap_err(), PersistError::InvalidFrame);
+    }
+
+    #[test]
+    fn rdb_accepts_older_supported_versions() {
+        // Dumps from older redis releases (6.x = v9, 7.0/7.1 = v10) carry the
+        // same version-stable type tags; with a valid checksum they must load,
+        // matching redis which accepts any `1..=RDB_VERSION`.
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"legacy-key".to_vec(),
+            value: RdbValue::String(b"legacy-value".to_vec()),
+            expire_ms: None,
+        }];
+        for ver in [b"0001", b"0009", b"0010", b"0011"] {
+            let mut encoded = encode_rdb(&entries, &[]);
+            reversion_rdb(&mut encoded, ver);
+            let (decoded, _aux) = decode_rdb(&encoded)
+                .unwrap_or_else(|e| panic!("RDB version {ver:?} must load: {e:?}"));
+            assert_eq!(decoded, entries, "version {ver:?} round-trip");
+        }
     }
 
     #[test]
