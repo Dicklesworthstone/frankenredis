@@ -3035,10 +3035,26 @@ pub fn write_rdb_file(
     entries: &[RdbEntry],
     aux: &[(&str, &str)],
 ) -> Result<(), PersistError> {
-    let encoded = encode_rdb(entries, aux);
+    write_rdb_bytes_atomically(path, &encode_rdb(entries, aux))
+}
+
+/// Like [`write_rdb_file`] but also persists FUNCTION library payloads as
+/// `RDB_OPCODE_FUNCTION2` records, so libraries survive a save/load cycle
+/// (restart, DEBUG RELOAD, replication snapshot). (frankenredis-c0u9q)
+pub fn write_rdb_file_with_functions(
+    path: &Path,
+    entries: &[RdbEntry],
+    aux: &[(&str, &str)],
+    functions: &[&[u8]],
+) -> Result<(), PersistError> {
+    write_rdb_bytes_atomically(path, &encode_rdb_with_functions(entries, aux, functions))
+}
+
+/// Durably write RDB bytes to `path` via a temp file + rename + parent fsync.
+fn write_rdb_bytes_atomically(path: &Path, encoded: &[u8]) -> Result<(), PersistError> {
     let tmp_path = path.with_extension("rdb.tmp");
     let mut file = std::fs::File::create(&tmp_path)?;
-    file.write_all(&encoded)?;
+    file.write_all(encoded)?;
     file.sync_all()?;
     drop(file);
     std::fs::rename(&tmp_path, path)?;
@@ -5998,6 +6014,29 @@ mod tests {
         let path = std::path::Path::new("/tmp/fr_persist_nonexistent_test_file.rdb");
         let (entries, _) = super::read_rdb_file(path).expect("read missing");
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn write_rdb_file_with_functions_persists_libraries_to_disk() {
+        let dir = std::env::temp_dir().join("fr_persist_rdb_functions_disk_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("functions.rdb");
+        let lib = b"#!lua name=disklib\nredis.register_function('d', function() return 1 end)";
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"k".to_vec(),
+            value: RdbValue::String(b"v".to_vec()),
+            expire_ms: None,
+        }];
+        super::write_rdb_file_with_functions(&path, &entries, &[], &[lib.as_slice()])
+            .expect("write rdb with functions");
+
+        let (read_entries, _aux, functions) =
+            super::read_rdb_file_with_functions(&path).expect("read back");
+        assert_eq!(read_entries, entries);
+        assert_eq!(functions, vec![lib.to_vec()]);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

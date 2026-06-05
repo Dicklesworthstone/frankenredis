@@ -30,7 +30,7 @@ use fr_eventloop::{
 };
 use fr_persist::{
     AofRecord, PersistError, RdbEntry, RdbValue, argv_to_aof_records, decode_aof_stream,
-    decode_rdb, encode_aof_stream, encode_rdb, read_rdb_file, write_aof_file, write_rdb_file,
+    decode_rdb, encode_aof_stream, read_rdb_file, write_aof_file,
 };
 use fr_protocol::{RespFrame, RespParseError};
 use fr_repl::{
@@ -3605,10 +3605,12 @@ impl Runtime {
         // back, then replace the store. This validates the
         // encoder/decoder pair without touching disk.
         let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
-        let bytes = encode_rdb(&entries, &[]);
-        let (decoded_entries, _aux) = match decode_rdb(&bytes) {
-            Ok(out) => out,
-            Err(_) => {
+        let fn_codes = self.rdb_function_codes();
+        let fn_refs: Vec<&[u8]> = fn_codes.iter().map(Vec::as_slice).collect();
+        let bytes = fr_persist::encode_rdb_with_functions(&entries, &[], &fn_refs);
+        let decoded = match fr_persist::decode_rdb_prefix(&bytes) {
+            Ok(out) if out.consumed == bytes.len() => out,
+            _ => {
                 return RespFrame::Error(
                     "ERR failed to reload dataset from in-memory RDB round-trip".to_string(),
                 );
@@ -3617,7 +3619,7 @@ impl Runtime {
         let mut store = Store::new();
         let counts = match apply_rdb_entries_to_store(
             &mut store,
-            &decoded_entries,
+            &decoded.entries,
             now_ms.saturating_add(1),
         ) {
             Ok(counts) => counts,
@@ -3627,6 +3629,10 @@ impl Runtime {
                 );
             }
         };
+        // Restore FUNCTION libraries through the round-trip too. (frankenredis-c0u9q)
+        for code in &decoded.functions {
+            let _ = store.function_load(code, true);
+        }
         store.stat_rdb_last_load_keys_expired = u64::try_from(counts.expired).unwrap_or(u64::MAX);
         store.stat_rdb_last_load_keys_loaded = u64::try_from(counts.loaded).unwrap_or(u64::MAX);
         self.server.store = store;
@@ -3805,15 +3811,30 @@ impl Runtime {
         stream.get(start..).unwrap_or(&[]).to_vec()
     }
 
+    /// Library source for every registered FUNCTION, name-sorted, for embedding
+    /// FUNCTION2 records into an RDB snapshot so they survive a save/load cycle.
+    /// (frankenredis-c0u9q)
+    fn rdb_function_codes(&self) -> Vec<Vec<u8>> {
+        self.server
+            .store
+            .function_list(None)
+            .iter()
+            .map(|lib| lib.code.clone())
+            .collect()
+    }
+
     #[must_use]
     pub fn encoded_rdb_snapshot(&mut self, now_ms: u64) -> Vec<u8> {
         let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
-        encode_rdb(
+        let fn_codes = self.rdb_function_codes();
+        let fn_refs: Vec<&[u8]> = fn_codes.iter().map(Vec::as_slice).collect();
+        fr_persist::encode_rdb_with_functions(
             &entries,
             &[
                 ("redis-ver", fr_store::REDIS_COMPAT_VERSION),
                 ("frankenredis", "true"),
             ],
+            &fn_refs,
         )
     }
 
@@ -12224,13 +12245,15 @@ impl Runtime {
             }
         }
 
-        if let Some(path) = &self.server.rdb_path {
+        if let Some(path) = self.server.rdb_path.clone() {
             let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
+            let fn_codes = self.rdb_function_codes();
+            let fn_refs: Vec<&[u8]> = fn_codes.iter().map(Vec::as_slice).collect();
             let aux = [
                 ("redis-ver", fr_store::REDIS_COMPAT_VERSION),
                 ("frankenredis", "true"),
             ];
-            if write_rdb_file(path, &entries, &aux).is_err() {
+            if fr_persist::write_rdb_file_with_functions(&path, &entries, &aux, &fn_refs).is_err() {
                 return Err(RespFrame::Error(
                     "ERR error saving RDB snapshot to disk".to_string(),
                 ));
@@ -27269,6 +27292,46 @@ mod tests {
         // And the function is callable (definitive proof it was re-registered).
         let called = rt.execute_frame(command(&[b"FCALL", b"myfunc", b"0"]), 101);
         assert_eq!(called, RespFrame::BulkString(Some(b"hello".to_vec())), "{called:?}");
+    }
+
+    #[test]
+    fn rdb_save_then_load_preserves_function_libraries() {
+        // Regression (frankenredis-c0u9q): RDB SAVE must emit FUNCTION2 records
+        // so a function registered in fr survives a save -> fresh-load cycle
+        // (fr->fr restart), not only redis-origin dumps.
+        let dir = std::env::temp_dir().join("fr_runtime_rdb_function_save_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let rdb_path = dir.join("save_functions.rdb");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_rdb_path(rdb_path.clone());
+        let lib =
+            b"#!lua name=savelib\nredis.register_function('sf', function() return 'saved' end)";
+        rt.execute_frame(command(&[b"FUNCTION", b"LOAD", lib.as_slice()]), 10);
+        rt.execute_frame(command(&[b"SET", b"k1", b"v1"]), 11);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SAVE"]), 12),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rdb_path.exists(), "SAVE must write the RDB file");
+
+        // Fresh runtime loads the dump fr just wrote.
+        let mut rt2 = Runtime::default_strict();
+        rt2.set_rdb_path(rdb_path.clone());
+        let loaded = rt2.load_rdb(20).expect("load should succeed");
+        assert_eq!(loaded, 1, "the key must reload");
+
+        let RespFrame::Array(Some(libs)) = rt2.execute_frame(command(&[b"FUNCTION", b"LIST"]), 21)
+        else {
+            panic!("FUNCTION LIST should be an array");
+        };
+        assert_eq!(libs.len(), 1, "the saved library must reload");
+        assert_eq!(
+            rt2.execute_frame(command(&[b"FCALL", b"sf", b"0"]), 22),
+            RespFrame::BulkString(Some(b"saved".to_vec()))
+        );
+
+        let _ = std::fs::remove_file(&rdb_path);
     }
 
     #[test]
