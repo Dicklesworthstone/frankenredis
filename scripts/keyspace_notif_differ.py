@@ -146,6 +146,7 @@ def main():
     ap.add_argument("--fr", type=int, default=16400)
     ap.add_argument("--iters", type=int, default=3000)
     ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--db", type=int, default=0, help="DB to exercise (catches db-prefix leaks)")
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
@@ -154,8 +155,10 @@ def main():
     for c in (op, fp):
         c.cmd("FLUSHALL")
         c.cmd("CONFIG", "SET", "notify-keyspace-events", "KEA")
+        if args.db:
+            c.cmd("SELECT", str(args.db))
     for c in (os_, fs_):
-        c.cmd("PSUBSCRIBE", "__key*@0__:*")
+        c.cmd("PSUBSCRIBE", "__key*@%d__:*" % args.db)
         time.sleep(0.05)
         c.drain_pmessages()  # clear the subscribe confirmation
 

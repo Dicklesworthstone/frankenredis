@@ -6436,7 +6436,11 @@ impl Runtime {
                                     &cmd_keys[0],
                                     db,
                                 );
-                                if !self.server.store.key_is_present(&cmd_keys[0]) {
+                                if !self
+                                    .server
+                                    .store
+                                    .key_is_present(&encode_db_key(db, &cmd_keys[0]))
+                                {
                                     self.server.store.notify_keyspace_event(
                                         fr_store::NOTIFY_GENERIC,
                                         "del",
@@ -6482,7 +6486,7 @@ impl Runtime {
                                 } else {
                                     &cmd_keys[0]
                                 };
-                                if self.server.store.key_is_present(dest) {
+                                if self.server.store.key_is_present(&encode_db_key(db, dest)) {
                                     self.server
                                         .store
                                         .notify_keyspace_event(event_type, event, dest, db);
@@ -6592,7 +6596,7 @@ impl Runtime {
                                 .is_some_and(|c| Self::command_can_empty_collection(c))
                             {
                                 for key in &cmd_keys {
-                                    if !self.server.store.key_is_present(key) {
+                                    if !self.server.store.key_is_present(&encode_db_key(db, key)) {
                                         self.server.store.notify_keyspace_event(
                                             fr_store::NOTIFY_GENERIC,
                                             "del",
