@@ -40,6 +40,20 @@ model.
 - Candidate zset proof output on `ts2`: `ZRANK ratio=222.07x`,
   `ZRANGE deep-index ratio=111.20x`.
 
+Final post-scanner iterator fix:
+
+- Candidate command: `target-icywolf-9mh3o-candidate-after-ubs/release/fr-zset-pack-harness 8192 48`.
+- Paired hyperfine artifact: `comparison-after-ubs-hyperfine.json`.
+- Baseline mean: `463.7 ms +/- 16.0 ms`.
+- Candidate mean: `291.1 ms +/- 9.5 ms`.
+- Ratio: `1.59x` faster.
+- In-harness insert: `129912535ns` -> `73739467ns`.
+- In-harness read: `137200388ns` -> `74012895ns`.
+- In-harness pop: `6732322ns` -> `2087022ns`.
+- Candidate output artifact: `candidate-after-ubs-output.txt`.
+- Golden invariants: `state_digest=324091d9da416741` and
+  `checksum=17527362544575379395` unchanged.
+
 ## Isomorphism Obligations
 
 - Ordering preserved: packed and indexed forms must both use canonical zero,
@@ -58,6 +72,10 @@ model.
 - `rch exec -- cargo check -p fr-store --all-targets`
 - `rch exec -- cargo clippy -p fr-store --all-targets -- -D warnings`
 - `cargo fmt -p fr-store -- --check`
+- `rch exec -- env CARGO_TARGET_DIR=target-icywolf-9mh3o-test-packed-after-ubs cargo test -p fr-store packed_set::tests::zset -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=target-icywolf-9mh3o-check-after-ubs cargo check -p fr-store --all-targets`
+- `rch exec -- env CARGO_TARGET_DIR=target-icywolf-9mh3o-clippy-after-ubs cargo clippy -p fr-store --all-targets -- -D warnings`
+- `ubs crates/fr-store/src/packed_set.rs`
 
 ## Fallback Trigger
 
