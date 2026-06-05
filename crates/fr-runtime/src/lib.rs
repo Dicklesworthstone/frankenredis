@@ -29,8 +29,8 @@ use fr_eventloop::{
     validate_fd_registration_bounds, validate_pending_write_delivery, validate_read_path,
 };
 use fr_persist::{
-    AofRecord, PersistError, RdbEntry, RdbValue, argv_to_aof_records, decode_aof_stream,
-    encode_aof_stream, read_rdb_file, write_aof_file,
+    AofRecord, PersistError, RdbEntry, RdbValue, decode_aof_stream, encode_aof_stream,
+    read_rdb_file,
 };
 use fr_protocol::{RespFrame, RespParseError};
 use fr_repl::{
@@ -2483,6 +2483,13 @@ pub struct ServerState {
     /// Wall-clock ms of the last AOF fsync, used to rate-limit the `everysec`
     /// fsync policy to at most once per second.
     aof_last_fsync_ms: u64,
+    /// Current base/incr file sequence of the on-disk redis-7 `appendonlydir`
+    /// (manifest layout). 0 means no base has been written yet; the first
+    /// rewrite/flush after AOF is enabled creates seq 1. Each full rewrite
+    /// (BGREWRITEAOF / SAVE / DEBUG RELOAD) advances it; incremental flushes
+    /// append to `<basename>.<seq>.incr.aof`. Loaded from an existing manifest
+    /// so post-load rewrites continue the sequence. (frankenredis-oe6qt)
+    aof_current_seq: u64,
     aof_selected_db: usize,
     replication_runtime_state: ReplicationRuntimeState,
     evidence: EvidenceLedger,
@@ -2642,6 +2649,7 @@ impl Default for ServerState {
             aof_base_offset: 0,
             aof_disk_flushed_records: 0,
             aof_last_fsync_ms: 0,
+            aof_current_seq: 0,
             aof_selected_db: 0,
             evidence: EvidenceLedger::default(),
             auth_state: AuthState::default(),
@@ -3415,7 +3423,42 @@ fn resolve_aof_manifest(path: &std::path::Path) -> Option<std::path::PathBuf> {
             .map(|entry| entry.path())
             .find(|p| p.extension().and_then(|e| e.to_str()) == Some("manifest"));
     }
+    // The configured AOF path is the base file inside an `appendonlydir`
+    // (e.g. `appendonlydir/appendonly.aof`). When fr (or redis) has written
+    // the manifest layout, its sibling manifest is `<path>.manifest`. A
+    // present manifest takes precedence over any legacy single-file AOF at
+    // `path`, matching redis's manifest-first load. (frankenredis-oe6qt)
+    let sibling = aof_manifest_path(path);
+    if sibling.is_file() {
+        return Some(sibling);
+    }
     None
+}
+
+/// Resolve the `appendonlydir` directory and base name for the manifest layout
+/// from a configured AOF path. The path's parent is the directory and its file
+/// name is the redis `appendfilename` base (e.g. `appendonlydir/appendonly.aof`
+/// -> dir `appendonlydir`, base `appendonly.aof`). (frankenredis-oe6qt)
+fn aof_manifest_target(path: &std::path::Path) -> (std::path::PathBuf, String) {
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(
+            || std::path::PathBuf::from("."),
+            std::path::Path::to_path_buf,
+        );
+    let basename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("appendonly.aof")
+        .to_string();
+    (dir, basename)
+}
+
+/// The manifest file path (`<basename>.manifest`) for a configured AOF path.
+fn aof_manifest_path(path: &std::path::Path) -> std::path::PathBuf {
+    let (dir, basename) = aof_manifest_target(path);
+    dir.join(format!("{basename}.manifest"))
 }
 
 fn preserve_store_load_context(replacement: &mut Store, original: &Store) {
@@ -3524,19 +3567,37 @@ impl Runtime {
         // file. (frankenredis-nvcby)
         let (base_rdb, records) = match resolve_aof_manifest(&path) {
             Some(manifest_path) => {
+                // Continue the loaded sequence so post-load rewrites bump it
+                // and incremental flushes append to the loaded incr file rather
+                // than starting a fresh manifest. (frankenredis-oe6qt)
+                if let Ok(manifest) = fr_persist::read_aof_manifest_file(&manifest_path) {
+                    self.server.aof_current_seq =
+                        manifest.curr_base_file_seq.max(manifest.curr_incr_file_seq);
+                }
                 let loaded = fr_persist::read_aof_manifest_dir(&manifest_path)?;
-                let base = if loaded.base_rdb_entries.is_empty()
-                    && loaded.base_rdb_functions.is_empty()
-                {
-                    None
-                } else {
-                    Some((loaded.base_rdb_entries, loaded.base_rdb_functions))
-                };
+                let base =
+                    if loaded.base_rdb_entries.is_empty() && loaded.base_rdb_functions.is_empty() {
+                        None
+                    } else {
+                        Some((loaded.base_rdb_entries, loaded.base_rdb_functions))
+                    };
                 (base, loaded.records)
             }
-            None => (None, fr_persist::read_aof_file(&path)?),
+            None => {
+                // Legacy single-file AOF: the next rewrite/flush migrates it to
+                // the manifest layout starting at seq 1. (frankenredis-oe6qt)
+                self.server.aof_current_seq = 0;
+                (None, fr_persist::read_aof_file(&path)?)
+            }
         };
-        let count = records.len();
+        // Count both the base-RDB keys (multi-part AOF where the just-rewritten
+        // base holds the dataset and the incr is empty) and the replayed incr
+        // records, so a freshly rewritten appendonlydir still reports a non-zero
+        // load. (frankenredis-oe6qt)
+        let count = records.len()
+            + base_rdb
+                .as_ref()
+                .map_or(0, |(entries, _functions)| entries.len());
         let mut original_store = std::mem::replace(&mut self.server.store, Store::new());
         let original_records = std::mem::take(&mut self.server.aof_records);
         let original_aof_db = self.server.aof_selected_db;
@@ -12336,6 +12397,39 @@ impl Runtime {
         }
     }
 
+    /// Write the redis-7 `appendonlydir` layout for the current store state:
+    /// manifest, `<base>.<seq>.base.rdb`, and empty
+    /// `<base>.<seq>.incr.aof`. This advances the file sequence. The base RDB
+    /// captures the full dataset plus FUNCTION libs,
+    /// so the incremental-flush cursor is anchored at the current buffer tail and
+    /// the fresh incr file starts empty — exactly what redis-server loads, and the
+    /// inverse of [`load_aof`]'s manifest branch. Returns the new sequence.
+    /// (frankenredis-oe6qt)
+    fn rewrite_aof_manifest(&mut self, now_ms: u64) -> Result<u64, PersistError> {
+        let path = self
+            .server
+            .aof_path
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("appendonly.aof"));
+        let (dir, basename) = aof_manifest_target(&path);
+        let seq = self.server.aof_current_seq.saturating_add(1);
+        let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
+        let fn_codes = self.rdb_function_codes();
+        let fn_refs: Vec<&[u8]> = fn_codes.iter().map(Vec::as_slice).collect();
+        let aux = [
+            ("redis-ver", fr_store::REDIS_COMPAT_VERSION),
+            ("frankenredis", "true"),
+        ];
+        let base_rdb = fr_persist::encode_rdb_with_functions(&entries, &aux, &fn_refs);
+        fr_persist::write_aof_manifest_dir(&dir, &basename, seq, &base_rdb, &[])?;
+        self.server.aof_current_seq = seq;
+        // The base now fully represents current state; the incremental flush
+        // must resume appending only records captured after this rewrite, so
+        // anchor the cursor at the current buffer length.
+        self.server.aof_disk_flushed_records = self.server.aof_records.len();
+        Ok(seq)
+    }
+
     fn persist_snapshot_to_disk(
         &mut self,
         now_ms: u64,
@@ -12348,10 +12442,13 @@ impl Runtime {
         // fresh AOF base out from under the parent would make the parent's
         // incremental tail duplicate the base on the next flush. The AOF stays
         // current via the per-iteration incremental flush + BGREWRITEAOF.
-        if write_aof && let Some(path) = &self.server.aof_path {
-            let commands = self.server.store.to_aof_commands(now_ms);
-            let records = argv_to_aof_records(commands);
-            if write_aof_file(path, &records).is_err() {
+        if write_aof && self.server.aof_path.is_some() {
+            // (frankenredis-oe6qt) Emit the redis-7 `appendonlydir` layout
+            // (manifest + base.rdb + fresh empty incr) so redis-server can load
+            // fr's AOF. `rewrite_aof_manifest` anchors the incremental-flush
+            // cursor at the current buffer length so post-rewrite writes append
+            // past the base.
+            if self.rewrite_aof_manifest(now_ms).is_err() {
                 if record_aof_write_status {
                     self.server.store.record_aof_write_status(false);
                 }
@@ -12359,10 +12456,6 @@ impl Runtime {
                     "ERR error saving dataset to disk".to_string(),
                 ));
             }
-            // The file now fully represents current state; the incremental
-            // flush must resume appending only records captured after this
-            // rewrite, so anchor the cursor at the current buffer length.
-            self.server.aof_disk_flushed_records = self.server.aof_records.len();
             if record_aof_write_status {
                 self.server.store.record_aof_write_status(true);
             }
@@ -12386,33 +12479,51 @@ impl Runtime {
         Ok(())
     }
 
-    /// Append AOF records captured since the last flush to the on-disk AOF
-    /// file and fsync per the configured `appendfsync` policy. Called once per
-    /// event-loop iteration (the `beforeSleep`/`flushAppendOnlyFile` analog).
-    /// (frankenredis-ol9tz)
+    /// Append AOF records captured since the last flush to the current
+    /// incremental file of the on-disk `appendonlydir` and fsync per the
+    /// configured `appendfsync` policy. Called once per event-loop iteration
+    /// (the `beforeSleep`/`flushAppendOnlyFile` analog). (frankenredis-ol9tz)
     ///
-    /// fr's AOF is a single command-log file that, before this, was only ever
-    /// rewritten wholesale from store state by SAVE/BGSAVE/BGREWRITEAOF — so
-    /// every write made between those snapshots was lost on restart (the file
-    /// was often never even created). This incremental tail makes ordinary
-    /// writes durable. Records beyond `aof_disk_flushed_records` are appended;
-    /// the snapshot rewriters anchor that cursor at `aof_records.len()` so a
-    /// freshly written base is never duplicated.
+    /// fr's AOF is the redis-7 multi-part layout (frankenredis-oe6qt): a base
+    /// RDB snapshot plus an append-only `<basename>.<seq>.incr.aof` command log,
+    /// tied together by a manifest. The first flush after AOF is enabled writes
+    /// the initial manifest (base = full current dataset), so the incr file
+    /// starts empty and only subsequent writes are appended. Without this
+    /// incremental tail, every write made between full rewrites would be lost on
+    /// restart. Records beyond `aof_disk_flushed_records` are appended; the
+    /// snapshot rewriters anchor that cursor at `aof_records.len()` so a freshly
+    /// written base is never duplicated.
     ///
-    /// The file is opened fresh each flush rather than held open: `write_aof_file`
-    /// replaces the path via atomic rename, so a long-lived handle would point
-    /// at the stale, unlinked inode after any rewrite. (A persistent fd guarded
-    /// against rewrite is a possible future perf lever.)
+    /// The incr file is opened fresh each flush rather than held open: a rewrite
+    /// (BGREWRITEAOF) advances the sequence and writes a new incr file, so a
+    /// long-lived handle would point at the stale file after any rewrite. (A
+    /// persistent fd guarded against rewrite is a possible future perf lever.)
     pub fn flush_aof_to_disk(&mut self, now_ms: u64) {
         let path = match &self.server.aof_path {
             Some(path) => path.clone(),
             None => return,
         };
         // Respect a runtime `CONFIG SET appendonly no`: stop appending, but
-        // leave the file and cursor intact for a later re-enable/rewrite.
+        // leave the files and cursor intact for a later re-enable/rewrite.
         if !self.server.store.aof_enabled {
             return;
         }
+        // (frankenredis-oe6qt) An incremental flush appends to the current base's
+        // incr file, so a base manifest must exist first. The first flush after
+        // AOF is enabled (or after a legacy single-file load) writes the initial
+        // manifest from the full current dataset; that anchors the cursor at the
+        // buffer tail, so there is nothing left to append on this same call.
+        if self.server.aof_current_seq == 0 {
+            if self.rewrite_aof_manifest(now_ms).is_err() {
+                self.server.store.record_aof_write_status(false);
+            }
+            return;
+        }
+        let (dir, basename) = aof_manifest_target(&path);
+        let incr_path = dir.join(format!(
+            "{basename}.{}.incr.aof",
+            self.server.aof_current_seq
+        ));
         let flushed = self
             .server
             .aof_disk_flushed_records
@@ -12431,7 +12542,7 @@ impl Runtime {
         let mut file = match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
+            .open(&incr_path)
         {
             Ok(file) => file,
             Err(_) => {
@@ -12483,21 +12594,17 @@ impl Runtime {
         // server.aof_filename ('appendonly.aof' by default) even
         // when AOF persistence isn't currently active.
         // (br-frankenredis-bgrewriteoff)
-        let path = self
-            .server
-            .aof_path
-            .clone()
-            .unwrap_or_else(|| std::path::PathBuf::from("appendonly.aof"));
-        let commands = self.server.store.to_aof_commands(now_ms);
-        let records = argv_to_aof_records(commands);
-        if let Err(_e) = write_aof_file(&path, &records) {
+        //
+        // (frankenredis-oe6qt) The rewrite emits the redis-7 `appendonlydir`
+        // layout (new base RDB + fresh empty incr, advancing the sequence) so
+        // redis-server can load it. `rewrite_aof_manifest` anchors the
+        // incremental-flush cursor at the buffer tail so post-rewrite writes
+        // append only past the base.
+        if self.rewrite_aof_manifest(now_ms).is_err() {
             self.server.aof_rewrite_scheduled = false;
             self.server.store.record_aof_bgrewrite_status(false);
             return RespFrame::Error("ERR error rewriting AOF file".to_string());
         }
-        // (frankenredis-ol9tz) The file now holds a fresh full base; the
-        // incremental flush must append only post-rewrite records.
-        self.server.aof_disk_flushed_records = self.server.aof_records.len();
         self.server.aof_rewrite_scheduled = false;
         self.server.replication_ack_state.local_fsync_offset =
             self.server.replication_ack_state.primary_offset;
@@ -15160,8 +15267,10 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
                     fields.sort_by(|a, b| a.0.cmp(&b.0));
                     RdbValue::HashWithTtls(fields)
                 } else {
-                    let mut fields: Vec<(Vec<u8>, Vec<u8>)> =
-                        h.iter().map(|(k_, v_)| (k_.to_vec(), v_.to_vec())).collect();
+                    let mut fields: Vec<(Vec<u8>, Vec<u8>)> = h
+                        .iter()
+                        .map(|(k_, v_)| (k_.to_vec(), v_.to_vec()))
+                        .collect();
                     fields.sort_by(|a, b| a.0.cmp(&b.0));
                     RdbValue::Hash(fields)
                 }
@@ -15198,9 +15307,7 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
                                         let meta = group.consumer_metadata.get(name).copied();
                                         fr_persist::RdbStreamConsumer {
                                             name: name.clone(),
-                                            seen_time_ms: meta
-                                                .map(|m| m.seen_time_ms)
-                                                .unwrap_or(0),
+                                            seen_time_ms: meta.map(|m| m.seen_time_ms).unwrap_or(0),
                                             active_time_ms: meta.and_then(|m| m.active_time_ms),
                                         }
                                     })
@@ -19793,50 +19900,69 @@ mod tests {
 
     #[test]
     fn incremental_aof_flush_persists_writes_between_rewrites() {
-        // (frankenredis-ol9tz) Writes made between full rewrites must be
-        // appended to the on-disk AOF by flush_aof_to_disk; before this fix
-        // the file was only ever rewritten wholesale on SAVE/BGREWRITEAOF, so
-        // ordinary writes were silently lost on restart.
+        // (frankenredis-ol9tz / frankenredis-oe6qt) Writes made between full
+        // rewrites must be durable across a restart. fr now emits the redis-7
+        // `appendonlydir` layout: the first flush writes the manifest + base RDB
+        // (full dataset), and subsequent flushes append to the incr file. The
+        // restart path is `load_aof`, which seeds the base then replays the incr.
         let dir = std::env::temp_dir().join(format!(
             "fr_runtime_incremental_aof_flush_{}",
             std::process::id()
         ));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("appendonly.aof");
-        let _ = std::fs::remove_file(&path);
+        let manifest = dir.join("appendonly.aof.manifest");
+        let incr = dir.join("appendonly.aof.1.incr.aof");
+        for p in [&path, &manifest, &incr] {
+            let _ = std::fs::remove_file(p);
+        }
 
         let mut rt = Runtime::default_strict();
         rt.set_aof_path(path.clone());
 
-        // No rewrite has run; the file should not exist yet.
-        assert!(!path.exists(), "AOF file must not exist before any flush");
+        // No rewrite has run; no manifest should exist yet.
+        assert!(
+            !manifest.exists(),
+            "manifest must not exist before any flush"
+        );
 
-        // First batch of writes, then an incremental flush.
+        // First batch of writes, then an incremental flush — this writes the
+        // initial manifest with the full dataset as the base RDB.
         rt.execute_frame(command(&[b"SET", b"k1", b"v1"]), 1);
         rt.execute_frame(command(&[b"SET", b"k2", b"v2"]), 2);
         rt.flush_aof_to_disk(3);
 
-        let bytes = std::fs::read(&path).expect("AOF file created by flush");
-        let records = decode_aof_stream(&bytes).expect("decode flushed AOF");
-        let argvs: Vec<Vec<Vec<u8>>> = records.iter().map(|r| r.argv.clone()).collect();
+        assert!(manifest.exists(), "first flush must write the manifest");
         assert!(
-            argvs.iter().any(
-                |a| a.first().is_some_and(|c| c.eq_ignore_ascii_case(b"SET"))
-                    && a.get(1).is_some_and(|k| k.as_slice() == b"k1")
-            ),
-            "flushed AOF must contain `SET k1`, got {argvs:?}"
+            dir.join("appendonly.aof.1.base.rdb").exists(),
+            "first flush must write the base RDB"
+        );
+        // The base RDB captures the current dataset; the fresh incr is empty.
+        let loaded = fr_persist::read_aof_manifest_dir(&manifest).expect("load manifest");
+        assert!(
+            loaded.records.is_empty(),
+            "incr must be empty right after the initial rewrite, got {:?}",
+            loaded.records
         );
 
-        // A second batch flushes only the new records (append, not rewrite).
+        // A second batch appends only the new record to the incr file.
         rt.execute_frame(command(&[b"SET", b"k3", b"v3"]), 4);
         rt.flush_aof_to_disk(5);
+        let loaded = fr_persist::read_aof_manifest_dir(&manifest).expect("reload manifest");
+        let incr_argvs: Vec<Vec<Vec<u8>>> = loaded.records.iter().map(|r| r.argv.clone()).collect();
+        assert!(
+            incr_argvs.iter().any(
+                |a| a.first().is_some_and(|c| c.eq_ignore_ascii_case(b"SET"))
+                    && a.get(1).is_some_and(|k| k.as_slice() == b"k3")
+            ),
+            "second flush must append `SET k3` to the incr, got {incr_argvs:?}"
+        );
 
-        // Replay the whole file into a fresh runtime and confirm every key
-        // survives — this is the restart path.
-        let bytes = std::fs::read(&path).expect("read AOF after second flush");
-        let records = decode_aof_stream(&bytes).expect("decode AOF after second flush");
+        // Reload the whole appendonlydir into a fresh runtime and confirm every
+        // key survives — this is the restart path.
         let mut reloaded = Runtime::default_strict();
-        let _ = reloaded.replay_aof_records(&records, 9_000);
+        reloaded.set_aof_path(path.clone());
+        reloaded.load_aof(9_000).expect("reload appendonlydir");
         for (k, v) in [(b"k1", b"v1"), (b"k2", b"v2"), (b"k3", b"v3")] {
             assert_eq!(
                 reloaded.execute_frame(command(&[b"GET", k]), 9_001),
@@ -19846,22 +19972,39 @@ mod tests {
             );
         }
 
-        let _ = std::fs::remove_file(&path);
+        for p in [
+            &path,
+            &manifest,
+            &incr,
+            &dir.join("appendonly.aof.1.base.rdb"),
+        ] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     #[test]
     fn incremental_aof_flush_after_bgrewriteaof_appends_not_duplicates() {
-        // (frankenredis-ol9tz) Writes made AFTER a BGREWRITEAOF must be
-        // appended past the freshly written base, and the base must not be
-        // duplicated by the next incremental flush (the cursor is anchored at
-        // rewrite time).
+        // (frankenredis-ol9tz / frankenredis-oe6qt) Writes made AFTER a
+        // BGREWRITEAOF must be appended past the freshly written base, and the
+        // base must not be duplicated by the next incremental flush (the cursor
+        // is anchored at rewrite time). In the appendonlydir layout the base is
+        // an RDB snapshot, so the incr file must hold ONLY the post-rewrite
+        // record, never a copy of the base key.
         let dir = std::env::temp_dir().join(format!(
             "fr_runtime_aof_flush_post_rewrite_{}",
             std::process::id()
         ));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("appendonly.aof");
-        let _ = std::fs::remove_file(&path);
+        let manifest = dir.join("appendonly.aof.manifest");
+        for p in [
+            &path,
+            &manifest,
+            &dir.join("appendonly.aof.1.base.rdb"),
+            &dir.join("appendonly.aof.1.incr.aof"),
+        ] {
+            let _ = std::fs::remove_file(p);
+        }
 
         let mut rt = Runtime::default_strict();
         rt.set_aof_path(path.clone());
@@ -19870,10 +20013,23 @@ mod tests {
         rt.execute_frame(command(&[b"SET", b"after", b"2"]), 3);
         rt.flush_aof_to_disk(4);
 
-        let bytes = std::fs::read(&path).expect("read AOF");
-        let records = decode_aof_stream(&bytes).expect("decode AOF");
+        // The incr stream must contain `after` exactly once and never `base`
+        // (which lives in the base RDB) — the anti-duplication witness.
+        let loaded = fr_persist::read_aof_manifest_dir(&manifest).expect("load manifest");
+        let base_in_incr = loaded.records.iter().any(|r| {
+            r.argv
+                .first()
+                .is_some_and(|c| c.eq_ignore_ascii_case(b"SET"))
+                && r.argv.get(1).is_some_and(|k| k.as_slice() == b"base")
+        });
+        assert!(
+            !base_in_incr,
+            "base key must live in the base RDB, not be duplicated into the incr"
+        );
+
         let mut reloaded = Runtime::default_strict();
-        let _ = reloaded.replay_aof_records(&records, 9_000);
+        reloaded.set_aof_path(path.clone());
+        reloaded.load_aof(9_000).expect("reload appendonlydir");
         assert_eq!(
             reloaded.execute_frame(command(&[b"GET", b"base"]), 9_001),
             RespFrame::BulkString(Some(b"1".to_vec())),
@@ -19884,22 +20040,78 @@ mod tests {
             RespFrame::BulkString(Some(b"2".to_vec())),
             "post-rewrite key must survive (the original ol9tz bug)"
         );
-        // `base` was SET exactly once; replay must not have applied it twice in
-        // a way that corrupts a counter. Use a numeric witness instead: the
-        // base snapshot for a string is a single SET, so the decoded stream
-        // must contain exactly one SET for `base`.
-        let base_sets = records
-            .iter()
-            .filter(|r| {
-                r.argv
-                    .first()
-                    .is_some_and(|c| c.eq_ignore_ascii_case(b"SET"))
-                    && r.argv.get(1).is_some_and(|k| k.as_slice() == b"base")
-            })
-            .count();
-        assert_eq!(base_sets, 1, "base must appear once, not duplicated");
 
-        let _ = std::fs::remove_file(&path);
+        for p in [
+            &path,
+            &manifest,
+            &dir.join("appendonly.aof.1.base.rdb"),
+            &dir.join("appendonly.aof.1.incr.aof"),
+        ] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn bgrewriteaof_emits_redis_appendonlydir_manifest_layout() {
+        // (frankenredis-oe6qt) A rewrite must produce the exact redis-7
+        // `appendonlydir` file set (manifest + `<base>.<seq>.base.rdb` +
+        // `<base>.<seq>.incr.aof`) with a manifest in the redis text format,
+        // and BGREWRITEAOF must advance the sequence on each call.
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_appendonlydir_layout_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        for name in [
+            "appendonly.aof.manifest",
+            "appendonly.aof.1.base.rdb",
+            "appendonly.aof.1.incr.aof",
+            "appendonly.aof.2.base.rdb",
+            "appendonly.aof.2.incr.aof",
+        ] {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
+
+        let mut rt = Runtime::default_strict();
+        // Mirror the server's configured path: the base file inside appendonlydir.
+        rt.set_aof_path(dir.join("appendonly.aof"));
+        rt.execute_frame(command(&[b"SET", b"layout:key", b"v"]), 1);
+        rt.execute_frame(command(&[b"BGREWRITEAOF"]), 2);
+
+        // Exact redis-standard file names for seq 1.
+        let manifest = dir.join("appendonly.aof.manifest");
+        assert!(manifest.exists(), "manifest file");
+        assert!(dir.join("appendonly.aof.1.base.rdb").exists(), "base rdb");
+        assert!(dir.join("appendonly.aof.1.incr.aof").exists(), "incr aof");
+
+        // Manifest text matches redis's space-delimited `file ... seq ... type ...`.
+        let manifest_text = std::fs::read_to_string(&manifest).expect("read manifest");
+        assert!(
+            manifest_text.contains("file appendonly.aof.1.base.rdb seq 1 type b"),
+            "manifest must name the base RDB in redis format, got:\n{manifest_text}"
+        );
+        assert!(
+            manifest_text.contains("file appendonly.aof.1.incr.aof seq 1 type i"),
+            "manifest must name the incr in redis format, got:\n{manifest_text}"
+        );
+
+        // A second rewrite advances the sequence (seq 2).
+        rt.execute_frame(command(&[b"BGREWRITEAOF"]), 3);
+        let manifest_text = std::fs::read_to_string(&manifest).expect("re-read manifest");
+        assert!(
+            manifest_text.contains("seq 2 type b"),
+            "second rewrite must advance the base sequence, got:\n{manifest_text}"
+        );
+
+        for name in [
+            "appendonly.aof.manifest",
+            "appendonly.aof.1.base.rdb",
+            "appendonly.aof.1.incr.aof",
+            "appendonly.aof.2.base.rdb",
+            "appendonly.aof.2.incr.aof",
+        ] {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
     }
 
     #[test]
@@ -20593,7 +20805,10 @@ mod tests {
             other => unreachable!("unexpected CLIENT INFO: {other:?}"),
         };
         assert!(info.contains("argv-mem=10 "), "argv-mem mismatch: {info}");
-        assert!(info.contains("multi-mem=0 "), "multi-mem should be 0 idle: {info}");
+        assert!(
+            info.contains("multi-mem=0 "),
+            "multi-mem should be 0 idle: {info}"
+        );
         // multi-mem (per queued MULTI command: arg bytes + 8*argc) is observed
         // cross-connection — `SET k vvvvv` (9+8*3) + `GET k` (4+8*2) = 53, verified
         // e2e vs redis 7.2.4 (it can't be read by the MULTI client itself, since
@@ -20726,7 +20941,10 @@ mod tests {
         };
         assert_eq!(without_argv_mem(&list_normal), without_argv_mem(&list_all));
         assert_eq!(list_replica, RespFrame::BulkString(Some(Vec::new())));
-        assert_eq!(without_argv_mem(&list_id_match), without_argv_mem(&list_all));
+        assert_eq!(
+            without_argv_mem(&list_id_match),
+            without_argv_mem(&list_all)
+        );
         assert_eq!(list_id_miss, RespFrame::BulkString(Some(Vec::new())));
     }
 
@@ -26456,8 +26674,8 @@ mod tests {
         let save_result = rt.execute_frame(command(&[b"SAVE"]), 100);
         assert_eq!(save_result, RespFrame::SimpleString("OK".to_string()));
 
-        // Verify the file exists
-        assert!(aof_path.exists());
+        // Verify the appendonlydir manifest was written. (frankenredis-oe6qt)
+        assert!(dir.join("test_save.aof.manifest").exists());
 
         // Load into a fresh runtime
         let mut rt2 = Runtime::default_strict();
@@ -26513,7 +26731,7 @@ mod tests {
         // SAVE to persist
         let save_result = rt.execute_frame(command(&[b"SAVE"]), 100);
         assert_eq!(save_result, RespFrame::SimpleString("OK".to_string()));
-        assert!(aof_path.exists());
+        assert!(dir.join("test_stream.aof.manifest").exists());
 
         // Load into fresh runtime
         let mut rt2 = Runtime::default_strict();
@@ -27014,10 +27232,14 @@ mod tests {
 
     #[test]
     fn save_failure_updates_aof_last_write_status() {
+        // (frankenredis-oe6qt) Force an unwritable appendonlydir by pointing the
+        // AOF path's parent at an existing file.
         let dir = std::env::temp_dir().join("fr_runtime_save_failure_status_dir");
         let _ = std::fs::create_dir_all(&dir);
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("seed blocker file");
         let mut rt = Runtime::default_strict();
-        rt.set_aof_path(dir.clone());
+        rt.set_aof_path(blocker.join("appendonly.aof"));
 
         assert_eq!(
             rt.execute_frame(command(&[b"SAVE"]), 1),
@@ -27084,10 +27306,14 @@ mod tests {
 
     #[test]
     fn fr_p2c_005_u009_aof_disk_error_denies_writes() {
+        // (frankenredis-oe6qt) Force an unwritable appendonlydir by pointing the
+        // AOF path's parent at an existing file.
         let dir = std::env::temp_dir().join("fr_runtime_aof_disk_error_write_deny_dir");
         let _ = std::fs::create_dir_all(&dir);
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("seed blocker file");
         let mut rt = Runtime::default_strict();
-        rt.set_aof_path(dir);
+        rt.set_aof_path(blocker.join("appendonly.aof"));
 
         assert_eq!(
             rt.execute_frame(command(&[b"SAVE"]), 1),
@@ -27120,11 +27346,15 @@ mod tests {
 
     #[test]
     fn debug_reload_aof_snapshot_failure_does_not_poison_aof_write_status() {
+        // (frankenredis-oe6qt) Force an unwritable appendonlydir by pointing the
+        // AOF path's parent at an existing file.
         let dir = std::env::temp_dir().join("fr_runtime_debug_reload_aof_failure_dir");
         let _ = std::fs::create_dir_all(&dir);
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("seed blocker file");
         let mut rt = Runtime::default_strict();
         rt.set_enable_debug_command("yes");
-        rt.set_aof_path(dir);
+        rt.set_aof_path(blocker.join("appendonly.aof"));
 
         assert_eq!(
             rt.execute_frame(command(&[b"DEBUG", b"RELOAD"]), 1),
@@ -27234,10 +27464,16 @@ mod tests {
 
     #[test]
     fn bgrewriteaof_failure_updates_info_persistence_status() {
+        // (frankenredis-oe6qt) Force an unwritable appendonlydir: point the AOF
+        // path's parent directory at an existing *file*, so `create_dir_all` for
+        // the manifest layout fails and BGREWRITEAOF reports the error status.
         let dir = std::env::temp_dir().join("fr_runtime_bgrewrite_failure_status_dir");
         let _ = std::fs::create_dir_all(&dir);
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("seed blocker file");
         let mut rt = Runtime::default_strict();
-        rt.set_aof_path(dir.clone());
+        // parent = `blocker` (a regular file) -> appendonlydir creation fails.
+        rt.set_aof_path(blocker.join("appendonly.aof"));
 
         assert_eq!(
             rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1),
@@ -27431,7 +27667,8 @@ mod tests {
         let mut rt = Runtime::default_strict();
         rt.set_aof_path(manifest_path);
         let loaded = rt.load_aof(100).expect("load multipart aof");
-        assert_eq!(loaded, 2, "incr record count");
+        // 1 base-RDB key (base_key) + 2 incr records. (frankenredis-oe6qt)
+        assert_eq!(loaded, 3, "base keys + incr record count");
 
         // base_key was set in the base then DELeted by the incr stream.
         assert_eq!(
@@ -27614,7 +27851,11 @@ mod tests {
 
         // And the function is callable (definitive proof it was re-registered).
         let called = rt.execute_frame(command(&[b"FCALL", b"myfunc", b"0"]), 101);
-        assert_eq!(called, RespFrame::BulkString(Some(b"hello".to_vec())), "{called:?}");
+        assert_eq!(
+            called,
+            RespFrame::BulkString(Some(b"hello".to_vec())),
+            "{called:?}"
+        );
     }
 
     #[test]
