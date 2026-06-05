@@ -79,6 +79,10 @@ W xadd stream:s 1-1 a 1 >/dev/null
 W xadd stream:s 2-2 b 2 >/dev/null
 W xgroup create stream:s grp 0 >/dev/null
 W xreadgroup group grp c1 count 1 streams stream:s '>' >/dev/null
+# FUNCTION2 opcode at the head of the dump must not abort the whole load
+# (regression frankenredis-vd0ii — fr used to drop the entire keyspace).
+W function load "#!lua name=problib
+redis.register_function('pf', function() return 1 end)" >/dev/null 2>&1
 
 DBSIZE=$(W dbsize)
 W save >/dev/null
@@ -125,6 +129,15 @@ chk "XPENDING stream:s grp count" "$(O xpending stream:s grp|head -1)" "$(F xpen
 fr_inactive=$(F xinfo consumers stream:s grp | awk '/^inactive$/{getline; print}')
 if [ "$fr_inactive" = "-1" ]; then
   echo "KNOWN [frankenredis-sq4ov] stream consumer active_time dropped on RDB load (fr inactive=-1)"
+  known=$((known+1))
+fi
+
+# ── known divergence: FUNCTION libraries not re-registered on load (tm139) ────
+# The data-loss part (vd0ii) is a HARD check above — DBSIZE includes every key
+# even though a FUNCTION2 payload precedes them. The library itself is captured
+# but not yet re-registered into the engine, so FUNCTION LIST stays empty.
+if [ -n "$(O function list 2>/dev/null)" ] && [ -z "$(F function list 2>/dev/null)" ]; then
+  echo "KNOWN [frankenredis-tm139] FUNCTION library not re-registered on RDB load (FUNCTION LIST empty)"
   known=$((known+1))
 fi
 
