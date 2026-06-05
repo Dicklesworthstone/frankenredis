@@ -10,6 +10,7 @@ use std::path::Path;
 use fr_protocol::{RespFrame, RespParseError};
 
 pub mod listpack;
+pub mod ziplist;
 #[allow(dead_code)]
 pub(crate) mod rdb_stream;
 
@@ -786,6 +787,7 @@ const RDB_OPCODE_FUNCTION2: u8 = 0xF5;
 const RDB_TYPE_STRING: u8 = 0;
 const RDB_TYPE_LIST: u8 = 1;
 const RDB_TYPE_SET: u8 = 2;
+const RDB_TYPE_ZSET: u8 = 3; // Legacy zset: ASCII-string double scores (redis ≤ 6.2)
 const RDB_TYPE_ZSET_2: u8 = 5; // Binary LE double scores (our encoding)
 const RDB_TYPE_HASH: u8 = 4;
 /// FrankenRedis-private type tag for hashes that carry at least one
@@ -805,6 +807,15 @@ const RDB_TYPE_STREAM: u8 = 15; // FrankenRedis stream encoding
 /// for these tags lives in fr-store::dump_key (DUMP/RESTORE).
 /// (br-frankenredis-aqgx)
 const RDB_TYPE_SET_INTSET: u8 = 11;
+/// Legacy ziplist/zipmap encodings written by redis ≤ 6.2 (and the old
+/// quicklist whose nodes are ziplists). Modern redis upgrades these to listpack
+/// on load; fr-persist decodes them via the `ziplist` module so dumps from older
+/// redis releases load instead of failing closed. (br-frankenredis-rdb-ziplist)
+const RDB_TYPE_HASH_ZIPMAP: u8 = 9;
+const RDB_TYPE_LIST_ZIPLIST: u8 = 10;
+const RDB_TYPE_ZSET_ZIPLIST: u8 = 12;
+const RDB_TYPE_HASH_ZIPLIST: u8 = 13;
+const RDB_TYPE_LIST_QUICKLIST: u8 = 14;
 const RDB_TYPE_HASH_LISTPACK: u8 = 16;
 const RDB_TYPE_ZSET_LISTPACK: u8 = 17;
 const RDB_TYPE_LIST_QUICKLIST_2: u8 = 18;
@@ -2265,6 +2276,24 @@ fn rdb_decode_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
     }
 }
 
+/// Decode redis's legacy ASCII double encoding (`rdbLoadDoubleValue`): a length
+/// byte where 253/254/255 mean NaN/+Inf/-Inf, otherwise that many ASCII bytes
+/// holding the textual score (e.g. "3.14"). Returns the value and bytes consumed.
+fn rdb_load_legacy_double(data: &[u8]) -> Option<(f64, usize)> {
+    let len = *data.first()?;
+    match len {
+        255 => Some((f64::NEG_INFINITY, 1)),
+        254 => Some((f64::INFINITY, 1)),
+        253 => Some((f64::NAN, 1)),
+        n => {
+            let end = 1usize.checked_add(n as usize)?;
+            let s = std::str::from_utf8(data.get(1..end)?).ok()?;
+            let v: f64 = s.trim().parse().ok()?;
+            Some((v, end))
+        }
+    }
+}
+
 /// Decode an RDB preamble and report the first byte after its checksum.
 ///
 /// Redis AOF replay can begin with an RDB preamble followed by RESP AOF records.
@@ -2308,11 +2337,17 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                 | RDB_TYPE_SET
                 | RDB_TYPE_HASH
                 | RDB_TYPE_HASH_WITH_TTLS
+                | RDB_TYPE_ZSET
                 | RDB_TYPE_ZSET_2
                 | RDB_TYPE_STREAM
                 | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2
                 | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3
                 | RDB_TYPE_SET_INTSET
+                | RDB_TYPE_HASH_ZIPMAP
+                | RDB_TYPE_LIST_ZIPLIST
+                | RDB_TYPE_ZSET_ZIPLIST
+                | RDB_TYPE_HASH_ZIPLIST
+                | RDB_TYPE_LIST_QUICKLIST
                 | RDB_TYPE_HASH_LISTPACK
                 | RDB_TYPE_ZSET_LISTPACK
                 | RDB_TYPE_LIST_QUICKLIST_2
@@ -2330,22 +2365,28 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
 
         match opcode {
             RDB_OPCODE_EOF => {
-                if cursor + RDB_CHECKSUM_LEN > data.len() {
-                    return Err(PersistError::InvalidFrame);
-                }
-                let expected_checksum = u64::from_le_bytes(
-                    data[cursor..cursor + RDB_CHECKSUM_LEN]
-                        .try_into()
-                        .map_err(|_| PersistError::InvalidFrame)?,
-                );
-                let actual_checksum = crc64_redis(&data[..cursor]);
-                if expected_checksum != actual_checksum {
-                    return Err(PersistError::InvalidFrame);
-                }
                 if pending_expire_ms.is_some() {
                     return Err(PersistError::InvalidFrame);
                 }
-                cursor += RDB_CHECKSUM_LEN;
+                // RDB versions < 5 predate the CRC64 trailer entirely — EOF is
+                // the final byte. Versions >= 5 always append 8 bytes, but a
+                // stored checksum of 0 means "checksum disabled" and redis skips
+                // verification (rdb.c: `if (server.rdb_checksum && cksum) ...`).
+                if version >= 5 {
+                    if cursor + RDB_CHECKSUM_LEN > data.len() {
+                        return Err(PersistError::InvalidFrame);
+                    }
+                    let expected_checksum = u64::from_le_bytes(
+                        data[cursor..cursor + RDB_CHECKSUM_LEN]
+                            .try_into()
+                            .map_err(|_| PersistError::InvalidFrame)?,
+                    );
+                    let actual_checksum = crc64_redis(&data[..cursor]);
+                    if expected_checksum != 0 && expected_checksum != actual_checksum {
+                        return Err(PersistError::InvalidFrame);
+                    }
+                    cursor += RDB_CHECKSUM_LEN;
+                }
                 saw_eof = true;
                 break;
             }
@@ -2430,11 +2471,17 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
             | RDB_TYPE_SET
             | RDB_TYPE_HASH
             | RDB_TYPE_HASH_WITH_TTLS
+            | RDB_TYPE_ZSET
             | RDB_TYPE_ZSET_2
             | RDB_TYPE_STREAM
             | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2
             | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3
             | RDB_TYPE_SET_INTSET
+            | RDB_TYPE_HASH_ZIPMAP
+            | RDB_TYPE_LIST_ZIPLIST
+            | RDB_TYPE_ZSET_ZIPLIST
+            | RDB_TYPE_HASH_ZIPLIST
+            | RDB_TYPE_LIST_QUICKLIST
             | RDB_TYPE_HASH_LISTPACK
             | RDB_TYPE_ZSET_LISTPACK
             | RDB_TYPE_LIST_QUICKLIST_2
@@ -2534,6 +2581,24 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                                     .map_err(|_| PersistError::InvalidFrame)?,
                             );
                             cursor += 8;
+                            members.push((m, score));
+                        }
+                        RdbValue::SortedSet(members)
+                    }
+                    RDB_TYPE_ZSET => {
+                        // Legacy zset (redis ≤ 6.2): count, then (member:string,
+                        // score:legacy-ASCII-double) pairs.
+                        let (count, c) =
+                            rdb_decode_length(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
+                        cursor += c;
+                        let mut members = Vec::with_capacity(count.min(1024));
+                        for _ in 0..count {
+                            let (m, c) = rdb_decode_string(&data[cursor..])
+                                .ok_or(PersistError::InvalidFrame)?;
+                            cursor += c;
+                            let (score, c) = rdb_load_legacy_double(&data[cursor..])
+                                .ok_or(PersistError::InvalidFrame)?;
+                            cursor += c;
                             members.push((m, score));
                         }
                         RdbValue::SortedSet(members)
@@ -2817,6 +2882,82 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                             }
                         }
                         RdbValue::List(items)
+                    }
+                    RDB_TYPE_LIST_ZIPLIST => {
+                        // Legacy single-ziplist list (redis ≤ 6.2).
+                        let (zl, consumed) =
+                            rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
+                        cursor += consumed;
+                        let items = ziplist::decode_ziplist(&zl).ok_or(PersistError::InvalidFrame)?;
+                        RdbValue::List(items)
+                    }
+                    RDB_TYPE_LIST_QUICKLIST => {
+                        // Legacy quicklist: node_count plain ziplist nodes (no
+                        // per-node container byte, unlike QUICKLIST_2).
+                        let (node_count, consumed) =
+                            rdb_decode_length(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
+                        cursor += consumed;
+                        let mut items = Vec::with_capacity(node_count.min(1024));
+                        for _ in 0..node_count {
+                            let (node_blob, consumed) = rdb_decode_string(&data[cursor..])
+                                .ok_or(PersistError::InvalidFrame)?;
+                            cursor += consumed;
+                            items.extend(
+                                ziplist::decode_ziplist(&node_blob)
+                                    .ok_or(PersistError::InvalidFrame)?,
+                            );
+                        }
+                        RdbValue::List(items)
+                    }
+                    RDB_TYPE_HASH_ZIPLIST => {
+                        // Ziplist of f1, v1, f2, v2, ... pairs.
+                        let (zl, consumed) =
+                            rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
+                        cursor += consumed;
+                        let entries = ziplist::decode_ziplist(&zl).ok_or(PersistError::InvalidFrame)?;
+                        if !entries.len().is_multiple_of(2) {
+                            return Err(PersistError::InvalidFrame);
+                        }
+                        let fields = entries
+                            .chunks_exact(2)
+                            .map(|pair| (pair[0].clone(), pair[1].clone()))
+                            .collect();
+                        RdbValue::Hash(fields)
+                    }
+                    RDB_TYPE_HASH_ZIPMAP => {
+                        // Even-older zipmap small-hash encoding (redis ≤ 2.4).
+                        let (zm, consumed) =
+                            rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
+                        cursor += consumed;
+                        let entries = ziplist::decode_zipmap(&zm).ok_or(PersistError::InvalidFrame)?;
+                        if !entries.len().is_multiple_of(2) {
+                            return Err(PersistError::InvalidFrame);
+                        }
+                        let fields = entries
+                            .chunks_exact(2)
+                            .map(|pair| (pair[0].clone(), pair[1].clone()))
+                            .collect();
+                        RdbValue::Hash(fields)
+                    }
+                    RDB_TYPE_ZSET_ZIPLIST => {
+                        // Ziplist of m1, score1, m2, score2, ... with the score
+                        // as its decimal-string form.
+                        let (zl, consumed) =
+                            rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
+                        cursor += consumed;
+                        let entries = ziplist::decode_ziplist(&zl).ok_or(PersistError::InvalidFrame)?;
+                        if !entries.len().is_multiple_of(2) {
+                            return Err(PersistError::InvalidFrame);
+                        }
+                        let mut members = Vec::with_capacity(entries.len() / 2);
+                        for pair in entries.chunks_exact(2) {
+                            let score = std::str::from_utf8(&pair[1])
+                                .ok()
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .ok_or(PersistError::InvalidFrame)?;
+                            members.push((pair[0].clone(), score));
+                        }
+                        RdbValue::SortedSet(members)
                     }
                     _ => return Err(PersistError::InvalidFrame),
                 };
@@ -5680,13 +5821,100 @@ mod tests {
             value: RdbValue::String(b"legacy-value".to_vec()),
             expire_ms: None,
         }];
-        for ver in [b"0001", b"0009", b"0010", b"0011"] {
+        // encode_rdb always appends the v5+ CRC64 trailer, so this synthetic
+        // round-trip covers the checksummed versions. The pre-v5 (no-trailer)
+        // path is covered by the real v3/v4 redis fixtures below.
+        for ver in [b"0005", b"0009", b"0010", b"0011"] {
             let mut encoded = encode_rdb(&entries, &[]);
             reversion_rdb(&mut encoded, ver);
             let (decoded, _aux) = decode_rdb(&encoded)
                 .unwrap_or_else(|e| panic!("RDB version {ver:?} must load: {e:?}"));
             assert_eq!(decoded, entries, "version {ver:?} round-trip");
         }
+    }
+
+    /// Decode an ASCII-hex string into bytes (test helper).
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid hex"))
+            .collect()
+    }
+
+    #[test]
+    fn rdb_decodes_legacy_ziplist_zipmap_quicklist_fixtures() {
+        // Byte-for-byte RDB fixtures shipped in the redis test suite
+        // (tests/assets/*.rdb), exercising the pre-listpack encodings. Expected
+        // values are what a live redis 7.2.4 reports after loading each dump.
+
+        // hash-ziplist.rdb (v9, RDB_TYPE_HASH_ZIPLIST=13) -> {f1:v1, f2:v2}
+        let hash_zl = "524544495330303039fa0972656469732d7665720b3235352e3235352e323535fa0a72656469732d62697473c040fa056374696d65c2c85c9660fa08757365642d6d656dc290ad0c00fa0c616f662d707265616d626c65c000fe00fb01000d04686173681b1b00000016000000040000026631040276310402663204027632ffff4f9cd1fd16699883";
+        let (e, _) = decode_rdb(&unhex(hash_zl)).expect("hash-ziplist must load");
+        assert_eq!(
+            e,
+            vec![RdbEntry {
+                db: 0,
+                key: b"hash".to_vec(),
+                value: RdbValue::Hash(vec![
+                    (b"f1".to_vec(), b"v1".to_vec()),
+                    (b"f2".to_vec(), b"v2".to_vec()),
+                ]),
+                expire_ms: None,
+            }]
+        );
+
+        // zset-ziplist.rdb (v10, RDB_TYPE_ZSET_ZIPLIST=12) -> {one:1, two:2}
+        let zset_zl = "524544495330303130fa0972656469732d7665720b3235352e3235352e323535fa0a72656469732d62697473c040fa056374696d65c262b71361fa08757365642d6d656dc250f40c00fa0c616f662d707265616d626c65c000fe00fb01000c047a736574191900000016000000040000036f6e6505f2020374776f05f3ffff1fb2fdf0997f9e19";
+        let (e, _) = decode_rdb(&unhex(zset_zl)).expect("zset-ziplist must load");
+        assert_eq!(
+            e,
+            vec![RdbEntry {
+                db: 0,
+                key: b"zset".to_vec(),
+                value: RdbValue::SortedSet(vec![
+                    (b"one".to_vec(), 1.0),
+                    (b"two".to_vec(), 2.0),
+                ]),
+                expire_ms: None,
+            }]
+        );
+
+        // hash-zipmap.rdb (v3, RDB_TYPE_HASH_ZIPMAP=9) -> {f1:v1, f2:v2}
+        let hash_zm = "524544495330303033fe0009046861736810020266310200763102663202007632ffff";
+        let (e, _) = decode_rdb(&unhex(hash_zm)).expect("hash-zipmap must load");
+        assert_eq!(
+            e,
+            vec![RdbEntry {
+                db: 0,
+                key: b"hash".to_vec(),
+                value: RdbValue::Hash(vec![
+                    (b"f1".to_vec(), b"v1".to_vec()),
+                    (b"f2".to_vec(), b"v2".to_vec()),
+                ]),
+                expire_ms: None,
+            }]
+        );
+
+        // list-quicklist.rdb (v8, RDB_TYPE_LIST_QUICKLIST=14 + int string) -> [7], x=7
+        let list_ql = "524544495330303038fa0972656469732d76657205342e302e39fa0a72656469732d62697473c040fa056374696d65c29f062661fa08757365642d6d656dc280920700fa0c616f662d707265616d626c65c000fe00fb02000e046c697374010d0d0000000a000000010000f8ff000178c007ff3572f8541ac4d740";
+        let (e, _) = decode_rdb(&unhex(list_ql)).expect("list-quicklist must load");
+        assert_eq!(
+            e,
+            vec![
+                RdbEntry {
+                    db: 0,
+                    key: b"list".to_vec(),
+                    value: RdbValue::List(vec![b"7".to_vec()]),
+                    expire_ms: None,
+                },
+                RdbEntry {
+                    db: 0,
+                    key: b"x".to_vec(),
+                    value: RdbValue::String(b"7".to_vec()),
+                    expire_ms: None,
+                },
+            ]
+        );
     }
 
     #[test]
