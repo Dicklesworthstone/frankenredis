@@ -9694,42 +9694,27 @@ mod tests {
                 return;
             }
         };
+        // (AmberFox 2026-06-05) Re-verified all former XFAIL entries against a
+        // LIVE vendored redis 7.2.4 oracle (272 scripting cases). 24 were stale —
+        // the Lua arg-validation (ipairs/pairs/next/rawget/rawset/table.concat/
+        // table.insert/table.remove/unpack non-table & non-numeric rejection),
+        // absent `rawlen`/`os` globals (Lua 5.1 sandbox), table.insert OOB silent
+        // no-op, xpcall handler propagation, and EVAL_RO/EVALSHA_RO arity cases
+        // are now byte-exact (fixed by the y0ri2 + junab refreshes but never
+        // cleared from XFAIL). They are removed, so the fixture now diffs them
+        // live against the oracle.
+        //
+        // The 3 below STILL diverge: fr's interpreter hardcodes `user_script:1`
+        // in every Lua error (see frankenredis-m7oy8) so a multi-line script
+        // whose error lands on line >1 reports `:1`/`@user_script:1.` where
+        // vendored reports `:2`/`@user_script:2.`. Keep XFAIL'd until m7oy8 wires
+        // real line numbers through the lexer/AST/evaluator.
+        // (Earlier: frankenredis-4oudk swept the orphan eval_redis_call_config_*
+        // names in commit 478bc0d.)
         const XFAIL_CASES: &[&str] = &[
-            "eval_ipairs_rejects_non_table_argument",
             "eval_next_rejects_invalid_key",
-            "eval_next_rejects_non_table_argument",
-            "eval_os_clock_non_negative",
-            "eval_os_clock_returns_number",
-            "eval_pairs_rejects_non_table_argument",
-            "eval_rawget_rejects_non_table_argument",
-            "eval_rawlen_table",
-            "eval_rawset_rejects_non_table_argument",
-            // (frankenredis-4oudk) Removed in commit 478bc0d alongside
-            // their fixture entries — the 7 eval_redis_call_config_(get|set)_*
-            // cases were replaced with a single
-            // eval_redis_call_config_get_blocked_by_noscript pin that
-            // both fr and vendored agree on (CONFIG is in CMD_NOSCRIPT,
-            // not callable from scripts). XFAIL_CASES needed the same
-            // sweep — the orphan names made the assertion at line ~9580
-            // panic with 'XFAIL entries missing from fixture'.
-            "eval_redis_call_xread_block_rejected_from_scripts",
-            "eval_redis_call_xreadgroup_block_rejected_from_scripts",
-            "eval_ro_wrong_arity",
-            "eval_select_zero_index_errors",
-            "eval_table_concat_rejects_non_numeric_end",
-            "eval_table_concat_rejects_non_numeric_start",
-            "eval_table_concat_rejects_non_table_argument",
             "eval_table_insert_rejects_non_numeric_position",
-            "eval_table_insert_rejects_non_table_argument",
-            "eval_table_insert_rejects_out_of_bounds_position",
             "eval_table_remove_rejects_non_numeric_position",
-            "eval_table_remove_rejects_non_table_argument",
-            "eval_unpack_rejects_non_numeric_end",
-            "eval_unpack_rejects_non_numeric_start",
-            "eval_unpack_rejects_non_table_argument",
-            "eval_xpcall_error_with_handler",
-            "eval_xpcall_with_handler",
-            "evalsha_ro_wrong_arity",
         ];
         let xfails = XFAIL_CASES.iter().copied().collect::<BTreeSet<_>>();
         let missing_xfails = xfails
