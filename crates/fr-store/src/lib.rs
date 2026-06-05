@@ -3835,30 +3835,18 @@ impl Store {
     }
 
     fn list_fits_legacy_listpack_size(&self, list: &ListValue) -> bool {
-        if self.list_max_listpack_size >= 0 {
-            return list.len() <= self.list_max_listpack_size as usize;
-        }
-
-        let max_bytes: usize = match self.list_max_listpack_size {
-            -1 => 4096,
-            -2 => 8192,
-            -3 => 16384,
-            -4 => 32768,
-            _ => 65536, // -5 and below
-        };
-        // Bounded sum: stop at the first element that pushes the
-        // accumulator past max_bytes. Mirrors upstream t_list.c::
-        // listTypeTryConversion which bails per-add rather than
-        // walking the whole list every encoding query.
-        // (frankenredis-t1z5)
-        let mut total: usize = 0;
-        for v in list.iter() {
-            total = total.saturating_add(v.len() + 11); // 11 bytes overhead per entry
-            if total > max_bytes {
-                return false;
-            }
-        }
-        true
+        // A list reports `listpack` while every element fits in a SINGLE
+        // listpack node, else `quicklist`. The threshold is upstream's
+        // `lpBytes(lp)` vs `list-max-listpack-size`, so the size must be the
+        // ACTUAL listpack byte length (integer-encoding numeric elements, real
+        // per-entry headers + backlen, the 6-byte listpack header + EOF). The
+        // old flat "v.len() + 11 bytes/entry" estimate over-counted (a 65-byte
+        // string is ~68 listpack bytes, not 76) and converted to quicklist too
+        // early — fr flipped to quicklist at 108 such elements where redis stays
+        // listpack until 121. Reuse the byte-exact encoder that backs DUMP.
+        // (frankenredis-listpacksz)
+        let refs: Vec<&[u8]> = list.iter().collect();
+        quicklist_packed_node_fits(&refs, self.list_max_listpack_size).unwrap_or(false)
     }
 
     fn set_fits_intset(set: &SetValue, max_intset_entries: usize) -> bool {
