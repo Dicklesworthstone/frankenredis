@@ -1,0 +1,1 @@
+mode=profile dbs=4096 entries_per_db=2 entries=8192 iters=1000 sort_ns=75913998 count_scan_ns=57654506558 encode_ns=314891524 sorted_len=8192000 count_total=10923000 encoded_len=221185000

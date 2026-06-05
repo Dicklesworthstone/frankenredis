@@ -1,0 +1,210 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cycles:P'
+# Event count (approx.): 6710348081
+#
+# Overhead  Command          Shared Object                 Symbol                                                                                                                                                                                                       
+# ........  ...............  ............................  .............................................................................................................................................................................................................
+#
+    44.67%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] fr_persist::encode_rdb_internal
+            |          
+            |--37.99%--fr_persist::encode_rdb_internal
+            |          |          
+            |           --5.52%--0x1000
+            |                     0
+            |          
+            |--3.45%--fr_persist::rdb_encode_length
+            |          |          
+            |          |--1.36%--0x1000
+            |          |          0
+            |          |          
+            |          |--1.01%--0x5ce2641c6f30
+            |          |          
+            |           --0.89%--0x5ce2641c6f10
+            |          
+            |--1.75%--fr_persist::rdb_encode_string
+            |          |          
+            |          |--0.75%--0x5ce2641c6f10
+            |          |          
+            |           --0.65%--0x5ce2641c6f30
+            |          
+             --1.22%--__memmove_avx_unaligned_erms
+                       |          
+                       |--0.64%--0x5ce2641c6f30
+                       |          
+                        --0.58%--0x5ce2641c6f10
+
+    18.63%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] core::slice::sort::stable::drift::sort::<&fr_persist::RdbEntry, <[&fr_persist::RdbEntry]>::sort_by<fr_persist::encode_rdb_internal::{closure#0}>::{closure#0}>
+            |          
+            |--12.90%--core::slice::sort::stable::drift::sort::<&fr_persist::RdbEntry, <[&fr_persist::RdbEntry]>::sort_by<fr_persist::encode_rdb_internal::{closure#0}>::{closure#0}>
+            |          
+             --5.67%--__memcmp_avx2_movbe
+
+    14.04%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] fr_persist::rdb_encode_length
+            |          
+            |--6.43%--fr_persist::encode_rdb_internal
+            |          0x1000
+            |          0
+            |          
+            |--3.03%--fr_persist::rdb_encode_length
+            |          |          
+            |          |--1.28%--0x1000
+            |          |          0
+            |          |          
+            |          |--0.82%--0x5ce2641c6f30
+            |          |          
+            |           --0.62%--0x5ce2641c6f10
+            |          
+            |--2.33%--fr_persist::rdb_encode_string
+            |          |          
+            |          |--1.19%--0x5ce2641c6f10
+            |          |          
+            |           --0.67%--0x5ce2641c6f30
+            |          
+             --2.26%--__memmove_avx_unaligned_erms
+                       |          
+                       |--1.28%--0x5ce2641c6f10
+                       |          
+                        --0.99%--0x5ce2641c6f30
+
+    12.33%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] fr_persist::rdb_encode_string
+            |          
+            |--6.13%--fr_persist::encode_rdb_internal
+            |          0x1000
+            |          0
+            |          
+            |--2.56%--fr_persist::rdb_encode_length
+            |          |          
+            |          |--0.86%--0x1000
+            |          |          0
+            |          |          
+            |          |--0.84%--0x5ce2641c6f10
+            |          |          
+            |           --0.55%--0x5ce2641c6f30
+            |          
+            |--2.29%--fr_persist::rdb_encode_string
+            |          |          
+            |          |--1.13%--0x5ce2641c6f30
+            |          |          
+            |           --0.74%--0x5ce2641c6f10
+            |          
+             --1.34%--__memmove_avx_unaligned_erms
+                       |          
+                        --0.90%--0x5ce2641c6f10
+
+     6.13%  fr-persist-rdb-  libc.so.6                     [.] __memmove_avx_unaligned_erms
+            |          
+            |--2.41%--fr_persist::encode_rdb_internal
+            |          0x1000
+            |          0
+            |          
+            |--1.94%--fr_persist::rdb_encode_length
+            |          |          
+            |           --0.81%--0x1000
+            |                     0
+            |          
+            |--1.04%--fr_persist::rdb_encode_string
+            |          |          
+            |           --0.64%--0x5ce2641c6f30
+            |          
+             --0.61%--__memmove_avx_unaligned_erms
+                       |          
+                        --0.55%--0x5ce2641c6f30
+
+     2.88%  fr-persist-rdb-  libc.so.6                     [.] __memcmp_avx2_movbe
+            |          
+            |--1.69%--core::slice::sort::stable::drift::sort::<&fr_persist::RdbEntry, <[&fr_persist::RdbEntry]>::sort_by<fr_persist::encode_rdb_internal::{closure#0}>::{closure#0}>
+            |          
+             --1.19%--__memcmp_avx2_movbe
+
+     0.12%  fr-persist-rdb-  libc.so.6                     [.] _int_free_chunk
+     0.11%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8621b2b7
+     0.09%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8515379f
+     0.08%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] <alloc::raw_vec::RawVec<u8>>::grow_one
+     0.08%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff850a7266
+     0.07%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8510d2e6
+     0.07%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85151cee
+     0.07%  fr-persist-rdb-  libc.so.6                     [.] _int_malloc
+     0.06%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+     0.06%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8506f8f8
+     0.06%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8536b943
+     0.06%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8517f7f6
+     0.06%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8583c1b1
+     0.06%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85080fba
+     0.06%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8506b732
+     0.06%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] core::slice::sort::stable::driftsort_main::<&fr_persist::RdbEntry, <[&fr_persist::RdbEntry]>::sort_by<fr_persist::encode_rdb_internal::{closure#0}>::{closure#0}, alloc::vec::Vec<&fr_persist::RdbEntry>>
+     0.05%  fr-persist-rdb-  fr-persist-rdb-multidb-bench  [.] <alloc::raw_vec::RawVecInner>::finish_grow
+     0.05%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85080fa4
+     0.01%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8532f028
+     0.01%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff851c3819
+     0.01%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff86229e6b
+     0.00%  fr-persist-rdb-  ld-linux-x86-64.so.2          [.] _dl_check_map_versions
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff853afe69
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff84d04109
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff852ff1c6
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8621c6a9
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff84f8c9d1
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8530d2bc
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff84c01192
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8530580c
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff84c0188e
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8530d2c3
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8530d280
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85124022
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff86227613
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff84c01199
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff84c01884
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff857bfc49
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8621c6a7
+     0.00%  perf-exec        [unknown]                     [k] 0xffffffff8531760f
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85087e55
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8621f93a
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff853136b2
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8621c6a1
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff84d0410b
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85180123
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85300fbd
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8508a8cf
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff84fdedcb
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff852fe66f
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff853057d6
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8531473a
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff853136b6
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff862251f7
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff862288af
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff86227606
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff851801cb
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85300fe1
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85312e5b
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85312c73
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85312e7b
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff86224c51
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8530d286
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8621ff13
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff84c0185b
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8530d285
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8530d2cc
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff8530d289
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85300b80
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85300b65
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85300b66
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff84f32f8e
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff84f337e5
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff84f337e6
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff84fdedd9
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff850c2906
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff850c290d
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85300b69
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85300b79
+     0.00%  fr-persist-rdb-  [unknown]                     [k] 0xffffffff85300b7c
+     0.00%  perf-exec        [unknown]                     [k] 0xffffffff85300b65
+     0.00%  perf-exec        [unknown]                     [k] 0xffffffff8530d280
+     0.00%  perf-exec        [unknown]                     [k] 0xffffffff8530d2c3
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

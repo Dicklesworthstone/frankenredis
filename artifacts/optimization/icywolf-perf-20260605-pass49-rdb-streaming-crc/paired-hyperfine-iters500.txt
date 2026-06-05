@@ -1,0 +1,11 @@
+Benchmark 1: target-icywolf-pass49-harness-baseline/release/fr-persist-rdb-multidb-bench --mode bench --dbs 4096 --entries-per-db 2 --iters 500
+  Time (mean ± σ):     186.2 ms ±  13.1 ms    [User: 181.3 ms, System: 2.8 ms]
+  Range (min … max):   166.1 ms … 220.3 ms    12 runs
+ 
+Benchmark 2: target-icywolf-pass49-harness-candidate/release/fr-persist-rdb-multidb-bench --mode bench --dbs 4096 --entries-per-db 2 --iters 500
+  Time (mean ± σ):     184.0 ms ±   5.7 ms    [User: 179.6 ms, System: 3.4 ms]
+  Range (min … max):   177.0 ms … 198.0 ms    12 runs
+ 
+Summary
+  target-icywolf-pass49-harness-candidate/release/fr-persist-rdb-multidb-bench --mode bench --dbs 4096 --entries-per-db 2 --iters 500 ran
+    1.01 ± 0.08 times faster than target-icywolf-pass49-harness-baseline/release/fr-persist-rdb-multidb-bench --mode bench --dbs 4096 --entries-per-db 2 --iters 500
