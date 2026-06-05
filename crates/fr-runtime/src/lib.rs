@@ -6221,9 +6221,16 @@ impl Runtime {
 
                     // Optimized blocking: track keys modified by write commands
                     // so the event loop only checks clients waiting on these keys.
+                    // Only record ready keys when a client is actually blocked —
+                    // a write only needs to signal a key someone is already
+                    // waiting on (mirrors signalKeyAsReady's blocking_keys gate).
+                    // Skips the per-write ready_keys hash insert + key clones in
+                    // the common no-blocked-clients case. (frankenredis-readykeysgate)
                     if !handled_migrate {
-                        for key in &cmd_keys {
-                            self.server.ready_keys.insert(key.clone());
+                        if !self.server.blocked_client_ids.is_empty() {
+                            for key in &cmd_keys {
+                                self.server.ready_keys.insert(key.clone());
+                            }
                         }
                         self.queue_client_tracking_invalidations(&cmd_keys);
                         // Keyspace notifications: publish events for modified keys.
@@ -14595,22 +14602,31 @@ replica_announced:1\r\n",
                             transaction_aof.push(effect);
                         }
 
-                        // Optimized blocking: track keys modified by write commands
-                        let cmd_keys = fr_command::command_keys(argv);
-                        for key in &cmd_keys {
-                            self.server.ready_keys.insert(key.clone());
-                        }
-                        // Keyspace notifications
-                        if self.server.store.notify_keyspace_events != 0 {
-                            let event = Self::command_to_keyspace_event(argv);
-                            let event_type = Self::command_to_notify_type(argv);
-                            let db = self.session.selected_db;
-                            for key in &cmd_keys {
-                                self.server
-                                    .store
-                                    .notify_keyspace_event(event_type, event, key, db);
+                        // Both blocking-wakeup tracking and keyspace
+                        // notifications need the modified-key set, but only when
+                        // a client is actually blocked or notifications are
+                        // enabled. Extract the keys (and run either consumer)
+                        // only then — pure waste otherwise. (frankenredis-readykeysgate)
+                        let need_ready = !self.server.blocked_client_ids.is_empty();
+                        let need_notify = self.server.store.notify_keyspace_events != 0;
+                        if need_ready || need_notify {
+                            let cmd_keys = fr_command::command_keys(argv);
+                            if need_ready {
+                                for key in &cmd_keys {
+                                    self.server.ready_keys.insert(key.clone());
+                                }
                             }
-                            self.deliver_keyspace_notifications();
+                            if need_notify {
+                                let event = Self::command_to_keyspace_event(argv);
+                                let event_type = Self::command_to_notify_type(argv);
+                                let db = self.session.selected_db;
+                                for key in &cmd_keys {
+                                    self.server
+                                        .store
+                                        .notify_keyspace_event(event_type, event, key, db);
+                                }
+                                self.deliver_keyspace_notifications();
+                            }
                         }
                     }
                     self.strip_db_prefixes_from_frame(&mut reply);
