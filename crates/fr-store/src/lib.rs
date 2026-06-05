@@ -2806,6 +2806,12 @@ pub struct Store {
     pub script_nesting_level: usize,
     /// Whether the current script/function execution context forbids writes.
     pub script_read_only: bool,
+    /// 1-based source line of the most recent Lua script runtime error, set by
+    /// `eval_script` when it returns an Err so the command layer can stamp the
+    /// real line into the `script: <sha>, on @user_script:N.` envelope suffix
+    /// (the interpreter prefix is stamped separately). Default 1 == chunk start.
+    /// (frankenredis-m7oy8)
+    pub lua_error_line: u32,
     /// Current propagation mask for commands emitted from the active Lua script.
     pub script_propagation_mode: u8,
     /// Commands emitted by the active Lua script together with their propagation masks.
@@ -3184,6 +3190,7 @@ impl Default for Store {
             aof_enabled: false,
             script_nesting_level: 0,
             script_read_only: false,
+            lua_error_line: 1,
             script_propagation_mode: SCRIPT_PROPAGATE_ALL,
             script_propagation_records: Vec::new(),
             expires_count: 0,

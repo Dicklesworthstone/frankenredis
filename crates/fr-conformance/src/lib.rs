@@ -9717,18 +9717,14 @@ mod tests {
         // cleared from XFAIL). They are removed, so the fixture now diffs them
         // live against the oracle.
         //
-        // The 3 below STILL diverge: fr's interpreter hardcodes `user_script:1`
-        // in every Lua error (see frankenredis-m7oy8) so a multi-line script
-        // whose error lands on line >1 reports `:1`/`@user_script:1.` where
-        // vendored reports `:2`/`@user_script:2.`. Keep XFAIL'd until m7oy8 wires
-        // real line numbers through the lexer/AST/evaluator.
+        // The final 3 (multi-line scripts whose Lua error lands on line >1) are
+        // now also fixed: frankenredis-m7oy8 threads real source lines through
+        // the lexer/parser/evaluator and stamps them into both the
+        // `user_script:N:` prefix and the `on @user_script:N.` suffix. XFAIL is
+        // now empty — the full fixture diffs live against the oracle.
         // (Earlier: frankenredis-4oudk swept the orphan eval_redis_call_config_*
         // names in commit 478bc0d.)
-        const XFAIL_CASES: &[&str] = &[
-            "eval_next_rejects_invalid_key",
-            "eval_table_insert_rejects_non_numeric_position",
-            "eval_table_remove_rejects_non_numeric_position",
-        ];
+        const XFAIL_CASES: &[&str] = &[];
         let xfails = XFAIL_CASES.iter().copied().collect::<BTreeSet<_>>();
         let missing_xfails = xfails
             .iter()

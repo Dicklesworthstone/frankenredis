@@ -1873,7 +1873,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR user_script:1: bad argument #2 to 'insert' (number expected, got string) script: b71b73854945f5077dbdd612451df2fb07552230, on @user_script:1."
+        "value": "ERR user_script:2: bad argument #2 to 'insert' (number expected, got string) script: b71b73854945f5077dbdd612451df2fb07552230, on @user_script:2."
       }
     },
     {
@@ -1912,7 +1912,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR user_script:1: bad argument #2 to 'remove' (number expected, got string) script: ac450261d2f39b89d24700c1005f46df3ec72e32, on @user_script:1."
+        "value": "ERR user_script:2: bad argument #2 to 'remove' (number expected, got string) script: ac450261d2f39b89d24700c1005f46df3ec72e32, on @user_script:2."
       }
     },
     {
@@ -3139,7 +3139,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR invalid key to 'next' script: 2de83d1cc48d6b4206fa5e10f6de650aabb44ac5, on @user_script:1."
+        "value": "ERR invalid key to 'next' script: 2de83d1cc48d6b4206fa5e10f6de650aabb44ac5, on @user_script:2."
       }
     },
     {

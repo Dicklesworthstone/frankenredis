@@ -20097,7 +20097,7 @@ fn format_eval_read_only_script_error(script: &[u8]) -> String {
     )
 }
 
-fn eval_script_error_reply(script: &[u8], error: String) -> RespFrame {
+fn eval_script_error_reply(script: &[u8], error: String, error_line: u32) -> RespFrame {
     if error == SCRIPT_NOSCRIPT_ERROR {
         RespFrame::Error(format_eval_noscript_error(script))
     } else if error == READ_ONLY_SCRIPT_WRITE_ERROR {
@@ -20139,8 +20139,12 @@ fn eval_script_error_reply(script: &[u8], error: String) -> RespFrame {
         } else {
             format!("ERR {error}")
         };
+        // (frankenredis-m7oy8) Stamp the real error line into the envelope
+        // suffix; `error_line` defaults to 1 (single-line scripts), so this is
+        // a no-op there and matches vendored luaCallFunction for multi-line
+        // scripts (including prefix-less bodies like "invalid key to 'next'").
         RespFrame::Error(format!(
-            "{body} script: {}, on @user_script:1.",
+            "{body} script: {}, on @user_script:{error_line}.",
             sha1_hex_public(script)
         ))
     }
@@ -22939,7 +22943,7 @@ fn eval_cmd(
     store.script_nesting_level += 1;
     let result = match lua_eval::eval_script(script, &keys_vec, &args_vec, store, now_ms) {
         Ok(frame) => Ok(frame),
-        Err(e) => Ok(eval_script_error_reply(script, e)),
+        Err(e) => Ok(eval_script_error_reply(script, e, store.lua_error_line)),
     };
     store.script_nesting_level -= 1;
     store.script_read_only = previous_read_only;
@@ -22987,7 +22991,7 @@ fn evalsha_cmd(
     store.script_nesting_level += 1;
     let result = match lua_eval::eval_script(&script, &keys_vec, &args_vec, store, now_ms) {
         Ok(frame) => Ok(frame),
-        Err(e) => Ok(eval_script_error_reply(&script, e)),
+        Err(e) => Ok(eval_script_error_reply(&script, e, store.lua_error_line)),
     };
     store.script_nesting_level -= 1;
     store.script_read_only = previous_read_only;

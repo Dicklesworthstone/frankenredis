@@ -127,10 +127,32 @@ impl PartialEq for LuaHashKey {
 
 impl Eq for LuaHashKey {}
 
+/// A block of statements, each tagged with the 1-based source line where it
+/// begins. The evaluator updates `current_line` from these tags so error
+/// messages report the real line (not a hardcoded 1). (frankenredis-m7oy8)
+pub type Block = Vec<(u32, Stmt)>;
+
+/// Stamp the real source line into a leading `user_script:1:` prefix. The
+/// interpreter's ~90 error sites hardcode line 1; the evaluator tracks the
+/// executing statement's line in `current_line` and applies it here, at the
+/// single uncaught-error boundary. Only the chunk-start `user_script:1:`
+/// prefix is rewritten — `line == 1` is a no-op (the common single-line case),
+/// and other chunk labels (e.g. loadstring's `[string "..."]:N:`) and
+/// already-stamped prefixes are left untouched. (frankenredis-m7oy8)
+fn stamp_user_script_line(msg: String, line: u32) -> String {
+    if line == 1 {
+        return msg;
+    }
+    match msg.strip_prefix("user_script:1:") {
+        Some(rest) => format!("user_script:{line}:{rest}"),
+        None => msg,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LuaFunc {
     pub params: Vec<String>,
-    pub body: Vec<Stmt>,
+    pub body: Block,
     pub is_variadic: bool,
     /// Captured lexical environment (upvalues) from function definition site.
     pub captured_env: Option<Vec<HashMap<String, Rc<RefCell<LuaValue>>>>>,
@@ -1546,16 +1568,36 @@ impl<'a> Lexer<'a> {
     }
 
     fn tokenize_all(&mut self) -> Result<Vec<Token>, String> {
+        Ok(self.tokenize_all_with_lines()?.0)
+    }
+
+    /// Tokenize, also returning the 1-based source line where each token begins
+    /// (parallel to the token vec, including the trailing `Eof`). Used to thread
+    /// real line numbers into Lua error messages. (frankenredis-m7oy8)
+    fn tokenize_all_with_lines(&mut self) -> Result<(Vec<Token>, Vec<u32>), String> {
         let mut tokens = Vec::new();
+        let mut lines = Vec::new();
+        let mut cur_line: u32 = 1;
+        let mut counted: usize = 0;
         loop {
+            // Position at the next token's first byte, then count newlines in
+            // the gap since the previous token (O(n) total, not O(n^2)).
+            self.skip_whitespace_and_comments()?;
+            let start = self.pos.min(self.src.len());
+            cur_line += self.src[counted..start]
+                .iter()
+                .filter(|&&b| b == b'\n')
+                .count() as u32;
+            counted = start;
             let tok = self.next_token()?;
-            if tok == Token::Eof {
-                tokens.push(Token::Eof);
+            let is_eof = tok == Token::Eof;
+            tokens.push(tok);
+            lines.push(cur_line);
+            if is_eof {
                 break;
             }
-            tokens.push(tok);
         }
-        Ok(tokens)
+        Ok((tokens, lines))
     }
 }
 
@@ -1576,7 +1618,7 @@ pub enum Expr {
     Call(Box<Expr>, Vec<Expr>),
     MethodCall(Box<Expr>, String, Vec<Expr>),
     TableConstructor(Vec<TableField>),
-    FunctionDef(Vec<String>, bool, Vec<Stmt>),
+    FunctionDef(Vec<String>, bool, Block),
 }
 
 #[derive(Clone, Debug)]
@@ -1617,22 +1659,24 @@ pub enum Stmt {
     Assign(Vec<Expr>, Vec<Expr>),
     LocalAssign(Vec<String>, Vec<Expr>),
     Expression(Expr),
-    If(Vec<(Expr, Vec<Stmt>)>, Option<Vec<Stmt>>),
-    NumericFor(String, Expr, Expr, Option<Expr>, Vec<Stmt>),
-    GenericFor(Vec<String>, Vec<Expr>, Vec<Stmt>),
-    While(Expr, Vec<Stmt>),
-    Repeat(Vec<Stmt>, Expr),
-    DoBlock(Vec<Stmt>),
+    If(Vec<(Expr, Block)>, Option<Block>),
+    NumericFor(String, Expr, Expr, Option<Expr>, Block),
+    GenericFor(Vec<String>, Vec<Expr>, Block),
+    While(Expr, Block),
+    Repeat(Block, Expr),
+    DoBlock(Block),
     Return(Vec<Expr>),
     Break,
-    FunctionDecl(Vec<String>, Vec<String>, bool, Vec<Stmt>),
-    LocalFunctionDecl(String, Vec<String>, bool, Vec<Stmt>),
+    FunctionDecl(Vec<String>, Vec<String>, bool, Block),
+    LocalFunctionDecl(String, Vec<String>, bool, Block),
 }
 
 // ── Parser ──────────────────────────────────────────────────────────────
 
 struct Parser {
     tokens: Vec<Token>,
+    /// 1-based source line for each token (parallel to `tokens`). (m7oy8)
+    lines: Vec<u32>,
     pos: usize,
     /// (frankenredis-i0h24) Lexical loop nesting depth — used so the
     /// parser can reject `break` outside any loop with vendored's
@@ -1643,11 +1687,24 @@ struct Parser {
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
+        // Default line map (all 1) for callers that don't supply one — keeps
+        // the line numbers harmless when source positions aren't tracked.
+        let lines = vec![1u32; tokens.len()];
+        Self::with_lines(tokens, lines)
+    }
+
+    fn with_lines(tokens: Vec<Token>, lines: Vec<u32>) -> Self {
         Self {
             tokens,
+            lines,
             pos: 0,
             loop_depth: 0,
         }
+    }
+
+    /// 1-based source line of the token at the parser cursor. (m7oy8)
+    fn cur_line(&self) -> u32 {
+        self.lines.get(self.pos).copied().unwrap_or(1)
     }
 
     fn peek(&self) -> &Token {
@@ -1674,8 +1731,8 @@ impl Parser {
         std::mem::discriminant(self.peek()) == std::mem::discriminant(expected)
     }
 
-    fn parse_block(&mut self) -> Result<Vec<Stmt>, String> {
-        let mut stmts = Vec::new();
+    fn parse_block(&mut self) -> Result<Block, String> {
+        let mut stmts: Block = Vec::new();
         loop {
             // Skip semicolons
             while self.check(&Token::Semi) {
@@ -1694,8 +1751,9 @@ impl Parser {
                     // the trailing token as a new statement, surfacing
                     // a generic "unexpected symbol near 'X'" instead.
                     let is_return = matches!(self.peek(), Token::Return);
+                    let line = self.cur_line();
                     let stmt = self.parse_statement()?;
-                    stmts.push(stmt);
+                    stmts.push((line, stmt));
                     if is_return {
                         break;
                     }
@@ -1903,7 +1961,7 @@ impl Parser {
         Ok(Stmt::FunctionDecl(names, params, is_variadic, body))
     }
 
-    fn parse_func_body(&mut self) -> Result<(Vec<String>, bool, Vec<Stmt>), String> {
+    fn parse_func_body(&mut self) -> Result<(Vec<String>, bool, Block), String> {
         self.expect(&Token::LParen)?;
         let mut params = Vec::new();
         let mut is_variadic = false;
@@ -2452,6 +2510,11 @@ pub struct LuaState<'a> {
     /// tracking, so the yield must error rather than silently drop
     /// iterations on resume. (frankenredis-ztawj)
     nested_exec_stmts_depth: usize,
+    /// 1-based source line of the statement currently being executed, updated
+    /// by `exec_stmts` from the parser's per-statement line tags. Used to stamp
+    /// the real line into the `user_script:N:` error prefix at the uncaught-
+    /// error boundary (default 1 == upstream chunk start). (frankenredis-m7oy8)
+    current_line: u32,
     /// True iff exec_stmt is currently dispatching a bare
     /// Stmt::Expression (a stmt that's a single discarded-result
     /// expression). Combined with nested_exec_stmts_depth == 0,
@@ -2917,6 +2980,7 @@ impl<'a> LuaState<'a> {
             call_depth: 0,
             lua_frame_kinds: Vec::new(),
             iterations: 0,
+            current_line: 1,
             rng_seed,
             lua_random,
             script_started_at: Instant::now(),
@@ -3052,8 +3116,8 @@ impl<'a> LuaState<'a> {
 
     pub fn execute(&mut self, source: &[u8]) -> Result<LuaValue, String> {
         let mut lexer = Lexer::new(source);
-        let tokens = lexer.tokenize_all()?;
-        let mut parser = Parser::new(tokens);
+        let (tokens, lines) = lexer.tokenize_all_with_lines()?;
+        let mut parser = Parser::with_lines(tokens, lines);
         let stmts = parser.parse_block()?;
         if !parser.check(&Token::Eof) {
             return Err(format!(
@@ -3108,13 +3172,18 @@ impl<'a> LuaState<'a> {
                     rendered
                 })
             }
-            Err(msg) => Err(msg),
+            // (frankenredis-m7oy8) Stamp the real source line into the
+            // hardcoded `user_script:1:` prefix the interpreter's error sites
+            // emit. For single-line scripts current_line==1 (no-op); multi-line
+            // scripts whose error lands on line >1 now report the right line,
+            // matching vendored Redis 7.2.4's luaL_where output.
+            Err(msg) => Err(stamp_user_script_line(msg, self.current_line)),
         }
     }
 
     fn exec_block(
         &mut self,
-        stmts: &[Stmt],
+        stmts: &[(u32, Stmt)],
         env: &mut Env,
         varargs: &mut Vec<LuaValue>,
     ) -> Result<ControlFlow, String> {
@@ -3126,7 +3195,7 @@ impl<'a> LuaState<'a> {
 
     fn exec_stmts(
         &mut self,
-        stmts: &[Stmt],
+        stmts: &[(u32, Stmt)],
         env: &mut Env,
         varargs: &mut Vec<LuaValue>,
     ) -> Result<ControlFlow, String> {
@@ -3139,7 +3208,8 @@ impl<'a> LuaState<'a> {
         // (frankenredis-ztawj)
         self.nested_exec_stmts_depth = self.nested_exec_stmts_depth.saturating_add(1);
         let mut outcome: Result<ControlFlow, String> = Ok(ControlFlow::None);
-        for stmt in stmts {
+        for (line, stmt) in stmts {
+            self.current_line = *line;
             self.iterations += 1;
             if self.iterations > MAX_ITERATIONS {
                 outcome = Err("script exceeded maximum iteration count".to_string());
@@ -4281,12 +4351,13 @@ impl<'a> LuaState<'a> {
 
     fn exec_coroutine_stmts(
         &mut self,
-        stmts: &[Stmt],
+        stmts: &[(u32, Stmt)],
         start_pc: usize,
         env: &mut Env,
         varargs: &mut Vec<LuaValue>,
     ) -> Result<CoroutineRun, String> {
-        for (offset, stmt) in stmts.iter().enumerate().skip(start_pc) {
+        for (offset, (line, stmt)) in stmts.iter().enumerate().skip(start_pc) {
+            self.current_line = *line;
             self.iterations += 1;
             if self.iterations > MAX_ITERATIONS {
                 return Err("script exceeded maximum iteration count".to_string());
@@ -11563,7 +11634,18 @@ pub fn eval_script(
         script
     };
 
-    let result = state.execute(executed_script)?;
+    // (frankenredis-m7oy8) On error, record the failing statement's source line
+    // so the command layer can stamp it into the `on @user_script:N.` envelope
+    // suffix (covers prefix-less errors like "invalid key to 'next'" too).
+    let result = match state.execute(executed_script) {
+        Ok(value) => value,
+        Err(err) => {
+            let line = state.current_line;
+            drop(state);
+            store.lua_error_line = line;
+            return Err(err);
+        }
+    };
     let frame = lua_to_resp(&result);
     // Drop state explicitly to release the mutable borrow of store before
     // accessing store.dispatch_client_ctx below.
