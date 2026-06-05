@@ -281,6 +281,48 @@ pub fn read_aof_manifest_file(path: &Path) -> Result<AofManifest, PersistError> 
     }
 }
 
+/// A loaded multi-part AOF (redis 7 `appendonlydir`): the base RDB payload
+/// (present only when the base file is RDB-format) plus the ordered AOF command
+/// records from an AOF-format base file followed by every incremental file.
+/// (frankenredis-nvcby)
+#[derive(Debug, Clone, Default)]
+pub struct MultipartAofLoad {
+    pub base_rdb_entries: Vec<RdbEntry>,
+    pub base_rdb_functions: Vec<Vec<u8>>,
+    pub records: Vec<AofRecord>,
+}
+
+/// Load a redis 7 multi-part AOF from its manifest file. Data files named in
+/// the manifest are resolved relative to the manifest's directory; `history`
+/// entries are skipped (they are superseded). The base file is decoded as RDB
+/// (`*.base.rdb`, the `aof-use-rdb-preamble yes` default) or as an AOF stream
+/// (`*.base.aof`); incrementals are AOF streams. The result preserves replay
+/// order: base RDB first, then base-AOF records (if any), then incr records.
+pub fn read_aof_manifest_dir(manifest_path: &Path) -> Result<MultipartAofLoad, PersistError> {
+    let manifest = read_aof_manifest_file(manifest_path)?;
+    let dir = manifest_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| Path::new(".").to_path_buf(), Path::to_path_buf);
+    let mut out = MultipartAofLoad::default();
+    for entry in manifest.replay_entries() {
+        let data = std::fs::read(dir.join(&entry.file_name)).map_err(PersistError::Io)?;
+        if data.is_empty() {
+            continue;
+        }
+        let is_rdb_base = entry.file_type == AofManifestFileType::Base
+            && entry.file_name.ends_with(".rdb");
+        if is_rdb_base {
+            let decoded = decode_rdb_prefix(&data)?;
+            out.base_rdb_entries = decoded.entries;
+            out.base_rdb_functions = decoded.functions;
+        } else {
+            out.records.extend(decode_aof_stream(&data)?);
+        }
+    }
+    Ok(out)
+}
+
 #[must_use]
 pub fn format_aof_manifest(manifest: &AofManifest) -> String {
     let mut out = String::new();
@@ -3816,6 +3858,54 @@ mod tests {
                 reason: "invalid seq field",
             }
         );
+    }
+
+    #[test]
+    fn read_aof_manifest_dir_loads_base_rdb_and_incr_records() {
+        // (frankenredis-nvcby) A redis 7 multi-part AOF (manifest + base.rdb +
+        // incr.aof) must load the base RDB snapshot plus the ordered incr
+        // command records.
+        let dir = std::env::temp_dir().join("fr_persist_multipart_aof_test");
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Base RDB carries one key + a FUNCTION library.
+        let base_entries = vec![RdbEntry {
+            db: 0,
+            key: b"base_key".to_vec(),
+            value: RdbValue::String(b"base_val".to_vec()),
+            expire_ms: None,
+        }];
+        let lib = b"#!lua name=ml\nredis.register_function('f', function() return 1 end)";
+        let base_rdb = encode_rdb_with_functions(&base_entries, &[], &[lib.as_slice()]);
+        std::fs::write(dir.join("appendonly.aof.1.base.rdb"), &base_rdb).expect("write base");
+
+        // Incremental AOF: a SET applied on top of the base.
+        let incr = encode_aof_stream(&[AofRecord {
+            argv: vec![b"SET".to_vec(), b"incr_key".to_vec(), b"incr_val".to_vec()],
+        }]);
+        std::fs::write(dir.join("appendonly.aof.1.incr.aof"), &incr).expect("write incr");
+
+        let manifest_path = dir.join("appendonly.aof.manifest");
+        std::fs::write(
+            &manifest_path,
+            "file appendonly.aof.1.base.rdb seq 1 type b\n\
+             file appendonly.aof.1.incr.aof seq 1 type i\n",
+        )
+        .expect("write manifest");
+
+        let loaded = super::read_aof_manifest_dir(&manifest_path).expect("load multipart aof");
+        assert_eq!(loaded.base_rdb_entries, base_entries);
+        assert_eq!(loaded.base_rdb_functions, vec![lib.to_vec()]);
+        assert_eq!(
+            loaded.records,
+            vec![AofRecord {
+                argv: vec![b"SET".to_vec(), b"incr_key".to_vec(), b"incr_val".to_vec()],
+            }]
+        );
+
+        let _ = std::fs::remove_file(dir.join("appendonly.aof.1.base.rdb"));
+        let _ = std::fs::remove_file(dir.join("appendonly.aof.1.incr.aof"));
+        let _ = std::fs::remove_file(&manifest_path);
     }
 
     #[test]

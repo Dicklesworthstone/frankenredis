@@ -3386,6 +3386,23 @@ impl ExecutionSource {
     }
 }
 
+/// Resolve a redis 7 multi-part AOF manifest from a configured AOF path: the
+/// path may BE a `*.manifest` file, or a directory (e.g. `appendonlydir`)
+/// containing one. Returns `None` for a plain single-file AOF. (frankenredis-nvcby)
+fn resolve_aof_manifest(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    if path.extension().and_then(|e| e.to_str()) == Some("manifest") {
+        return Some(path.to_path_buf());
+    }
+    if path.is_dir() {
+        return std::fs::read_dir(path)
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|p| p.extension().and_then(|e| e.to_str()) == Some("manifest"));
+    }
+    None
+}
+
 fn preserve_store_load_context(replacement: &mut Store, original: &Store) {
     replacement.set_aof_enabled(original.aof_enabled);
     replacement.cluster_enabled = original.cluster_enabled;
@@ -3487,7 +3504,23 @@ impl Runtime {
             Some(path) => path.clone(),
             None => return Ok(0),
         };
-        let records = fr_persist::read_aof_file(&path)?;
+        // redis 7 multi-part AOF: the path may be (or contain) a manifest with a
+        // base file (RDB or AOF) plus incrementals. Otherwise it's a single AOF
+        // file. (frankenredis-nvcby)
+        let (base_rdb, records) = match resolve_aof_manifest(&path) {
+            Some(manifest_path) => {
+                let loaded = fr_persist::read_aof_manifest_dir(&manifest_path)?;
+                let base = if loaded.base_rdb_entries.is_empty()
+                    && loaded.base_rdb_functions.is_empty()
+                {
+                    None
+                } else {
+                    Some((loaded.base_rdb_entries, loaded.base_rdb_functions))
+                };
+                (base, loaded.records)
+            }
+            None => (None, fr_persist::read_aof_file(&path)?),
+        };
         let count = records.len();
         let mut original_store = std::mem::replace(&mut self.server.store, Store::new());
         let original_records = std::mem::take(&mut self.server.aof_records);
@@ -3496,6 +3529,20 @@ impl Runtime {
 
         self.server.aof_selected_db = 0;
         self.session.selected_db = 0;
+        // Seed the fresh store with the base RDB snapshot (multi-part AOF) before
+        // replaying the incremental command records. (frankenredis-nvcby)
+        if let Some((entries, functions)) = &base_rdb {
+            if apply_rdb_entries_to_store(&mut self.server.store, entries, now_ms).is_err() {
+                self.server.store = original_store;
+                self.server.aof_records = original_records;
+                self.server.aof_selected_db = original_aof_db;
+                self.session.selected_db = original_db;
+                return Err(PersistError::InvalidFrame);
+            }
+            for code in functions {
+                let _ = self.server.store.function_load(code, true);
+            }
+        }
         for (index, record) in records.iter().enumerate() {
             let replay_now_ms = now_ms.saturating_add(index as u64);
             let reply = self.with_execution_source(ExecutionSource::AofLoad, |runtime| {
@@ -27246,6 +27293,69 @@ mod tests {
         let mut rt = Runtime::default_strict();
         let count = rt.load_aof(100).expect("should succeed");
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn load_aof_loads_redis7_multipart_manifest() {
+        // (frankenredis-nvcby) Pointing the AOF path at a redis 7 manifest must
+        // load the base RDB snapshot (+FUNCTION libs) and replay the incr file.
+        let dir = std::env::temp_dir().join("fr_runtime_multipart_aof_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let base_entries = vec![RdbEntry {
+            db: 0,
+            key: b"base_key".to_vec(),
+            value: RdbValue::String(b"base_val".to_vec()),
+            expire_ms: None,
+        }];
+        let lib = b"#!lua name=ml\nredis.register_function('mf', function() return 'ok' end)";
+        std::fs::write(
+            dir.join("appendonly.aof.1.base.rdb"),
+            fr_persist::encode_rdb_with_functions(&base_entries, &[], &[lib.as_slice()]),
+        )
+        .expect("write base");
+        std::fs::write(
+            dir.join("appendonly.aof.1.incr.aof"),
+            fr_persist::encode_aof_stream(&[
+                AofRecord {
+                    argv: vec![b"SET".to_vec(), b"incr_key".to_vec(), b"incr_val".to_vec()],
+                },
+                AofRecord {
+                    argv: vec![b"DEL".to_vec(), b"base_key".to_vec()],
+                },
+            ]),
+        )
+        .expect("write incr");
+        let manifest_path = dir.join("appendonly.aof.manifest");
+        std::fs::write(
+            &manifest_path,
+            "file appendonly.aof.1.base.rdb seq 1 type b\n\
+             file appendonly.aof.1.incr.aof seq 1 type i\n",
+        )
+        .expect("write manifest");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(manifest_path);
+        let loaded = rt.load_aof(100).expect("load multipart aof");
+        assert_eq!(loaded, 2, "incr record count");
+
+        // base_key was set in the base then DELeted by the incr stream.
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXISTS", b"base_key"]), 101),
+            RespFrame::Integer(0)
+        );
+        // incr_key survives from the incr stream.
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"incr_key"]), 102),
+            RespFrame::BulkString(Some(b"incr_val".to_vec()))
+        );
+        // FUNCTION library from the base RDB is registered.
+        assert_eq!(
+            rt.execute_frame(command(&[b"FCALL", b"mf", b"0"]), 103),
+            RespFrame::BulkString(Some(b"ok".to_vec()))
+        );
+
+        let _ = std::fs::remove_file(dir.join("appendonly.aof.1.base.rdb"));
+        let _ = std::fs::remove_file(dir.join("appendonly.aof.1.incr.aof"));
     }
 
     #[test]
