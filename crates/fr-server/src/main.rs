@@ -31,7 +31,7 @@ use fr_config::{RuntimePolicy, parse_redis_config_bytes};
 use fr_eventloop::{
     EventLoopMode, TickBudget, plan_tick, validate_accept_path, validate_read_path,
 };
-use fr_protocol::{ParserConfig, RespFrame, RespParseError};
+use fr_protocol::{BorrowedCommandArgsKind, ParserConfig, RespFrame, RespParseError};
 use fr_repl::ReplOffset;
 use fr_runtime::{ClientSession, ClientUnblockMode, Runtime};
 use mio::net::{TcpListener, TcpStream};
@@ -1545,6 +1545,7 @@ fn process_buffered_frames(
     let mut consumed_total = 0;
     let mut processed_frames = 0usize;
     let mut budget_exhausted = false;
+    let mut argv_scratch: Vec<Vec<u8>> = Vec::new();
 
     loop {
         if consumed_total >= conn.read_buf.len() || conn.closing {
@@ -1564,13 +1565,19 @@ fn process_buffered_frames(
             break;
         }
 
-        let unparsed = &conn.read_buf[consumed_total..];
+        let Some(&first_byte) = conn.read_buf.get(consumed_total) else {
+            break;
+        };
 
         // Try inline command parsing only for true non-RESP input. RESP uses
         // multiple leading prefixes; treating every non-array prefix as inline
         // can misclassify protocol frames and break parsing.
-        let parse_result = if !unparsed.is_empty() && should_try_inline_parsing(unparsed[0]) {
-            match try_parse_inline(unparsed) {
+        if should_try_inline_parsing(first_byte) {
+            let inline_parse_result = {
+                let unparsed = &conn.read_buf[consumed_total..];
+                try_parse_inline(unparsed)
+            };
+            match inline_parse_result {
                 Ok(InlineParseResult::EmptyLine(consumed)) => {
                     // Silently consume empty lines (Redis behavior).
                     processed_frames = processed_frames.saturating_add(1);
@@ -1584,17 +1591,138 @@ fn process_buffered_frames(
                     consumed_total += consumed;
                     continue;
                 }
-                Ok(InlineParseResult::Command(frame, consumed)) => Ok((frame, consumed)),
-                Err(e) => Err(e),
+                Ok(InlineParseResult::Command(frame, consumed)) => {
+                    processed_frames = processed_frames.saturating_add(1);
+                    if !command_frame_can_move_to_argv(&frame) {
+                        let response = runtime.execute_frame_with_unix_time_us(&frame, ts, ts_us);
+                        let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                        encode_client_reply(&response, client_resp3, &mut conn.write_buf);
+                        consumed_total += consumed;
+                        continue;
+                    }
+                    let argv = fr_command::argv_from_frame(frame)
+                        .expect("command frame prevalidated for argv move");
+                    match process_argv_frame(
+                        token,
+                        &argv,
+                        conn,
+                        runtime,
+                        blocked_tokens,
+                        blocked_wake_index,
+                        closing_tokens,
+                        write_tokens,
+                        paused_tokens,
+                        ts,
+                        ts_us,
+                    ) {
+                        ProcessArgvAction::Continue => {
+                            consumed_total += consumed;
+                            if disconnect_if_output_limit_exceeded(
+                                conn,
+                                runtime.server.output_buffer_limit,
+                                closing_tokens,
+                                token,
+                            ) {
+                                break;
+                            }
+                            continue;
+                        }
+                        ProcessArgvAction::BreakAfterConsume => {
+                            consumed_total += consumed;
+                            break;
+                        }
+                        ProcessArgvAction::BreakWithoutConsume => break,
+                    }
+                }
+                Err(err) => {
+                    if handle_parse_error(err, conn, closing_tokens, token) {
+                        break;
+                    }
+                    continue;
+                }
             }
-        } else {
-            // (frankenredis-5qqv1) Client command frames are strict multibulks:
-            // every element must be a non-null bulk string. The generic parser
-            // (used for replies/replication) accepts any element type.
+        }
+
+        // (frankenredis-08d0x) The hot client command path is strict multibulk.
+        // Parse argv as borrowed slices, then copy into caller-reused Vec
+        // storage for dispatch. This keeps Redis-visible ownership and reply
+        // ordering unchanged while replacing per-command argv allocation churn
+        // with one scratch arena per buffered processing pass.
+        if matches!(first_byte, b'*') {
+            let borrowed_parse_result = {
+                let unparsed = &conn.read_buf[consumed_total..];
+                let mut borrowed_args = Vec::new();
+                match fr_protocol::parse_command_args_borrowed_into(
+                    unparsed,
+                    &runtime.parser_config(),
+                    &mut borrowed_args,
+                ) {
+                    Ok(parsed) => {
+                        let argv_len = borrowed_args.len();
+                        if matches!(parsed.kind, BorrowedCommandArgsKind::Arguments) && argv_len > 0
+                        {
+                            copy_borrowed_argv_into_scratch(&borrowed_args, &mut argv_scratch);
+                        }
+                        Ok((parsed.kind, parsed.consumed, argv_len))
+                    }
+                    Err(err) => Err(err),
+                }
+            };
+            match borrowed_parse_result {
+                Ok((kind, consumed, argv_len)) => {
+                    processed_frames = processed_frames.saturating_add(1);
+                    if matches!(kind, BorrowedCommandArgsKind::NullArray) || argv_len == 0 {
+                        consumed_total += consumed;
+                        continue;
+                    }
+                    let argv = &argv_scratch[..argv_len];
+                    match process_argv_frame(
+                        token,
+                        argv,
+                        conn,
+                        runtime,
+                        blocked_tokens,
+                        blocked_wake_index,
+                        closing_tokens,
+                        write_tokens,
+                        paused_tokens,
+                        ts,
+                        ts_us,
+                    ) {
+                        ProcessArgvAction::Continue => {
+                            consumed_total += consumed;
+                            if disconnect_if_output_limit_exceeded(
+                                conn,
+                                runtime.server.output_buffer_limit,
+                                closing_tokens,
+                                token,
+                            ) {
+                                break;
+                            }
+                            continue;
+                        }
+                        ProcessArgvAction::BreakAfterConsume => {
+                            consumed_total += consumed;
+                            break;
+                        }
+                        ProcessArgvAction::BreakWithoutConsume => break,
+                    }
+                }
+                Err(err) => {
+                    if handle_parse_error(err, conn, closing_tokens, token) {
+                        break;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // Non-multibulk RESP reaches the generic parser exactly as before.
+        let parse_result = {
+            let unparsed = &conn.read_buf[consumed_total..];
             fr_protocol::parse_command_frame(unparsed, &runtime.parser_config())
                 .map(|p| (p.frame, p.consumed))
         };
-
         match parse_result {
             Ok((frame, consumed)) => {
                 processed_frames = processed_frames.saturating_add(1);
@@ -1617,123 +1745,28 @@ fn process_buffered_frames(
                 }
                 let argv = fr_command::argv_from_frame(frame)
                     .expect("command frame prevalidated for argv move");
-                // Subscription mode gate: reject most commands while subscribed.
-                // (frankenredis-j7nwu) Only RESP2 subscribers are restricted —
-                // upstream server.c::processCommand gates the allow-list on
-                // `c->resp == 2`. RESP3 clients may freely interleave any
-                // command with push frames, so the gate (and its runtime mirror
-                // at lib.rs ~5426) must be skipped for them.
-                if runtime.is_in_subscription_mode()
-                    && runtime.client_session().resp_protocol_version() != 3
-                    && let Some(reject) = check_subscription_mode_gate(&argv, true)
-                {
-                    reject.encode_into(&mut conn.write_buf);
-                    consumed_total += consumed;
-                    continue;
-                }
-                runtime.set_blocked_clients_count_for_info(blocked_tokens.len());
-                // CLIENT PAUSE gate: delay command processing while paused.
-                // Fast path: `is_client_paused` is an O(1) deadline check that is
-                // false on the overwhelmingly common no-pause path. Guarding the
-                // gate with it avoids materializing a full `frame_to_argv` heap
-                // copy (one Vec + one Vec per argument) on every command — the
-                // single largest per-request allocation in the dispatch hot path
-                // (gdb profiling: ~58% of on-CPU samples in the allocator). When a
-                // pause IS active, behavior is identical: `is_command_paused`
-                // already re-checks `is_client_paused` internally.
-                if runtime.is_client_paused(ts)
-                    && runtime.is_command_paused(&argv, ts)
-                    && !is_client_pause_exempt(&argv)
-                {
-                    // Don't process the command — leave it in the read buffer.
-                    // Track paused token so we can re-process when pause expires.
-                    paused_tokens.insert(token);
-                    break;
-                }
-                // Dispatch on the argv moved out of the parsed frame, then
-                // reuse the same buffers for post-dispatch checks. This keeps
-                // the success path at one allocation per wire argument instead
-                // of rebuilding argv for each helper. (frankenredis-8yfmt)
-                let response = runtime.execute_argv_with_unix_time_us(&argv, ts, ts_us);
-                // (frankenredis-pgplm) Choose the RESP3 null encoding (`_`)
-                // when the client negotiated HELLO 3. Captured before the
-                // block-detection check below, which still compares the
-                // unmutated `response`.
-                let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-
-                // Check for QUIT command.
-                if is_quit_frame(&argv) {
-                    encode_client_reply(&response, client_resp3, &mut conn.write_buf);
-                    write_tokens.insert(token);
-                    conn.closing = true;
-                    closing_tokens.insert(token);
-                    consumed_total += consumed;
-                    break;
-                }
-
-                // Check for blocking commands that returned nil — block the
-                // client instead of sending the nil response immediately.
-                let should_block = response == RespFrame::Array(None)
-                    || response == RespFrame::BulkString(None)
-                    || waitaof_should_block(&argv, &response)
-                    || wait_should_block(&argv, &response);
-                if should_block
-                    && let Some(blocked) = try_build_blocked_state(&argv, ts).and_then(
-                        |BlockedState { op, deadline_ms }| {
-                            Some(BlockedState {
-                                op: resolve_blocked_op(op, runtime, ts)?,
-                                deadline_ms,
-                            })
-                        },
-                    )
-                {
-                    // Redis behavior: if the keys already have data, we shouldn't block.
-                    // try_build_blocked_state only returns Some if it's a blocking command.
-                    if let Some(immediate_response) = try_fulfill_blocked(&blocked.op, runtime, ts)
-                    {
-                        encode_client_reply(&immediate_response, client_resp3, &mut conn.write_buf);
-                    } else {
-                        conn.blocked = Some(blocked);
-                        blocked_tokens.insert(token);
-                        if let Some(blocked) = &conn.blocked {
-                            blocked_wake_index.insert(token, blocked);
-                        }
-                        runtime.mark_client_blocked(runtime.client_id());
+                match process_argv_frame(
+                    token,
+                    &argv,
+                    conn,
+                    runtime,
+                    blocked_tokens,
+                    blocked_wake_index,
+                    closing_tokens,
+                    write_tokens,
+                    paused_tokens,
+                    ts,
+                    ts_us,
+                ) {
+                    ProcessArgvAction::Continue => {
                         consumed_total += consumed;
-                        break; // Stop processing — client is now blocked.
                     }
-                } else if suppress_client_network_reply(runtime, &argv, &response) {
-                    // Redis treats REPLCONF ACK/GETACK as internal control
-                    // frames and does not send a direct reply on client links.
-                } else {
-                    encode_client_reply(&response, client_resp3, &mut conn.write_buf);
-                }
-                if let Some(follow_up) = replication_follow_up_bytes(runtime, &argv, &response, ts)
-                {
-                    conn.write_buf.extend_from_slice(&follow_up);
-                    if runtime.is_replica(runtime.client_id()) {
-                        conn.replication_sent_offset = Some(runtime.replication_primary_offset());
+                    ProcessArgvAction::BreakAfterConsume => {
+                        consumed_total += consumed;
+                        break;
                     }
+                    ProcessArgvAction::BreakWithoutConsume => break,
                 }
-
-                // Drain and deliver any pending pub/sub messages (including
-                // shard pub/sub SMessage) generated by the command.
-                for msg in runtime.drain_pending_pubsub() {
-                    let resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    let frame = pubsub_message_to_frame_for_protocol(
-                        msg,
-                        runtime.client_session().resp_protocol_version(),
-                    );
-                    // (frankenredis-o90ga) See deliver_pubsub_messages: RESP3
-                    // clients need the RESP3 null inside flush invalidations.
-                    if resp3 {
-                        frame.encode_into_resp3(&mut conn.write_buf);
-                    } else {
-                        frame.encode_into(&mut conn.write_buf);
-                    }
-                }
-
-                consumed_total += consumed;
 
                 if conn.write_buf.len() > runtime.server.output_buffer_limit {
                     eprintln!("warn: client write buffer exceeded limit, disconnecting");
@@ -1747,15 +1780,7 @@ fn process_buffered_frames(
                 break;
             }
             Err(err) => {
-                // Protocol error — send the specific message and disconnect,
-                // matching upstream networking.c (e.g. "invalid multibulk
-                // length", "invalid bulk length"). fr previously emitted a
-                // generic "invalid frame" for every parse failure.
-                // (frankenredis-w7xy8)
-                let err_reply = RespFrame::Error(format!("ERR Protocol error: {err}"));
-                err_reply.encode_into(&mut conn.write_buf);
-                conn.closing = true;
-                closing_tokens.insert(token);
+                let _ = handle_parse_error(err, conn, closing_tokens, token);
                 break;
             }
         }
@@ -1771,6 +1796,186 @@ fn process_buffered_frames(
     }
 
     budget_exhausted
+}
+
+fn copy_borrowed_argv_into_scratch(borrowed_args: &[&[u8]], argv_scratch: &mut Vec<Vec<u8>>) {
+    while argv_scratch.len() < borrowed_args.len() {
+        argv_scratch.push(Vec::new());
+    }
+    for (idx, arg) in borrowed_args.iter().enumerate() {
+        argv_scratch[idx].clear();
+        argv_scratch[idx].extend_from_slice(arg);
+    }
+}
+
+enum ProcessArgvAction {
+    Continue,
+    BreakAfterConsume,
+    BreakWithoutConsume,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_argv_frame(
+    token: Token,
+    argv: &[Vec<u8>],
+    conn: &mut ClientConnection,
+    runtime: &mut Runtime,
+    blocked_tokens: &mut HashSet<Token>,
+    blocked_wake_index: &mut BlockedWakeIndex,
+    closing_tokens: &mut HashSet<Token>,
+    write_tokens: &mut HashSet<Token>,
+    paused_tokens: &mut HashSet<Token>,
+    ts: u64,
+    ts_us: u64,
+) -> ProcessArgvAction {
+    // Subscription mode gate: reject most commands while subscribed.
+    // (frankenredis-j7nwu) Only RESP2 subscribers are restricted —
+    // upstream server.c::processCommand gates the allow-list on
+    // `c->resp == 2`. RESP3 clients may freely interleave any
+    // command with push frames, so the gate (and its runtime mirror
+    // at lib.rs ~5426) must be skipped for them.
+    if runtime.is_in_subscription_mode()
+        && runtime.client_session().resp_protocol_version() != 3
+        && let Some(reject) = check_subscription_mode_gate(argv, true)
+    {
+        reject.encode_into(&mut conn.write_buf);
+        return ProcessArgvAction::Continue;
+    }
+    runtime.set_blocked_clients_count_for_info(blocked_tokens.len());
+    // CLIENT PAUSE gate: delay command processing while paused.
+    // Fast path: `is_client_paused` is an O(1) deadline check that is
+    // false on the overwhelmingly common no-pause path. Guarding the
+    // gate with it avoids materializing a full `frame_to_argv` heap
+    // copy (one Vec + one Vec per argument) on every command — the
+    // single largest per-request allocation in the dispatch hot path
+    // (gdb profiling: ~58% of on-CPU samples in the allocator). When a
+    // pause IS active, behavior is identical: `is_command_paused`
+    // already re-checks `is_client_paused` internally.
+    if runtime.is_client_paused(ts)
+        && runtime.is_command_paused(argv, ts)
+        && !is_client_pause_exempt(argv)
+    {
+        // Don't process the command — leave it in the read buffer.
+        // Track paused token so we can re-process when pause expires.
+        paused_tokens.insert(token);
+        return ProcessArgvAction::BreakWithoutConsume;
+    }
+    // Dispatch on argv storage that lives through all post-dispatch checks.
+    // The owned fallback still moves argv out of the parsed frame; the hot
+    // multibulk path reuses a per-pass scratch arena. (frankenredis-8yfmt,
+    // frankenredis-08d0x)
+    let response = runtime.execute_argv_with_unix_time_us(argv, ts, ts_us);
+    // (frankenredis-pgplm) Choose the RESP3 null encoding (`_`)
+    // when the client negotiated HELLO 3. Captured before the
+    // block-detection check below, which still compares the
+    // unmutated `response`.
+    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+
+    // Check for QUIT command.
+    if is_quit_frame(argv) {
+        encode_client_reply(&response, client_resp3, &mut conn.write_buf);
+        write_tokens.insert(token);
+        conn.closing = true;
+        closing_tokens.insert(token);
+        return ProcessArgvAction::BreakAfterConsume;
+    }
+
+    // Check for blocking commands that returned nil — block the
+    // client instead of sending the nil response immediately.
+    let should_block = matches!(
+        response,
+        RespFrame::Array(None) | RespFrame::BulkString(None)
+    ) || waitaof_should_block(argv, &response)
+        || wait_should_block(argv, &response);
+    if should_block
+        && let Some(blocked) =
+            try_build_blocked_state(argv, ts).and_then(|BlockedState { op, deadline_ms }| {
+                Some(BlockedState {
+                    op: resolve_blocked_op(op, runtime, ts)?,
+                    deadline_ms,
+                })
+            })
+    {
+        // Redis behavior: if the keys already have data, we shouldn't block.
+        // try_build_blocked_state only returns Some if it's a blocking command.
+        if let Some(immediate_response) = try_fulfill_blocked(&blocked.op, runtime, ts) {
+            encode_client_reply(&immediate_response, client_resp3, &mut conn.write_buf);
+        } else {
+            conn.blocked = Some(blocked);
+            blocked_tokens.insert(token);
+            if let Some(blocked) = &conn.blocked {
+                blocked_wake_index.insert(token, blocked);
+            }
+            runtime.mark_client_blocked(runtime.client_id());
+            return ProcessArgvAction::BreakAfterConsume;
+        }
+    } else if suppress_client_network_reply(runtime, argv, &response) {
+        // Redis treats REPLCONF ACK/GETACK as internal control
+        // frames and does not send a direct reply on client links.
+    } else {
+        encode_client_reply(&response, client_resp3, &mut conn.write_buf);
+    }
+    if let Some(follow_up) = replication_follow_up_bytes(runtime, argv, &response, ts) {
+        conn.write_buf.extend_from_slice(&follow_up);
+        if runtime.is_replica(runtime.client_id()) {
+            conn.replication_sent_offset = Some(runtime.replication_primary_offset());
+        }
+    }
+
+    // Drain and deliver any pending pub/sub messages (including
+    // shard pub/sub SMessage) generated by the command.
+    for msg in runtime.drain_pending_pubsub() {
+        let resp3 = runtime.client_session().resp_protocol_version() == 3;
+        let frame = pubsub_message_to_frame_for_protocol(
+            msg,
+            runtime.client_session().resp_protocol_version(),
+        );
+        // (frankenredis-o90ga) See deliver_pubsub_messages: RESP3
+        // clients need the RESP3 null inside flush invalidations.
+        if resp3 {
+            frame.encode_into_resp3(&mut conn.write_buf);
+        } else {
+            frame.encode_into(&mut conn.write_buf);
+        }
+    }
+
+    ProcessArgvAction::Continue
+}
+
+fn disconnect_if_output_limit_exceeded(
+    conn: &mut ClientConnection,
+    output_buffer_limit: usize,
+    closing_tokens: &mut HashSet<Token>,
+    token: Token,
+) -> bool {
+    if conn.write_buf.len() > output_buffer_limit {
+        eprintln!("warn: client write buffer exceeded limit, disconnecting");
+        conn.closing = true;
+        closing_tokens.insert(token);
+        return true;
+    }
+    false
+}
+
+fn handle_parse_error(
+    err: RespParseError,
+    conn: &mut ClientConnection,
+    closing_tokens: &mut HashSet<Token>,
+    token: Token,
+) -> bool {
+    if err == RespParseError::Incomplete {
+        return true;
+    }
+    // Protocol error — send the specific message and disconnect,
+    // matching upstream networking.c (e.g. "invalid multibulk
+    // length", "invalid bulk length"). fr previously emitted a
+    // generic "invalid frame" for every parse failure.
+    // (frankenredis-w7xy8)
+    let err_reply = RespFrame::Error(format!("ERR Protocol error: {err}"));
+    err_reply.encode_into(&mut conn.write_buf);
+    conn.closing = true;
+    closing_tokens.insert(token);
+    true
 }
 
 use fr_server::{InlineParseResult, should_try_inline_parsing, try_parse_inline};
