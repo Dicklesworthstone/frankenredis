@@ -4994,7 +4994,9 @@ fn geo_radius_cover_steps(clat: f64, radius_m: f64) -> u8 {
 /// is the 52-bit interleave whose top `2*steps` bits identify the cell.
 /// (frankenredis-7hg0r)
 fn geo_radius_cell_ranges(clon: f64, clat: f64, radius_m: f64) -> Option<Vec<(f64, f64)>> {
-    if clat < GEO_LAT_MIN || clat > GEO_LAT_MAX || clon < GEO_LONG_MIN || clon > GEO_LONG_MAX {
+    if !(GEO_LAT_MIN..=GEO_LAT_MAX).contains(&clat)
+        || !(GEO_LONG_MIN..=GEO_LONG_MAX).contains(&clon)
+    {
         return None;
     }
     let steps = geo_radius_cover_steps(clat, radius_m);
@@ -5057,7 +5059,9 @@ fn geo_cells_for_steps(clon: f64, clat: f64, steps: u8) -> Vec<(f64, f64)> {
 /// cells span most of the keyspace (the caller then does a full scan).
 /// (frankenredis-b9utp)
 fn geo_box_cell_ranges(clon: f64, clat: f64, half_w: f64, half_h: f64) -> Option<Vec<(f64, f64)>> {
-    if clat < GEO_LAT_MIN || clat > GEO_LAT_MAX || clon < GEO_LONG_MIN || clon > GEO_LONG_MAX {
+    if !(GEO_LAT_MIN..=GEO_LAT_MAX).contains(&clat)
+        || !(GEO_LONG_MIN..=GEO_LONG_MAX).contains(&clon)
+    {
         return None;
     }
     let (_lat_min, lat_max, _lon_min, lon_max, lon_wrap) = geo_box_bbox(clon, clat, half_w, half_h);
@@ -12108,11 +12112,11 @@ fn score_bound_f64(bound: ScoreBound) -> f64 {
 ///
 /// `lo`/`hi` are the bounds in the order passed to the store method (already
 /// swapped for REV). Returns:
-///   - `Ok(false)` — range is not inverted; the normal path type-checks itself.
-///   - `Ok(true)`  — inverted range on a zset or missing key; the caller should
-///                   emit its empty result WITHOUT calling the store (so exactly
-///                   the single keyspace lookup redis performs is recorded).
-///   - `Err(WrongType)` — inverted range on a wrong-type key.
+/// - `Ok(false)` — range is not inverted; the normal path type-checks itself.
+/// - `Ok(true)`  — inverted range on a zset or missing key; the caller should
+///   emit its empty result WITHOUT calling the store (so exactly the single
+///   keyspace lookup redis performs is recorded).
+/// - `Err(WrongType)` — inverted range on a wrong-type key.
 fn zscore_inverted_wrongtype_guard(
     store: &mut Store,
     key: &[u8],
