@@ -4424,9 +4424,12 @@ fn lset_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     // "value is not an integer or out of range" instead of upstream's
     // "ERR no such key", and on a wrong-type key surfaced the same
     // generic instead of WRONGTYPE.
-    match store.key_type(&argv[1], now_ms) {
+    // LSET is a write (upstream lookupKeyWriteOrReply), so this nokey/WRONGTYPE
+    // precheck must use the NON-counting peek — it must not bump keyspace_hits.
+    // (frankenredis-934ax)
+    match store.peek_value_type(&argv[1], now_ms) {
         None => return Err(CommandError::NoSuchKey),
-        Some("list") => {}
+        Some(fr_store::ValueType::List) => {}
         Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
     }
     let index = parse_i64_arg(&argv[2])?;
@@ -12382,8 +12385,10 @@ fn spop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         // which skips the type check when count==0 and returns an
         // empty array, masking WRONGTYPE. Fire the type check here
         // so a wrongtype key with count==0 reports the same error.
-        match store.key_type(&argv[1], now_ms) {
-            Some("set") | None => {}
+        // SPOP is a write (lookupKeyWrite), so use the NON-counting
+        // peek — this precheck must not bump keyspace_hits. (frankenredis-934ax)
+        match store.peek_value_type(&argv[1], now_ms) {
+            Some(fr_store::ValueType::Set) | None => {}
             Some(_) => return Err(CommandError::Store(StoreError::WrongType)),
         }
         let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;

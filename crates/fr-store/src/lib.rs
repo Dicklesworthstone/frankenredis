@@ -8942,7 +8942,10 @@ impl Store {
     }
 
     pub fn spop(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        // SPOP is a write (upstream t_set.c::spopCommand uses lookupKeyWriteOrReply),
+        // so it must NOT bump keyspace_hits/misses — only lookupKeyRead* does.
+        // Use the non-counting expiry-aware lookup. (frankenredis-934ax)
+        if !self.drop_if_expired(key, now_ms) {
             return Ok(None);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -15718,7 +15721,12 @@ impl Store {
     /// Serialize a key's value for DUMP. Returns None if key doesn't exist.
     /// Format: [type_byte][payload][2-byte RDB version][8-byte CRC64].
     pub fn dump_key(&mut self, key: &[u8], now_ms: u64) -> Option<Vec<u8>> {
-        self.drop_if_expired(key, now_ms);
+        // DUMP is a read (upstream cluster.c::dumpCommand uses lookupKeyRead),
+        // so it bumps keyspace_hits on a present key / keyspace_misses on a
+        // missing one. (frankenredis-934ax)
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return None;
+        }
         let entry = self.entries.get(key)?;
         let mut buf = Vec::new();
         match &entry.value {
@@ -20517,6 +20525,33 @@ mod tests {
 
         assert_eq!(store.stat_keyspace_hits, 7);
         assert_eq!(store.stat_keyspace_misses, 3);
+    }
+
+    #[test]
+    fn write_spop_does_not_count_keyspace_lookup_but_read_dump_does() {
+        // (frankenredis-934ax) Upstream only bumps keyspace_hits/misses in
+        // lookupKeyRead*; write commands (lookupKeyWrite*) must not. SPOP is a
+        // write → no count; DUMP is a read → counts hit on present / miss on
+        // absent. Verified vs redis 7.2.4.
+        let mut store = Store::new();
+        store.sadd(b"s", &[b"a".to_vec(), b"b".to_vec()], 0).unwrap();
+        store.stat_keyspace_hits = 0;
+        store.stat_keyspace_misses = 0;
+
+        store.spop(b"s", 0).unwrap(); // write: no count
+        assert_eq!(store.stat_keyspace_hits, 0, "SPOP must not bump hits");
+        assert_eq!(store.stat_keyspace_misses, 0, "SPOP must not bump misses");
+        store.spop(b"missing", 0).unwrap(); // write on missing: still no count
+        assert_eq!(store.stat_keyspace_hits, 0);
+        assert_eq!(store.stat_keyspace_misses, 0);
+
+        store.set(b"d".to_vec(), b"v".to_vec(), None, 0);
+        store.dump_key(b"d", 0); // read on present: +1 hit
+        assert_eq!(store.stat_keyspace_hits, 1, "DUMP present must bump a hit");
+        assert_eq!(store.stat_keyspace_misses, 0);
+        store.dump_key(b"nope", 0); // read on absent: +1 miss
+        assert_eq!(store.stat_keyspace_hits, 1);
+        assert_eq!(store.stat_keyspace_misses, 1, "DUMP absent must bump a miss");
     }
 
     #[test]
