@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "PORT=6468; LOG=/data/projects/frankenredis/artifacts/optimization/cod-pass45-reprofile-20260606T1645Z/paired-baseline-server-$PORT-$$.log; /data/projects/frankenredis/target-cod-pass43-reprofile/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true' EXIT; sleep 0.25; /data/projects/frankenredis/target-cod-pass43-reprofile/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass45pairbase >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.0073809684400001,
+      "stddev": 0.03120246971259863,
+      "median": 1.0061443372400003,
+      "user": 0.7529240799999999,
+      "system": 0.7716847200000001,
+      "min": 0.9692496677400001,
+      "max": 1.0712548987400001,
+      "times": [
+        1.0712548987400001,
+        1.03281188974,
+        1.0147992057400002,
+        0.98385276474,
+        0.96954926574,
+        1.02543862574,
+        0.9692496677400001,
+        0.9945646917400001,
+        1.0012198357400002,
+        1.0110688387400002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "PORT=6469; LOG=/data/projects/frankenredis/artifacts/optimization/cod-pass45-reprofile-20260606T1645Z/paired-candidate-server-$PORT-$$.log; /data/projects/frankenredis/target-cod-pass45-parser-range-candidate/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true' EXIT; sleep 0.25; /data/projects/frankenredis/target-cod-pass45-parser-range-candidate/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass45paircand >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.10004165394,
+      "stddev": 0.10696099883964477,
+      "median": 1.09445812024,
+      "user": 0.8496187799999999,
+      "system": 0.8546547200000001,
+      "min": 0.9723611187400001,
+      "max": 1.2975796157400001,
+      "times": [
+        0.9723611187400001,
+        1.01007298174,
+        1.13661301874,
+        1.15604008174,
+        1.22441797374,
+        1.2975796157400001,
+        1.12156180274,
+        1.0673544377400002,
+        1.02766961774,
+        0.9867458907400001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

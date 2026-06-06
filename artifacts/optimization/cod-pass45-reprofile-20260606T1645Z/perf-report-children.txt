@@ -1,0 +1,2630 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 19K of event 'cycles:u'
+# Event count (approx.): 6527758770
+#
+# Children      Self  Command       Shared Object         Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                 
+# ........  ........  ............  ....................  .......................................................................................................................................................................................................................................................................................................................................................................................................................................
+#
+    14.25%     0.41%  frankenredis  frankenredis          [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u64>
+            |
+            ---<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u64>
+               |          
+               |--6.50%--<fr_runtime::Runtime>::execute_frame_internal
+               |          |          
+               |          |--2.08%--<std::sys::pal::unix::time::Timespec>::now
+               |          |          |          
+               |          |           --2.08%--clock_gettime@@GLIBC_2.17
+               |          |                     |          
+               |          |                      --1.41%--0x705443caf986
+               |          |          
+               |           --1.13%--<std::time::Instant>::elapsed
+               |                     |          
+               |                      --0.93%--<std::sys::pal::unix::time::Timespec>::now
+               |                                clock_gettime@@GLIBC_2.17
+               |                                |          
+               |                                 --0.86%--0x705443caf986
+               |          
+               |--1.25%--<fr_runtime::Runtime>::queue_client_tracking_invalidations
+               |          
+               |--0.89%--fr_command::classify_command
+               |          
+               |--0.79%--<fr_runtime::ServerState>::capture_aof_record
+               |          
+               |--0.68%--<fr_runtime::Runtime>::execute_db_scoped_command
+               |          
+                --0.60%--fr_command::is_write_command
+
+    13.99%     0.00%  frankenredis  [unknown]             [.] 0x0000000000000008
+            |
+            ---0x8
+               |          
+                --13.84%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u64>
+                          |          
+                          |--6.50%--<fr_runtime::Runtime>::execute_frame_internal
+                          |          |          
+                          |          |--2.08%--<std::sys::pal::unix::time::Timespec>::now
+                          |          |          |          
+                          |          |           --2.08%--clock_gettime@@GLIBC_2.17
+                          |          |                     |          
+                          |          |                      --1.41%--0x705443caf986
+                          |          |          
+                          |           --1.13%--<std::time::Instant>::elapsed
+                          |                     |          
+                          |                      --0.93%--<std::sys::pal::unix::time::Timespec>::now
+                          |                                clock_gettime@@GLIBC_2.17
+                          |                                |          
+                          |                                 --0.86%--0x705443caf986
+                          |          
+                          |--1.25%--<fr_runtime::Runtime>::queue_client_tracking_invalidations
+                          |          
+                          |--0.89%--fr_command::classify_command
+                          |          
+                          |--0.79%--<fr_runtime::ServerState>::capture_aof_record
+                          |          
+                          |--0.68%--<fr_runtime::Runtime>::execute_db_scoped_command
+                          |          
+                           --0.60%--fr_command::is_write_command
+
+    13.09%     0.00%  frankenredis  [unknown]             [.] 0xfec5000002d2820f
+            |
+            ---0xfec5000002d2820f
+               |          
+               |--7.31%--<fr_store::Store>::drop_if_expired
+               |          
+                --5.47%--__memcmp_avx2_movbe
+
+     7.94%     0.00%  frankenredis  [unknown]             [.] 0x0000000000000002
+            |
+            ---0x2
+               |          
+                --5.98%--<fr_runtime::Runtime>::execute_dispatch
+
+     7.46%     7.38%  frankenredis  frankenredis          [.] <fr_store::Store>::drop_if_expired
+            |          
+             --7.23%--0xfec5000002d2820f
+                       <fr_store::Store>::drop_if_expired
+
+     6.97%     3.25%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::execute_frame_internal
+            |          
+            |--3.94%--<fr_runtime::Runtime>::execute_frame_internal
+            |          |          
+            |          |--2.08%--<std::sys::pal::unix::time::Timespec>::now
+            |          |          |          
+            |          |           --2.08%--clock_gettime@@GLIBC_2.17
+            |          |                     |          
+            |          |                      --1.41%--0x705443caf986
+            |          |          
+            |           --1.13%--<std::time::Instant>::elapsed
+            |                     |          
+            |                      --0.93%--<std::sys::pal::unix::time::Timespec>::now
+            |                                clock_gettime@@GLIBC_2.17
+            |                                |          
+            |                                 --0.86%--0x705443caf986
+            |          
+             --2.78%--0x8
+                       <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u64>
+                       <fr_runtime::Runtime>::execute_frame_internal
+
+     6.56%     6.56%  frankenredis  libc.so.6             [.] __memcmp_avx2_movbe
+            |          
+            |--5.47%--0xfec5000002d2820f
+            |          __memcmp_avx2_movbe
+            |          
+             --0.72%--__memcmp_avx2_movbe
+
+     6.33%     0.00%  frankenredis  [unknown]             [.] 0000000000000000
+            |
+            ---0
+               |          
+               |--1.62%--<fr_runtime::Runtime>::dispatch_with_client_context
+               |          
+               |--0.85%--<fr_runtime::Runtime>::refresh_dispatch_peer_addr_cache
+               |          |          
+               |           --0.60%--core::fmt::write
+               |                     |          
+               |                      --0.52%--<core::net::socket_addr::SocketAddrV4 as core::fmt::Display>::fmt
+               |          
+               |--0.82%--mi_free
+               |          
+                --0.70%--_mi_page_malloc_zero
+
+     6.06%     6.06%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::execute_dispatch
+            |          
+             --5.98%--0x2
+                       <fr_runtime::Runtime>::execute_dispatch
+
+     5.81%     0.46%  frankenredis  libc.so.6             [.] clock_gettime@@GLIBC_2.17
+            |          
+             --5.35%--clock_gettime@@GLIBC_2.17
+                       |          
+                        --3.96%--0x705443caf986
+
+     5.65%     0.24%  frankenredis  frankenredis          [.] <std::sys::pal::unix::time::Timespec>::now
+            |          
+             --5.42%--<std::sys::pal::unix::time::Timespec>::now
+                       |          
+                        --5.42%--clock_gettime@@GLIBC_2.17
+                                  |          
+                                   --3.96%--0x705443caf986
+
+     4.32%     0.00%  frankenredis  libc.so.6             [.] __syscall_cancel
+            |          
+             --4.32%--__syscall_cancel
+                       |          
+                        --3.77%--0xffffffff84c0012b
+                                  |          
+                                   --3.21%--0xffffffff86220551
+                                             |          
+                                             |--1.96%--0xffffffff84f24d8f
+                                             |          0xffffffff85eefb24
+                                             |          |          
+                                             |           --1.73%--0xffffffff85eefaba
+                                             |                     |          
+                                             |                      --1.64%--0xffffffff860733b6
+                                             |                                |          
+                                             |                                 --1.33%--0xffffffff860248f0
+                                             |                                           |          
+                                             |                                            --0.70%--0xffffffff860239fb
+                                             |                                                      0xffffffff86022e9a
+                                             |          
+                                              --1.25%--0xffffffff84f25587
+                                                        0xffffffff85eefdf4
+                                                        |          
+                                                         --1.25%--0xffffffff85eefd13
+                                                                   |          
+                                                                    --1.23%--0xffffffff85eec316
+                                                                              |          
+                                                                               --1.23%--0xffffffff86071a1f
+                                                                                         |          
+                                                                                          --1.20%--0xffffffff86027511
+                                                                                                    |          
+                                                                                                     --0.54%--0xffffffff86026096
+                                                                                                               0xffffffff85f0db23
+
+     4.07%     0.34%  fr-bench      fr-bench              [.] fr_bench::build_command
+            |          
+             --3.98%--fr_bench::build_command
+                       |          
+                        --3.45%--alloc::fmt::format::format_inner
+                                  |          
+                                   --2.98%--core::fmt::write
+                                             |          
+                                             |--1.46%--<usize as core::fmt::Display>::fmt
+                                             |          |          
+                                             |           --1.18%--<alloc::string::String as core::fmt::Write>::write_str
+                                             |                     |          
+                                             |                      --1.06%--<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+                                             |                                |          
+                                             |                                 --0.97%--<alloc::raw_vec::RawVecInner>::finish_grow
+                                             |                                           |          
+                                             |                                            --0.85%--realloc
+                                             |                                                      |          
+                                             |                                                       --0.63%--_int_realloc
+                                             |          
+                                              --0.83%--<alloc::string::String as core::fmt::Write>::write_str
+                                                        |          
+                                                         --0.55%--<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+
+     4.04%     4.04%  frankenredis  [vdso]                [.] 0x0000000000000986
+            |          
+            |--2.27%--0x8
+            |          <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u64>
+            |          <fr_runtime::Runtime>::execute_frame_internal
+            |          |          
+            |          |--1.41%--<std::sys::pal::unix::time::Timespec>::now
+            |          |          clock_gettime@@GLIBC_2.17
+            |          |          0x705443caf986
+            |          |          
+            |           --0.86%--<std::time::Instant>::elapsed
+            |                     <std::sys::pal::unix::time::Timespec>::now
+            |                     clock_gettime@@GLIBC_2.17
+            |                     0x705443caf986
+            |          
+             --1.69%--<fr_runtime::ServerState>::run_active_expire_cycle
+                       |          
+                       |--0.98%--<std::time::Instant>::elapsed
+                       |          <std::sys::pal::unix::time::Timespec>::now
+                       |          clock_gettime@@GLIBC_2.17
+                       |          0x705443caf986
+                       |          
+                        --0.71%--<std::sys::pal::unix::time::Timespec>::now
+                                  clock_gettime@@GLIBC_2.17
+                                  0x705443caf986
+
+     3.96%     0.00%  frankenredis  [vdso]                [.] 0x0000705443caf986
+            |
+            ---0x705443caf986
+
+     3.79%     0.00%  frankenredis  [unknown]             [.] 0xffffffff84c0012b
+            |
+            ---0xffffffff84c0012b
+               |          
+                --3.21%--0xffffffff86220551
+                          |          
+                          |--1.96%--0xffffffff84f24d8f
+                          |          0xffffffff85eefb24
+                          |          |          
+                          |           --1.73%--0xffffffff85eefaba
+                          |                     |          
+                          |                      --1.64%--0xffffffff860733b6
+                          |                                |          
+                          |                                 --1.33%--0xffffffff860248f0
+                          |                                           |          
+                          |                                            --0.70%--0xffffffff860239fb
+                          |                                                      0xffffffff86022e9a
+                          |          
+                           --1.25%--0xffffffff84f25587
+                                     0xffffffff85eefdf4
+                                     |          
+                                      --1.25%--0xffffffff85eefd13
+                                                |          
+                                                 --1.23%--0xffffffff85eec316
+                                                           |          
+                                                            --1.23%--0xffffffff86071a1f
+                                                                      |          
+                                                                       --1.20%--0xffffffff86027511
+                                                                                 |          
+                                                                                  --0.54%--0xffffffff86026096
+                                                                                            0xffffffff85f0db23
+
+     3.77%     0.98%  frankenredis  frankenredis          [.] <fr_runtime::ServerState>::run_active_expire_cycle
+            |          
+             --3.69%--<fr_runtime::ServerState>::run_active_expire_cycle
+                       |          
+                       |--1.53%--<std::time::Instant>::elapsed
+                       |          <std::sys::pal::unix::time::Timespec>::now
+                       |          |          
+                       |           --1.45%--clock_gettime@@GLIBC_2.17
+                       |                     |          
+                       |                      --0.98%--0x705443caf986
+                       |          
+                        --1.11%--<std::sys::pal::unix::time::Timespec>::now
+                                  |          
+                                   --0.95%--clock_gettime@@GLIBC_2.17
+                                             |          
+                                              --0.71%--0x705443caf986
+
+     3.47%     0.31%  fr-bench      fr-bench              [.] alloc::fmt::format::format_inner
+            |          
+             --3.18%--alloc::fmt::format::format_inner
+                       |          
+                        --2.98%--core::fmt::write
+                                  |          
+                                  |--1.46%--<usize as core::fmt::Display>::fmt
+                                  |          |          
+                                  |           --1.18%--<alloc::string::String as core::fmt::Write>::write_str
+                                  |                     |          
+                                  |                      --1.06%--<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+                                  |                                |          
+                                  |                                 --0.97%--<alloc::raw_vec::RawVecInner>::finish_grow
+                                  |                                           |          
+                                  |                                            --0.85%--realloc
+                                  |                                                      |          
+                                  |                                                       --0.63%--_int_realloc
+                                  |          
+                                   --0.83%--<alloc::string::String as core::fmt::Write>::write_str
+                                             |          
+                                              --0.55%--<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+
+     3.23%     3.23%  frankenredis  frankenredis          [.] mi_free
+            |          
+            |--1.11%--mi_free
+            |          
+             --0.82%--0
+                       mi_free
+
+     3.21%     0.00%  frankenredis  [unknown]             [.] 0xffffffff86220551
+            |
+            ---0xffffffff86220551
+               |          
+               |--1.96%--0xffffffff84f24d8f
+               |          0xffffffff85eefb24
+               |          |          
+               |           --1.73%--0xffffffff85eefaba
+               |                     |          
+               |                      --1.64%--0xffffffff860733b6
+               |                                |          
+               |                                 --1.33%--0xffffffff860248f0
+               |                                           |          
+               |                                            --0.70%--0xffffffff860239fb
+               |                                                      0xffffffff86022e9a
+               |          
+                --1.25%--0xffffffff84f25587
+                          0xffffffff85eefdf4
+                          |          
+                           --1.25%--0xffffffff85eefd13
+                                     |          
+                                      --1.23%--0xffffffff85eec316
+                                                |          
+                                                 --1.23%--0xffffffff86071a1f
+                                                           |          
+                                                            --1.20%--0xffffffff86027511
+                                                                      |          
+                                                                       --0.54%--0xffffffff86026096
+                                                                                 0xffffffff85f0db23
+
+     3.02%     0.27%  fr-bench      fr-bench              [.] core::fmt::write
+            |          
+             --2.75%--core::fmt::write
+                       |          
+                       |--1.46%--<usize as core::fmt::Display>::fmt
+                       |          |          
+                       |           --1.18%--<alloc::string::String as core::fmt::Write>::write_str
+                       |                     |          
+                       |                      --1.06%--<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+                       |                                |          
+                       |                                 --0.97%--<alloc::raw_vec::RawVecInner>::finish_grow
+                       |                                           |          
+                       |                                            --0.85%--realloc
+                       |                                                      |          
+                       |                                                       --0.63%--_int_realloc
+                       |          
+                        --0.83%--<alloc::string::String as core::fmt::Write>::write_str
+                                  |          
+                                   --0.55%--<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+
+     3.01%     0.50%  fr-bench      fr-bench              [.] <fr_bench::BenchmarkClient>::run_batch::<core::slice::iter::Iter<fr_bench::PreparedCommand>>
+            |          
+             --2.77%--<fr_bench::BenchmarkClient>::run_batch::<core::slice::iter::Iter<fr_bench::PreparedCommand>>
+                       |          
+                       |--0.77%--<std::net::tcp::TcpStream as std::io::Write>::write
+                       |          |          
+                       |           --0.74%--__send
+                       |                     |          
+                       |                      --0.74%--__syscall_cancel_arch_end
+                       |                                |          
+                       |                                 --0.68%--0xffffffff84c0012b
+                       |                                           |          
+                       |                                            --0.57%--0xffffffff86220551
+                       |          
+                       |--0.71%--<std::time::Instant>::elapsed
+                       |          |          
+                       |           --0.62%--<std::sys::pal::unix::time::Timespec>::now
+                       |                     |          
+                       |                      --0.55%--clock_gettime@@GLIBC_2.17
+                       |          
+                        --0.59%--<std::sys::pal::unix::time::Timespec>::now
+                                  |          
+                                   --0.55%--clock_gettime@@GLIBC_2.17
+
+     2.74%     0.09%  frankenredis  frankenredis          [.] <std::time::Instant>::elapsed
+            |          
+             --2.73%--<std::time::Instant>::elapsed
+                       |          
+                        --2.46%--<std::sys::pal::unix::time::Timespec>::now
+                                  |          
+                                   --2.38%--clock_gettime@@GLIBC_2.17
+                                             |          
+                                              --1.84%--0x705443caf986
+
+     2.69%     0.69%  frankenredis  frankenredis          [.] fr_runtime::set_command_keys
+            |          
+             --2.00%--fr_runtime::set_command_keys
+                       |          
+                       |--1.05%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+                       |          
+                        --0.63%--<&mut <fr_runtime::Runtime>::queue_client_tracking_invalidations::{closure#0} as core::ops::function::FnMut<(&alloc::vec::Vec<u8>,)>>::call_mut
+
+     2.59%     0.00%  frankenredis  [unknown]             [.] 0xc359003d9bea15ff
+            |
+            ---0xc359003d9bea15ff
+               |          
+                --2.59%--<mio::net::tcp::stream::TcpStream as std::io::Write>::write
+                          |          
+                           --2.52%--<&std::os::unix::net::stream::UnixStream as std::io::Write>::write
+                                     |          
+                                      --2.52%--__send
+                                                __syscall_cancel
+                                                |          
+                                                 --2.36%--0xffffffff84c0012b
+                                                           |          
+                                                            --1.96%--0xffffffff86220551
+                                                                      0xffffffff84f24d8f
+                                                                      0xffffffff85eefb24
+                                                                      |          
+                                                                       --1.73%--0xffffffff85eefaba
+                                                                                 |          
+                                                                                  --1.64%--0xffffffff860733b6
+                                                                                            |          
+                                                                                             --1.33%--0xffffffff860248f0
+                                                                                                       |          
+                                                                                                        --0.70%--0xffffffff860239fb
+                                                                                                                  0xffffffff86022e9a
+
+     2.59%     0.00%  frankenredis  frankenredis          [.] <mio::net::tcp::stream::TcpStream as std::io::Write>::write
+            |
+            ---<mio::net::tcp::stream::TcpStream as std::io::Write>::write
+               |          
+                --2.52%--<&std::os::unix::net::stream::UnixStream as std::io::Write>::write
+                          |          
+                           --2.52%--__send
+                                     __syscall_cancel
+                                     |          
+                                      --2.36%--0xffffffff84c0012b
+                                                |          
+                                                 --1.96%--0xffffffff86220551
+                                                           0xffffffff84f24d8f
+                                                           0xffffffff85eefb24
+                                                           |          
+                                                            --1.73%--0xffffffff85eefaba
+                                                                      |          
+                                                                       --1.64%--0xffffffff860733b6
+                                                                                 |          
+                                                                                  --1.33%--0xffffffff860248f0
+                                                                                            |          
+                                                                                             --0.70%--0xffffffff860239fb
+                                                                                                       0xffffffff86022e9a
+
+     2.59%     0.08%  frankenredis  libc.so.6             [.] __send
+            |          
+             --2.52%--__send
+                       __syscall_cancel
+                       |          
+                        --2.36%--0xffffffff84c0012b
+                                  |          
+                                   --1.96%--0xffffffff86220551
+                                             0xffffffff84f24d8f
+                                             0xffffffff85eefb24
+                                             |          
+                                              --1.73%--0xffffffff85eefaba
+                                                        |          
+                                                         --1.64%--0xffffffff860733b6
+                                                                   |          
+                                                                    --1.33%--0xffffffff860248f0
+                                                                              |          
+                                                                               --0.70%--0xffffffff860239fb
+                                                                                         0xffffffff86022e9a
+
+     2.57%     2.57%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::dispatch_with_client_context
+            |          
+            |--1.62%--0
+            |          <fr_runtime::Runtime>::dispatch_with_client_context
+            |          
+             --0.95%--<fr_runtime::Runtime>::dispatch_with_client_context
+
+     2.52%     0.00%  frankenredis  frankenredis          [.] <&std::os::unix::net::stream::UnixStream as std::io::Write>::write
+            |          
+             --2.52%--<&std::os::unix::net::stream::UnixStream as std::io::Write>::write
+                       |          
+                        --2.52%--__send
+                                  __syscall_cancel
+                                  |          
+                                   --2.36%--0xffffffff84c0012b
+                                             |          
+                                              --1.96%--0xffffffff86220551
+                                                        0xffffffff84f24d8f
+                                                        0xffffffff85eefb24
+                                                        |          
+                                                         --1.73%--0xffffffff85eefaba
+                                                                   |          
+                                                                    --1.64%--0xffffffff860733b6
+                                                                              |          
+                                                                               --1.33%--0xffffffff860248f0
+                                                                                         |          
+                                                                                          --0.70%--0xffffffff860239fb
+                                                                                                    0xffffffff86022e9a
+
+     2.05%     0.41%  fr-bench      fr-bench              [.] <alloc::string::String as core::fmt::Write>::write_str
+            |          
+             --1.65%--<alloc::string::String as core::fmt::Write>::write_str
+                       |          
+                        --1.62%--<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+                                  |          
+                                   --1.30%--<alloc::raw_vec::RawVecInner>::finish_grow
+                                             |          
+                                              --0.94%--realloc
+                                                        |          
+                                                         --0.63%--_int_realloc
+
+     1.96%     0.00%  frankenredis  [unknown]             [.] 0xffffffff84f24d8f
+            |
+            ---0xffffffff84f24d8f
+               0xffffffff85eefb24
+               |          
+                --1.73%--0xffffffff85eefaba
+                          |          
+                           --1.64%--0xffffffff860733b6
+                                     |          
+                                      --1.33%--0xffffffff860248f0
+                                                |          
+                                                 --0.70%--0xffffffff860239fb
+                                                           0xffffffff86022e9a
+
+     1.96%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85eefb24
+            |
+            ---0xffffffff85eefb24
+               |          
+                --1.73%--0xffffffff85eefaba
+                          |          
+                           --1.64%--0xffffffff860733b6
+                                     |          
+                                      --1.33%--0xffffffff860248f0
+                                                |          
+                                                 --0.70%--0xffffffff860239fb
+                                                           0xffffffff86022e9a
+
+     1.85%     1.85%  frankenredis  frankenredis          [.] _mi_page_malloc_zero
+            |          
+             --0.70%--0
+                       _mi_page_malloc_zero
+
+     1.73%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85eefaba
+            |
+            ---0xffffffff85eefaba
+               |          
+                --1.64%--0xffffffff860733b6
+                          |          
+                           --1.33%--0xffffffff860248f0
+                                     |          
+                                      --0.70%--0xffffffff860239fb
+                                                0xffffffff86022e9a
+
+     1.66%     0.22%  fr-bench      fr-bench              [.] <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+            |          
+             --1.44%--<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+                       |          
+                        --1.30%--<alloc::raw_vec::RawVecInner>::finish_grow
+                                  |          
+                                   --0.94%--realloc
+                                             |          
+                                              --0.63%--_int_realloc
+
+     1.65%     0.00%  fr-bench      [unknown]             [.] 0x0000000000000002
+            |
+            ---0x2
+               |          
+                --1.29%--<fr_bench::BenchmarkClient>::run_batch::<core::slice::iter::Iter<fr_bench::PreparedCommand>>
+                          |          
+                           --0.71%--<std::time::Instant>::elapsed
+                                     |          
+                                      --0.62%--<std::sys::pal::unix::time::Timespec>::now
+                                                |          
+                                                 --0.55%--clock_gettime@@GLIBC_2.17
+
+     1.64%     0.00%  frankenredis  [unknown]             [.] 0xffffffff860733b6
+            |
+            ---0xffffffff860733b6
+               |          
+                --1.33%--0xffffffff860248f0
+                          |          
+                           --0.70%--0xffffffff860239fb
+                                     0xffffffff86022e9a
+
+     1.60%     1.60%  frankenredis  libc.so.6             [.] __memmove_avx_unaligned_erms
+            |          
+             --1.02%--__memmove_avx_unaligned_erms
+
+     1.57%     0.00%  frankenredis  frankenredis          [.] <mio::net::tcp::stream::TcpStream as std::io::Read>::read
+            |
+            ---<mio::net::tcp::stream::TcpStream as std::io::Read>::read
+               |          
+                --1.57%--<&std::os::unix::net::stream::UnixStream as std::io::Read>::read
+                          |          
+                           --1.57%--__libc_recv
+                                     |          
+                                      --1.57%--__syscall_cancel
+                                                |          
+                                                 --1.41%--0xffffffff84c0012b
+                                                           |          
+                                                            --1.25%--0xffffffff86220551
+                                                                      |          
+                                                                       --1.25%--0xffffffff84f25587
+                                                                                 0xffffffff85eefdf4
+                                                                                 |          
+                                                                                  --1.25%--0xffffffff85eefd13
+                                                                                            |          
+                                                                                             --1.23%--0xffffffff85eec316
+                                                                                                       |          
+                                                                                                        --1.23%--0xffffffff86071a1f
+                                                                                                                  |          
+                                                                                                                   --1.20%--0xffffffff86027511
+                                                                                                                             |          
+                                                                                                                              --0.54%--0xffffffff86026096
+                                                                                                                                        0xffffffff85f0db23
+
+     1.57%     0.00%  frankenredis  frankenredis          [.] <&std::os::unix::net::stream::UnixStream as std::io::Read>::read
+            |          
+             --1.57%--<&std::os::unix::net::stream::UnixStream as std::io::Read>::read
+                       |          
+                        --1.57%--__libc_recv
+                                  |          
+                                   --1.57%--__syscall_cancel
+                                             |          
+                                              --1.41%--0xffffffff84c0012b
+                                                        |          
+                                                         --1.25%--0xffffffff86220551
+                                                                   |          
+                                                                    --1.25%--0xffffffff84f25587
+                                                                              0xffffffff85eefdf4
+                                                                              |          
+                                                                               --1.25%--0xffffffff85eefd13
+                                                                                         |          
+                                                                                          --1.23%--0xffffffff85eec316
+                                                                                                    |          
+                                                                                                     --1.23%--0xffffffff86071a1f
+                                                                                                               |          
+                                                                                                                --1.20%--0xffffffff86027511
+                                                                                                                          |          
+                                                                                                                           --0.54%--0xffffffff86026096
+                                                                                                                                     0xffffffff85f0db23
+
+     1.57%     0.00%  frankenredis  libc.so.6             [.] __libc_recv
+            |          
+             --1.57%--__libc_recv
+                       __syscall_cancel
+                       |          
+                        --1.41%--0xffffffff84c0012b
+                                  |          
+                                   --1.25%--0xffffffff86220551
+                                             |          
+                                              --1.25%--0xffffffff84f25587
+                                                        0xffffffff85eefdf4
+                                                        |          
+                                                         --1.25%--0xffffffff85eefd13
+                                                                   |          
+                                                                    --1.23%--0xffffffff85eec316
+                                                                              |          
+                                                                               --1.23%--0xffffffff86071a1f
+                                                                                         |          
+                                                                                          --1.20%--0xffffffff86027511
+                                                                                                    |          
+                                                                                                     --0.54%--0xffffffff86026096
+                                                                                                               0xffffffff85f0db23
+
+     1.56%     0.00%  frankenredis  [unknown]             [.] 0x6e697274733a666f
+            |
+            ---0x6e697274733a666f
+
+     1.53%     1.53%  frankenredis  frankenredis          [.] frankenredis::process_buffered_frames
+            |          
+             --0.55%--frankenredis::process_buffered_frames
+
+     1.53%     0.08%  fr-bench      fr-bench              [.] <usize as core::fmt::Display>::fmt
+            |          
+             --1.45%--<usize as core::fmt::Display>::fmt
+                       |          
+                        --1.18%--<alloc::string::String as core::fmt::Write>::write_str
+                                  |          
+                                   --1.06%--<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+                                             |          
+                                              --0.97%--<alloc::raw_vec::RawVecInner>::finish_grow
+                                                        |          
+                                                         --0.85%--realloc
+                                                                   |          
+                                                                    --0.63%--_int_realloc
+
+     1.51%     0.44%  fr-bench      libc.so.6             [.] realloc
+            |          
+             --1.07%--realloc
+                       |          
+                        --0.95%--_int_realloc
+
+     1.51%     1.26%  frankenredis  frankenredis          [.] fr_runtime::canonical_command_fullname
+            |
+            ---fr_runtime::canonical_command_fullname
+
+     1.42%     1.42%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::queue_client_tracking_invalidations
+            |          
+             --1.25%--0x8
+                       <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u64>
+                       <fr_runtime::Runtime>::queue_client_tracking_invalidations
+
+     1.41%     1.41%  frankenredis  frankenredis          [.] <fr_store::Store>::internal_entries_insert
+            |          
+             --1.18%--<fr_store::Store>::internal_entries_insert
+
+     1.38%     1.38%  frankenredis  frankenredis          [.] mi_theap_malloc_aligned
+            |          
+             --0.74%--mi_theap_malloc_aligned
+
+     1.38%     1.26%  frankenredis  frankenredis          [.] <fr_store::Store>::set
+     1.35%     1.35%  frankenredis  frankenredis          [.] fr_protocol::parse_command_args_borrowed_into
+            |          
+             --0.76%--fr_protocol::parse_command_args_borrowed_into
+
+     1.33%     0.17%  fr-bench      fr-bench              [.] <alloc::raw_vec::RawVecInner>::finish_grow
+            |          
+             --1.16%--<alloc::raw_vec::RawVecInner>::finish_grow
+                       |          
+                        --0.94%--realloc
+                                  |          
+                                   --0.63%--_int_realloc
+
+     1.33%     0.00%  frankenredis  [unknown]             [.] 0xffffffff860248f0
+            |
+            ---0xffffffff860248f0
+               |          
+                --0.70%--0xffffffff860239fb
+                          0xffffffff86022e9a
+
+     1.25%     0.00%  frankenredis  [unknown]             [.] 0xffffffff84f25587
+            |
+            ---0xffffffff84f25587
+               0xffffffff85eefdf4
+               |          
+                --1.25%--0xffffffff85eefd13
+                          |          
+                           --1.23%--0xffffffff85eec316
+                                     |          
+                                      --1.23%--0xffffffff86071a1f
+                                                |          
+                                                 --1.20%--0xffffffff86027511
+                                                           |          
+                                                            --0.54%--0xffffffff86026096
+                                                                      0xffffffff85f0db23
+
+     1.25%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85eefdf4
+            |
+            ---0xffffffff85eefdf4
+               |          
+                --1.25%--0xffffffff85eefd13
+                          |          
+                           --1.23%--0xffffffff85eec316
+                                     |          
+                                      --1.23%--0xffffffff86071a1f
+                                                |          
+                                                 --1.20%--0xffffffff86027511
+                                                           |          
+                                                            --0.54%--0xffffffff86026096
+                                                                      0xffffffff85f0db23
+
+     1.25%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85eefd13
+            |
+            ---0xffffffff85eefd13
+               |          
+                --1.23%--0xffffffff85eec316
+                          |          
+                           --1.23%--0xffffffff86071a1f
+                                     |          
+                                      --1.20%--0xffffffff86027511
+                                                |          
+                                                 --0.54%--0xffffffff86026096
+                                                           0xffffffff85f0db23
+
+     1.25%     0.00%  frankenredis  [unknown]             [.] 0x3232240a0d544553
+            |
+            ---0x3232240a0d544553
+               |          
+                --0.52%--<alloc::raw_vec::RawVecInner>::finish_grow
+
+     1.23%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85eec316
+            |
+            ---0xffffffff85eec316
+               |          
+                --1.23%--0xffffffff86071a1f
+                          |          
+                           --1.20%--0xffffffff86027511
+                                     |          
+                                      --0.54%--0xffffffff86026096
+                                                0xffffffff85f0db23
+
+     1.23%     0.00%  frankenredis  [unknown]             [.] 0xffffffff86071a1f
+            |
+            ---0xffffffff86071a1f
+               |          
+                --1.20%--0xffffffff86027511
+                          |          
+                           --0.54%--0xffffffff86026096
+                                     0xffffffff85f0db23
+
+     1.23%     0.00%  fr-bench      libc.so.6             [.] __syscall_cancel_arch_end
+            |
+            ---__syscall_cancel_arch_end
+               |          
+                --1.12%--0xffffffff84c0012b
+                          |          
+                           --1.00%--0xffffffff86220551
+
+     1.22%     0.08%  fr-bench      fr-bench              [.] <std::sys::pal::unix::time::Timespec>::now
+            |          
+             --1.14%--<std::sys::pal::unix::time::Timespec>::now
+                       |          
+                        --1.11%--clock_gettime@@GLIBC_2.17
+                                  |          
+                                   --0.87%--0x70a86c979986
+
+     1.20%     0.00%  frankenredis  [unknown]             [.] 0xffffffff86027511
+            |
+            ---0xffffffff86027511
+               |          
+                --0.54%--0xffffffff86026096
+                          0xffffffff85f0db23
+
+     1.18%     0.09%  fr-bench      libc.so.6             [.] clock_gettime@@GLIBC_2.17
+            |          
+             --1.09%--clock_gettime@@GLIBC_2.17
+                       |          
+                        --0.87%--0x70a86c979986
+
+     1.15%     1.15%  frankenredis  frankenredis          [.] fr_command::classify_command
+            |          
+             --0.89%--0x8
+                       <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u64>
+                       fr_command::classify_command
+
+     1.13%     1.13%  frankenredis  frankenredis          [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+            |          
+             --0.98%--fr_runtime::set_command_keys
+                       <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+
+     1.12%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84c0012b
+            |
+            ---0xffffffff84c0012b
+               |          
+                --1.00%--0xffffffff86220551
+
+     1.06%     1.05%  fr-bench      libc.so.6             [.] _int_malloc
+            |          
+             --0.58%--fr_bench::build_command
+
+     1.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86220551
+            |
+            ---0xffffffff86220551
+
+     1.00%     1.00%  frankenredis  frankenredis          [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     0.97%     0.97%  fr-bench      libc.so.6             [.] __memmove_avx_unaligned_erms
+     0.97%     0.29%  fr-bench      libc.so.6             [.] _int_realloc
+            |          
+             --0.68%--_int_realloc
+
+     0.94%     0.55%  fr-bench      libc.so.6             [.] _int_free_chunk
+     0.87%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c979986
+            |
+            ---0x70a86c979986
+
+     0.87%     0.87%  fr-bench      [vdso]                [.] 0x0000000000000986
+     0.87%     0.87%  frankenredis  frankenredis          [.] fr_command::set
+            |          
+             --0.55%--0x6e697274733a666f
+
+     0.86%     0.86%  frankenredis  frankenredis          [.] frankenredis::process_argv_frame
+            |          
+             --0.86%--frankenredis::process_argv_frame
+
+     0.85%     0.25%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::refresh_dispatch_peer_addr_cache
+            |          
+             --0.60%--<fr_runtime::Runtime>::refresh_dispatch_peer_addr_cache
+                       core::fmt::write
+                       |          
+                        --0.52%--<core::net::socket_addr::SocketAddrV4 as core::fmt::Display>::fmt
+
+     0.83%     0.11%  fr-bench      fr-bench              [.] <alloc::raw_vec::RawVecInner>::finish_grow
+            |
+            ---<alloc::raw_vec::RawVecInner>::finish_grow
+               |          
+                --0.57%--realloc
+
+     0.81%     0.81%  frankenredis  frankenredis          [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+     0.80%     0.17%  fr-bench      libc.so.6             [.] __libc_malloc2
+            |          
+             --0.67%--__libc_malloc2
+                       |          
+                        --0.62%--_int_malloc
+
+     0.79%     0.79%  frankenredis  frankenredis          [.] <fr_runtime::ServerState>::capture_aof_record
+            |
+            ---0x8
+               <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u64>
+               <fr_runtime::ServerState>::capture_aof_record
+
+     0.79%     0.01%  fr-bench      fr-bench              [.] <std::net::tcp::TcpStream as std::io::Write>::write
+            |          
+             --0.79%--<std::net::tcp::TcpStream as std::io::Write>::write
+                       |          
+                        --0.74%--__send
+                                  |          
+                                   --0.74%--__syscall_cancel_arch_end
+                                             |          
+                                              --0.68%--0xffffffff84c0012b
+                                                        |          
+                                                         --0.57%--0xffffffff86220551
+
+     0.78%     0.33%  fr-bench      fr-bench              [.] <fr_bench::BenchmarkClient>::read_frame
+            |          
+             --0.75%--<fr_bench::BenchmarkClient>::read_frame
+
+     0.77%     0.03%  fr-bench      libc.so.6             [.] __send
+            |          
+             --0.74%--__send
+                       |          
+                        --0.74%--__syscall_cancel_arch_end
+                                  |          
+                                   --0.68%--0xffffffff84c0012b
+                                             |          
+                                              --0.57%--0xffffffff86220551
+
+     0.76%     0.76%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::execute_db_scoped_command
+            |          
+             --0.68%--0x8
+                       <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u64>
+                       <fr_runtime::Runtime>::execute_db_scoped_command
+
+     0.75%     0.75%  fr-bench      libc.so.6             [.] cfree@GLIBC_2.2.5
+            |          
+             --0.61%--cfree@GLIBC_2.2.5
+
+     0.71%     0.02%  fr-bench      fr-bench              [.] <std::time::Instant>::elapsed
+            |          
+             --0.70%--<std::time::Instant>::elapsed
+                       |          
+                        --0.62%--<std::sys::pal::unix::time::Timespec>::now
+                                  |          
+                                   --0.55%--clock_gettime@@GLIBC_2.17
+
+     0.70%     0.70%  frankenredis  frankenredis          [.] fr_command::dispatch_argv
+            |
+            ---fr_command::dispatch_argv
+
+     0.70%     0.70%  frankenredis  frankenredis          [.] foldhash::hash_bytes_medium
+     0.70%     0.00%  frankenredis  [unknown]             [.] 0xffffffff860239fb
+            |
+            ---0xffffffff860239fb
+               0xffffffff86022e9a
+
+     0.70%     0.00%  frankenredis  [unknown]             [.] 0xffffffff86022e9a
+            |
+            ---0xffffffff86022e9a
+
+     0.70%     0.70%  frankenredis  frankenredis          [.] <core::str::lossy::Utf8Chunks as core::iter::traits::iterator::Iterator>::next
+     0.69%     0.00%  frankenredis  [unknown]             [.] 0x00005d75f295e020
+            |
+            ---0x5d75f295e020
+
+     0.67%     0.67%  fr-bench      libc.so.6             [.] malloc
+     0.67%     0.67%  frankenredis  frankenredis          [.] fr_command::command_table_index
+            |
+            ---fr_command::command_table_index
+
+     0.67%     0.67%  frankenredis  frankenredis          [.] <fr_store::CommandHistogramTracker>::record_with_kind
+            |
+            ---<fr_store::CommandHistogramTracker>::record_with_kind
+
+     0.67%     0.67%  frankenredis  frankenredis          [.] fr_runtime::push_ascii_lowercase_lossy
+     0.63%     0.63%  frankenredis  frankenredis          [.] <&mut <fr_runtime::Runtime>::queue_client_tracking_invalidations::{closure#0} as core::ops::function::FnMut<(&alloc::vec::Vec<u8>,)>>::call_mut
+            |
+            ---fr_runtime::set_command_keys
+               <&mut <fr_runtime::Runtime>::queue_client_tracking_invalidations::{closure#0} as core::ops::function::FnMut<(&alloc::vec::Vec<u8>,)>>::call_mut
+
+     0.60%     0.60%  frankenredis  frankenredis          [.] fr_command::is_write_command
+            |
+            ---0x8
+               <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u64>
+               fr_command::is_write_command
+
+     0.60%     0.08%  frankenredis  frankenredis          [.] core::fmt::write
+            |          
+             --0.52%--core::fmt::write
+                       <core::net::socket_addr::SocketAddrV4 as core::fmt::Display>::fmt
+
+     0.59%     0.59%  fr-bench      fr-bench              [.] <fr_protocol::RespFrame>::encode_into
+            |
+            ---<fr_protocol::RespFrame>::encode_into
+
+     0.56%     0.56%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::drain_pending_pubsub
+            |
+            ---<fr_runtime::Runtime>::drain_pending_pubsub
+
+     0.56%     0.56%  frankenredis  frankenredis          [.] <fr_runtime::AclUser>::acl_permission_error_for_argv
+     0.54%     0.00%  frankenredis  [unknown]             [.] 0xffffffff86026096
+            |
+            ---0xffffffff86026096
+               0xffffffff85f0db23
+
+     0.54%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85f0db23
+            |
+            ---0xffffffff85f0db23
+
+     0.52%     0.52%  frankenredis  frankenredis          [.] <alloc::raw_vec::RawVecInner>::finish_grow
+            |          
+             --0.52%--0x3232240a0d544553
+                       <alloc::raw_vec::RawVecInner>::finish_grow
+
+     0.52%     0.00%  frankenredis  frankenredis          [.] <core::net::socket_addr::SocketAddrV4 as core::fmt::Display>::fmt
+            |
+            ---<core::net::socket_addr::SocketAddrV4 as core::fmt::Display>::fmt
+
+     0.51%     0.43%  frankenredis  frankenredis          [.] fr_command::acl_command_selectors_for_argv
+            |
+            ---fr_command::acl_command_selectors_for_argv
+
+     0.49%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f24d8f
+     0.49%     0.49%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::feed_monitors
+     0.48%     0.48%  frankenredis  frankenredis          [.] core::ptr::drop_glue::<alloc::vec::Vec<alloc::vec::Vec<u8>>>
+     0.47%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85eefb24
+     0.47%     0.47%  frankenredis  frankenredis          [.] <std::time::Instant>::now
+     0.46%     0.46%  frankenredis  frankenredis          [.] <fr_store::CommandHistogramTracker>::record_canonical_with_kind
+     0.45%     0.00%  fr-bench      fr-bench              [.] <std::os::unix::net::datagram::UnixDatagram>::recv
+     0.45%     0.00%  fr-bench      libc.so.6             [.] __libc_recv
+     0.43%     0.43%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::refresh_client_memory_aggregates
+     0.43%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f25587
+     0.42%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85eefdf4
+     0.42%     0.00%  frankenredis  [unknown]             [.] 0xffffffff86023707
+     0.41%     0.41%  frankenredis  frankenredis          [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+     0.41%     0.41%  frankenredis  frankenredis          [.] fr_command::rewrite_relative_expire_for_propagation
+     0.40%     0.40%  frankenredis  frankenredis          [.] <hashbrown::map::HashMap<alloc::vec::Vec<u8>, fr_store::Entry, foldhash::quality::RandomState>>::insert
+     0.39%     0.39%  frankenredis  frankenredis          [.] <fr_protocol::RespFrame>::encode_into
+     0.39%     0.14%  fr-bench      fr-bench              [.] core::ptr::drop_glue::<fr_protocol::RespFrame>
+     0.39%     0.08%  frankenredis  [unknown]             [.] 0xffffffff85eff22b
+     0.38%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210a10
+     0.37%     0.00%  frankenredis  [unknown]             [.] 0x0000000000002a86
+     0.37%     0.37%  frankenredis  frankenredis          [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::vec::Vec<u8>>
+     0.36%     0.17%  frankenredis  frankenredis          [.] <fr_runtime::ClientSession as core::clone::Clone>::clone
+     0.36%     0.00%  frankenredis  [unknown]             [.] 0x700a0d3232240a0d
+     0.36%     0.08%  frankenredis  frankenredis          [.] <core::net::ip_addr::Ipv4Addr as core::fmt::Display>::fmt
+     0.34%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85eefd13
+     0.33%     0.33%  frankenredis  frankenredis          [.] core::str::converts::from_utf8
+     0.33%     0.33%  frankenredis  frankenredis          [.] __rustc::__rust_no_alloc_shim_is_unstable_v2
+     0.33%     0.33%  fr-bench      fr-bench              [.] core::ptr::drop_glue::<fr_protocol::RespFrame>
+     0.33%     0.33%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::parser_config
+     0.32%     0.32%  frankenredis  frankenredis          [.] <alloc::collections::btree::map::IntoIter<u64, alloc::vec::Vec<alloc::vec::Vec<u8>>> as core::ops::drop::Drop>::drop
+     0.32%     0.32%  frankenredis  frankenredis          [.] <hashbrown::raw::RawTable<(alloc::vec::Vec<u8>, std::collections::hash::set::HashSet<u64>)>>::remove_entry::<hashbrown::map::equivalent_key<alloc::vec::Vec<u8>, alloc::vec::Vec<u8>, std::collections::hash::set::HashSet<u64>>::{closure#0}>
+     0.32%     0.32%  frankenredis  frankenredis          [.] fr_command::parse_client_reply_action
+     0.32%     0.32%  frankenredis  [vdso]                [.] 0x000000000000098c
+     0.32%     0.00%  frankenredis  [vdso]                [.] 0x0000705443caf98c
+     0.32%     0.32%  frankenredis  frankenredis          [.] <fr_store::TouchGuard as core::ops::drop::Drop>::drop
+     0.32%     0.32%  frankenredis  frankenredis          [.] <alloc::collections::btree::map::IntoIter<u64, alloc::vec::Vec<alloc::vec::Vec<u8>>>>::dying_next
+     0.32%     0.00%  frankenredis  [unknown]             [.] 0xffffffff86022ffc
+     0.31%     0.31%  frankenredis  [vdso]                [.] 0x00000000000009c2
+     0.31%     0.00%  frankenredis  [vdso]                [.] 0x0000705443caf9c2
+     0.31%     0.31%  frankenredis  frankenredis          [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::vec::Vec<u8>>
+     0.30%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85eec316
+     0.30%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85f0cd7b
+     0.30%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85f0cb5e
+     0.30%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8546fe41
+     0.30%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8546fd9f
+     0.30%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86071a1f
+     0.30%     0.24%  fr-bench      fr-bench              [.] fr_bench::run_worker
+     0.28%     0.28%  fr-bench      fr-bench              [.] fr_protocol::push_usize
+     0.28%     0.00%  fr-bench      [unknown]             [.] 0000000000000000
+     0.28%     0.28%  fr-bench      fr-bench              [.] fr_protocol::parse_frame_internal
+     0.27%     0.07%  fr-bench      fr-bench              [.] fr_bench::value_for_request
+     0.27%     0.27%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::is_in_subscription_mode
+     0.27%     0.27%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::record_client_session
+     0.27%     0.00%  frankenredis  [unknown]             [.] 0xffffffff86220705
+     0.27%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85124af4
+     0.27%     0.27%  frankenredis  [unknown]             [k] 0xffffffff860258ce
+     0.25%     0.25%  fr-bench      libc.so.6             [.] _int_free_merge_chunk
+     0.25%     0.25%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::record_slowlog
+     0.24%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86027511
+     0.24%     0.24%  frankenredis  [vdso]                [.] 0x00000000000009bf
+     0.24%     0.00%  frankenredis  [vdso]                [.] 0x0000705443caf9bf
+     0.24%     0.00%  frankenredis  [unknown]             [.] 0x8b48fb894820ec83
+     0.24%     0.24%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::execute_frame_internal::{closure#4}
+     0.24%     0.24%  frankenredis  frankenredis          [.] mi_find_page
+     0.24%     0.13%  fr-bench      fr-bench              [.] <alloc::vec::Vec<fr_protocol::RespFrame> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<fr_protocol::RespFrame, core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<alloc::vec::Vec<u8>>, fr_bench::argv_frame::{closure#0}>>>::from_iter
+     0.24%     0.24%  fr-bench      fr-bench              [.] <hdrhistogram::Histogram<u64>>::record_n_inner
+     0.24%     0.24%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::strip_db_prefixes_from_frame
+     0.24%     0.24%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::reject_due_to_replica_write_quorum
+     0.24%     0.24%  frankenredis  frankenredis          [.] <alloc::string::String>::from_utf8_lossy
+     0.23%     0.00%  frankenredis  [unknown]             [.] 0xffffffff860248e1
+     0.23%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85eff157
+     0.23%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85efbc79
+     0.23%     0.23%  frankenredis  frankenredis          [.] <fr_runtime::ServerState>::record_command_histogram_outcome
+     0.23%     0.23%  frankenredis  [unknown]             [k] 0xffffffff86229e6b
+     0.23%     0.23%  frankenredis  frankenredis          [.] <fr_store::Store>::record_slowlog_with_client
+     0.23%     0.23%  frankenredis  frankenredis          [.] <hashbrown::raw::RawTable<(alloc::vec::Vec<u8>, (u64, u64))>>::remove_entry::<hashbrown::map::equivalent_key<[u8], alloc::vec::Vec<u8>, (u64, u64)>::{closure#0}>
+     0.23%     0.23%  frankenredis  frankenredis          [.] mi_malloc_aligned
+     0.22%     0.22%  frankenredis  frankenredis          [.] fr_store::canonical_string_value
+     0.22%     0.22%  fr-bench      fr-bench              [.] <u64>::_fmt_inner
+     0.22%     0.00%  fr-bench      [unknown]             [.] 0x0d4b4f2b0a0d4b4f
+     0.21%     0.21%  frankenredis  frankenredis          [.] <alloc::collections::btree::map::IntoIter<alloc::vec::Vec<u8>, alloc::collections::btree::set_val::SetValZST>>::dying_next
+     0.21%     0.21%  fr-bench      fr-bench              [.] <fr_protocol::RespFrame>::encoded_len_hint
+     0.20%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85eefaba
+     0.20%     0.00%  fr-bench      [unknown]             [.] 0xffffffff860733b6
+     0.20%     0.20%  frankenredis  frankenredis          [.] <alloc::string::String as core::clone::Clone>::clone
+     0.18%     0.18%  frankenredis  frankenredis          [.] fr_protocol::push_inline_sanitized
+     0.18%     0.18%  frankenredis  frankenredis          [.] mi_theap_malloc_zero_aligned_at_generic
+     0.17%     0.12%  fr-bench      fr-bench              [.] <core::fmt::Formatter>::pad_integral
+     0.16%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86025a7a
+     0.16%     0.00%  frankenredis  [unknown]             [.] 0xffffffff862206af
+     0.16%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85124d3c
+     0.16%     0.16%  frankenredis  frankenredis          [.] <u16 as core::fmt::Display>::fmt
+     0.16%     0.16%  frankenredis  [unknown]             [k] 0xffffffff84c00083
+     0.16%     0.00%  frankenredis  [unknown]             [.] 0x000002000068cce0
+     0.16%     0.00%  frankenredis  [unknown]             [.] 0x000002000068cb00
+     0.16%     0.00%  frankenredis  [unknown]             [.] 0x000002000068cdc0
+     0.16%     0.16%  frankenredis  frankenredis          [.] <u8 as core::fmt::Display>::fmt
+     0.16%     0.16%  frankenredis  [unknown]             [k] 0xffffffff85f0cc8d
+     0.16%     0.16%  frankenredis  frankenredis          [.] fr_command::rewrite_effect_command_for_propagation
+     0.16%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c260
+     0.16%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c1e0
+     0.16%     0.16%  frankenredis  [unknown]             [k] 0xffffffff860259b1
+     0.16%     0.16%  frankenredis  frankenredis          [.] mi_good_size
+     0.16%     0.16%  frankenredis  frankenredis          [.] <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+     0.16%     0.16%  frankenredis  [unknown]             [k] 0xffffffff8546fc25
+     0.16%     0.00%  frankenredis  [unknown]             [.] 0x0000000000746573
+     0.16%     0.00%  frankenredis  [unknown]             [.] 0x000002000068ccc0
+     0.16%     0.16%  frankenredis  [unknown]             [k] 0xffffffff8623a3c0
+     0.16%     0.00%  frankenredis  frankenredis          [.] <frankenredis::ClientConnection>::try_flush
+     0.16%     0.16%  frankenredis  [unknown]             [k] 0xffffffff84c001c4
+     0.15%     0.15%  frankenredis  [vdso]                [.] 0x0000000000000969
+     0.15%     0.00%  frankenredis  [vdso]                [.] 0x0000705443caf969
+     0.15%     0.00%  frankenredis  [unknown]             [.] 0x000002000068cc20
+     0.15%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c320
+     0.15%     0.15%  frankenredis  frankenredis          [.] <alloc::string::String as core::clone::Clone>::clone_from
+     0.15%     0.15%  frankenredis  frankenredis          [.] <alloc::vec::Vec<(alloc::vec::Vec<u8>, std::collections::hash::set::HashSet<u64>)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(alloc::vec::Vec<u8>, std::collections::hash::set::HashSet<u64>), core::iter::adapters::filter_map::FilterMap<core::slice::iter::Iter<alloc::vec::Vec<u8>>, <fr_runtime::Runtime>::queue_client_tracking_invalidations::{closure#0}>>>::from_iter
+     0.14%     0.00%  fr-bench      [unknown]             [.] 0xffffffff860248f0
+     0.14%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8546fbbd
+     0.12%     0.12%  fr-bench      libc.so.6             [.] malloc_consolidate
+     0.12%     0.12%  frankenredis  [vdso]                [.] 0x00000000000009d4
+     0.12%     0.00%  frankenredis  [vdso]                [.] 0x0000705443caf9d4
+     0.12%     0.02%  fr-bench      fr-bench              [.] <usize>::_fmt
+     0.12%     0.12%  fr-bench      fr-bench              [.] core::str::converts::from_utf8
+     0.12%     0.12%  frankenredis  frankenredis          [.] core::ptr::drop_glue::<fr_protocol::RespFrame>
+     0.12%     0.01%  fr-bench      libc.so.6             [.] _int_free_maybe_consolidate
+     0.12%     0.00%  frankenredis  [unknown]             [.] 0xffffffff84c00f0b
+     0.12%     0.00%  frankenredis  [unknown]             [.] 0xffffffff86227724
+     0.12%     0.12%  frankenredis  [unknown]             [k] 0xffffffff84fc4bac
+     0.12%     0.11%  fr-bench      fr-bench              [.] <fr_protocol::RespFrame>::to_bytes
+     0.11%     0.11%  fr-bench      fr-bench              [.] __rustc::__rust_no_alloc_shim_is_unstable_v2
+     0.11%     0.11%  frankenredis  frankenredis          [.] <hashbrown::raw::RawTable<(alloc::vec::Vec<u8>, alloc::collections::btree::map::BTreeMap<alloc::vec::Vec<u8>, fr_store::StreamGroup>)>>::remove_entry::<hashbrown::map::equivalent_key<[u8], alloc::vec::Vec<u8>, alloc::collections::btree::map::BTreeMap<alloc::vec::Vec<u8>, fr_store::StreamGroup>>::{closure#0}>
+     0.11%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85eef9db
+     0.11%     0.11%  frankenredis  frankenredis          [.] <alloc::collections::btree::map::BTreeMap<alloc::vec::Vec<u8>, alloc::collections::btree::set_val::SetValZST>>::insert
+     0.11%     0.11%  frankenredis  frankenredis          [.] fr_store::with_touch_disabled::<fr_protocol::RespFrame, <fr_runtime::Runtime>::execute_dispatch::{closure#3}>
+     0.11%     0.00%  frankenredis  [unknown]             [.] 0x0000020000478d00
+     0.11%     0.11%  frankenredis  frankenredis          [.] <std::sys::pal::unix::time::Timespec>::sub_timespec
+     0.11%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210b90
+     0.10%     0.10%  fr-bench      fr-bench              [.] fr_protocol::sanitize_inline_body
+     0.10%     0.10%  frankenredis  [unknown]             [k] 0xffffffff8602303f
+     0.10%     0.10%  fr-bench      fr-bench              [.] fr_protocol::parse_frame
+     0.10%     0.10%  fr-bench      fr-bench              [.] <fr_bench::ResponseExpectation>::validate
+     0.10%     0.10%  frankenredis  frankenredis          [.] _mi_theap_malloc_zero
+     0.10%     0.10%  frankenredis  [unknown]             [k] 0xffffffff84d04104
+     0.10%     0.10%  fr-bench      fr-bench              [.] __rustc::__rust_alloc
+     0.09%     0.09%  frankenredis  frankenredis          [.] <hashbrown::raw::RawTable<(u64, alloc::vec::Vec<fr_store::PubSubMessage>)>>::remove_entry::<hashbrown::map::equivalent_key<u64, u64, alloc::vec::Vec<fr_store::PubSubMessage>>::{closure#0}>
+     0.09%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210090
+     0.09%     0.09%  frankenredis  [unknown]             [k] 0xffffffff8513aee8
+     0.09%     0.09%  frankenredis  [unknown]             [k] 0xffffffff860733a9
+     0.09%     0.00%  fr-bench      [unknown]             [.] 0xffffffff856a20bf
+     0.09%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210848
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff851a2a9d
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068cc40
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000000000000a5b
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff84fef658
+     0.08%     0.08%  frankenredis  frankenredis          [.] fr_command::command_acl_parent_has_subcommands
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000000004c746573
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff851a296f
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff8572925a
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85eef9db
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0xffffffff856a20bf
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0xffffffff857121d9
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8572a63d
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff8603c843
+     0.08%     0.08%  fr-bench      fr-bench              [.] __rustc::__rdl_realloc
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff853ef648
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0xffffffff853f12a3
+     0.08%     0.08%  frankenredis  frankenredis          [.] _mi_bin_size
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c020
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068ca20
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c380
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c520
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c460
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c1c0
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c8e0
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068cae0
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068cf40
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c140
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff851a297b
+     0.08%     0.08%  frankenredis  frankenredis          [.] <fr_store::Store>::record_ops_sec_sample
+     0.08%     0.08%  frankenredis  [vdso]                [.] 0x000000000000096c
+     0.08%     0.00%  frankenredis  [vdso]                [.] 0x0000705443caf96c
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210ca8
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff860317e4
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0xffffffff86025c77
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x00007ffe10f4fa10
+     0.08%     0.08%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::run_active_expire_cycle
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000000000003f86
+     0.08%     0.00%  frankenredis  [unknown]             [k] 0x000000000000001f
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210b68
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000020000454440
+     0.08%     0.08%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::command_advances_replication_offset
+     0.08%     0.08%  frankenredis  frankenredis          [.] _mi_malloc_generic
+     0.08%     0.08%  frankenredis  frankenredis          [.] mi_bin
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c5c0
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c4e0
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068ca00
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210be8
+     0.08%     0.08%  frankenredis  [vdso]                [.] 0x000000000000099f
+     0.08%     0.00%  frankenredis  [vdso]                [.] 0x0000705443caf99f
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff8602609a
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c500
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c820
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068cc80
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c080
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c060
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068cfa0
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068cd00
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c680
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c6c0
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068cbe0
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x00000200004180fe
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210fc0
+     0.08%     0.08%  frankenredis  frankenredis          [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&mio::token::Token>
+     0.08%     0.08%  frankenredis  [vdso]                [.] 0x000000000000098f
+     0.08%     0.00%  frankenredis  [vdso]                [.] 0x0000705443caf98f
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000027c29c
+     0.08%     0.08%  frankenredis  frankenredis          [.] <fr_store::Store>::record_command_histogram_with_kind
+     0.08%     0.08%  frankenredis  frankenredis          [.] <fr_store::Store>::run_active_expire_cycle
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff86220541
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff8603a985
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff86022fe5
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff86025980
+     0.08%     0.08%  frankenredis  frankenredis          [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+     0.08%     0.08%  frankenredis  frankenredis          [.] <fr_runtime::ServerState>::propagate_expired_key_deletions
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x00746c7561666564
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000047bdc0
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0d5445530a0d3324
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff86003098
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8603c949
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff862204d0
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff85f0cc9b
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210d18
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff853f12f8
+     0.08%     0.08%  frankenredis  frankenredis          [.] <hashbrown::map::HashMap<mio::token::Token, (), std::hash::random::RandomState>>::insert
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff8623a4c3
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85ef6b00
+     0.08%     0.08%  frankenredis  frankenredis          [.] fr_store::decode_db_key
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c300
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c740
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210a20
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210d48
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff8603c8a1
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff84c00ef3
+     0.08%     0.00%  frankenredis  [unknown]             [k] 0x0000000000000027
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff853f11d5
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x35303333310a0d35
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff853f11fa
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff851a0565
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0xffffffff851a2b6a
+     0.08%     0.08%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::capture_aof_record
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000020000274269
+     0.08%     0.08%  frankenredis  frankenredis          [.] <alloc::collections::btree::map::BTreeMap<alloc::vec::Vec<u8>, alloc::collections::btree::set_val::SetValZST>>::remove::<alloc::vec::Vec<u8>>
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x00000200002109e8
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210db8
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068cf80
+     0.08%     0.08%  frankenredis  frankenredis          [.] core::ptr::drop_glue::<fr_store::Value>
+     0.08%     0.08%  frankenredis  frankenredis          [.] _mi_bin
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000046529d
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff853f124c
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c7a0
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff860248e5
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff8602365b
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210958
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000000000000e4f
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0a0d33240a0d332a
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff85eef8bc
+     0.08%     0.08%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::execute_argv_with_unix_time_us
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000000000002f79
+     0.08%     0.08%  frankenredis  [unknown]             [k] 0xffffffff84c0008b
+     0.08%     0.00%  frankenredis  [unknown]             [k] 0x000000000000002b
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000020000455fc0
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000027d0fe
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c8c0
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c420
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c700
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068cec0
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x000002000068c0e0
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210a90
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000020000276132
+     0.08%     0.00%  frankenredis  [unknown]             [.] 0x0000000000000f87
+     0.07%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c9799bf
+     0.07%     0.07%  fr-bench      [vdso]                [.] 0x00000000000009bf
+     0.07%     0.07%  fr-bench      fr-bench              [.] <core::fmt::Formatter>::pad
+     0.07%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86220705
+     0.07%     0.07%  frankenredis  [unknown]             [k] 0xffffffff851249d0
+     0.07%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85eefcc7
+     0.07%     0.07%  fr-bench      [unknown]             [k] 0xffffffff8605411c
+     0.07%     0.07%  frankenredis  [unknown]             [k] 0xffffffff85eef8dd
+     0.06%     0.06%  frankenredis  frankenredis          [.] fr_command::check_command_arity
+     0.06%     0.00%  fr-bench      [unknown]             [.] 0xffffffff857121d9
+     0.06%     0.06%  frankenredis  [unknown]             [k] 0xffffffff84fef63a
+     0.06%     0.06%  frankenredis  [unknown]             [k] 0xffffffff8605411c
+     0.06%     0.06%  fr-bench      fr-bench              [.] __rustc::__rdl_alloc
+     0.06%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85124af4
+     0.06%     0.06%  fr-bench      [unknown]             [k] 0xffffffff84d04104
+     0.06%     0.06%  fr-bench      fr-bench              [.] __rustc::__rdl_dealloc
+     0.06%     0.06%  fr-bench      fr-bench              [.] <core::fmt::Formatter>::pad_integral::write_prefix
+     0.05%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85ef7485
+     0.05%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85eef910
+     0.04%     0.04%  fr-bench      fr-bench              [.] <str as core::fmt::Display>::fmt
+     0.04%     0.04%  fr-bench      fr-bench              [.] <std::sys::pal::unix::time::Timespec>::sub_timespec
+     0.04%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86023707
+     0.04%     0.04%  frankenredis  frankenredis          [.] <alloc::string::String as core::fmt::Write>::write_str
+     0.04%     0.04%  fr-bench      [unknown]             [k] 0xffffffff8602585d
+     0.04%     0.04%  fr-bench      [vdso]                [.] 0x0000000000000994
+     0.04%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c979994
+     0.04%     0.04%  fr-bench      fr-bench              [.] <std::time::Instant>::now
+     0.04%     0.04%  fr-bench      libc.so.6             [.] __syscall_cancel
+     0.04%     0.04%  fr-bench      libc.so.6             [.] unlink_chunk.isra.0
+     0.04%     0.04%  fr-bench      [unknown]             [k] 0xffffffff86023595
+     0.04%     0.04%  fr-bench      [unknown]             [k] 0xffffffff854aff10
+     0.04%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85eec275
+     0.03%     0.00%  frankenredis  frankenredis          [.] <hashbrown::raw::RawTable<(alloc::vec::Vec<u8>, fr_store::Entry)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::vec::Vec<u8>, fr_store::Entry, foldhash::quality::RandomState>::{closure#0}>
+     0.03%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85ef73a0
+     0.03%     0.00%  frankenredis  [unknown]             [.] 0x0000020000498f40
+     0.03%     0.00%  fr-bench      [unknown]             [.] 0x6e697274733a666f
+     0.03%     0.00%  frankenredis  [unknown]             [.] 0xffffffff860274f8
+     0.03%     0.03%  fr-bench      [unknown]             [k] 0xffffffff85eefb00
+     0.03%     0.03%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::reject_due_to_disk_write_error
+     0.03%     0.03%  fr-bench      [unknown]             [k] 0xffffffff854afeeb
+     0.03%     0.03%  fr-bench      [unknown]             [k] 0xffffffff84c00083
+     0.03%     0.03%  fr-bench      [unknown]             [k] 0xffffffff8602365b
+     0.03%     0.03%  fr-bench      [unknown]             [k] 0xffffffff85ef7315
+     0.03%     0.03%  fr-bench      fr-bench              [.] __rustc::__rust_dealloc
+     0.03%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85ef7373
+     0.03%     0.02%  fr-bench      libc.so.6             [.] __memset_avx2_unaligned_erms
+     0.03%     0.03%  fr-bench      [unknown]             [k] 0xffffffff84f23441
+     0.03%     0.03%  fr-bench      [unknown]             [k] 0xffffffff854afef9
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0x006730000070a7fc
+     0.02%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c9799d4
+     0.02%     0.02%  fr-bench      [vdso]                [.] 0x00000000000009d4
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86022ffc
+     0.02%     0.02%  fr-bench      fr-bench              [.] <&str as core::fmt::Display>::fmt
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff8572a5a5
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff85052497
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0x008310000070a7d4
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0xffffffff851a298a
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8623a4cd
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0x005330000070a808
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0xffffffff860274f8
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff8603c86d
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff8572a621
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85ef6b00
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff85021ad9
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0xffffffff860248e1
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff85eefb05
+     0.02%     0.02%  fr-bench      [vdso]                [.] 0x000000000000098f
+     0.02%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c97998f
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0xffffffff856a2147
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85712c89
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff8572a609
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0x00000200002d34e0
+     0.02%     0.02%  fr-bench      fr-bench              [.] __rustc::__rust_realloc
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff85712175
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0x003330000070a828
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0x002330000070a838
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff850b8f65
+     0.02%     0.02%  frankenredis  [unknown]             [k] 0xffffffff84c00b90
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0x00000200002d8dc0
+     0.02%     0.02%  fr-bench      fr-bench              [.] <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85eec275
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0xffffffff856a2147
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85712c89
+     0.02%     0.02%  frankenredis  [unknown]             [k] 0xffffffff8572a621
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff85eef8dd
+     0.02%     0.02%  frankenredis  [unknown]             [k] 0xffffffff85ef6b01
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff85ef73a7
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff85ef6b01
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0xe400b310000070a7
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff8583588f
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff85ef6e04
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff86023050
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8572a63d
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0xe4004310000070a8
+     0.02%     0.00%  fr-bench      [unknown]             [.] 0xffffffff850b8ff2
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff84c00f70
+     0.02%     0.00%  frankenredis  libc.so.6             [.] epoll_ctl
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff854afeda
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0xffffffff84c00bb7
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8622811f
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0xffffffff84feb96b
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0xffffffff853a5627
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff84c000a9
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff850beb1b
+     0.02%     0.00%  fr-bench      [unknown]             [k] 0x000070a8380036c0
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0xffffffff853a53ad
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8541df1b
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8541a9e8
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0xffffffff853dda90
+     0.02%     0.02%  frankenredis  [unknown]             [k] 0xffffffff8621b2b7
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0xffffffff853a4de7
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0xffffffff853a37ea
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0xffffffff853a33d2
+     0.02%     0.00%  frankenredis  [unknown]             [.] 0xffffffff853dc6c9
+     0.02%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c979942
+     0.02%     0.02%  fr-bench      [vdso]                [.] 0x0000000000000942
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff86025845
+     0.02%     0.02%  fr-bench      [unknown]             [k] 0xffffffff8572a734
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff84f23888
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff86220524
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xe4006f10000070a7
+     0.01%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c979930
+     0.01%     0.01%  fr-bench      [vdso]                [.] 0x0000000000000930
+     0.01%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c979969
+     0.01%     0.01%  fr-bench      [vdso]                [.] 0x0000000000000969
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff8513aec9
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xe4000710000070a8
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff85ef6e5e
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0x000b10000070a850
+     0.01%     0.00%  fr-bench      [unknown]             [k] 0x000070a7fc003660
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0x004730000070a81c
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff84f240ca
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0x001f30000070a844
+     0.01%     0.01%  fr-bench      [vdso]                [.] 0x00000000000009fe
+     0.01%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c9799fe
+     0.01%     0.01%  frankenredis  [unknown]             [k] 0xffffffff85ef6ae6
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff85eef896
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xffffffff862375e3
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xffffffff851377d0
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff84d04109
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff85eef9af
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84c00f4b
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xe4008f30000070a7
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff86237565
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff85eef8bc
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff851a2a27
+     0.01%     0.01%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::execute_frame_internal::{closure#6}
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff85ef7377
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86227465
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86228a43
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86228929
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8622f947
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0x009f30000070a7c0
+     0.01%     0.01%  fr-bench      fr-bench              [.] <hdrhistogram::Histogram<u64>>::add::<&hdrhistogram::Histogram<u64>>
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0x96c000005f7be400
+     0.01%     0.00%  fr-bench      [unknown]             [k] 0x000070a850004490
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff85eefcf9
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff8622f1c3
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff8572925a
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xe4002f10000070a8
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0x006310000070a7f8
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff851a28cf
+     0.01%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c9799c2
+     0.01%     0.01%  fr-bench      [vdso]                [.] 0x00000000000009c2
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff851a2948
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff854afe66
+     0.01%     0.01%  fr-bench      [vdso]                [.] 0x000000000000096c
+     0.01%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c97996c
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff851360e9
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xfffb10000070a864
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff851a2940
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff84c00005
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff85eefa35
+     0.01%     0.00%  frankenredis  frankenredis          [.] <alloc::raw_vec::RawVec<gimli::read::unit::AttributeValue<gimli::read::endian_slice::EndianSlice<gimli::endianity::LittleEndian>, usize>>>::grow_one
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff854afe55
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0x00b710000070a7a8
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff8513aec1
+     0.01%     0.01%  fr-bench      [vdso]                [.] 0x0000000000000970
+     0.01%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c979970
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff85729263
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff850beae7
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84c00f0b
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86227724
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xe400b710000070a7
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xe4008710000070a7
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84c00bb7
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff854afee8
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8622811f
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff862204ea
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0x005730000070a80c
+     0.01%     0.00%  frankenredis  [unknown]             [.] 0x0000020000261920
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff85139e74
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff8572a617
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff86027502
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0x00af30000070a7b0
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff85eefdd0
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff856a2112
+     0.01%     0.01%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::namespace_argv_for_selected_db
+     0.01%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210bb8
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff85eefa23
+     0.01%     0.00%  frankenredis  [unknown]             [.] 0x00000000000043f0
+     0.01%     0.01%  frankenredis  [unknown]             [k] 0xffffffff84c015d7
+     0.01%     0.00%  frankenredis  [unknown]             [k] 0x0000000000000026
+     0.01%     0.00%  sleep         ld-linux-x86-64.so.2  [.] _dl_start_user
+     0.01%     0.00%  sleep         ld-linux-x86-64.so.2  [.] _dl_start
+     0.01%     0.00%  sleep         ld-linux-x86-64.so.2  [.] _dl_sysdep_start
+     0.01%     0.00%  sleep         ld-linux-x86-64.so.2  [.] dl_main
+     0.01%     0.00%  sleep         ld-linux-x86-64.so.2  [.] _dl_relocate_object
+     0.01%     0.00%  sleep         ld-linux-x86-64.so.2  [.] _dl_relocate_object_no_relro
+     0.01%     0.00%  sleep         [unknown]             [.] 0xffffffff84c00bb7
+     0.01%     0.00%  sleep         [unknown]             [.] 0xffffffff8622811f
+     0.01%     0.00%  sleep         [unknown]             [.] 0xffffffff84feb96b
+     0.01%     0.00%  sleep         [unknown]             [.] 0xffffffff853a5627
+     0.01%     0.00%  sleep         [unknown]             [.] 0xffffffff853a53ad
+     0.01%     0.00%  sleep         [unknown]             [.] 0xffffffff853a4d51
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff85eef9c0
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0x00bb30000070a79c
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84feb96b
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853a5627
+     0.01%     0.01%  sleep         [unknown]             [k] 0xffffffff853dda0b
+     0.01%     0.00%  sleep         [unknown]             [.] 0xffffffff8539f704
+     0.01%     0.00%  sleep         [unknown]             [.] 0xffffffff85394c6a
+     0.01%     0.00%  sleep         [unknown]             [.] 0xffffffff8541df1b
+     0.01%     0.00%  sleep         [unknown]             [.] 0xffffffff8541a9e8
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff860274fb
+     0.01%     0.01%  fr-bench      [unknown]             [k] 0xffffffff86023601
+     0.01%     0.00%  fr-bench      [unknown]             [.] 0x004b10000070a810
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4005f30000070a8
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853a53ad
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853a4de7
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853a37ea
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a2903
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff860259f6
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853a33d2
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8541df1b
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8541a9e8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eefc45
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a110fd5
+     0.00%     0.00%  sh            libc.so.6             [.] __libc_start_main@@GLIBC_2.34
+     0.00%     0.00%  sh            libc.so.6             [.] __libc_start_call_main
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86027496
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4006310000070a7
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853dda90
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __GI___clone3
+     0.00%     0.00%  fr-bench      libc.so.6             [.] start_thread
+     0.00%     0.00%  sleep         [unknown]             [k] 0xffffffff86229e6b
+     0.00%     0.00%  sleep         sleep                 [.] 0x00005573477f2b15
+     0.00%     0.00%  sleep         libc.so.6             [.] __libc_start_main@@GLIBC_2.34
+     0.00%     0.00%  sleep         libc.so.6             [.] __libc_start_call_main
+     0.00%     0.00%  sleep         sleep                 [.] 0x00005573478d36e5
+     0.00%     0.00%  sleep         sleep                 [.] 0x0000557347a60961
+     0.00%     0.00%  sleep         sleep                 [.] 0x0000557347a5989f
+     0.00%     0.00%  sleep         sleep                 [.] 0x0000557347a70660
+     0.00%     0.00%  sleep         libc.so.6             [.] pthread_getattr_np@@GLIBC_2.32
+     0.00%     0.00%  sleep         libc.so.6             [.] fopen@@GLIBC_2.2.5
+     0.00%     0.00%  sleep         libc.so.6             [.] _IO_file_fopen@@GLIBC_2.2.5
+     0.00%     0.00%  sleep         libc.so.6             [.] _IO_file_open
+     0.00%     0.00%  sleep         libc.so.6             [.] __open64_nocancel
+     0.00%     0.00%  sleep         [unknown]             [.] 0xffffffff84c0012b
+     0.00%     0.00%  sleep         [unknown]             [.] 0xffffffff86220551
+     0.00%     0.00%  sleep         [unknown]             [.] 0xffffffff84f25032
+     0.00%     0.00%  sleep         [unknown]             [.] 0xffffffff8547a93f
+     0.00%     0.00%  sleep         [unknown]             [.] 0xffffffff8547a3dc
+     0.00%     0.00%  sleep         [unknown]             [.] 0xffffffff8549809c
+     0.00%     0.00%  sleep         [unknown]             [.] 0xffffffff85491299
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe400a330000070a7
+     0.00%     0.00%  fr-bench      fr-bench              [.] <std::sys::thread::unix::Thread>::new::thread_start
+     0.00%     0.00%  sh            dash                  [.] 0x0000000000011403
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a110de3
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a12485e
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a11e14e
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a11de58
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a11d403
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853dc6c9
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8621b2b7
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8623758a
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x000002000045dfc0
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x000002000045df20
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x000002000045dde0
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x000002000045dce0
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x000002000045dac0
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x000002000045d9e0
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x000002000045d7c0
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x000002000045d6a0
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x000002000045d600
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x000002000045d480
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x000002000045d4e0
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x000002000045d240
+     0.00%     0.00%  frankenredis  ld-linux-x86-64.so.2  [.] _dl_start_user
+     0.00%     0.00%  frankenredis  ld-linux-x86-64.so.2  [.] _dl_start
+     0.00%     0.00%  frankenredis  ld-linux-x86-64.so.2  [.] _dl_sysdep_start
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000330000070a858
+     0.00%     0.00%  frankenredis  ld-linux-x86-64.so.2  [.] do_lookup_x
+     0.00%     0.00%  frankenredis  ld-linux-x86-64.so.2  [.] dl_main
+     0.00%     0.00%  frankenredis  ld-linux-x86-64.so.2  [.] _dl_relocate_object
+     0.00%     0.00%  frankenredis  ld-linux-x86-64.so.2  [.] _dl_relocate_object_no_relro
+     0.00%     0.00%  frankenredis  ld-linux-x86-64.so.2  [.] _dl_lookup_symbol_x
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff854afe64
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84c00f8b
+     0.00%     0.00%  fr-bench      ld-linux-x86-64.so.2  [.] _dl_start_user
+     0.00%     0.00%  fr-bench      ld-linux-x86-64.so.2  [.] _dl_start
+     0.00%     0.00%  fr-bench      ld-linux-x86-64.so.2  [.] _dl_sysdep_start
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x7be4007f30000070
+     0.00%     0.00%  fr-bench      ld-linux-x86-64.so.2  [.] _dl_relocate_object_no_relro
+     0.00%     0.00%  fr-bench      ld-linux-x86-64.so.2  [.] dl_main
+     0.00%     0.00%  fr-bench      ld-linux-x86-64.so.2  [.] _dl_relocate_object
+     0.00%     0.00%  fr-bench      ld-linux-x86-64.so.2  [.] do_lookup_x
+     0.00%     0.00%  fr-bench      ld-linux-x86-64.so.2  [.] _dl_lookup_symbol_x
+     0.00%     0.00%  fr-bench      fr-bench              [.] <fr_bench::BenchmarkClient>::connect
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c00121
+     0.00%     0.00%  fr-bench      fr-bench              [.] std::sys::pal::unix::stack_overflow::imp::make_handler
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c979931
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x0000000000000931
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86025a6b
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff851626e3
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86227644
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84fc01dc
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eef8ec
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eef895
+     0.00%     0.00%  fr-bench      fr-bench              [.] std::sys::net::connection::each_addr::<&alloc::string::String, <std::sys::net::connection::socket::TcpStream>::connect::inner, std::sys::net::connection::socket::TcpStream>
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000000000a0d4b4f
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850beb3a
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8572a61e
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff860259dc
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c0008b
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c97999f
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000000000000099f
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8623a3cb
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff860274e6
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86220541
+     0.00%     0.00%  fr-bench      libc.so.6             [.] memcpy@@GLIBC_2.14@plt
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff860733a9
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850beb52
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86071a0e
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8603c856
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __socket
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c000a7
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0x000070a7c0003820
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x5f7be4003f300000
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85ef6ac6
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff856a2137
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eec294
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff860274c3
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x7be4006f10000070
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85136dc9
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85137651
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85ef6e5d
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x000000000000015f
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x002b10000070a830
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a2959
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0x000070a84c003020
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86025954
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff851a2903
+     0.00%     0.00%  frankenredis  libc.so.6             [.] epoll_wait
+     0.00%     0.00%  frankenredis  frankenredis          [.] <mio::poll::Poll>::poll
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84feb92c
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85021b13
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f24d80
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85eee7e7
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84fc4bc8
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4005b30000070a8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85133a66
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff851623d5
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85ef6adb
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000020000445020
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x00000200004450c0
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000020000445140
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x00000200004451e0
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000020000445260
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x00000200004452e0
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000020000445380
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000020000445400
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x00000200004454a0
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000020000445520
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x00000200004455c0
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000000000000330
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __GI___sigaltstack
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x7be4005f30000070
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85139f5d
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85392d40
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85ef7394
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4003b30000070a8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8623a3b5
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x5f7be40057300000
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x00000000000009ae
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c9799ae
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853f11fa
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff860239fb
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86022e9a
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85eff157
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85efbc79
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8622743e
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8513752f
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85138fe5
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85138e4e
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86209822
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4004b10000070a8
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff862206af
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85124d3c
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8600300c
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8603c949
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x3132240a0d544553
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8622f22c
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85052485
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x5f7be4003b300000
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85eee749
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85eeae83
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0x000070a838006040
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c000ba
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8583cac6
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000000000000098c
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c97998c
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86024b1b
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c00f30
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86220517
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850b8f82
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x007330000070a7e8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8572a730
+     0.00%     0.00%  sh            ld-linux-x86-64.so.2  [.] _dl_start_user
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86025b0f
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85ef7310
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c001c4
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x00000000000009ee
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c9799ee
+     0.00%     0.00%  sh            ld-linux-x86-64.so.2  [.] _dl_start
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0x000070a840003ac0
+     0.00%     0.00%  sh            ld-linux-x86-64.so.2  [.] __minimal_malloc
+     0.00%     0.00%  sh            ld-linux-x86-64.so.2  [.] _dl_sysdep_start
+     0.00%     0.00%  sh            ld-linux-x86-64.so.2  [.] dl_main
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eefcca
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff860258ce
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8513757f
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff860249e6
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85078f68
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85ef6ae6
+     0.00%     0.00%  fr-bench      [vdso]                [.] __vdso_clock_gettime
+     0.00%     0.00%  fr-bench      libc.so.6             [.] pthread_getattr_np@@GLIBC_2.32
+     0.00%     0.00%  fr-bench      libc.so.6             [.] tcache_malloc_init
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff851a2ab6
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __GI___setsockopt
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c00080
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506f917
+     0.00%     0.00%  fr-bench      fr-bench              [.] std::thread::lifecycle::spawn_unchecked::<fr_bench::run::{closure#0}, core::result::Result<fr_bench::WorkerResult, alloc::string::String>>
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __GI___gettid
+     0.00%     0.00%  fr-bench      libc.so.6             [.] arena_get2.part.0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86054115
+     0.00%     0.00%  fr-bench      libc.so.6             [.] pthread_getaffinity_np@GLIBC_2.3.4
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86025d83
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8623a345
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85712181
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84f23461
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86027495
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff862204d0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff861f65eb
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000000000000001
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __mmap
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8513aebf
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff856a2149
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eefc98
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7fc004010
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c000b0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85124a28
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8623a357
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x005f7be400ab3000
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x7be4000330000070
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff851a2a23
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a110da1
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f25500
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f81c56
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853aa864
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85124aca
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86073375
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x7be400bf30000070
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a2909
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000000000000097d
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c97997d
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85458fa1
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853a33ec
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eec255
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe3ffff10000070a8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8513aeb6
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86025d74
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff854afeee
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85124a1f
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86073235
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853dc432
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853da487
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0x000070a7f00034a0
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853d9102
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853d8e06
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85021d95
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8536b5d4
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853ddbdb
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff857121c2
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4002b10000070a8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85133c68
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4003f30000070a8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff856a2163
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4001b10000070a8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8623a4c3
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f24789
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853f03e3
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff850b61b3
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff861e5c55
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c015d7
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4006b30000070a7
+     0.00%     0.00%  fr-bench      fr-bench              [.] <std::sys::thread::unix::Thread>::new
+     0.00%     0.00%  fr-bench      libc.so.6             [.] pthread_create@GLIBC_2.2.5
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84d0410b
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff860719d5
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210780
+     0.00%     0.00%  fr-bench      fr-bench              [.] <core::net::parser::Parser>::read_number::<u16>::{closure#0}
+     0.00%     0.00%  fr-bench      fr-bench              [.] <str as std::net::socket_addr::ToSocketAddrs>::to_socket_addrs
+     0.00%     0.00%  fr-bench      fr-bench              [.] <core::net::socket_addr::SocketAddr>::parse_ascii
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff856a20d7
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86239b8e
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850cd89b
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff850beada
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8572a606
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe400bb30000070a7
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x00b310000070a7a4
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x7be4006310000070
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x0000000000000001
+     0.00%     0.00%  fr-bench      fr-bench              [.] <std::thread::lifecycle::JoinInner<core::result::Result<fr_bench::WorkerResult, alloc::string::String>>>::join
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x00005f7be3ffff70
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x5f7be40043100000
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8623a3b0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8572a5f0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff856a2092
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff860236c7
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85ef6e27
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85ef6dee
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff853a4f65
+     0.00%     0.00%  frankenredis  frankenredis          [.] mi_page_free_list_extend
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85133c77
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x7be4009b30000070
+     0.00%     0.00%  frankenredis  frankenredis          [.] <&core::net::ip_addr::Ipv4Addr as core::fmt::Display>::fmt
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84f23a11
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851377b9
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8622f1cf
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff860249e0
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4007730000070a7
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff862287c0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853a5106
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a11e0f9
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a117ce8
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x004310000070a818
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8513756a
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x00a730000070a7b8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86228770
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86227613
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff854afe50
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff861f6570
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x0000000000000956
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c979956
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4006730000070a7
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c000c2
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84fd0b99
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8572a640
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eec256
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eefd0a
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0x0000001000000000
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x7be400a730000070
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x7be400b710000070
+     0.00%     0.00%  frankenredis  frankenredis          [.] frankenredis::main
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4008310000070a7
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eef902
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85ef7316
+     0.00%     0.00%  fr-bench      libc.so.6             [.] alloc_new_heap
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f2523f
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85ef000f
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85eeff8b
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85ef1645
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c000c0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0x0000000000000004
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0x0000000000000020
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x00000200002109b8
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4002330000070a8
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x7be4004310000070
+     0.00%     0.00%  frankenredis  frankenredis          [.] fr_eventloop::plan_active_expire_cycle
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x005b30000070a800
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe400ab30000070a7
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x00ab30000070a7ac
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85196606
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x7be4009f30000070
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff856a1d8e
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85078f33
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8506dc51
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff857142f6
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff856a1da7
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8571471a
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4004730000070a8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86234665
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8536aa37
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851965fa
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8536aa79
+     0.00%     0.00%  frankenredis  [vdso]                [.] 0x0000000000000930
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff84c0012b
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff861f0f30
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853ab7cb
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853aae03
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853aac3c
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f82127
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853aab6b
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853ce57b
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86203334
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8519f426
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851622bc
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853ec7f8
+     0.00%     0.00%  sh            libc.so.6             [.] __syscall_cancel
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff862206af
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff85124d3c
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff8519f409
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a118720
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a114882
+     0.00%     0.00%  sh            libc.so.6             [.] __close
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff851a2ab6
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __mprotect
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f247b9
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853b18af
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853b15fe
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853b1079
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853ccaf7
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8519f5ad
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eee742
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4003730000070a8
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff853a4d51
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4001730000070a8
+     0.00%     0.00%  frankenredis  frankenredis          [.] core::ptr::drop_glue::<core::option::Option<frankenredis::ReplicaPrimaryConnection>>
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86220569
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853ca9fc
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853cae74
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8539f785
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8539f2f2
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff8532efe5
+     0.00%     0.00%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::replica_sync_target
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8532f30a
+     0.00%     0.00%  fr-bench      fr-bench              [.] core::ptr::drop_glue::<[alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send>]>
+     0.00%     0.00%  fr-bench      fr-bench              [.] std::sys::backtrace::__rust_begin_short_backtrace::<std::thread::lifecycle::spawn_unchecked<fr_bench::run::{closure#0}, core::result::Result<fr_bench::WorkerResult, alloc::string::String>>::{closure#1}::{closure#0}::{closure#0}, ()>
+     0.00%     0.00%  fr-bench      fr-bench              [.] <std::thread::spawnhook::ChildSpawnHooks>::run
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8519f553
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a120059
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a1166fc
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff851a2b34
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4007b30000070a7
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8622f2bd
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8506fd7b
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8502d16d
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f24450
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c0016e
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff851a220b
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85196611
+     0.00%     0.00%  sh            dash                  [.] 0x0000000000009756
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a115965
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a115756
+     0.00%     0.00%  sleep         [unknown]             [k] 0xffffffff86216f31
+     0.00%     0.00%  sleep         [unknown]             [.] 0xffffffff8539f785
+     0.00%     0.00%  sleep         [unknown]             [.] 0xffffffff8539f2f2
+     0.00%     0.00%  sleep         [unknown]             [.] 0xffffffff8532f30a
+     0.00%     0.00%  sleep         [unknown]             [.] 0xffffffff8532ef99
+     0.00%     0.00%  sleep         [unknown]             [.] 0xffffffff86218348
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85392d65
+     0.00%     0.00%  sh            libc.so.6             [.] cfree@GLIBC_2.2.5
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a11e111
+     0.00%     0.00%  frankenredis  ld-linux-x86-64.so.2  [.] __GI___tunables_init
+     0.00%     0.00%  frankenredis  libc.so.6             [.] __memset_avx2_unaligned_erms
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86217dc2
+     0.00%     0.00%  fr-bench      ld-linux-x86-64.so.2  [.] __GI___tunables_init
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853a4d51
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8539f785
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8539f2f2
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8532f30a
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8532ef99
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86218348
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85139003
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff851524f6
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85137dd2
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff84c00bb7
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff8622811f
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff84feb96b
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff853a5627
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff853a53ad
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8506cb18
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff853a4d51
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85139ee7
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8508a3b2
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8508a32d
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850c2f99
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8507e5d4
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8507e4cb
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff8539f785
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff86217db8
+     0.00%     0.00%  sh            ld-linux-x86-64.so.2  [.] _dl_setup_hash
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff8539f2f2
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff8532f30a
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff8532ef99
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff86218348
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850b6a68
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8506cab9
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85078fb8
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85078cd8
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85071679
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff851a2b6a
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff850a9e61
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f24bcd
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84f81c20
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8506ca4a
+     0.00%     0.00%  frankenredis  frankenredis          [.] core::ptr::drop_glue::<std::io::error::Error>
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8508a9ce
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8506f8f8
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff850c03ab
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8536a9b5
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x00000000000009bc
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c9799bc
+     0.00%     0.00%  frankenredis  frankenredis          [.] <fr_runtime::ClientSession>::refresh_authentication_for_server
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff861f67ea
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210b88
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x00000000000002d5
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853dd93e
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850a97e2
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x0000000000000988
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c979988
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4009330000070a7
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8513f6f8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8584169f
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8502ed2c
+     0.00%     0.00%  frankenredis  frankenredis          [.] __rustc::__rust_alloc
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850a97c5
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8623a4ce
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85078fad
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c015a5
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x5f7be40053300000
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8506ca13
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85090754
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff8548f9b9
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff851a2ab6
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8519f3fe
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4001330000070a8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850a731b
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8508a42f
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8508129a
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x0000000000000960
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c979960
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8623a445
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8502ed80
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84f87bc3
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff861f65a4
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff862252ea
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850a9832
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xed835946eb28c03e
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0x0000000000000034
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0x000070a7ef3f8730
+     0.00%     0.00%  fr-bench      fr-bench              [.] std::sys::thread_local::guard::key::enable
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a0565
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff86025845
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853ca945
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85089947
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff85eefd16
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85139eb3
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff86220551
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850cd871
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8508a411
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8508aa0d
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff8592b653
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a1158e6
+     0.00%     0.00%  sh            libc.so.6             [.] __GI___execve
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff84f25398
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff8548be8f
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff8549809c
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85139e65
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506f8ed
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a1158bb
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85078f3b
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4000f10000070a8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85062542
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c00f33
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85138e83
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff851a0563
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8519f782
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a848004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4008b30000070a7
+     0.00%     0.00%  frankenredis  frankenredis          [.] <core::iter::adapters::copied::Copied<core::iter::adapters::filter::Filter<std::collections::hash::set::Iter<mio::token::Token>, frankenredis::main::{closure#0}>> as core::iter::traits::iterator::Iterator>::next
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506f970
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506f910
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850906eb
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85152489
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff85712c31
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a28c5
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84f88cf7
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x00000000000009fc
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c9799fc
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a11870a
+     0.00%     0.00%  sh            libc.so.6             [.] __libc_fork
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff85835840
+     0.00%     0.00%  sh            libc.so.6             [.] __getrandom_fork_subprocess
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506cabc
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8510f1d0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506257d
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff853a4df4
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff85344756
+     0.00%     0.00%  fr-bench      fr-bench              [.] fr_bench::main
+     0.00%     0.00%  frankenredis  frankenredis          [.] <fr_store::TouchGuard>::new
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __getpagesize
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8513f68a
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853ab683
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8508a3aa
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8519f3fe
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a0548
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853ec7f1
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a2273
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a2b2c
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8519f58b
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506ca05
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a04c5
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a0543
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85062535
+     0.00%     0.00%  frankenredis  frankenredis          [.] <std::time::SystemTime>::now
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a123f2a
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a115689
+     0.00%     0.00%  sh            libc.so.6             [.] malloc
+     0.00%     0.00%  sleep         [unknown]             [k] 0xffffffff84c00b90
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff85eefcb7
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a2b51
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff853dc387
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8539f704
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85394c6a
+     0.00%     0.00%  fr-bench      libc.so.6             [.] create_thread
+     0.00%     0.00%  fr-bench      fr-bench              [.] <std::thread::thread::Thread>::new
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853ef292
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f2553c
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85017006
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85016f97
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85016836
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85015116
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853f12a3
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8513f660
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8519f574
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a123ec0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85089950
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff8622f1cf
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff84c00f4b
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff86227465
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff86228a43
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff86228929
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff8622f947
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853dda26
+     0.00%     0.00%  sh            dash                  [.] 0x0000000000014088
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a120088
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853d908a
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff853dd981
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff8539f704
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff85394c6a
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff8541df1b
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff8541a9e8
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84c00fab
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86227564
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84fc010c
+     0.00%     0.00%  fr-bench      libc.so.6             [.] _setjmp
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f88cf0
+     0.00%     0.00%  fr-bench      libc.so.6             [.] name_stack_maps
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff854afe84
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85712c31
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85139ef5
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850c03b2
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a2b24
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff854afe64
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff854afe66
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85162321
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff8623a3cb
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff862252e9
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c00ef3
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8513f672
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8513f665
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a824004240
+     0.00%     0.00%  sh            dash                  [.] 0x0000000000017eab
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a120061
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a1136cf
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a112cc9
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a123eab
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506dc61
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8622f275
+     0.00%     0.00%  fr-bench      fr-bench              [.] std::thread::spawnhook::run_spawn_hooks
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __set_vma_name
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86239b85
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8623ba66
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff854afe81
+     0.00%     0.00%  frankenredis  frankenredis          [.] fr_command::set_relative_expire_deadline_ms
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __GI___snprintf
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86225246
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86227401
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __vsnprintf_internal
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851622f3
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8603a9ca
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8603c89a
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850b6a55
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853d8dd8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8583cacf
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x7be400bb30000070
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84ff0c15
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506f8db
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85138e29
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8622f1c8
+     0.00%     0.00%  fr-bench      libc.so.6             [.] sysmalloc_mmap.isra.0
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff84feb92c
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85392d40
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x00000000000009f8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85078efc
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85162382
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853d8dcc
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8622f28c
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c9799f8
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4005730000070a8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84ff0c51
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85124af8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85138885
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85138e09
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8513f6c9
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eefce2
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff861f662b
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe400bf30000070a7
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a112a31
+     0.00%     0.00%  sh            libc.so.6             [.] __GI___wait4
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853a4e41
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86209929
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4000b10000070a8
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x00005f7be4001390
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506caa8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c00f73
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85138f1d
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a294f
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a2985
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff86025ac9
+     0.00%     0.00%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::clear_ready_keys
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff85020131
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x7be4004b10000070
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff84f2486d
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __sigjmp_save
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff86025acc
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff85eefcf9
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x7be4007730000070
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x00000200004152f8
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f24174
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x00000000000009f9
+     0.00%     0.00%  fr-bench      libc.so.6             [.] get_free_list
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c00ef0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8583cab3
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a2ac8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85326a71
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff86232e91
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __printf_buffer
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c9799f9
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff84f2515e
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85500e5c
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85500778
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86220578
+     0.00%     0.00%  fr-bench      fr-bench              [.] <alloc::string::String as core::clone::Clone>::clone
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8519f409
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff8532f276
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff854a664c
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8622056a
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff862251d2
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __sigsetjmp
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85124d40
+     0.00%     0.00%  frankenredis  [vdso]                [.] 0x0000000000000931
+     0.00%     0.00%  frankenredis  [vdso]                [.] 0x0000705443caf931
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a112b34
+     0.00%     0.00%  sh            dash                  [.] 0x0000000000017ec0
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff84c00083
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff84c00b90
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84feb7e4
+     0.00%     0.00%  frankenredis  frankenredis          [.] <hashbrown::map::HashMap<mio::token::Token, (), std::hash::random::RandomState>>::remove::<mio::token::Token>
+     0.00%     0.00%  fr-bench      libc.so.6             [.] _itoa_word
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff861f65f6
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8622f233
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85152482
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86220691
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c00b90
+     0.00%     0.00%  sh            libc.so.6             [.] __sigsetmask
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff862280ca
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8622f222
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7ac004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a818004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a8380044d0
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a840004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a850004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x008b30000070a7cc
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x00000000000009aa
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __strchrnul_avx2
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84f23ce1
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85138fbf
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff856a212e
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eec2a3
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff861f6611
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c979937
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c9799aa
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84c00e67
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f7a4d0
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85124156
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85326b38
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86224231
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7c4004240
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a84c004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a854004010
+     0.00%     0.00%  sh            libc.so.6             [.] _Fork
+     0.00%     0.00%  frankenredis  frankenredis          [.] <std::sync::once_lock::OnceLock<std::collections::hash::map::HashMap<alloc::vec::Vec<u8>, usize, foldhash::quality::RandomState>>>::initialize::<<std::sync::once_lock::OnceLock<std::collections::hash::map::HashMap<alloc::vec::Vec<u8>, usize, foldhash::quality::RandomState>>>::get_or_init<fr_command::command_table_index::{closure#0}>::{closure#0}, !>
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a1166e3
+     0.00%     0.00%  sh            libc.so.6             [.] __GI___sigprocmask
+     0.00%     0.00%  sh            libc.so.6             [.] pthread_sigmask@GLIBC_2.2.5
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x0000000000000937
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __printf_buffer_write
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506dc42
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850cd883
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85104b20
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8510b30c
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8583cab0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85f1aca5
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86025946
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86209833
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8620a0eb
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86223c8e
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8622814a
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff862287e0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff862287f7
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8623b8aa
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff860274e6
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff854afe8d
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff85eefdd5
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff861f67ea
+     0.00%     0.00%  sh            dash                  [.] 0x000000000000a684
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __GI___clone_internal
+     0.00%     0.00%  frankenredis  ld-linux-x86-64.so.2  [.] _start
+     0.00%     0.00%  fr-bench      libc.so.6             [.] pthread_attr_setaffinity_np@@GLIBC_2.32
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f2335d
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff850ee3e3
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff850e8036
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff850e7e0f
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff86220589
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7a0004000
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7a4004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7d4004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7d8004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7f0004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7f4004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a800004240
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a804004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a808004000
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a830004000
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a85c004000
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff84c00f4b
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff86227465
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff86228a43
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff86228929
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8622f947
+     0.00%     0.00%  sh            ld-linux-x86-64.so.2  [.] _start
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a116684
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x00000000000009f2
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x00000000000009fb
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __GI___nptl_deallocate_stack
+     0.00%     0.00%  fr-bench      fr-bench              [.] <alloc::sync::Arc<std::thread::thread::Inner, std::alloc::System>>::drop_slow
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __ctype_init
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __libc_calloc
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __printf_buffer_done
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __strchrnul_ifunc@plt
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __syscall_cancel_arch
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __syscall_cancel_arch_start
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c00000
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c000c4
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c000e2
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c00b93
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84f237e9
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84f23966
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84f87bc9
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84f88ce8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84f8c36c
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84f8c39a
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84f9ce95
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84fd0b92
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84feb779
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8513aeb5
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84feb808
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506ca51
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506db9b
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506dbc0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506dc39
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506f8cd
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8506fd73
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8507e3ec
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850898f7
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8508a39c
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8508a8d5
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850beadf
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850cd87c
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850cd89d
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff850ed12e
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85104b43
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8510b2d5
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8510b399
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8510b48f
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851240bb
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85124146
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851249d0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85124a16
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85124c18
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85124d44
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85138f82
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85139e7a
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8513cef6
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8513cf1c
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8513f683
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8513f6b1
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85196610
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853aa825
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8519e3f5
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8519f42d
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8519f4a8
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8519f7ca
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a04d1
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a04fa
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a056a
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a28e1
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a2a34
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a2aba
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff851a2b38
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85326528
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853267f2
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853269af
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85326a58
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85392d17
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85392d4f
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85392d57
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85392dd3
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85393d6b
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8569fbf3
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85394433
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853a3440
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853a4e7c
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853a5065
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853a56b4
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff853d71d0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff854afeb2
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff854afec0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85712c8a
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85835840
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eec277
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eec2fb
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eefc78
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eefc89
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eefcb4
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eefcb7
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eefdd5
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff85eefdd6
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86025d62
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff860274d0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff861e5c31
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff861f6511
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff861f6564
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff861f657d
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff861f65e1
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff861f66c4
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff861f66e0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff861f6811
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86209691
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86209871
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8620d9e0
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8620da01
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8621f945
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86220689
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86220708
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff862251d6
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86227569
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8622768a
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff862280d4
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff862287f5
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8622f151
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff86239c48
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8623a34c
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8623a4b5
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff8623a6aa
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff8541af2a
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff8539de30
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff8572a609
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff860259f6
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff86025ac4
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff8623a3dd
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff860274d0
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff85062542
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff856a2116
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff86071a2d
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff85104b41
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff86028bc0
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff84c001c4
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff85eec2c1
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff8620a0eb
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff8622f1c3
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff84d0410b
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff853a55f2
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff8583cac6
+     0.00%     0.00%  frankenredis  [unknown]             [k] 0xffffffff84c00080
+     0.00%     0.00%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::take_script_propagation_commands_for_capture
+     0.00%     0.00%  frankenredis  frankenredis          [.] <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<std::collections::hash::map::HashMap<alloc::vec::Vec<u8>, usize, foldhash::quality::RandomState>>>::initialize<<std::sync::once_lock::OnceLock<std::collections::hash::map::HashMap<alloc::vec::Vec<u8>, usize, foldhash::quality::RandomState>>>::get_or_init<fr_command::command_table_index::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+     0.00%     0.00%  frankenredis  frankenredis          [.] foldhash::seed::gen_per_hasher_seed
+     0.00%     0.00%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::enforce_maxmemory_before_dispatch
+     0.00%     0.00%  sh            dash                  [.] 0x0000000000006b34
+     0.00%     0.00%  sh            dash                  [.] 0x0000000000008688
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff85036b95
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff8513aec9
+     0.00%     0.00%  sh            dash                  [.] 0x0000000000014808
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff8539f6fd
+     0.00%     0.00%  sh            dash                  [.] 0x000000000001405c
+     0.00%     0.00%  sh            libc.so.6             [.] __vfork
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff8519f7ca
+     0.00%     0.00%  sh            libc.so.6             [.] _int_malloc
+     0.00%     0.00%  sh            [unknown]             [k] 0xffffffff86220708
+     0.00%     0.00%  sleep         [unknown]             [k] 0xffffffff853a55d2
+     0.00%     0.00%  sleep         [unknown]             [k] 0xffffffff861f6511
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c9799f2
+     0.00%     0.00%  fr-bench      [vdso]                [.] 0x000070a86c9799fb
+     0.00%     0.00%  fr-bench      fr-bench              [.] <std::sys::thread::unix::Thread>::join
+     0.00%     0.00%  fr-bench      fr-bench              [.] std::sys::pal::unix::stack_overflow::thread_info::set_current_info
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0xffffffff84c000b7
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __pthread_attr_extension
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __libc_calloc2
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __madvise
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __munmap
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff84f255ff
+     0.00%     0.00%  fr-bench      libc.so.6             [.] __pthread_clockjoin_ex
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xe4005330000070a8
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8506dbad
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85138ff5
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853267c9
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853f969b
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853f95d6
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853f8d09
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853f89ac
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853ac26c
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff853b1583
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff85eeff44
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8622740f
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0xffffffff8622f26b
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0x0000000000100000
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a79c004000
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7b0004240
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7b8004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7bc004450
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7c0004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7cc004010
+     0.00%     0.00%  fr-bench      [unknown]             [k] 0x000070a7d0003c80
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7d0004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7dc003b70
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7e0004000
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7e4004240
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7e8004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a7f8004450
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a808004440
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a80c003b70
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a814004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a82c004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a834004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a83c003550
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a844004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a84c0043c0
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a858004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a860004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x000070a864004010
+     0.00%     0.00%  fr-bench      [unknown]             [.] 0x7be4003b30000070
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000020000681ca0
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000020000681940
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000020000681820
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x00000200006815e0
+     0.00%     0.00%  frankenredis  libc.so.6             [.] __GI___setsockopt
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x00000200006811e0
+     0.00%     0.00%  frankenredis  frankenredis          [.] <hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff84f2523f
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff84c00f8b
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff84fc4bc8
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85ef000f
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000020000681180
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85139f5d
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85eeff8b
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff86227644
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8622f2bd
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff84fc01dc
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8506fd7b
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85138fe5
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85eea991
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff8539f396
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff8506ca4a
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85138e4e
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff851626e3
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0xffffffff85ef165a
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000000000000200
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x00000200002107b8
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210818
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210b38
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210bf0
+     0.00%     0.00%  frankenredis  [unknown]             [.] 0x0000020000210e18
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a1166dc
+     0.00%     0.00%  sleep         [unknown]             [.] 0xffffffff84feb92c
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a114688
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a114ad5
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a11669b
+     0.00%     0.00%  sh            libc.so.6             [.] __restore_rt
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff86220705
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff85124af4
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff84f24ab0
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff851a298a
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a12005c
+     0.00%     0.00%  sh            dash                  [.] 0x000065286a120808
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff851a2b6a
+     0.00%     0.00%  sh            libc.so.6             [.] __libc_malloc2
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff84fedebd
+     0.00%     0.00%  sh            [unknown]             [.] 0xffffffff851a0563
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

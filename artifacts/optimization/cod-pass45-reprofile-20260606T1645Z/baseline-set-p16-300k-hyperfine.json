@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "PORT=6466; LOG=/data/projects/frankenredis/artifacts/optimization/cod-pass45-reprofile-20260606T1645Z/baseline-hyperfine-server-$PORT-$$.log; /data/projects/frankenredis/target-cod-pass43-reprofile/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true' EXIT; sleep 0.25; /data/projects/frankenredis/target-cod-pass43-reprofile/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass45base >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.10675248642,
+      "stddev": 0.0814984609675006,
+      "median": 1.09763034972,
+      "user": 0.8786868400000001,
+      "system": 0.8579072,
+      "min": 1.0197524977199999,
+      "max": 1.29638398372,
+      "times": [
+        1.0197524977199999,
+        1.0454144267199998,
+        1.29638398372,
+        1.17881364172,
+        1.13119117572,
+        1.09504139072,
+        1.04679772672,
+        1.10089620972,
+        1.1002193087199998,
+        1.05301450272
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

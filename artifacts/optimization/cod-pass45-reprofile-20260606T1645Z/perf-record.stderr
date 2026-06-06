@@ -1,0 +1,2 @@
+[ perf record: Woken up 1 times to write data ]
+[ perf record: Captured and wrote 1.464 MB /data/projects/frankenredis/artifacts/optimization/cod-pass45-reprofile-20260606T1645Z/profile-set-p16-1m.perf.data (19042 samples) ]
