@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "PORT=6431; DIR=artifacts/optimization/cod-pass41-set-borrowed-keys-20260606T1615Z; LOG=$DIR/baseline-server-$PORT-$$.log; target-cod-pass41-keys-base/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.2; target-cod-pass41-keys-base/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass41base >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.04484371824,
+      "stddev": 0.15837809427775887,
+      "median": 0.9507957981400001,
+      "user": 0.8476625200000001,
+      "system": 0.8311560800000001,
+      "min": 0.9205988781400001,
+      "max": 1.3576653161399999,
+      "times": [
+        0.9618207951400001,
+        0.9282218541400001,
+        0.9256987041400001,
+        0.9397708011400001,
+        1.11570000414,
+        1.3576653161399999,
+        1.24664388414,
+        1.12687326814,
+        0.9254436771400001,
+        0.9205988781400001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

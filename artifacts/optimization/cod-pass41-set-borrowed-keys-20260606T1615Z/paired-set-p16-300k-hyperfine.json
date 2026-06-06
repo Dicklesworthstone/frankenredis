@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "PORT=6434; DIR=artifacts/optimization/cod-pass41-set-borrowed-keys-20260606T1615Z; LOG=$DIR/paired-baseline-server-$PORT-$$.log; target-cod-pass41-keys-base/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.2; target-cod-pass41-keys-base/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass41basepair >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.20478232514,
+      "stddev": 0.134911888209413,
+      "median": 1.1980845703399998,
+      "user": 0.9158389,
+      "system": 0.8661727399999999,
+      "min": 1.00182195434,
+      "max": 1.47853165134,
+      "times": [
+        1.31495985834,
+        1.20196588834,
+        1.22451944934,
+        1.10543366034,
+        1.0666878363399999,
+        1.00182195434,
+        1.19420325234,
+        1.27901210134,
+        1.18068759934,
+        1.47853165134
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "PORT=6435; DIR=artifacts/optimization/cod-pass41-set-borrowed-keys-20260606T1615Z; LOG=$DIR/paired-candidate-server-$PORT-$$.log; /data/projects/.scratch/frankenredis-pass41-cod-borrowed-keys-1618/target-cod-pass41-keys-candidate/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.2; /data/projects/.scratch/frankenredis-pass41-cod-borrowed-keys-1618/target-cod-pass41-keys-candidate/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass41candpair >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.12453904274,
+      "stddev": 0.15150714142775137,
+      "median": 1.0721731938399999,
+      "user": 0.8829024999999998,
+      "system": 0.8642073399999998,
+      "min": 0.9635838673400001,
+      "max": 1.33953323134,
+      "times": [
+        1.26807312834,
+        1.33953323134,
+        1.22683521334,
+        1.3315405703399998,
+        1.08499727634,
+        1.05934911134,
+        0.9728600993400001,
+        0.9635838673400001,
+        1.0127171283399998,
+        0.98590080134
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
