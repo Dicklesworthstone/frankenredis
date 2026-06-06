@@ -2242,6 +2242,21 @@ fn command_is_replication_only(argv: &[Vec<u8>]) -> bool {
     })
 }
 
+/// Single-key PFCOUNT is a "may-replicate" read: when the cached HLL
+/// cardinality is invalid it recomputes the estimate and rewrites the cache
+/// into the HLL header (HLL_VALID_CACHE), bumping `dirty`. Upstream
+/// pfcountCommand then propagates the PFCOUNT verbatim under the default flags
+/// (PROPAGATE_AOF | PROPAGATE_REPL) so replicas and the AOF recompute the same
+/// cache and the HLL string stays byte-identical. It is NOT a write command —
+/// it is never denyoom — so it must flow through the replication/AOF capture
+/// gate WITHOUT being treated as a write by the maxmemory/OOM gate (which keys
+/// on `command_advances_replication_offset`). The dispatch dirty-gate ensures
+/// capture happens only on the turn it actually recomputed: a cache hit and
+/// multi-key PFCOUNT never dirty, so they never propagate, matching upstream.
+fn command_is_may_replicate_read(argv: &[Vec<u8>]) -> bool {
+    argv.first().is_some_and(|cmd| eq_ascii_token(cmd, b"PFCOUNT"))
+}
+
 /// Mirror upstream networking.c::addReplySubcommandSyntaxError for
 /// ACL subcommands whose handlers fall through (commands.def arity
 /// is variadic: -2). Uses the user-typed subcommand casing and an
@@ -3149,7 +3164,14 @@ impl ServerState {
     }
 
     fn capture_aof_record(&mut self, argv: &[Vec<u8>]) {
-        if !Runtime::command_advances_replication_offset(argv) {
+        // PFCOUNT is not a write command but, when it recomputes the HLL cache,
+        // upstream propagates it verbatim (PROPAGATE_AOF | PROPAGATE_REPL). The
+        // only caller that reaches here with PFCOUNT is the dispatch dirty-gate,
+        // which fires solely on the turn the cache was actually recomputed, so
+        // letting may-replicate reads past this write-only gate is safe.
+        if !Runtime::command_advances_replication_offset(argv)
+            && !command_is_may_replicate_read(argv)
+        {
             return;
         }
         // (frankenredis-rl0qz) Vendored Redis 7.2.4
@@ -7517,7 +7539,8 @@ impl Runtime {
         let is_select = argv
             .first()
             .is_some_and(|cmd| eq_ascii_token(cmd, b"SELECT"));
-        if Runtime::command_advances_replication_offset(argv)
+        if (Runtime::command_advances_replication_offset(argv)
+            || command_is_may_replicate_read(argv))
             && self.server.aof_selected_db != self.session.selected_db
         {
             if !is_select {
@@ -22747,6 +22770,58 @@ mod tests {
         assert!(
             crate::eq_ascii_token(&recs.last().unwrap().argv[0], b"PUBLISH"),
             "the captured replication record should be the PUBLISH itself"
+        );
+    }
+
+    // (frankenredis-8luan) Single-key PFCOUNT is a may-replicate read: when it
+    // recomputes the invalid HLL cardinality cache it bumps `dirty` and upstream
+    // propagates the PFCOUNT verbatim (AOF + REPL) so replicas/AOF rebuild the
+    // same cache and the HLL string stays byte-identical. A cache hit and
+    // multi-key PFCOUNT do not dirty, so they must not propagate.
+    #[test]
+    fn pfcount_cache_recompute_propagates_but_cache_hit_does_not() {
+        assert!(crate::command_is_may_replicate_read(&[b"PFCOUNT".to_vec()]));
+        assert!(crate::command_is_may_replicate_read(&[b"pfcount".to_vec()]));
+        assert!(!crate::command_is_may_replicate_read(&[b"SET".to_vec()]));
+        assert!(!crate::command_is_may_replicate_read(&[b"GET".to_vec()]));
+        // PFCOUNT must NOT be treated as a write by the offset/maxmemory gate.
+        assert!(!Runtime::command_advances_replication_offset(&[
+            b"PFCOUNT".to_vec()
+        ]));
+
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(11);
+        rt.execute_frame(command(&[b"PFADD", b"hll", b"a", b"b", b"c"]), 0);
+
+        // First PFCOUNT recomputes the cache invalidated by PFADD: it dirties
+        // and therefore propagates verbatim.
+        let pre = rt.replication_primary_offset().0;
+        let recs_before = rt.aof_records().len();
+        rt.execute_frame(command(&[b"PFCOUNT", b"hll"]), 1);
+        assert!(
+            rt.replication_primary_offset().0 > pre,
+            "PFCOUNT that recomputes the HLL cache must advance the offset"
+        );
+        let recs = rt.aof_records();
+        assert_eq!(recs.len(), recs_before + 1, "exactly one PFCOUNT record");
+        assert!(
+            crate::eq_ascii_token(&recs.last().unwrap().argv[0], b"PFCOUNT"),
+            "the captured record should be the PFCOUNT itself"
+        );
+
+        // Second PFCOUNT hits the now-valid cache: no dirty, no propagation.
+        let pre2 = rt.replication_primary_offset().0;
+        let recs2 = rt.aof_records().len();
+        rt.execute_frame(command(&[b"PFCOUNT", b"hll"]), 2);
+        assert_eq!(
+            rt.replication_primary_offset().0,
+            pre2,
+            "a PFCOUNT cache hit must not advance the offset"
+        );
+        assert_eq!(
+            rt.aof_records().len(),
+            recs2,
+            "a PFCOUNT cache hit must not capture a record"
         );
     }
 
