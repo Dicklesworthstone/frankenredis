@@ -2556,6 +2556,14 @@ pub struct ServerState {
     pub masterauth: Option<Vec<u8>>,
     /// Whether to serve stale data when the link to the primary is down (CONFIG SET replica-serve-stale-data). Default yes.
     pub replica_serve_stale_data: bool,
+    /// Reject client writes while acting as a replica (CONFIG SET
+    /// replica-read-only). Default yes — a read-only replica returns `-READONLY`
+    /// for write commands from normal clients. (frankenredis-replro)
+    pub replica_read_only: bool,
+    /// Set only while replaying the primary's replication stream onto this
+    /// replica's store, so those propagated writes bypass the read-only gate
+    /// (upstream exempts the CLIENT_MASTER link). (frankenredis-replro)
+    pub applying_master_stream: bool,
     pub repl_diskless_sync: bool,
     pub repl_diskless_sync_delay_sec: u64,
     pub cluster_allow_reads_when_down: bool,
@@ -2696,6 +2704,8 @@ impl Default for ServerState {
             masteruser: None,
             masterauth: None,
             replica_serve_stale_data: true,
+            replica_read_only: true,
+            applying_master_stream: false,
             replica_priority: 100,
             enable_debug_command: "no".to_string(),
             repl_diskless_sync: true,
@@ -5708,6 +5718,36 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-replro) Upstream server.c::processCommand rejects a
+    /// CMD_WRITE command from a normal client when the server is a replica with
+    /// `repl-slave-ro` enabled and the command did NOT arrive on the primary
+    /// link: `-READONLY You can't write against a read only replica.`. Writes
+    /// replayed from the primary's replication stream (applying_master_stream)
+    /// are exempt, so replication itself is unaffected; non-write commands pass.
+    fn reject_write_on_readonly_replica(&self, argv: &[Vec<u8>]) -> Option<RespFrame> {
+        if !self.server.replica_read_only || self.server.applying_master_stream {
+            return None;
+        }
+        // Internal replays (AOF load, replication backlog/CONTINUE replay) are
+        // not client writes and must apply regardless of the read-only gate.
+        if !matches!(self.execution_source, ExecutionSource::Client) {
+            return None;
+        }
+        if !matches!(
+            self.server.replication_runtime_state.role,
+            ReplicationRoleState::Replica { .. }
+        ) {
+            return None;
+        }
+        let command = argv.first()?;
+        if !fr_command::is_write_command(command) {
+            return None;
+        }
+        Some(RespFrame::Error(
+            "READONLY You can't write against a read only replica.".to_string(),
+        ))
+    }
+
     fn reject_stale_replica_read_request(
         &self,
         argv: &[Vec<u8>],
@@ -6060,6 +6100,13 @@ impl Runtime {
         }
 
         if let Some(reply) = self.reject_stale_replica_read_request(argv, special_command) {
+            self.apply_existing_client_reply_suppression_to_undispatched_reply();
+            return reply;
+        }
+
+        if command_arity_ok
+            && let Some(reply) = self.reject_write_on_readonly_replica(argv)
+        {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return reply;
         }
@@ -9761,6 +9808,7 @@ impl Runtime {
         let mut next_repl_backlog_size: Option<u64> = None;
         let mut next_repl_timeout: Option<u64> = None;
         let mut next_replica_serve_stale_data: Option<bool> = None;
+        let mut next_replica_read_only: Option<bool> = None;
         let mut next_replica_priority: Option<usize> = None;
         let mut next_repl_diskless_sync: Option<bool> = None;
         let mut next_repl_diskless_sync_delay: Option<u64> = None;
@@ -10231,6 +10279,29 @@ impl Runtime {
                 next_replica_serve_stale_data = Some(parsed);
                 static_override_updates.push((
                     "replica-serve-stale-data".to_string(),
+                    if parsed {
+                        "yes".to_string()
+                    } else {
+                        "no".to_string()
+                    },
+                ));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("replica-read-only")
+                || parameter.eq_ignore_ascii_case("slave-read-only")
+            {
+                let parsed = match std::str::from_utf8(&pair[1]) {
+                    Ok(s) if s.eq_ignore_ascii_case("yes") => true,
+                    Ok(s) if s.eq_ignore_ascii_case("no") => false,
+                    _ => {
+                        return RespFrame::Error(format!(
+                            "ERR Invalid argument for CONFIG SET '{parameter}'"
+                        ));
+                    }
+                };
+                next_replica_read_only = Some(parsed);
+                static_override_updates.push((
+                    "replica-read-only".to_string(),
                     if parsed {
                         "yes".to_string()
                     } else {
@@ -11508,6 +11579,9 @@ impl Runtime {
         }
         if let Some(serve_stale) = next_replica_serve_stale_data {
             self.server.replica_serve_stale_data = serve_stale;
+        }
+        if let Some(read_only) = next_replica_read_only {
+            self.server.replica_read_only = read_only;
         }
         if let Some(priority) = next_replica_priority {
             self.server.replica_priority = priority;
@@ -23093,6 +23167,53 @@ mod tests {
         assert_eq!(
             replica.execute_frame(command(&[b"GET", b"keep"]), 2),
             RespFrame::BulkString(Some(b"old".to_vec()))
+        );
+    }
+
+    /// (frankenredis-replro) A read-only replica (default) rejects client write
+    /// commands with `-READONLY`, but reads work, the toggle is live, and a
+    /// promoted master writes freely. Verified vs redis 7.2.4.
+    #[test]
+    fn readonly_replica_rejects_client_writes() {
+        let mut rt = Runtime::default_strict();
+        // Master writes freely.
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k0", b"v0"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // Become a replica — replica-read-only defaults to yes.
+        rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6390"]), 0);
+        for w in [
+            &[b"SET".as_slice(), b"k", b"v"][..],
+            &[b"INCR".as_slice(), b"c"][..],
+            &[b"LPUSH".as_slice(), b"l", b"x"][..],
+            &[b"FLUSHALL".as_slice()][..],
+        ] {
+            let owned: Vec<Vec<u8>> = w.iter().map(|s| s.to_vec()).collect();
+            let refs: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+            let r = rt.execute_frame(command(&refs), 0);
+            assert!(
+                matches!(&r, RespFrame::Error(e) if e.starts_with("READONLY")),
+                "replica write {w:?} should be READONLY-rejected, got {r:?}"
+            );
+        }
+        // Reads still work on the replica.
+        assert!(!matches!(
+            rt.execute_frame(command(&[b"GET", b"k0"]), 0),
+            RespFrame::Error(_)
+        ));
+        // Disabling read-only allows writes on the replica.
+        rt.execute_frame(command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]), 0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // Promote back to master: writes allowed even with read-only re-enabled.
+        rt.execute_frame(command(&[b"CONFIG", b"SET", b"replica-read-only", b"yes"]), 0);
+        rt.execute_frame(command(&[b"REPLICAOF", b"NO", b"ONE"]), 0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k2", b"v2"]), 0),
+            RespFrame::SimpleString("OK".to_string())
         );
     }
 
