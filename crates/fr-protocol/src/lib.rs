@@ -380,6 +380,18 @@ pub fn format_redis_double(value: f64) -> String {
     }
 
     // Exact-integer fast path (double2ll → ll2string).
+    //
+    // NOTE: upstream util.c::d2string only takes the ll2string path for
+    // `|value| < 2^52`; above that it uses fpconv_dtoa (grisu2), whose SHORTEST
+    // decimal usually equals the exact integer (so this wider window matches)
+    // but occasionally shortens it (e.g. 6.30082e18 → upstream
+    // "6300820258065051000", here the exact "6300820258065050624"). Narrowing
+    // to the 2^52 window does NOT fix that — it merely moves the divergence to
+    // round magnitudes (1e18 → fpconv "1000000000000000000", but fr's
+    // {:e}-driven fallback emits "1e+18"), which is worse and more frequent. A
+    // faithful fix is a real fpconv_dtoa/grisu2 port replacing the Ryū piggyback
+    // below; until then the i64 window is the closest approximation.
+    // (frankenredis d2string large-integer residual — see scripts/float_format_differ.py)
     if value >= i64::MIN as f64 && value <= i64::MAX as f64 {
         let truncated = value as i64;
         if truncated as f64 == value {
