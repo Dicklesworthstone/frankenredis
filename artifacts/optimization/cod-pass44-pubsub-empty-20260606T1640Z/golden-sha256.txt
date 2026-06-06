@@ -1,0 +1,2 @@
+02b4baca0985a4e82384a0b3da87d1723a7af02df679d4f016ea6c57aa8c12d9  /data/projects/frankenredis/artifacts/optimization/cod-pass44-pubsub-empty-20260606T1640Z/golden-baseline.raw
+02b4baca0985a4e82384a0b3da87d1723a7af02df679d4f016ea6c57aa8c12d9  /data/projects/frankenredis/artifacts/optimization/cod-pass44-pubsub-empty-20260606T1640Z/golden-candidate.raw
