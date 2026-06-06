@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "PORT=6427; LOG=artifacts/optimization/cod-pass41-postkeep/postkeep-server-$PORT-$$.log; target-cod-pass41-postkeep/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.2; target-cod-pass41-postkeep/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass41post >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 0.94477237088,
+      "stddev": 0.07462354982433267,
+      "median": 0.91602174968,
+      "user": 0.7491291999999999,
+      "system": 0.68100122,
+      "min": 0.8574822011800001,
+      "max": 1.09172265918,
+      "times": [
+        0.96416907318,
+        0.91966810818,
+        0.8847564051800001,
+        1.09172265918,
+        1.02998876418,
+        0.89934612118,
+        0.9985129531800001,
+        0.91237539118,
+        0.8897020321800001,
+        0.8574822011800001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
