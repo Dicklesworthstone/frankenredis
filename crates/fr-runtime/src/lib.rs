@@ -4114,6 +4114,14 @@ impl Runtime {
                     u64::try_from(counts.expired).unwrap_or(u64::MAX);
                 store.stat_rdb_last_load_keys_loaded =
                     u64::try_from(counts.loaded).unwrap_or(u64::MAX);
+                // (frankenredis-replport) A full-resync replaces the store with
+                // one loaded from the primary's RDB; carry over this instance's
+                // identity (server_port, run_id, pid, cluster, AOF/sentinel mode)
+                // exactly like the AOF/RDB local-load paths, so the replica keeps
+                // its own --port. Otherwise server_port reverted to the 6379
+                // default, corrupting INFO tcp_port and the REPLCONF
+                // listening-port advertised on reconnect (master's slave0 port).
+                preserve_store_load_context(&mut store, &self.server.store);
                 self.server.store = store;
                 self.server.aof_records.clear();
                 // (frankenredis-ol9tz) Buffer reset to empty; AOF flush cursor
@@ -23070,6 +23078,11 @@ mod tests {
         let fullresync_offset = primary.replication_primary_offset().0;
 
         let mut replica = Runtime::default_strict();
+        // (frankenredis-replport) This instance's own listening port must survive
+        // a full resync — the RDB load replaces the store, and server_port must
+        // not revert to the default (else INFO tcp_port and the REPLCONF
+        // listening-port advertised on reconnect become wrong).
+        replica.set_server_port(16555);
         assert_eq!(
             replica.execute_frame(command(&[b"SET", b"stale", b"value"]), 0),
             RespFrame::SimpleString("OK".to_string())
@@ -23081,6 +23094,9 @@ mod tests {
         replica
             .apply_replication_sync_payload(&reply, &snapshot, 4)
             .expect("apply fullresync");
+
+        // The replica keeps its own listening port across the full resync.
+        assert_eq!(replica.server_port(), 16555);
 
         assert_eq!(
             replica.execute_frame(command(&[b"GET", b"stale"]), 5),
