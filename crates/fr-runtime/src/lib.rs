@@ -13940,10 +13940,10 @@ impl Runtime {
                 let master_sync_in_progress = i64::from(*state == "sync");
                 // Upstream server.c::genRedisInfoString:6060-6066 emits
                 // slave_read_only and replica_announced alongside
-                // slave_priority when server.masterhost is set. fr does
-                // not yet track per-instance replica-read-only /
-                // replica-announced state so we surface upstream's "yes"
-                // defaults here. (frankenredis-e6iqd)
+                // slave_priority when server.masterhost is set. slave_read_only
+                // reflects the live replica-read-only config (frankenredis-replro);
+                // replica_announced is not yet tracked, so it keeps upstream's
+                // "1" default. (frankenredis-e6iqd)
                 let _ = write!(
                     info,
                     "master_host:{host}\r\n\
@@ -13954,9 +13954,10 @@ master_sync_in_progress:{master_sync_in_progress}\r\n\
 slave_read_repl_offset:{primary_offset}\r\n\
 slave_repl_offset:{primary_offset}\r\n\
 slave_priority:{}\r\n\
-slave_read_only:1\r\n\
+slave_read_only:{}\r\n\
 replica_announced:1\r\n",
-                    self.server.replica_priority
+                    self.server.replica_priority,
+                    i32::from(self.server.replica_read_only)
                 );
             }
         }
