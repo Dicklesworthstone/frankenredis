@@ -2230,6 +2230,18 @@ fn eq_ascii_token(lhs: &[u8], rhs: &[u8]) -> bool {
     lhs.eq_ignore_ascii_case(rhs)
 }
 
+/// Commands that vendored Redis propagates to replicas only (PROPAGATE_REPL)
+/// and never to the AOF (no PROPAGATE_AOF): PUBLISH and SPUBLISH. They flow
+/// down the replication stream so subscribers attached to a replica receive
+/// messages published on the master, but pub/sub traffic is transient and is
+/// never persisted to the append-only file. The AOF disk flush filters these
+/// records back out by name so the on-disk AOF matches upstream.
+fn command_is_replication_only(argv: &[Vec<u8>]) -> bool {
+    argv.first().is_some_and(|cmd| {
+        eq_ascii_token(cmd, b"PUBLISH") || eq_ascii_token(cmd, b"SPUBLISH")
+    })
+}
+
 /// Mirror upstream networking.c::addReplySubcommandSyntaxError for
 /// ACL subcommands whose handlers fall through (commands.def arity
 /// is variadic: -2). Uses the user-typed subcommand casing and an
@@ -3185,6 +3197,45 @@ impl ServerState {
             self.replication_ack_state.local_fsync_offset =
                 self.replication_ack_state.primary_offset;
         }
+        self.replication_runtime_state.update_backlog_window(
+            self.replication_ack_state.primary_offset,
+            self.repl_backlog_size,
+        );
+    }
+
+    /// Propagate a command to replicas and the replication backlog but NOT the
+    /// AOF — mirrors upstream forceCommandPropagation(c, PROPAGATE_REPL) for
+    /// PUBLISH / SPUBLISH. The record is pushed into the same buffer that feeds
+    /// connected replicas (so a subscriber on a replica receives messages
+    /// published on the master) and advances the replication offset, but the
+    /// on-disk AOF flush filters it back out (`command_is_replication_only`) so
+    /// transient pub/sub traffic is never persisted.
+    ///
+    /// Unlike a persisted write it is NOT materialized merely because the AOF is
+    /// enabled: with no replica ever connected there is no backlog to feed and
+    /// nothing reaches the AOF, exactly like replicationFeedSlaves short-circuits
+    /// when `repl_backlog == NULL && listLength(slaves) == 0`.
+    fn capture_replication_only_record(&mut self, argv: &[Vec<u8>]) {
+        let is_master = matches!(
+            self.replication_runtime_state.role,
+            ReplicationRoleState::Master
+        );
+        let any_replica_ever = self.replication_runtime_state.any_replica_ever_connected;
+        let should_propagate = !is_master || any_replica_ever;
+        if !should_propagate {
+            return;
+        }
+        let record = AofRecord {
+            argv: argv.to_vec(),
+        };
+        let encoded_len =
+            u64::try_from(record.to_resp_frame().to_bytes().len()).unwrap_or(u64::MAX);
+        self.aof_records.push(record);
+        self.replication_ack_state.primary_offset.0 = self
+            .replication_ack_state
+            .primary_offset
+            .0
+            .saturating_add(encoded_len);
         self.replication_runtime_state.update_backlog_window(
             self.replication_ack_state.primary_offset,
             self.repl_backlog_size,
@@ -12835,8 +12886,25 @@ impl Runtime {
             }
         };
         if !pending.is_empty() {
-            let bytes = encode_aof_stream(pending);
-            if std::io::Write::write_all(&mut file, &bytes).is_err() {
+            // Repl-only records (PUBLISH / SPUBLISH) ride the in-memory backlog
+            // to feed replicas but must never be persisted to the AOF, matching
+            // upstream PROPAGATE_REPL-without-PROPAGATE_AOF. Filter them out of
+            // the disk encoding; the offset cursor still advances past them so
+            // they are not reconsidered on the next flush. Avoid the clone in
+            // the common case where no repl-only record is pending.
+            let bytes = if pending.iter().any(|r| command_is_replication_only(&r.argv)) {
+                let persistable: Vec<AofRecord> = pending
+                    .iter()
+                    .filter(|r| !command_is_replication_only(&r.argv))
+                    .cloned()
+                    .collect();
+                encode_aof_stream(&persistable)
+            } else {
+                encode_aof_stream(pending)
+            };
+            if !bytes.is_empty()
+                && std::io::Write::write_all(&mut file, &bytes).is_err()
+            {
                 self.server.store.record_aof_write_status(false);
                 return;
             }
@@ -13024,6 +13092,11 @@ impl Runtime {
             return CommandError::WrongArity("PUBLISH").to_resp();
         }
         let receivers = self.pubsub_publish(&argv[1], &argv[2]);
+        // Propagate to replicas (repl-only, never AOF) regardless of the local
+        // receiver count: a subscriber may be attached to a replica, so the
+        // message must travel down the replication stream. Mirrors upstream
+        // publishCommand's forceCommandPropagation(c, PROPAGATE_REPL).
+        self.server.capture_replication_only_record(argv);
         RespFrame::Integer(receivers as i64)
     }
 
@@ -13246,6 +13319,8 @@ impl Runtime {
             return CommandError::WrongArity("SPUBLISH").to_resp();
         }
         let receivers = self.pubsub_spublish(&argv[1], &argv[2]);
+        // Sharded pub/sub propagates to replicas only, exactly like PUBLISH.
+        self.server.capture_replication_only_record(argv);
         RespFrame::Integer(receivers as i64)
     }
 
@@ -22624,6 +22699,54 @@ mod tests {
         assert!(
             latched_after > latched_before,
             "post-latch write should advance offset (was {latched_before}, now {latched_after})"
+        );
+    }
+
+    // (frankenredis pubsub-repl) Vendored Redis propagates PUBLISH/SPUBLISH to
+    // replicas (PROPAGATE_REPL) so a subscriber attached to a replica receives
+    // messages published on the master, but NEVER to the AOF. Pin that fr now
+    // advances the replication offset and captures the command into the buffer
+    // that feeds replicas, while leaving it absent pre-first-replica.
+    #[test]
+    fn publish_propagates_to_replicas_only() {
+        // Classification: PUBLISH/SPUBLISH are repl-only; ordinary writes and
+        // subscription commands are not.
+        assert!(crate::command_is_replication_only(&[b"PUBLISH".to_vec()]));
+        assert!(crate::command_is_replication_only(&[b"publish".to_vec()]));
+        assert!(crate::command_is_replication_only(&[b"SPUBLISH".to_vec()]));
+        assert!(!crate::command_is_replication_only(&[b"SET".to_vec()]));
+        assert!(!crate::command_is_replication_only(&[b"SUBSCRIBE".to_vec()]));
+
+        // Pre-first-replica with AOF off: PUBLISH must not advance the offset,
+        // mirroring replicationFeedSlaves short-circuiting with no backlog.
+        let mut rt = Runtime::default_strict();
+        let before = rt.replication_primary_offset().0;
+        rt.execute_frame(command(&[b"PUBLISH", b"ch", b"hello"]), 0);
+        assert_eq!(
+            rt.replication_primary_offset().0,
+            before,
+            "PUBLISH must not advance the offset pre-first-replica with AOF off"
+        );
+
+        // After a replica has connected, PUBLISH propagates: the offset advances
+        // and the verbatim command lands in the replica-feed buffer.
+        rt.server.replication_runtime_state.ensure_replica(7);
+        let pre = rt.replication_primary_offset().0;
+        let records_before = rt.aof_records().len();
+        rt.execute_frame(command(&[b"PUBLISH", b"ch", b"world"]), 1);
+        assert!(
+            rt.replication_primary_offset().0 > pre,
+            "PUBLISH must advance the replication offset once a replica exists"
+        );
+        let recs = rt.aof_records();
+        assert_eq!(
+            recs.len(),
+            records_before + 1,
+            "PUBLISH should append exactly one replication record"
+        );
+        assert!(
+            crate::eq_ascii_token(&recs.last().unwrap().argv[0], b"PUBLISH"),
+            "the captured replication record should be the PUBLISH itself"
         );
     }
 
