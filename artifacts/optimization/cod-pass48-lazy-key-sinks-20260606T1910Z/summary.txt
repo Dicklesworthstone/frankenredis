@@ -1,0 +1,11 @@
+pass48 lazy post-write key sinks rejection
+
+Target profile: SET P16/1M current HEAD e1f1cf332 showed set_command_keys 2.07% children and queue_client_tracking_invalidations 2.18% children, with no blocked clients, no client tracking consumers, and keyspace notifications disabled in the benchmark default path.
+
+Lever tested: materialize command keys only when a post-write/read-tracking sink could observe them (ready keys, client tracking invalidations, or keyspace notifications), preserving original ordering when any sink was live.
+
+Behavior proof: RCH cargo check -p fr-runtime --all-targets passed; RCH fr-runtime tracking filter passed 14 tests; RCH fr-runtime keyspace filter passed 5 total tests across unit/integration filters. Golden raw RESP baseline and candidate outputs matched exactly: input sha256 e7a11a6135058dd81b9593b9002c5d93469ed8d1f26b1838fcb165749c5d0f04, output sha256 5c82044b4b0062c0db526300576dcf15087e4d8c64f07c6fc01965df18100508, 33 bytes each.
+
+Benchmarks: baseline pass48 SET P16/300k before lever was 0.9655s +/- 0.0460s. Paired 300k baseline 0.9683414228s +/- 0.1776616665, candidate 0.9367479878s +/- 0.0538422813, candidate 1.03x +/- 0.20. Reversed 1M candidate 2.4741015276s +/- 0.1499059413, baseline 2.6316810873s +/- 0.3510546196, candidate 1.06x +/- 0.16.
+
+Decision: reject under Score>=2.0; production hunk removed. Next route: stop post-write sink micro-gates and attack a deeper primitive from the same profile, preferably zero-copy/borrowed command execution that removes Vec<Vec<u8>> argv copies as a class, or a store key layout/hash primitive if a fresh profile keeps RandomState/memmove/drop_if_expired ahead of parser copies.

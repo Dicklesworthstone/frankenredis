@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "PORT=6506; LOG=artifacts/optimization/cod-pass48-lazy-key-sinks-20260606T1910Z/hf-candidate-1m-$PORT-$$.log; target-cod-pass48-lazy-keys-release/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.25; target-cod-pass48-lazy-keys-release/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 1000000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass48lazycand1m >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 2.4741015276000002,
+      "stddev": 0.14990594134389232,
+      "median": 2.4230458945,
+      "user": 2.2606877599999997,
+      "system": 2.31809854,
+      "min": 2.322351461,
+      "max": 2.833829937,
+      "times": [
+        2.476955539,
+        2.833829937,
+        2.603204866,
+        2.453979767,
+        2.508758426,
+        2.392112022,
+        2.377061563,
+        2.322351461,
+        2.3875719799999997,
+        2.3851897149999997
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "PORT=6507; LOG=artifacts/optimization/cod-pass48-lazy-key-sinks-20260606T1910Z/hf-baseline-1m-$PORT-$$.log; target-cod-pass48-clean-baseline/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.25; target-cod-pass48-clean-baseline/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 1000000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass48lazybase1m >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 2.6316810873,
+      "stddev": 0.35105461961771556,
+      "median": 2.470810887,
+      "user": 2.4179451599999995,
+      "system": 2.3992973399999995,
+      "min": 2.374021536,
+      "max": 3.425476142,
+      "times": [
+        2.530028812,
+        2.4622943129999997,
+        2.462028271,
+        2.429173282,
+        2.374021536,
+        2.479327461,
+        2.595441728,
+        2.436284496,
+        3.122734832,
+        3.425476142
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
