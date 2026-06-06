@@ -7516,6 +7516,20 @@ impl Runtime {
         {
             return true;
         }
+        // FUNCTION is a container command: the bare token carries no write flag, so
+        // is_write_command(b"FUNCTION") is false. But its write subcommands
+        // (LOAD / DELETE / FLUSH / RESTORE) mutate the function library and MUST
+        // propagate to replicas and the AOF, exactly as redis flags function|load,
+        // function|delete, function|flush and function|restore as `write`. The read
+        // subcommands (LIST / DUMP / STATS / HELP) must not advance the offset.
+        if eq_ascii_token(command, b"FUNCTION") {
+            return argv.get(1).is_some_and(|sub| {
+                eq_ascii_token(sub, b"LOAD")
+                    || eq_ascii_token(sub, b"DELETE")
+                    || eq_ascii_token(sub, b"FLUSH")
+                    || eq_ascii_token(sub, b"RESTORE")
+            });
+        }
         fr_command::is_write_command(command)
     }
 
@@ -33000,5 +33014,51 @@ user bob reset off nopass +@all
             waitaof_reply,
             RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
         );
+    }
+
+    #[test]
+    fn function_write_subcommands_advance_replication_offset() {
+        let argv = |parts: &[&[u8]]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.to_vec()).collect()
+        };
+        // FUNCTION is a container command whose bare token carries no write flag,
+        // so it must be classified by its subcommand. The write subcommands mutate
+        // the function library and must propagate to replicas + the AOF (advance
+        // master_repl_offset), exactly as redis flags function|load etc. write.
+        for sub in [
+            b"LOAD".as_slice(),
+            b"DELETE".as_slice(),
+            b"FLUSH".as_slice(),
+            b"RESTORE".as_slice(),
+        ] {
+            assert!(
+                Runtime::command_advances_replication_offset(&argv(&[b"FUNCTION", sub])),
+                "FUNCTION {} should advance the replication offset",
+                String::from_utf8_lossy(sub)
+            );
+            // case-insensitive subcommand matching
+            let lower = sub.to_ascii_lowercase();
+            assert!(Runtime::command_advances_replication_offset(&argv(&[
+                b"function",
+                &lower
+            ])));
+        }
+        // Read subcommands must NOT advance the offset / propagate.
+        for sub in [
+            b"LIST".as_slice(),
+            b"DUMP".as_slice(),
+            b"STATS".as_slice(),
+            b"HELP".as_slice(),
+        ] {
+            assert!(
+                !Runtime::command_advances_replication_offset(&argv(&[b"FUNCTION", sub])),
+                "FUNCTION {} (read) must not advance the replication offset",
+                String::from_utf8_lossy(sub)
+            );
+        }
+        // Bare FUNCTION with no subcommand never propagates.
+        assert!(!Runtime::command_advances_replication_offset(&argv(&[
+            b"FUNCTION"
+        ])));
     }
 }
