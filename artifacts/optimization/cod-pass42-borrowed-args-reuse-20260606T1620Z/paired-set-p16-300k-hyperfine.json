@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "PORT=6442; LOG=/data/projects/frankenredis/artifacts/optimization/cod-pass42-borrowed-args-reuse-20260606T1620Z/paired-baseline-server-$PORT-$$.log; /data/projects/.scratch/frankenredis-pass42-cod-borrowed-args-reuse-1620/target-cod-pass42-borrowedargs-base/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true' EXIT; sleep 0.2; /data/projects/.scratch/frankenredis-pass42-cod-borrowed-args-reuse-1620/target-cod-pass42-borrowedargs-base/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass42pairbase >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.14997291812,
+      "stddev": 0.20434548153248971,
+      "median": 1.09342627232,
+      "user": 0.9286453199999999,
+      "system": 0.86834626,
+      "min": 0.9490171203200001,
+      "max": 1.4890980253200001,
+      "times": [
+        0.98298110532,
+        0.9490171203200001,
+        0.95217985232,
+        0.97376353132,
+        1.4890980253200001,
+        1.45593627932,
+        1.10586245832,
+        1.25294640532,
+        1.25695431732,
+        1.08099008632
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "PORT=6443; LOG=/data/projects/frankenredis/artifacts/optimization/cod-pass42-borrowed-args-reuse-20260606T1620Z/paired-candidate-server-$PORT-$$.log; /data/projects/.scratch/frankenredis-pass42-cod-borrowed-args-reuse-1620/target-cod-pass42-memchr-candidate/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true' EXIT; sleep 0.2; /data/projects/.scratch/frankenredis-pass42-cod-borrowed-args-reuse-1620/target-cod-pass42-memchr-candidate/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass42paircand >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.09827877162,
+      "stddev": 0.13770516683778422,
+      "median": 1.04932112282,
+      "user": 0.9212090199999998,
+      "system": 0.83857776,
+      "min": 0.9563785303200001,
+      "max": 1.38647279232,
+      "times": [
+        1.21762891532,
+        1.02647595832,
+        0.9563785303200001,
+        1.07216628732,
+        1.19098264132,
+        1.38647279232,
+        1.1576620153200001,
+        1.01858124832,
+        0.97149169832,
+        0.98494762932
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

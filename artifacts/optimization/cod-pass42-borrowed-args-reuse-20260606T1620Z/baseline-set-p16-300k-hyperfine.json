@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "PORT=6438; DIR=artifacts/optimization/cod-pass42-borrowed-args-reuse-20260606T1620Z; LOG=$DIR/baseline-server-$PORT-$$.log; /data/projects/.scratch/frankenredis-pass42-cod-borrowed-args-reuse-1620/target-cod-pass42-borrowedargs-base/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.2; /data/projects/.scratch/frankenredis-pass42-cod-borrowed-args-reuse-1620/target-cod-pass42-borrowedargs-base/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass42base >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 0.9690373651199999,
+      "stddev": 0.05477544004691886,
+      "median": 0.9479990737200001,
+      "user": 0.76781922,
+      "system": 0.7710394399999999,
+      "min": 0.9207515417200001,
+      "max": 1.07077121772,
+      "times": [
+        1.07077121772,
+        1.02188540872,
+        1.04110596572,
+        0.95640352372,
+        0.9207515417200001,
+        0.9304255157200001,
+        0.9562119707200001,
+        0.9314317817200001,
+        0.9397861767200001,
+        0.9216005487200001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
