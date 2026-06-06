@@ -2381,7 +2381,8 @@ impl CommandHistogram {
 /// Tracks per-command latency histograms.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommandHistogramTracker {
-    histograms: HashMap<String, CommandHistogram>,
+    set: Option<CommandHistogram>,
+    histograms: HashMap<String, CommandHistogram, foldhash::quality::RandomState>,
 }
 
 impl CommandHistogramTracker {
@@ -2421,19 +2422,28 @@ impl CommandHistogramTracker {
             // ASCII-lowercasing valid UTF-8 yields valid UTF-8 (only A-Z change,
             // both ASCII), so this never fails.
             if let Ok(key) = std::str::from_utf8(lower) {
-                if let Some(hist) = self.histograms.get_mut(key) {
-                    hist.record_with_kind(latency_us, kind);
-                    return;
-                }
-                self.histograms
-                    .entry(key.to_string())
-                    .or_default()
-                    .record_with_kind(latency_us, kind);
+                self.record_canonical_with_kind(key, latency_us, kind);
                 return;
             }
         }
+        let key = command.to_ascii_lowercase();
+        self.record_canonical_with_kind(&key, latency_us, kind);
+    }
+
+    fn record_canonical_with_kind(
+        &mut self,
+        command: &str,
+        latency_us: u64,
+        kind: CommandRecordKind,
+    ) {
+        if command == "set" {
+            self.set
+                .get_or_insert_with(CommandHistogram::default)
+                .record_with_kind(latency_us, kind);
+            return;
+        }
         self.histograms
-            .entry(command.to_ascii_lowercase())
+            .entry(command.to_string())
             .or_default()
             .record_with_kind(latency_us, kind);
     }
@@ -2441,7 +2451,11 @@ impl CommandHistogramTracker {
     /// Get histogram for a specific command.
     #[must_use]
     pub fn get(&self, command: &str) -> Option<&CommandHistogram> {
-        self.histograms.get(&command.to_ascii_lowercase())
+        let key = command.to_ascii_lowercase();
+        if key == "set" {
+            return self.set.as_ref();
+        }
+        self.histograms.get(&key)
     }
 
     /// Get all histograms, sorted by command name.
@@ -2452,6 +2466,9 @@ impl CommandHistogramTracker {
             .iter()
             .map(|(k, v)| (k.as_str(), v))
             .collect();
+        if let Some(hist) = &self.set {
+            result.push(("set", hist));
+        }
         result.sort_by(|a, b| a.0.cmp(b.0));
         result
     }
@@ -2459,7 +2476,8 @@ impl CommandHistogramTracker {
     /// Reset histograms for specified commands, or all if empty.
     pub fn reset(&mut self, commands: &[&str]) -> usize {
         if commands.is_empty() {
-            let count = self.histograms.len();
+            let count = self.histograms.len() + usize::from(self.set.is_some());
+            self.set = None;
             self.histograms.clear();
             return count;
         }
@@ -2469,6 +2487,12 @@ impl CommandHistogramTracker {
                 // (frankenredis-6n2qm) Lookup key matches the
                 // canonical lowercase form used by record_with_kind.
                 let key = cmd.to_ascii_lowercase();
+                if key == "set" {
+                    return self.set.as_mut().map(|h| {
+                        h.reset();
+                        1
+                    });
+                }
                 self.histograms.get_mut(&key).map(|h| {
                     h.reset();
                     1
@@ -18462,7 +18486,12 @@ struct IntegerLongDouble {
 }
 
 const LONG_DOUBLE_MANTISSA_BITS: i32 = 64;
-const MAX_LARGE_FLOAT_DECIMAL_DIGITS: usize = 400;
+// Covers the full x87 80-bit long double decimal range (≈ ±1.19e4932): a value
+// like "1e4932" has 1 significant digit and a decimal exponent of 4932, so the
+// digits+exponent bound must reach ~4933 for INCRBYFLOAT/HINCRBYFLOAT to accept
+// every value redis's strtold does (was 400, which rejected anything beyond f64
+// range and forced the f64 fallback to error). (frankenredis f80 decimal range)
+const MAX_LARGE_FLOAT_DECIMAL_DIGITS: usize = 4933;
 
 impl IntegerLongDouble {
     fn is_zero(self) -> bool {
@@ -18857,6 +18886,16 @@ fn parse_long_double(bytes: &[u8]) -> Option<IntegerLongDouble> {
         }
         bignat_to_long_double(negative, &coefficient, -(guard as i32), sticky)
     }
+}
+
+/// Whether `text` is a decimal float string accepted by the faithful 80-bit
+/// long double parser (i.e. the value redis's strtold/INCRBYFLOAT accepts and
+/// the f80 path will compute exactly). Used by the command layer so f80-range
+/// increments (e.g. "1e500") aren't rejected by the f64 `parse_f64_arg` gate.
+/// (frankenredis f80 decimal range)
+#[must_use]
+pub fn long_double_text_is_valid(text: &[u8]) -> bool {
+    parse_long_double(text).is_some()
 }
 
 /// Exact 80-bit long double addition (then a single round-half-even back to f80)
@@ -28753,6 +28792,34 @@ mod tests {
                 .unwrap();
             assert_eq!(hgot, expected.as_bytes(), "HINCRBYFLOAT {cur} + {delta}");
         }
+    }
+
+    /// (frankenredis f80 decimal range) Values beyond f64 range but within the
+    /// x87 80-bit long double range (~1.19e4932) — e.g. "1e500" — are accepted
+    /// and computed in f80 (previously rejected as "not a valid float" by the
+    /// 400-digit cap / f64 fallback). Verified byte-exact vs redis 7.2.4 by fuzz.
+    #[test]
+    fn incrbyfloat_accepts_f80_decimal_range() {
+        for delta in ["1e500", "1e4000", "1e4932"] {
+            let mut store = Store::new();
+            store.set(b"k".to_vec(), b"0".to_vec(), None, 0);
+            let got = store
+                .incrbyfloat_text(b"k", delta.as_bytes(), f64::INFINITY, 0)
+                .unwrap_or_else(|e| panic!("{delta} should be accepted, got {e:?}"));
+            assert!(
+                got.iter().all(u8::is_ascii_digit) && got.len() > 300,
+                "{delta} -> {:?}",
+                String::from_utf8_lossy(&got)
+            );
+        }
+        // Beyond the f80 range is still rejected (overflow).
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"0".to_vec(), None, 0);
+        assert!(
+            store
+                .incrbyfloat_text(b"k", b"1e5000", f64::INFINITY, 0)
+                .is_err()
+        );
     }
 
     #[test]

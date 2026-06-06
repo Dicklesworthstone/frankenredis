@@ -12282,7 +12282,16 @@ fn incrbyfloat(
     {
         return Err(CommandError::Store(StoreError::WrongType));
     }
-    let delta = parse_f64_arg(&argv[2])?;
+    // Accept the full x87 80-bit long double decimal range (e.g. "1e500"), which
+    // overflows f64 to inf and so is rejected by parse_f64_arg even though
+    // redis's strtold/INCRBYFLOAT accepts it. The f64 value is only used by the
+    // legacy f64 fallback; the faithful f80 path uses the original text, so a
+    // finite placeholder is fine here. (frankenredis f80 decimal range)
+    let delta = match parse_f64_arg(&argv[2]) {
+        Ok(v) => v,
+        Err(_) if fr_store::long_double_text_is_valid(&argv[2]) => 0.0,
+        Err(e) => return Err(e),
+    };
     let new_val = store.incrbyfloat_text(&argv[1], &argv[2], delta, now_ms)?;
     Ok(RespFrame::BulkString(Some(new_val)))
 }
@@ -12920,7 +12929,14 @@ fn hincrbyfloat(
     if argv.len() != 4 {
         return Err(CommandError::WrongArity("HINCRBYFLOAT"));
     }
-    let delta = parse_f64_arg(&argv[3])?;
+    // Accept the full f80 decimal range (e.g. "1e500"); see incrbyfloat.
+    // A finite placeholder keeps the NaN/Infinity gate below from misfiring on
+    // an f80-range value that merely overflows f64. (frankenredis f80 decimal range)
+    let delta = match parse_f64_arg(&argv[3]) {
+        Ok(v) => v,
+        Err(_) if fr_store::long_double_text_is_valid(&argv[3]) => 0.0,
+        Err(e) => return Err(e),
+    };
     // Upstream t_hash.c::hincrbyfloatCommand validates the increment
     // for NaN/Infinity BEFORE looking up the key, so a probe like
     // 'HINCRBYFLOAT wrong-type-key f inf' reports 'value is NaN or
