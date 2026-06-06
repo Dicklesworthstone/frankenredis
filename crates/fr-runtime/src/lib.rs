@@ -6282,7 +6282,17 @@ impl Runtime {
         // cmdstat_<unknown> rows and SLOWLOG entries. Errorstats and
         // total_error_replies are still updated via the rejection path.
         let unknown_command = matches!(&result, Err(CommandError::UnknownCommand { .. }));
-        if !unknown_command {
+        // (frankenredis-arityreject) Upstream rejects a wrong-arity command in
+        // processCommand BEFORE call() (rejectCommandArity), so it never reaches
+        // SLOWLOG / latency histograms / the commandstats `calls` column — only
+        // `rejected_calls` moves. fr validates arity at each handler's entry,
+        // returning WrongArity before doing any work, so that error is a
+        // rejection, NOT an execution failure. Classify it like the
+        // unknown-command path: record a rejection, skip slowlog/latency/calls.
+        let arity_rejected = matches!(&result, Err(CommandError::WrongArity(_)));
+        if arity_rejected {
+            self.server.record_command_rejected(argv);
+        } else if !unknown_command {
             self.record_slowlog(argv, elapsed_us, now_ms);
             self.server.record_latency_sample(argv, elapsed_us, now_ms);
             // (frankenredis-infosections) Classify the eventual reply so the
@@ -16753,6 +16763,62 @@ mod tests {
         // calls or usec — only to rejected_calls.
         assert!(row.starts_with("cmdstat_get:calls=1,usec="), "{row}");
         assert!(row.ends_with(",rejected_calls=3,failed_calls=0"), "{row}");
+    }
+
+    /// (frankenredis-arityreject) Upstream rejects a wrong-arity command in
+    /// processCommand BEFORE call() (rejectCommandArity): it increments
+    /// `rejected_calls` only — never `calls`/`usec`/`failed_calls`. An
+    /// EXECUTED command that returns an error reply (e.g. WRONGTYPE) instead
+    /// counts as `calls`+`failed_calls`. Verified vs redis 7.2.4.
+    #[test]
+    fn info_commandstats_wrong_arity_counts_rejected_not_failed() {
+        let mut rt = Runtime::default_strict();
+        // 2 wrong-arity GETs (too few / too many) → rejected, not calls.
+        assert!(matches!(
+            rt.execute_frame(command(&[b"GET"]), 0),
+            RespFrame::Error(_)
+        ));
+        assert!(matches!(
+            rt.execute_frame(command(&[b"GET", b"a", b"b"]), 0),
+            RespFrame::Error(_)
+        ));
+        // 1 successful GET.
+        rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 0),
+            RespFrame::BulkString(Some(b"v".to_vec()))
+        );
+        // 1 EXECUTED failure: WRONGTYPE (LPUSH on a string) → calls+failed.
+        assert!(matches!(
+            rt.execute_frame(command(&[b"LPUSH", b"k", b"x"]), 0),
+            RespFrame::Error(_)
+        ));
+
+        let info = rt.execute_frame(command(&[b"INFO", b"commandstats"]), 0);
+        let RespFrame::BulkString(Some(bytes)) = info else {
+            panic!("expected bulk info response");
+        };
+        let body = String::from_utf8(bytes).expect("utf8 info");
+        let get_row = body
+            .lines()
+            .find(|l| l.starts_with("cmdstat_get:"))
+            .unwrap_or_else(|| panic!("expected cmdstat_get row in:\n{body}"));
+        // GET: 1 call (the success), 2 rejected (arity), 0 failed.
+        assert!(get_row.starts_with("cmdstat_get:calls=1,usec="), "{get_row}");
+        assert!(
+            get_row.ends_with(",rejected_calls=2,failed_calls=0"),
+            "{get_row}"
+        );
+        let lpush_row = body
+            .lines()
+            .find(|l| l.starts_with("cmdstat_lpush:"))
+            .unwrap_or_else(|| panic!("expected cmdstat_lpush row in:\n{body}"));
+        // LPUSH: the WRONGTYPE reply is an executed failure → calls=1, failed=1.
+        assert!(lpush_row.starts_with("cmdstat_lpush:calls=1,usec="), "{lpush_row}");
+        assert!(
+            lpush_row.ends_with(",rejected_calls=0,failed_calls=1"),
+            "{lpush_row}"
+        );
     }
 
     /// (frankenredis-8who6) Upstream
