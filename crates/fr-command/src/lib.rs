@@ -2153,6 +2153,9 @@ impl CommandError {
                 fr_store::StoreError::InvalidHllValue => RespFrame::Error(
                     "WRONGTYPE Key is not a valid HyperLogLog string value.".to_string(),
                 ),
+                fr_store::StoreError::CorruptedHllValue => RespFrame::Error(
+                    "INVALIDOBJ Corrupted HLL object detected".to_string(),
+                ),
                 fr_store::StoreError::IndexOutOfRange => {
                     RespFrame::Error("ERR index out of range".to_string())
                 }

@@ -401,6 +401,13 @@ pub enum StoreError {
     KeyNotFound,
     WrongType,
     InvalidHllValue,
+    /// An HLL string that passes the structural gate (HYLL magic, >= 16-byte
+    /// header, valid encoding byte) but whose register payload is corrupt — e.g.
+    /// sparse opcodes that don't sum to HLL_REGISTERS (truncated or with trailing
+    /// garbage). Upstream surfaces this as `INVALIDOBJ Corrupted HLL object
+    /// detected` during the compute step, distinct from the `WRONGTYPE ... not a
+    /// valid HyperLogLog string value.` returned when the gate itself fails.
+    CorruptedHllValue,
     IndexOutOfRange,
     InvalidDumpPayload,
     BusyKey,
@@ -19731,7 +19738,9 @@ fn hll_decode_sparse_registers(payload: &[u8]) -> Result<Vec<u8>, StoreError> {
             index += 1;
         } else if byte & 0xc0 == HLL_SPARSE_XZERO_BIT {
             let Some(&next) = payload.get(index + 1) else {
-                return Err(StoreError::InvalidHllValue);
+                // A dangling XZERO opcode in an otherwise gate-valid sparse HLL
+                // is corruption, not a non-HLL string → INVALIDOBJ upstream.
+                return Err(StoreError::CorruptedHllValue);
             };
             let len = (((usize::from(byte & 0x3f)) << 8) | usize::from(next)) + 1;
             registers.resize(registers.len().saturating_add(len), 0);
@@ -19743,13 +19752,15 @@ fn hll_decode_sparse_registers(payload: &[u8]) -> Result<Vec<u8>, StoreError> {
             index += 1;
         }
         if registers.len() > HLL_REGISTERS {
-            return Err(StoreError::InvalidHllValue);
+            return Err(StoreError::CorruptedHllValue);
         }
     }
     if registers.len() == HLL_REGISTERS {
         Ok(registers)
     } else {
-        Err(StoreError::InvalidHllValue)
+        // Opcodes that pass the gate but don't sum to HLL_REGISTERS (truncated or
+        // trailing garbage) are a corrupt HLL object, not a non-HLL value.
+        Err(StoreError::CorruptedHllValue)
     }
 }
 
@@ -30472,6 +30483,34 @@ mod tests {
             !store
                 .pfadd(b"hll", &[b"a".to_vec(), b"b".to_vec()], 0)
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn pfcount_distinguishes_corrupt_hll_from_non_hll() {
+        // An HLL string that passes the structural gate (HYLL magic, >=16-byte
+        // header, sparse encoding) but whose opcodes no longer sum to
+        // HLL_REGISTERS — e.g. trailing bytes appended — is a CORRUPT object
+        // (-> INVALIDOBJ upstream), NOT a non-HLL value (-> WRONGTYPE).
+        let mut store = Store::new();
+        store
+            .pfadd(b"h", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 0)
+            .unwrap();
+        let mut raw = store.get(b"h", 0).unwrap().unwrap(); // valid sparse HLL bytes
+        raw.push(b'x'); // trailing garbage: gate still valid, opcodes corrupt
+        store.set(b"h".to_vec(), raw, None, 0);
+        assert_eq!(
+            store.pfcount(&[b"h"], 0),
+            Err(StoreError::CorruptedHllValue),
+            "gate-valid-but-corrupt sparse HLL must be CorruptedHllValue (INVALIDOBJ)"
+        );
+
+        // A string lacking the HYLL magic is not an HLL at all -> WRONGTYPE.
+        store.set(b"g".to_vec(), b"not-an-hll".to_vec(), None, 0);
+        assert_eq!(
+            store.pfcount(&[b"g"], 0),
+            Err(StoreError::InvalidHllValue),
+            "a non-HLL string must stay InvalidHllValue (WRONGTYPE)"
         );
     }
 
