@@ -5306,6 +5306,55 @@ impl Store {
         })
     }
 
+    /// Read-only, no-stat string length: `Ok(0)` for a missing/expired key,
+    /// `Ok(len)` for a string/int, `Err(WrongType)` otherwise — WITHOUT bumping
+    /// keyspace_hits/misses or touching LRU. For write-command size/type
+    /// prechecks (e.g. APPEND's checkStringLength) that mirror lookupKeyWrite,
+    /// which never counts. (frankenredis-934ax)
+    pub fn string_len_no_stats(&self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+        let Some(entry) = self.entries.get(key) else {
+            return Ok(0);
+        };
+        if entry.expiry_ms().is_some_and(|deadline| now_ms >= deadline) {
+            return Ok(0);
+        }
+        entry.value.string_len().ok_or(StoreError::WrongType)
+    }
+
+    /// Read-only, no-stat set cardinality: `Some(len)` for a live set,
+    /// `None` for a missing/expired/non-set key — WITHOUT bumping keyspace
+    /// stats. Used by SPOP-with-count to decide the whole-set-removal branch.
+    /// (frankenredis-934ax)
+    #[must_use]
+    pub fn set_cardinality_no_stats(&self, key: &[u8], now_ms: u64) -> Option<usize> {
+        let entry = self.entries.get(key)?;
+        if entry.expiry_ms().is_some_and(|deadline| now_ms >= deadline) {
+            return None;
+        }
+        match &entry.value {
+            Value::Set(set) => Some(set.len()),
+            _ => None,
+        }
+    }
+
+    /// Read-only, no-stat PTTL: like [`Self::pttl`] but does NOT bump
+    /// keyspace_hits/misses. For write-command TTL prechecks (EXPIRE NX/XX/GT/LT
+    /// remaining-TTL comparison) that mirror lookupKeyWrite. (frankenredis-934ax)
+    pub fn pttl_no_stats(&self, key: &[u8], now_ms: u64) -> PttlValue {
+        let Some(entry) = self.entries.get(key) else {
+            return PttlValue::KeyMissing;
+        };
+        if entry.expiry_ms().is_some_and(|deadline| now_ms >= deadline) {
+            return PttlValue::KeyMissing;
+        }
+        let decision = evaluate_expiry(now_ms, entry.expiry_ms());
+        if decision.remaining_ms == -1 {
+            PttlValue::NoExpiry
+        } else {
+            PttlValue::Remaining(decision.remaining_ms)
+        }
+    }
+
     /// Return the Redis-compatible encoding name for the value at `key`.
     #[must_use]
     pub fn object_encoding(&mut self, key: &[u8], now_ms: u64) -> Option<&'static str> {

@@ -3878,7 +3878,10 @@ fn append(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("APPEND"));
     }
-    let current_len = store.strlen(&argv[1], now_ms)?;
+    // APPEND is a write (lookupKeyWrite + checkType + checkStringLength), so the
+    // current-length/WRONGTYPE precheck must NOT bump keyspace_hits — use the
+    // non-counting length read. (frankenredis-934ax)
+    let current_len = store.string_len_no_stats(&argv[1], now_ms)?;
     let added_len = argv[2].len();
     if current_len.saturating_add(added_len) > 536_870_912 {
         // (frankenredis-ga4j1) Upstream t_string.c::checkStringLength
@@ -12395,6 +12398,17 @@ fn spop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             Some(fr_store::ValueType::Set) | None => {}
             Some(_) => return Err(CommandError::Store(StoreError::WrongType)),
         }
+        // (frankenredis-934ax) Upstream spopWithCountCommand routes the
+        // whole-set-removal branch (count >= cardinality) through a SUNION-style
+        // READ that bumps exactly one keyspace_hit, whereas the partial branch
+        // uses lookupKeyWrite (no count). Mirror that single hit here; the
+        // peek/scard reads above are non-counting so this is the only count.
+        if count > 0
+            && let Some(card) = store.set_cardinality_no_stats(&argv[1], now_ms)
+            && count >= card
+        {
+            let _ = store.exists_no_touch(&argv[1], now_ms);
+        }
         let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
         let members = store.spop_count(&argv[1], count, now_ms)?;
         let arr = members
@@ -13993,7 +14007,10 @@ fn apply_expiry_with_options(
     now_ms: u64,
     options: ExpireOptions,
 ) -> bool {
-    let current_remaining_ms = match store.pttl(key, now_ms) {
+    // EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT are writes (lookupKeyWrite); reading the
+    // current TTL for the NX/XX/GT/LT comparison must NOT bump keyspace_hits, so
+    // use the non-counting PTTL. (frankenredis-934ax)
+    let current_remaining_ms = match store.pttl_no_stats(key, now_ms) {
         PttlValue::KeyMissing => return false,
         PttlValue::NoExpiry => None,
         PttlValue::Remaining(ms) => Some(ms),
