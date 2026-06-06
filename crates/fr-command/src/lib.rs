@@ -12233,8 +12233,10 @@ fn setrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     // check (step 3) for non-empty values, so a probe like
     // `LPUSH listk a; SETRANGE listk 600000000 v` returned the
     // size-limit error instead of WRONGTYPE.
-    if let Some(t) = store.key_type(&argv[1], now_ms)
-        && t != "string"
+    // SETRANGE is a write (lookupKeyWrite), so this precheck must use the
+    // NON-counting peek — it must not bump keyspace_hits. (frankenredis-934ax)
+    if let Some(t) = store.peek_value_type(&argv[1], now_ms)
+        && t != fr_store::ValueType::String
     {
         return Err(CommandError::Store(StoreError::WrongType));
     }
@@ -12281,8 +12283,10 @@ fn incrbyfloat(
     // fr previously parsed the delta first, leaking
     // "value is not a valid float" on a wrong-type key when the
     // delta was unparseable (probe: INCRBYFLOAT <list-key> abc).
-    if let Some(t) = store.key_type(&argv[1], now_ms)
-        && t != "string"
+    // INCRBYFLOAT is a write (lookupKeyWrite), so this precheck must use the
+    // NON-counting peek — it must not bump keyspace_hits. (frankenredis-934ax)
+    if let Some(t) = store.peek_value_type(&argv[1], now_ms)
+        && t != fr_store::ValueType::String
     {
         return Err(CommandError::Store(StoreError::WrongType));
     }

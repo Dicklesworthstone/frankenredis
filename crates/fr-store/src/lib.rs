@@ -4427,7 +4427,10 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        self.drop_if_expired(&key, now_ms);
+        // GETSET reads the old value (upstream getsetCommand → getGenericCommand →
+        // lookupKeyRead), so it bumps keyspace_hits on a present key /
+        // keyspace_misses on a missing one. (frankenredis-934ax)
+        self.record_keyspace_lookup(&key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -5421,7 +5424,11 @@ impl Store {
 
     /// Return idle time in seconds for a key (time since last access).
     pub fn object_idletime(&mut self, key: &[u8], now_ms: u64) -> Option<u64> {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        // Non-counting: OBJECT IDLETIME's single keyspace count is already taken
+        // by the caller's existence precheck (object_cmd's exists_no_touch), and
+        // DEBUG OBJECT (the other caller) must not bump stats at all — upstream
+        // OBJECT IDLETIME does exactly one lookupKeyRead. (frankenredis-934ax)
+        if !self.drop_if_expired(key, now_ms) {
             return None;
         }
         self.entries.get(key).map(|entry| {
@@ -22300,13 +22307,19 @@ mod tests {
     }
 
     #[test]
-    fn object_idletime_updates_keyspace_stats_without_touching_lru() {
+    fn object_idletime_computes_idle_without_touching_lru_or_counting() {
         let mut store = Store::new();
         store.set(b"k".to_vec(), b"v".to_vec(), None, 100);
         store.reset_info_stats();
 
+        // object_idletime computes the idle seconds and does NOT update the
+        // entry's LRU access time. (frankenredis-934ax) It is also NON-counting:
+        // upstream OBJECT IDLETIME does exactly ONE lookupKeyRead, which fr takes
+        // in object_cmd's existence precheck (exists_no_touch); DEBUG OBJECT (the
+        // other caller) must not bump stats at all. So the store method itself
+        // leaves keyspace_hits/misses untouched.
         assert_eq!(store.object_idletime(b"k", 2_100), Some(2));
-        assert_eq!(store.stat_keyspace_hits, 1);
+        assert_eq!(store.stat_keyspace_hits, 0);
         assert_eq!(store.stat_keyspace_misses, 0);
         assert_eq!(
             store
@@ -22318,6 +22331,15 @@ mod tests {
         );
 
         assert_eq!(store.object_idletime(b"missing", 2_100), None);
+        assert_eq!(store.stat_keyspace_hits, 0);
+        assert_eq!(store.stat_keyspace_misses, 0);
+
+        // The single command-level count is taken by the existence precheck:
+        // a present key bumps a hit, a missing key bumps a miss.
+        store.reset_info_stats();
+        assert!(store.exists_no_touch(b"k", 2_100));
+        assert_eq!(store.stat_keyspace_hits, 1);
+        assert!(!store.exists_no_touch(b"missing", 2_100));
         assert_eq!(store.stat_keyspace_misses, 1);
     }
 
