@@ -15823,7 +15823,7 @@ impl Store {
                     buf.push(RDB_TYPE_SET);
                     encode_length(&mut buf, s.len());
                     for member in s.iter() {
-                        encode_dump_bulk(&mut buf, member.as_ref());
+                        encode_rdb_string(&mut buf, member.as_ref());
                     }
                 } else if entry.force_set_listpack_encoding {
                     buf.push(RDB_TYPE_SET_LISTPACK);
@@ -15846,7 +15846,7 @@ impl Store {
                         buf.push(RDB_TYPE_SET);
                         encode_length(&mut buf, s.len());
                         for member in s.iter() {
-                            encode_dump_bulk(&mut buf, member.as_ref());
+                            encode_rdb_string(&mut buf, member.as_ref());
                         }
                     }
                 } else if s.len() <= self.set_max_listpack_entries
@@ -15860,7 +15860,7 @@ impl Store {
                     buf.push(RDB_TYPE_SET);
                     encode_length(&mut buf, s.len());
                     for member in s.iter() {
-                        encode_dump_bulk(&mut buf, member.as_ref());
+                        encode_rdb_string(&mut buf, member.as_ref());
                     }
                 }
             }
@@ -15882,8 +15882,8 @@ impl Store {
                     buf.push(RDB_TYPE_HASH);
                     encode_length(&mut buf, h.len());
                     for (field, value) in h.iter() {
-                        encode_dump_bulk(&mut buf, field);
-                        encode_dump_bulk(&mut buf, value);
+                        encode_rdb_string(&mut buf, field);
+                        encode_rdb_string(&mut buf, value);
                     }
                 }
             }
@@ -15905,7 +15905,7 @@ impl Store {
                     buf.push(RDB_TYPE_ZSET_2);
                     encode_length(&mut buf, zs.len());
                     for (member, score) in zs.iter_desc() {
-                        encode_dump_bulk(&mut buf, member);
+                        encode_rdb_string(&mut buf, member);
                         buf.extend_from_slice(&score.to_le_bytes());
                     }
                 }
@@ -17063,11 +17063,6 @@ fn decode_dump_bulk(
         return Err(StoreError::InvalidDumpPayload);
     }
     Ok((data[start..end].to_vec(), len_bytes + len))
-}
-
-fn encode_dump_bulk(buf: &mut Vec<u8>, data: &[u8]) {
-    encode_length(buf, data.len());
-    buf.extend_from_slice(data);
 }
 
 fn encode_intset(values: &[i64]) -> Option<Vec<u8>> {
@@ -31128,6 +31123,43 @@ mod tests {
             &raw_payload[..7],
             &[RDB_TYPE_STRING, 5, b'0', b'0', b'1', b'2', b'3']
         );
+    }
+
+    #[test]
+    fn dump_hashtable_collection_elements_lzf_and_integer_encode() {
+        // The hashtable-set / hashtable-hash / skiplist-zset DUMP element loops
+        // must serialize each element through the same encoder as top-level
+        // strings (integer encoding + LZF for long compressible values), matching
+        // upstream rdbSaveStringObject — not a raw length+bytes copy. Regression
+        // for the encode_dump_bulk bypass that left collection elements
+        // uncompressed and never integer-encoded.
+        let mut store = Store::new();
+        store.hash_max_listpack_entries = 0; // force RDB_TYPE_HASH (hashtable)
+        store.set_max_intset_entries = 0;
+        store.set_max_listpack_entries = 0; // force RDB_TYPE_SET (hashtable)
+
+        // Long, highly compressible hash value -> LZF (0xC3), payload << raw 200B.
+        store.hset(b"h", b"f".to_vec(), vec![b'x'; 200], 0).unwrap();
+        let h = store.dump_key(b"h", 0).unwrap();
+        assert_eq!(h[0], RDB_TYPE_HASH);
+        assert!(
+            h.contains(&0xC3),
+            "long hashtable hash value must be LZF-encoded (0xC3 missing): {h:?}"
+        );
+        assert!(
+            h.len() < 100,
+            "LZF must shrink the 200B value, got {} bytes",
+            h.len()
+        );
+
+        // Integer member in a hashtable set -> integer string encoding (0xC1),
+        // not a raw "12345" string.
+        store.sadd(b"s", &[b"12345".to_vec()], 0).unwrap();
+        let s = store.dump_key(b"s", 0).unwrap();
+        assert_eq!(s[0], RDB_TYPE_SET);
+        assert_eq!(s[1], 1, "set member count");
+        assert_eq!(s[2], 0xC1, "integer set member must use integer encoding");
+        assert_eq!(&s[3..5], &12345i16.to_le_bytes());
     }
 
     #[test]
