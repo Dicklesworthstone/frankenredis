@@ -14667,14 +14667,21 @@ replica_announced:1\r\n",
     }
 
     fn handle_multi_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        // (frankenredis-6tg5i) Wrong arity is a pre-call rejection in upstream
+        // processCommand (rejectCommandArity → flagTransaction), checked BEFORE
+        // the command runs — so it precedes the nested-MULTI check. A bare
+        // `MULTI x` outside a transaction must NOT start one (subsequent commands
+        // then execute normally, and EXEC reports "EXEC without MULTI"); inside a
+        // transaction it taints it (CLIENT_DIRTY_EXEC → EXEC aborts) but does not
+        // re-report "MULTI calls can not be nested". Verified vs redis 7.2.4.
+        if argv.len() != 1 {
+            if self.session.transaction_state.in_transaction {
+                self.session.transaction_state.exec_abort = true;
+            }
+            return wrong_arity_error("multi");
+        }
         if self.session.transaction_state.in_transaction {
             return RespFrame::Error("ERR MULTI calls can not be nested".to_string());
-        }
-        if argv.len() != 1 {
-            self.session.transaction_state.in_transaction = true;
-            self.session.transaction_state.exec_abort = true;
-            self.session.transaction_state.command_queue.clear();
-            return wrong_arity_error("multi");
         }
         self.session.transaction_state.in_transaction = true;
         self.session.transaction_state.exec_abort = false;
@@ -24173,6 +24180,55 @@ mod tests {
             rt.execute_frame(command(&[b"DISCARD"]), 3),
             RespFrame::SimpleString("OK".to_string())
         );
+    }
+
+    /// (frankenredis-6tg5i) Wrong-arity MULTI is a pre-call rejection: outside a
+    /// transaction it must NOT start one, so following commands EXECUTE (not
+    /// QUEUE) and EXEC reports "EXEC without MULTI". Inside a transaction it
+    /// taints it (EXEC aborts) and reports the arity error, NOT "nested".
+    /// Verified vs redis 7.2.4.
+    #[test]
+    fn multi_wrong_arity_does_not_start_transaction() {
+        // Flow A: MULTI x outside a txn does not start one.
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI", b"x"]), 0),
+            wrong_arity_error("multi")
+        );
+        // Subsequent commands execute normally (not QUEUED).
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"v"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 2),
+            RespFrame::BulkString(Some(b"v".to_vec()))
+        );
+        // No transaction is open → EXEC reports "EXEC without MULTI".
+        assert!(matches!(
+            rt.execute_frame(command(&[b"EXEC"]), 3),
+            RespFrame::Error(ref e) if e.contains("EXEC without MULTI")
+        ));
+
+        // Flow B: MULTI x inside a real txn → arity error (not "nested") and the
+        // transaction is tainted so EXEC aborts.
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI", b"x"]), 1),
+            wrong_arity_error("multi")
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"v"]), 2),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        assert!(matches!(
+            rt.execute_frame(command(&[b"EXEC"]), 3),
+            RespFrame::Error(ref e) if e.contains("EXECABORT")
+        ));
     }
 
     #[test]
