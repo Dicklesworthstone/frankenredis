@@ -5540,6 +5540,9 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         let min = parse_score_bound(&argv[2])?;
         let max = parse_score_bound(&argv[3])?;
         let (lo, hi) = if rev { (max, min) } else { (min, max) };
+        if zscore_inverted_wrongtype_guard(store, &argv[1], lo, hi, now_ms)? {
+            return Ok(RespFrame::Array(Some(Vec::new())));
+        }
         // LIMIT pushed into the range walk — O(offset+count), not O(range).
         let pairs = store.zrangebyscore_withscores_limited(
             &argv[1],
@@ -5743,6 +5746,9 @@ fn zrangebyscore(
     let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
     let min = parse_score_bound(&argv[2])?;
     let max = parse_score_bound(&argv[3])?;
+    if zscore_inverted_wrongtype_guard(store, &argv[1], min, max, now_ms)? {
+        return Ok(RespFrame::Array(Some(Vec::new())));
+    }
     // LIMIT pushed into the range walk — O(offset+count), not O(range).
     let pairs = store.zrangebyscore_withscores_limited(
         &argv[1],
@@ -5766,6 +5772,9 @@ fn zcount(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     }
     let min = parse_score_bound(&argv[2])?;
     let max = parse_score_bound(&argv[3])?;
+    if zscore_inverted_wrongtype_guard(store, &argv[1], min, max, now_ms)? {
+        return Ok(RespFrame::Integer(0));
+    }
     let count = store.zcount(&argv[1], min, max, now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
@@ -11085,6 +11094,12 @@ fn zrangestore_cmd(
         let min = parse_score_bound(&argv[3])?;
         let max = parse_score_bound(&argv[4])?;
         let (lo, hi) = if rev { (max, min) } else { (min, max) };
+        if zscore_inverted_wrongtype_guard(store, src, lo, hi, now_ms)? {
+            // Inverted range on a zset/missing src → empty result: delete dst
+            // and return 0 (wrong-type src already returned WRONGTYPE above).
+            store.del(std::slice::from_ref(dst), now_ms);
+            return Ok(RespFrame::Integer(0));
+        }
         // LIMIT/REV pushed into the range walk — O(offset+count), not O(range)
         // (mirrors the ZRANGE BYSCORE path; frankenredis-qchm7).
         store.zrangebyscore_withscores_limited(
@@ -12072,6 +12087,44 @@ fn parse_score_bound(arg: &[u8]) -> Result<ScoreBound, CommandError> {
     }
 }
 
+/// The numeric value of a score bound, ignoring inclusivity — mirrors
+/// fr-store's `score_bound_value`, used only to detect an inverted range.
+fn score_bound_f64(bound: ScoreBound) -> f64 {
+    match bound {
+        ScoreBound::Inclusive(v) | ScoreBound::Exclusive(v) => v,
+    }
+}
+
+/// Upstream t_zset.c::genericZrangebyscoreCommand type-checks the key
+/// (WRONGTYPE) BEFORE it discovers an inverted score range and returns empty.
+/// fr's store range methods short-circuit `min > max` to an empty result
+/// *before* the type check, so a BYSCORE query with `min > max` against a
+/// wrong-type key returned an empty reply instead of WRONGTYPE
+/// (frankenredis ZRANGEBYSCORE inverted-range type-order parity).
+///
+/// `lo`/`hi` are the bounds in the order passed to the store method (already
+/// swapped for REV). Returns:
+///   - `Ok(false)` — range is not inverted; the normal path type-checks itself.
+///   - `Ok(true)`  — inverted range on a zset or missing key; the caller should
+///                   emit its empty result WITHOUT calling the store (so exactly
+///                   the single keyspace lookup redis performs is recorded).
+///   - `Err(WrongType)` — inverted range on a wrong-type key.
+fn zscore_inverted_wrongtype_guard(
+    store: &mut Store,
+    key: &[u8],
+    lo: ScoreBound,
+    hi: ScoreBound,
+    now_ms: u64,
+) -> Result<bool, CommandError> {
+    if score_bound_f64(lo) <= score_bound_f64(hi) {
+        return Ok(false);
+    }
+    match store.key_type(key, now_ms) {
+        None | Some("zset") => Ok(true),
+        Some(_) => Err(CommandError::Store(fr_store::StoreError::WrongType)),
+    }
+}
+
 fn setex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     // SETEX key seconds value
     if argv.len() != 4 {
@@ -12962,6 +13015,9 @@ fn zrevrangebyscore(
     let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
     let max = parse_score_bound(&argv[2])?;
     let min = parse_score_bound(&argv[3])?;
+    if zscore_inverted_wrongtype_guard(store, &argv[1], min, max, now_ms)? {
+        return Ok(RespFrame::Array(Some(Vec::new())));
+    }
     // REV + LIMIT pushed into the range walk — O(offset+count), not O(range).
     let pairs = store.zrangebyscore_withscores_limited(
         &argv[1],
@@ -32445,6 +32501,80 @@ mod tests {
             .expect_err("invalid score bound");
             assert_eq!(err, bad, "input={:?}", String::from_utf8_lossy(arg));
         }
+    }
+
+    /// (ZRANGEBYSCORE inverted-range type-order parity) An inverted score range
+    /// (`min > max`) against a WRONG-TYPE key must still surface WRONGTYPE —
+    /// upstream type-checks the key before discovering the empty range. fr's
+    /// store fast-path returned an empty reply instead; the command-level guard
+    /// restores upstream order for ZRANGEBYSCORE / ZREVRANGEBYSCORE / ZRANGE
+    /// BYSCORE / ZCOUNT / ZRANGESTORE BYSCORE.
+    #[test]
+    fn zscore_inverted_range_on_wrongtype_is_wrongtype() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"strk".to_vec(), b"hello".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        // Inverted ranges (min > max) on the wrong-type key → WRONGTYPE.
+        let inverted: &[&[&[u8]]] = &[
+            &[b"ZRANGEBYSCORE", b"strk", b"10", b"1"],
+            &[b"ZRANGEBYSCORE", b"strk", b"10", b"1", b"WITHSCORES"],
+            &[b"ZRANGEBYSCORE", b"strk", b"10", b"1", b"LIMIT", b"0", b"5"],
+            &[b"ZREVRANGEBYSCORE", b"strk", b"1", b"10"],
+            &[b"ZRANGE", b"strk", b"10", b"1", b"BYSCORE"],
+            &[b"ZRANGE", b"strk", b"(5", b"(2", b"BYSCORE"],
+            &[b"ZCOUNT", b"strk", b"10", b"1"],
+            &[b"ZRANGESTORE", b"dst", b"strk", b"10", b"1", b"BYSCORE"],
+        ];
+        for cmd in inverted {
+            let argv: Vec<Vec<u8>> = cmd.iter().map(|a| a.to_vec()).collect();
+            let label = cmd.iter().map(|a| String::from_utf8_lossy(a)).collect::<Vec<_>>();
+            match dispatch_argv(&argv, &mut store, 0) {
+                Err(CommandError::Store(StoreError::WrongType)) => {}
+                other => panic!("cmd={label:?} expected WrongType, got {other:?}"),
+            }
+        }
+
+        // Inverted range on a MISSING key → empty / 0 (not an error).
+        assert_eq!(
+            dispatch_argv(
+                &[b"ZRANGEBYSCORE".to_vec(), b"nope".to_vec(), b"10".to_vec(), b"1".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::Array(Some(Vec::new()))
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[b"ZCOUNT".to_vec(), b"nope".to_vec(), b"10".to_vec(), b"1".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::Integer(0)
+        );
+
+        // Inverted range on a real zset → empty / 0 (type check passes).
+        dispatch_argv(
+            &[b"ZADD".to_vec(), b"z".to_vec(), b"1".to_vec(), b"a".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            dispatch_argv(
+                &[b"ZRANGEBYSCORE".to_vec(), b"z".to_vec(), b"10".to_vec(), b"1".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::Array(Some(Vec::new()))
+        );
     }
 
     #[test]
