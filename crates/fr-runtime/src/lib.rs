@@ -6233,10 +6233,24 @@ impl Runtime {
                     Err(err) => err.to_resp(),
                 };
                 let elapsed_us = special_start.elapsed().as_micros() as u64;
-                self.record_slowlog(argv, elapsed_us, now_ms);
-                self.server.record_latency_sample(argv, elapsed_us, now_ms);
-                self.server
-                    .record_command_histogram(argv, elapsed_us, &reply);
+                // (frankenredis-aaziu) Wrong arity is a pre-call rejection in
+                // upstream processCommand: rejected_calls only, never
+                // calls/usec/failed_calls/SLOWLOG/latency — even for special
+                // commands whose reply wording differs (e.g. EXEC's EXECABORT,
+                // verified counted as rejected vs redis 7.2.4). The handler above
+                // already produced the correct reply; classify the stat by the
+                // canonical arity table, mirroring the regular path's WrongArity.
+                let arity_rejected = argv
+                    .first()
+                    .is_some_and(|cmd| fr_command::check_command_arity(cmd, argv.len()).is_err());
+                if arity_rejected {
+                    self.server.record_command_rejected(argv);
+                } else {
+                    self.record_slowlog(argv, elapsed_us, now_ms);
+                    self.server.record_latency_sample(argv, elapsed_us, now_ms);
+                    self.server
+                        .record_command_histogram(argv, elapsed_us, &reply);
+                }
                 return reply;
             }
         }
@@ -16819,6 +16833,45 @@ mod tests {
             lpush_row.ends_with(",rejected_calls=0,failed_calls=1"),
             "{lpush_row}"
         );
+    }
+
+    /// (frankenredis-aaziu) Special/runtime-dispatched commands (SUBSCRIBE,
+    /// CONFIG, EXEC, ...) must also count wrong-arity as rejected_calls, never
+    /// calls/failed_calls — even EXEC, whose reply wording is EXECABORT but is
+    /// still a pre-call arity rejection (verified vs redis 7.2.4). The reply
+    /// itself is unchanged; only the stat classification is asserted here.
+    #[test]
+    fn info_commandstats_special_command_wrong_arity_counts_rejected() {
+        let mut rt = Runtime::default_strict();
+        // Wrong-arity special commands → rejected.
+        let arity_cases: [&[&[u8]]; 4] = [
+            &[b"SUBSCRIBE"],
+            &[b"CONFIG"],
+            &[b"WAIT", b"1"],
+            &[b"EXEC", b"extra"],
+        ];
+        for cmd in arity_cases {
+            assert!(matches!(
+                rt.execute_frame(command(cmd), 0),
+                RespFrame::Error(_)
+            ));
+        }
+        let info = rt.execute_frame(command(&[b"INFO", b"commandstats"]), 0);
+        let RespFrame::BulkString(Some(bytes)) = info else {
+            panic!("expected bulk info response");
+        };
+        let body = String::from_utf8(bytes).expect("utf8 info");
+        for cmd in ["subscribe", "config", "wait", "exec"] {
+            let row = body
+                .lines()
+                .find(|l| l.starts_with(&format!("cmdstat_{cmd}:")))
+                .unwrap_or_else(|| panic!("expected cmdstat_{cmd} row in:\n{body}"));
+            assert!(
+                row.starts_with(&format!("cmdstat_{cmd}:calls=0,usec=0,"))
+                    && row.ends_with(",rejected_calls=1,failed_calls=0"),
+                "{cmd} should be a rejection (0 calls, 1 rejected): {row}"
+            );
+        }
     }
 
     /// (frankenredis-8who6) Upstream
