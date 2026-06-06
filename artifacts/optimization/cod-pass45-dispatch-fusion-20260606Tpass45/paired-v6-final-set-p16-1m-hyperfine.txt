@@ -1,0 +1,11 @@
+Benchmark 1: baseline
+  Time (mean ± σ):      3.017 s ±  0.491 s    [User: 2.655 s, System: 2.713 s]
+  Range (min … max):    2.540 s …  3.990 s    8 runs
+
+Benchmark 2: candidate
+  Time (mean ± σ):      2.155 s ±  0.210 s    [User: 1.829 s, System: 2.540 s]
+  Range (min … max):    1.916 s …  2.449 s    8 runs
+
+Summary
+  candidate ran
+    1.40 ± 0.27 times faster than baseline

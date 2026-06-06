@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "bash -lc 'log=\"$OUT/baseline-server-$PORT-$RANDOM.log\"; \"$SERVER\" --bind 127.0.0.1 --port \"$PORT\" --mode strict >\"$log\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for i in {1..100}; do grep -q ready \"$log\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$log\" || exit 1; \"$BENCH\" --host 127.0.0.1 --port \"$PORT\" --clients 50 --requests 300000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"$OUT/baseline-set-p16-300k-last.json\" --key-prefix \"$PREFIX\" >/dev/null; cleanup; trap - EXIT'",
+      "mean": 1.00140219072,
+      "stddev": 0.12085917643172503,
+      "median": 0.9856043594200001,
+      "user": 0.9027132199999999,
+      "system": 0.9271997599999999,
+      "min": 0.8400249314200001,
+      "max": 1.2053106194199998,
+      "times": [
+        0.9836453554200001,
+        0.8599934224200001,
+        0.92731247242,
+        1.04007551142,
+        0.9478981794200001,
+        0.8400249314200001,
+        0.9875633634200001,
+        1.04245663042,
+        1.2053106194199998,
+        1.17974142142
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

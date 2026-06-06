@@ -258,6 +258,10 @@ fn set_command_keys(argv: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
     .then(|| vec![argv[1].clone()])
 }
 
+fn plain_set_owned_argv(key: &[u8], value: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"SET".to_vec(), key.to_vec(), value.to_vec()]
+}
+
 fn wrong_arity_error(command: &'static str) -> RespFrame {
     RespFrame::Error(format!(
         "ERR wrong number of arguments for '{}' command",
@@ -2237,9 +2241,8 @@ fn eq_ascii_token(lhs: &[u8], rhs: &[u8]) -> bool {
 /// never persisted to the append-only file. The AOF disk flush filters these
 /// records back out by name so the on-disk AOF matches upstream.
 fn command_is_replication_only(argv: &[Vec<u8>]) -> bool {
-    argv.first().is_some_and(|cmd| {
-        eq_ascii_token(cmd, b"PUBLISH") || eq_ascii_token(cmd, b"SPUBLISH")
-    })
+    argv.first()
+        .is_some_and(|cmd| eq_ascii_token(cmd, b"PUBLISH") || eq_ascii_token(cmd, b"SPUBLISH"))
 }
 
 /// Single-key PFCOUNT is a "may-replicate" read: when the cached HLL
@@ -2254,7 +2257,8 @@ fn command_is_replication_only(argv: &[Vec<u8>]) -> bool {
 /// capture happens only on the turn it actually recomputed: a cache hit and
 /// multi-key PFCOUNT never dirty, so they never propagate, matching upstream.
 fn command_is_may_replicate_read(argv: &[Vec<u8>]) -> bool {
-    argv.first().is_some_and(|cmd| eq_ascii_token(cmd, b"PFCOUNT"))
+    argv.first()
+        .is_some_and(|cmd| eq_ascii_token(cmd, b"PFCOUNT"))
 }
 
 /// Mirror upstream networking.c::addReplySubcommandSyntaxError for
@@ -5589,6 +5593,159 @@ impl Runtime {
         self.execute_dispatch(None, Ok(argv), now_ms, Some(unix_time_us))
     }
 
+    pub fn execute_plain_set_borrowed(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_set_borrowed(key, value, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("set");
+        self.session.last_argv_len_sum = b"SET".len() + key.len() + value.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        self.server
+            .store
+            .set(key.to_vec(), value.to_vec(), None, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+
+        self.record_plain_set_borrowed_metrics(key, value, elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_writes_processed += 1;
+
+        Some(RespFrame::SimpleString("OK".to_string()))
+    }
+
+    fn can_execute_plain_set_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"SET".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || value.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        if self.session.requires_auth(&self.server.auth_state)
+            || !self.current_acl_allows_plain_set()
+        {
+            return false;
+        }
+        if self.session.selected_db != 0
+            || self.session.client_no_touch
+            || self.session.transaction_state.in_transaction
+            || self.session.transaction_state.executing_exec
+            || self.is_in_subscription_mode()
+            || self.is_client_paused(now_ms)
+            || self.active_disk_write_denial().is_some()
+            || self.server.maxmemory_bytes != 0
+            || self.server.min_replicas_to_write != 0
+            || self.server.aof_path.is_some()
+            || !matches!(
+                self.server.replication_runtime_state.role,
+                ReplicationRoleState::Master
+            )
+            || self
+                .server
+                .replication_runtime_state
+                .any_replica_ever_connected
+            || !self.server.replication_runtime_state.replicas.is_empty()
+            || !self.server.blocked_client_ids.is_empty()
+            || self.server.store.notify_keyspace_events != 0
+            || !self.server.store.keyspace_notifications.is_empty()
+            || !self.server.client_tracking_observed_keys.is_empty()
+            || !self.server.client_tracking_bcast_clients.is_empty()
+            || self.should_record_client_tracking_keys()
+            || !self.server.monitor_clients.is_empty()
+            || self.server.store.script_nesting_level != 0
+        {
+            return false;
+        }
+        true
+    }
+
+    fn current_acl_allows_plain_set(&self) -> bool {
+        let Some(user) = self
+            .server
+            .auth_state
+            .get_user(self.session.current_user_name())
+        else {
+            return false;
+        };
+        user.enabled
+            && user.all_commands
+            && user.denied_commands.is_empty()
+            && user.denied_categories.is_empty()
+            && user.all_keys
+    }
+
+    fn record_plain_set_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_set_owned_argv(key, value));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_set_owned_argv(key, value));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            self.server.store.record_command_histogram_with_kind(
+                "set",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_set_owned_argv(key, value));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'SET' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
     fn execute_dispatch(
         &mut self,
         frame: Option<&RespFrame>,
@@ -6196,9 +6353,7 @@ impl Runtime {
             return reply;
         }
 
-        if command_arity_ok
-            && let Some(reply) = self.reject_write_on_readonly_replica(argv)
-        {
+        if command_arity_ok && let Some(reply) = self.reject_write_on_readonly_replica(argv) {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return reply;
         }
@@ -12939,9 +13094,7 @@ impl Runtime {
             } else {
                 encode_aof_stream(pending)
             };
-            if !bytes.is_empty()
-                && std::io::Write::write_all(&mut file, &bytes).is_err()
-            {
+            if !bytes.is_empty() && std::io::Write::write_all(&mut file, &bytes).is_err() {
                 self.server.store.record_aof_write_status(false);
                 return;
             }
@@ -16115,6 +16268,92 @@ mod tests {
     }
 
     #[test]
+    fn plain_set_borrowed_fast_path_is_disabled_when_aof_is_configured() {
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(std::path::PathBuf::from("appendonly.aof"));
+
+        assert_eq!(rt.execute_plain_set_borrowed(b"aof-key", b"value", 1), None);
+        assert!(rt.aof_records().is_empty());
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"aof-key"]), 2),
+            RespFrame::BulkString(None)
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"aof-key", b"value"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.aof_records()
+                .last()
+                .expect("generic SET captures AOF")
+                .argv,
+            argv(&[b"SET", b"aof-key", b"value"])
+        );
+    }
+
+    #[test]
+    fn plain_set_borrowed_fast_path_applies_existing_reply_suppression() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"REPLY", b"SKIP"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_plain_set_borrowed(b"reply-key", b"value", 2),
+            Some(RespFrame::SimpleString("OK".to_string()))
+        );
+        assert!(rt.suppress_current_network_reply());
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"reply-key"]), 3),
+            RespFrame::BulkString(Some(b"value".to_vec()))
+        );
+        assert!(!rt.suppress_current_network_reply());
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"REPLY", b"OFF"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_plain_set_borrowed(b"reply-key", b"next", 5),
+            Some(RespFrame::SimpleString("OK".to_string()))
+        );
+        assert!(rt.suppress_current_network_reply());
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"REPLY", b"ON"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.suppress_current_network_reply());
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"reply-key"]), 7),
+            RespFrame::BulkString(Some(b"next".to_vec()))
+        );
+    }
+
+    #[test]
+    fn plain_set_borrowed_fast_path_clears_disabled_maxmemory_eviction_diagnostics() {
+        let mut rt = Runtime::default_strict();
+        rt.configure_maxmemory_enforcement(1, 0, 1, 1);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"large-key", b"large-value"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.last_eviction_loop_result().is_some());
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"maxmemory", b"0"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_plain_set_borrowed(b"large-key", b"new-value", 3),
+            Some(RespFrame::SimpleString("OK".to_string()))
+        );
+        assert!(rt.last_eviction_loop_result().is_none());
+    }
+
+    #[test]
     fn last_command_name_buffer_reuse_matches_reference_and_reports_ab_ratio() {
         use super::write_client_info_command_name;
         // Reference = the prior allocating implementation. (frankenredis-hackk)
@@ -17067,7 +17306,10 @@ mod tests {
             .find(|l| l.starts_with("cmdstat_get:"))
             .unwrap_or_else(|| panic!("expected cmdstat_get row in:\n{body}"));
         // GET: 1 call (the success), 2 rejected (arity), 0 failed.
-        assert!(get_row.starts_with("cmdstat_get:calls=1,usec="), "{get_row}");
+        assert!(
+            get_row.starts_with("cmdstat_get:calls=1,usec="),
+            "{get_row}"
+        );
         assert!(
             get_row.ends_with(",rejected_calls=2,failed_calls=0"),
             "{get_row}"
@@ -17077,7 +17319,10 @@ mod tests {
             .find(|l| l.starts_with("cmdstat_lpush:"))
             .unwrap_or_else(|| panic!("expected cmdstat_lpush row in:\n{body}"));
         // LPUSH: the WRONGTYPE reply is an executed failure → calls=1, failed=1.
-        assert!(lpush_row.starts_with("cmdstat_lpush:calls=1,usec="), "{lpush_row}");
+        assert!(
+            lpush_row.starts_with("cmdstat_lpush:calls=1,usec="),
+            "{lpush_row}"
+        );
         assert!(
             lpush_row.ends_with(",rejected_calls=0,failed_calls=1"),
             "{lpush_row}"
@@ -21756,7 +22001,11 @@ mod tests {
         // connection as a replica) flips the flag to 'S'.
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"REPLCONF", b"listening-port", b"1234"]), 0);
-        assert_eq!(flags_of(&mut rt), "S", "replica connection should be flags=S");
+        assert_eq!(
+            flags_of(&mut rt),
+            "S",
+            "replica connection should be flags=S"
+        );
     }
 
     #[test]
@@ -22878,7 +23127,9 @@ mod tests {
         assert!(crate::command_is_replication_only(&[b"publish".to_vec()]));
         assert!(crate::command_is_replication_only(&[b"SPUBLISH".to_vec()]));
         assert!(!crate::command_is_replication_only(&[b"SET".to_vec()]));
-        assert!(!crate::command_is_replication_only(&[b"SUBSCRIBE".to_vec()]));
+        assert!(!crate::command_is_replication_only(
+            &[b"SUBSCRIBE".to_vec()]
+        ));
 
         // Pre-first-replica with AOF off: PUBLISH must not advance the offset,
         // mirroring replicationFeedSlaves short-circuiting with no backlog.
@@ -23619,13 +23870,19 @@ mod tests {
             RespFrame::Error(_)
         ));
         // Disabling read-only allows writes on the replica.
-        rt.execute_frame(command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]), 0);
+        rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]),
+            0,
+        );
         assert_eq!(
             rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0),
             RespFrame::SimpleString("OK".to_string())
         );
         // Promote back to master: writes allowed even with read-only re-enabled.
-        rt.execute_frame(command(&[b"CONFIG", b"SET", b"replica-read-only", b"yes"]), 0);
+        rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"replica-read-only", b"yes"]),
+            0,
+        );
         rt.execute_frame(command(&[b"REPLICAOF", b"NO", b"ONE"]), 0);
         assert_eq!(
             rt.execute_frame(command(&[b"SET", b"k2", b"v2"]), 0),
@@ -23657,11 +23914,17 @@ mod tests {
         );
         // A read inside a script is allowed.
         assert!(!matches!(
-            rt.execute_frame(command(&[b"EVAL", b"return redis.call('GET','k')", b"0"]), 0),
+            rt.execute_frame(
+                command(&[b"EVAL", b"return redis.call('GET','k')", b"0"]),
+                0
+            ),
             RespFrame::Error(_)
         ));
         // Disabling read-only re-allows in-script writes.
-        rt.execute_frame(command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]), 0);
+        rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]),
+            0,
+        );
         assert!(!matches!(
             rt.execute_frame(
                 command(&[b"EVAL", b"return redis.call('SET','k','v')", b"0"]),
@@ -33356,9 +33619,7 @@ user bob reset off nopass +@all
 
     #[test]
     fn function_write_subcommands_advance_replication_offset() {
-        let argv = |parts: &[&[u8]]| -> Vec<Vec<u8>> {
-            parts.iter().map(|p| p.to_vec()).collect()
-        };
+        let argv = |parts: &[&[u8]]| -> Vec<Vec<u8>> { parts.iter().map(|p| p.to_vec()).collect() };
         // FUNCTION is a container command whose bare token carries no write flag,
         // so it must be classified by its subcommand. The write subcommands mutate
         // the function library and must propagate to replicas + the AOF (advance
