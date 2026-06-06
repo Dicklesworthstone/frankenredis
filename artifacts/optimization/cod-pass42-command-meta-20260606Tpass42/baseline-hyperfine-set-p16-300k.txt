@@ -1,0 +1,4 @@
+Benchmark 1: env OUT=artifacts/optimization/cod-pass42-command-meta-20260606Tpass42 SERVER=/tmp/codex-fr-pass42-commandmeta-baseline-target/release-perf/frankenredis BENCH=/tmp/codex-fr-pass42-commandmeta-baseline-target/release-perf/fr-bench PORT=20661 bash -lc 'set -euo pipefail; LOG="$OUT/baseline-hyperfine-server.log"; "$SERVER" --port "$PORT" --mode strict > "$LOG" 2>&1 & pid=$!; cleanup(){ kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }; trap cleanup EXIT; for _ in {1..100}; do grep -q ready "$LOG" && break; kill -0 "$pid" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready "$LOG"; "$BENCH" --host 127.0.0.1 --port "$PORT" --clients 50 --requests 300000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out "$OUT/baseline-hyperfine-last.json" --key-prefix cod-pass42-base-hf >/dev/null'
+  Time (mean ± σ):     813.4 ms ±  70.2 ms    [User: 698.0 ms, System: 780.5 ms]
+  Range (min … max):   706.7 ms … 948.0 ms    10 runs
+ 

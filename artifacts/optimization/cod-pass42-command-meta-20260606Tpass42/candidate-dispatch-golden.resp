@@ -1,0 +1,46 @@
++PONG
++OK
+$1
+v
+:1
+$1
+v
+-ERR wrong number of arguments for 'hget' command
+-ERR unknown command 'NOPE', with args beginning with: 'a' 'b' 
++OK
++OK
++OK
+$-1
++OK
+$2
+v1
++OK
++QUEUED
++QUEUED
+*2
++OK
+$1
+1
++OK
++OK
+$-1
+-NOPERM User limited has no permissions to run the 'set' command
+-NOPERM User limited has no permissions to run the 'quit' command
+*3
+$9
+subscribe
+$2
+ch
+:1
+*2
+$4
+pong
+$2
+hi
+*3
+$11
+unsubscribe
+$2
+ch
+:0
++OK

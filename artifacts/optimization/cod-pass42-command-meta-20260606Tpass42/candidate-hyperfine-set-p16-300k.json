@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "env OUT=artifacts/optimization/cod-pass42-command-meta-20260606Tpass42 SERVER=/tmp/codex-fr-pass42-commandmeta-candidate-target/release-perf/frankenredis BENCH=/tmp/codex-fr-pass42-commandmeta-candidate-target/release-perf/fr-bench PORT=20662 bash -lc 'set -euo pipefail; LOG=\"$OUT/candidate-hyperfine-server.log\"; \"$SERVER\" --port \"$PORT\" --mode strict > \"$LOG\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for _ in {1..100}; do grep -q ready \"$LOG\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$LOG\"; \"$BENCH\" --host 127.0.0.1 --port \"$PORT\" --clients 50 --requests 300000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"$OUT/candidate-hyperfine-last.json\" --key-prefix cod-pass42-cand-hf >/dev/null'",
+      "mean": 1.03543921186,
+      "stddev": 0.1337266108848078,
+      "median": 1.04495619096,
+      "user": 0.92810078,
+      "system": 0.9164249800000001,
+      "min": 0.84148869896,
+      "max": 1.22832494396,
+      "times": [
+        1.19475383696,
+        1.1029463289599999,
+        1.1150986299599999,
+        0.97438658296,
+        0.91001027396,
+        1.22832494396,
+        0.88718702396,
+        0.84148869896,
+        0.9869660529600001,
+        1.11322974596
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
