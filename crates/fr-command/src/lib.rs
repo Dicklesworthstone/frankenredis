@@ -237,6 +237,15 @@ pub fn rewrite_effect_command_for_propagation(
     if eq_ascii_command(cmd, b"GETDEL") && argv.len() == 2 {
         return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
     }
+    if eq_ascii_command(cmd, b"GETSET") && argv.len() == 3 {
+        // Upstream getsetCommand canonicalizes the deprecated GETSET into a plain
+        // SET in the replication / AOF stream (rewriteClientCommandArgument →
+        // shared.set), so replicas and AOF replay `SET key value`. No KEEPTTL:
+        // GETSET clears any existing TTL exactly like a plain SET, so the bare
+        // SET form already matches. The reply (the old value) is irrelevant — the
+        // rewrite is fully determined by argv.
+        return Some(vec![b"SET".to_vec(), argv[1].clone(), argv[2].clone()]);
+    }
     if eq_ascii_command(cmd, b"BRPOPLPUSH") && argv.len() == 4 {
         return Some(vec![
             b"RPOPLPUSH".to_vec(),
@@ -52268,6 +52277,18 @@ mod tests {
                 0
             ),
             Some(vec![v(b"DEL"), v(b"k")])
+        );
+        // GETSET -> SET key value (deprecated verb canonicalized; no KEEPTTL —
+        // GETSET clears the TTL exactly like a plain SET). The reply (old value)
+        // is irrelevant to the rewrite.
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"GETSET"), v(b"k"), v(b"neu")],
+                &b(b"old"),
+                &store,
+                0
+            ),
+            Some(vec![v(b"SET"), v(b"k"), v(b"neu")])
         );
         // SPOP with the set still present -> SREM <members>.
         store
