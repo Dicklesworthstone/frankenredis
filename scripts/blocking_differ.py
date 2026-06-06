@@ -207,6 +207,24 @@ def run(port):
     w4.cmd("MULTI")
     w4.cmd("SET", "casu", "3")
     r["cas_unwatch_ok"] = w4.cmd("EXEC")       # [OK] (unwatched)
+
+    # --- blocking commands inside MULTI must QUEUE and run NON-blocking at EXEC ---
+    # (WAIT/WAITAOF must not block the transaction; they return the immediate
+    # count/error at EXEC time, never waiting out their timeout.)
+    m = Conn(port)
+    m.cmd("MULTI")
+    r["multi_wait_queued"] = m.cmd("WAIT", "1", "250")     # +QUEUED
+    r["multi_wait_exec"] = m.cmd("EXEC")                   # [0] immediately
+    m.cmd("MULTI")
+    r["multi_wait0_queued"] = m.cmd("WAIT", "0", "250")
+    r["multi_wait0_exec"] = m.cmd("EXEC")                  # [0]
+    m.cmd("MULTI")
+    r["multi_waitaof_queued"] = m.cmd("WAITAOF", "1", "0", "250")
+    r["multi_waitaof_exec"] = m.cmd("EXEC")                # [error: numlocal w/o appendonly]
+    m.cmd("MULTI")
+    m.cmd("SET", "wk", "v")
+    m.cmd("WAIT", "2", "250")
+    r["multi_set_wait_exec"] = m.cmd("EXEC")               # [OK, 0]
     return r
 
 

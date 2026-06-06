@@ -2917,6 +2917,14 @@ fn waitaof_should_block(argv: &[Vec<u8>], response: &RespFrame) -> bool {
     if !command.eq_ignore_ascii_case(b"WAITAOF") {
         return false;
     }
+    // Only block when WAITAOF actually executed and returned its [numlocal,
+    // numreplicas] array below threshold. Any other reply means the command was
+    // NOT run as WAITAOF — queued as `+QUEUED` inside MULTI/EXEC, or rejected
+    // with an error (e.g. numlocal set while appendonly is off) — and must be
+    // delivered as-is. (frankenredis: WAIT/WAITAOF in MULTI must not block)
+    if !matches!(response, RespFrame::Array(Some(_))) {
+        return false;
+    }
     !waitaof_response_satisfies(argv, response)
 }
 
@@ -2942,6 +2950,14 @@ fn wait_should_block(argv: &[Vec<u8>], response: &RespFrame) -> bool {
         return false;
     };
     if !command.eq_ignore_ascii_case(b"WAIT") {
+        return false;
+    }
+    // Only block when WAIT actually executed and returned an integer ack count
+    // below the requested replica count. A non-integer reply means the command
+    // was NOT run as WAIT — queued as `+QUEUED` inside MULTI/EXEC, or rejected
+    // with an error (e.g. on a replica) — and must be delivered as-is.
+    // (frankenredis: WAIT/WAITAOF in MULTI must not block)
+    if !matches!(response, RespFrame::Integer(_)) {
         return false;
     }
     !wait_response_satisfies(argv, response)
@@ -4289,6 +4305,22 @@ mod tests {
             bulk(b"0"),
         ]));
         assert!(wait_should_block(&simple_wait, &RespFrame::Integer(0)));
+
+        // A `+QUEUED` reply (WAIT/WAITAOF queued inside MULTI) must NOT block —
+        // the command runs non-blocking at EXEC time. Likewise an error reply
+        // (e.g. WAIT on a replica, WAITAOF with numlocal but appendonly off)
+        // must be delivered as-is, not blocked on. Regression for the bug where
+        // these matchers keyed only on argv[0] and treated any non-executed
+        // reply as "unsatisfied → block". (verified vs redis 7.2.4)
+        let queued = RespFrame::SimpleString("QUEUED".to_string());
+        assert!(!wait_should_block(&wait, &queued));
+        assert!(!waitaof_should_block(&waitaof, &queued));
+        let wait_err = RespFrame::Error("ERR WAIT cannot be used with replica instances.".into());
+        assert!(!wait_should_block(&wait, &wait_err));
+        let waitaof_err = RespFrame::Error(
+            "ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled.".into(),
+        );
+        assert!(!waitaof_should_block(&waitaof, &waitaof_err));
     }
 
     #[test]
