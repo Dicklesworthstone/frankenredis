@@ -18797,6 +18797,56 @@ fn bignat_to_long_double(
     })
 }
 
+/// Parse the part after a `0x`/`0X` prefix of a C99 hex float to the nearest
+/// 80-bit long double, mirroring strtold (and fr's `try_parse_hex_float`):
+/// `<hexint>[.<hexfrac>][p<decexp>]`, at least one significand hex digit, the
+/// `p` exponent optional. The value is `<hex significand> *
+/// 2^(p - 4*hexfrac_digits)` — an exact dyadic rational built in BigNat so it is
+/// rounded to f80 exactly (not via lossy f64). (frankenredis strtold hex parity)
+fn parse_hex_long_double(negative: bool, after_prefix: &[u8]) -> Option<IntegerLongDouble> {
+    if after_prefix.is_empty() {
+        return None;
+    }
+    // Split off the binary exponent (p/P).
+    let (significand, exp_val) = match after_prefix.iter().position(|&b| b == b'p' || b == b'P') {
+        Some(pos) => {
+            let exp = &after_prefix[pos + 1..];
+            if exp.is_empty() {
+                return None;
+            }
+            (&after_prefix[..pos], parse_decimal_exponent(exp)?)
+        }
+        None => (after_prefix, 0),
+    };
+    // Split integer and fractional hex digits.
+    let (int_part, frac_part): (&[u8], &[u8]) =
+        match significand.iter().position(|&b| b == b'.') {
+            Some(pos) => (&significand[..pos], &significand[pos + 1..]),
+            None => (significand, b""),
+        };
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    // Concatenated hex significand as an exact integer mantissa.
+    let mut mantissa = BigNat::zero();
+    for part in [int_part, frac_part] {
+        for &d in part {
+            let value = match d {
+                b'0'..=b'9' => d - b'0',
+                b'a'..=b'f' => d - b'a' + 10,
+                b'A'..=b'F' => d - b'A' + 10,
+                _ => return None,
+            };
+            mantissa.mul_small(16);
+            mantissa.add_small(u32::from(value));
+        }
+    }
+    // value = mantissa * 2^(exp_val - 4*frac_hex_digits)
+    let frac_len = i32::try_from(frac_part.len()).ok()?;
+    let bin_exp = exp_val.checked_sub(frac_len.checked_mul(4)?)?;
+    bignat_to_long_double(negative, &mantissa, bin_exp, false)
+}
+
 /// Parse a decimal float string to the nearest 80-bit long double, mirroring
 /// strtold's accepted grammar (optional sign, digits with one dot, optional
 /// e/E exponent) and round-half-even rounding. Rejects leading/trailing
@@ -18824,6 +18874,12 @@ fn parse_long_double(bytes: &[u8]) -> Option<IntegerLongDouble> {
         return None;
     }
     let rest = &bytes[idx..];
+    // C99 hex float (`0x1.5p3`, `0x10`, `0xff`) — strtold accepts these and they
+    // are NOT decimal (e.g. the `e` in `0x10e5` is a hex digit, not an exponent),
+    // so dispatch before the decimal `e`/`E` scan. (frankenredis strtold hex parity)
+    if rest.len() >= 2 && rest[0] == b'0' && (rest[1] == b'x' || rest[1] == b'X') {
+        return parse_hex_long_double(negative, &rest[2..]);
+    }
     let exponent_marker = rest.iter().position(|&byte| byte == b'e' || byte == b'E');
     let (significand, exponent) = match exponent_marker {
         Some(pos) => (&rest[..pos], parse_decimal_exponent(&rest[pos + 1..])?),
@@ -28660,6 +28716,68 @@ mod tests {
                 Err(StoreError::ValueNotFloat),
                 "stored={:?} expected ValueNotFloat for HINCRBYFLOAT",
                 String::from_utf8_lossy(stored),
+            );
+        }
+    }
+
+    #[test]
+    fn incrbyfloat_accepts_c99_hex_float_operands() {
+        // (frankenredis strtold hex parity) redis parses the increment with
+        // `strtold`, which accepts C99 hex floats. fr's store parser was
+        // decimal-only and used to reject these. Golden results captured from
+        // vendored redis 7.2.4 INCRBYFLOAT against a fresh key.
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"0x10", b"16"),          // 16
+            (b"0xff", b"255"),         // 255
+            (b"0x1.8p1", b"3"),        // 1.5 * 2 = 3
+            (b"0x1.5p3", b"10.5"),     // 1.3125 * 8 = 10.5
+            (b"0xa.bp2", b"42.75"),    // 10.6875 * 4 = 42.75
+            (b"-0x10", b"-16"),        // negative
+            (b"0X1P4", b"16"),         // uppercase 0X / P
+            (b"0x0p0", b"0"),          // zero
+        ];
+        for (delta_text, expected) in cases {
+            let mut store = Store::new();
+            // delta f64 is the command-layer placeholder (0.0); the store uses
+            // the text via the faithful f80 parser.
+            let next = store
+                .incrbyfloat_text(b"k", delta_text, 0.0, 0)
+                .unwrap_or_else(|e| panic!("INCRBYFLOAT {delta_text:?} errored: {e:?}"));
+            assert_eq!(
+                next,
+                expected.to_vec(),
+                "INCRBYFLOAT 0 + {} expected {}",
+                String::from_utf8_lossy(delta_text),
+                String::from_utf8_lossy(expected),
+            );
+        }
+        // Chained accumulation (rounding path): 0xff twice => 510.
+        let mut store = Store::new();
+        store.incrbyfloat_text(b"k", b"0xff", 0.0, 0).unwrap();
+        let next = store.incrbyfloat_text(b"k", b"0xff", 0.0, 0).unwrap();
+        assert_eq!(next, b"510".to_vec());
+        // Invalid hex floats are rejected by the command-layer operand gate
+        // (long_double_text_is_valid), exercised end-to-end by
+        // scripts/hexfloat_incr_differ.py — the units below lock the validator.
+        for bad in &[
+            b"0x".as_slice(),
+            b"0xg",
+            b"0xp4",
+            b"0x1.5p",
+            b"0x1.2.3",
+            b"0x.",
+        ] {
+            assert!(
+                !crate::long_double_text_is_valid(bad),
+                "expected {:?} to be an invalid long double",
+                String::from_utf8_lossy(bad),
+            );
+        }
+        for good in &[b"0x10".as_slice(), b"0x1.5p3", b"-0xff", b"0X1P4"] {
+            assert!(
+                crate::long_double_text_is_valid(good),
+                "expected {:?} to be a valid long double",
+                String::from_utf8_lossy(good),
             );
         }
     }
