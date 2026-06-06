@@ -5497,14 +5497,10 @@ impl Runtime {
             // of the live command's args. (frankenredis-clargvmem)
             self.session.last_argv_len_sum = argv.iter().map(Vec::len).sum();
         }
-        // (frankenredis-2prp1) Inline the record_client_session call to
-        // avoid the redundant clone — the BTreeMap insert below already
-        // clones for ownership. Disjoint field borrows (self.session
-        // immut for the value + key, self.server mut for the insert)
-        // satisfy the borrow checker.
-        self.server
-            .client_sessions
-            .insert(self.session.client_id, self.session.clone());
+        // The TCP server snapshots this session once after processing a
+        // readable batch. CLIENT LIST/INFO include the active session directly,
+        // so cloning it into the registry on every command only burns hot-path
+        // CPU and allocator traffic without changing observable state.
         let processed_counts = argv_result
             .as_ref()
             .ok()
@@ -17387,6 +17383,32 @@ mod tests {
         };
         assert!(info.contains("age=2"), "expected age seconds in {info}");
         assert!(info.contains("idle=0"), "expected idle reset in {info}");
+    }
+
+    #[test]
+    fn client_list_reports_current_session_without_hot_path_registry_snapshot() {
+        let mut rt = Runtime::default_strict();
+        let current_id = rt.session.client_id;
+
+        assert!(!rt.server.client_sessions.contains_key(&current_id));
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"SETNAME", b"alpha"]), 1_000),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.server.client_sessions.contains_key(&current_id));
+
+        let client_list = rt.execute_frame(command(&[b"CLIENT", b"LIST"]), 1_500);
+        let info = match client_list {
+            RespFrame::BulkString(Some(info)) => String::from_utf8(info).expect("client info utf8"),
+            other => unreachable!("unexpected client list response: {other:?}"),
+        };
+
+        assert!(
+            info.contains(&format!("id={current_id}")),
+            "expected current id in {info}"
+        );
+        assert!(info.contains("name=alpha"), "expected name in {info}");
+        assert!(!rt.server.client_sessions.contains_key(&current_id));
     }
 
     #[test]
