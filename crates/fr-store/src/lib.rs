@@ -1938,6 +1938,15 @@ impl Entry {
     /// upstream PRNG is uniform — that's how fr's other random-sampled
     /// commands (HRANDFIELD, RANDOMKEY, …) consume the LCG.
     fn bump_lfu_freq(&mut self, now_ms: u64, decay_time: u64, log_factor: u64, rand_sample: u64) {
+        // CLIENT NO-TOUCH (and the per-command touch suppression it drives)
+        // skips the LRU/LFU update on access entirely — exactly like `touch()`
+        // above. Upstream `lookupKey` passes LOOKUP_NOTOUCH, which bypasses
+        // updateLFU as well as the idle-time refresh, so a NO-TOUCH client's
+        // reads must NOT advance OBJECT FREQ. Mirror that here so the LFU
+        // counter only moves on genuinely touch-enabled accesses.
+        if touch_disabled() {
+            return;
+        }
         let counter = self.current_lfu_freq(now_ms, decay_time);
         if counter < 255 {
             let baseval = u64::from(counter.saturating_sub(LFU_INIT_VAL));
@@ -21975,6 +21984,43 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn lfu_freq_bump_is_suppressed_while_touch_disabled() {
+        // CLIENT NO-TOUCH drives the per-command touch-suppression thread-local;
+        // an access made while it is set must NOT advance the LFU counter
+        // (upstream lookupKey's LOOKUP_NOTOUCH bypasses updateLFU), exactly like
+        // the LRU idle-time refresh `touch()` already skips.
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
+        // A freshly-created key starts at the base counter (LFU_INIT_VAL).
+        assert_eq!(store.object_freq(b"k", 1), Some(LFU_INIT_VAL));
+
+        // touch disabled: repeated reads must leave OBJECT FREQ untouched.
+        super::with_touch_disabled(true, || {
+            for t in 0..30 {
+                let _ = store.get(b"k", 100 + t);
+            }
+        });
+        assert_eq!(
+            store.object_freq(b"k", 200),
+            Some(LFU_INIT_VAL),
+            "an access while touch is disabled must not advance the LFU counter"
+        );
+
+        // touch enabled: at the base counter the increment probability is 1, so
+        // a single access deterministically bumps the frequency.
+        super::with_touch_disabled(false, || {
+            let _ = store.get(b"k", 300);
+        });
+        assert_eq!(
+            store.object_freq(b"k", 301),
+            Some(LFU_INIT_VAL + 1),
+            "a touch-enabled access at the base counter must advance the LFU counter"
+        );
     }
 
     #[test]
