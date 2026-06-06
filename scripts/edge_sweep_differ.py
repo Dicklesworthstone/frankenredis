@@ -201,12 +201,36 @@ def run_scenario(c, steps):
     return replies
 
 
+# Encoding-threshold baseline. These probes compare oracle-vs-fr encodings, so
+# both servers must share the SAME thresholds — but the oracle is a long-lived
+# shared instance whose CONFIG drifts (other probes set small thresholds; a
+# config-less redis defaults to 512/-2 while fr uses its own compiled defaults).
+# Pin both to a known baseline at startup so the 128/129/512/513/64/65 boundary
+# scenarios are meaningful and immune to prior contamination. (config_default_vs_oracle)
+ENCODING_BASELINE = (
+    ("list-max-listpack-size", "128"),
+    ("hash-max-listpack-entries", "128"),
+    ("hash-max-listpack-value", "64"),
+    ("set-max-listpack-entries", "128"),
+    ("set-max-intset-entries", "512"),
+    ("zset-max-listpack-entries", "128"),
+    ("zset-max-listpack-value", "64"),
+)
+
+
+def align_encoding_config(c):
+    for k, v in ENCODING_BASELINE:
+        c.cmd("CONFIG", "SET", k, v)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--oracle", type=int, default=16399)
     ap.add_argument("--fr", type=int, default=16400)
     args = ap.parse_args()
     o, f = Conn(args.oracle), Conn(args.fr)
+    align_encoding_config(o)
+    align_encoding_config(f)
 
     diffs = 0
     for steps in SCENARIOS:

@@ -163,12 +163,35 @@ def normalize_hello(reply):
     return reply
 
 
+# Pin both servers to a known encoding-threshold baseline before the exact
+# boundary scenarios (128/129, 512/513, 64/65-byte). The shared oracle's CONFIG
+# drifts (other probes leave small thresholds; config-less redis = 512/-2 vs fr's
+# compiled defaults), which otherwise turns a pure config skew into spurious
+# encoding "divergences". (config_default_vs_oracle)
+ENCODING_BASELINE = (
+    ("list-max-listpack-size", "128"),
+    ("hash-max-listpack-entries", "128"),
+    ("hash-max-listpack-value", "64"),
+    ("set-max-listpack-entries", "128"),
+    ("set-max-intset-entries", "512"),
+    ("zset-max-listpack-entries", "128"),
+    ("zset-max-listpack-value", "64"),
+)
+
+
+def align_encoding_config(c):
+    for k, v in ENCODING_BASELINE:
+        c.cmd("CONFIG", "SET", k, v)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--oracle", type=int, default=16399)
     ap.add_argument("--fr", type=int, default=16400)
     args = ap.parse_args()
     o, f = Conn(args.oracle), Conn(args.fr)
+    align_encoding_config(o)
+    align_encoding_config(f)
 
     diffs = 0
     for steps in SCENARIOS:
