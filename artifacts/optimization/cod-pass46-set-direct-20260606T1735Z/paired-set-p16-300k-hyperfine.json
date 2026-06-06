@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "PORT=6488; LOG=/data/projects/frankenredis/artifacts/optimization/cod-pass46-set-direct-20260606T1735Z/paired-baseline-server-$PORT-$$.log; /data/projects/frankenredis/target-cod-pass45-current-baseline/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true' EXIT; sleep 0.25; /data/projects/frankenredis/target-cod-pass45-current-baseline/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass46base >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.06596321334,
+      "stddev": 0.07774262086645135,
+      "median": 1.0467437468399998,
+      "user": 0.8234130000000001,
+      "system": 0.8226007799999999,
+      "min": 0.97671059784,
+      "max": 1.17915106284,
+      "times": [
+        1.04616298684,
+        0.9850056638400001,
+        1.0275163698399998,
+        1.04732450684,
+        0.9820184968400001,
+        0.97671059784,
+        1.1189611338399998,
+        1.17915106284,
+        1.1219150058399998,
+        1.17486630884
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "PORT=6489; LOG=/data/projects/frankenredis/artifacts/optimization/cod-pass46-set-direct-20260606T1735Z/paired-candidate-server-$PORT-$$.log; /data/projects/frankenredis/target-cod-pass46-set-direct-candidate/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true' EXIT; sleep 0.25; /data/projects/frankenredis/target-cod-pass45-current-baseline/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass46cand >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.00787174034,
+      "stddev": 0.03169887353425447,
+      "median": 1.0032377398399999,
+      "user": 0.7609031999999999,
+      "system": 0.7542138800000001,
+      "min": 0.96749876584,
+      "max": 1.08488628884,
+      "times": [
+        1.0231519118399999,
+        1.08488628884,
+        0.9894294988400001,
+        1.00188099584,
+        1.0106241508399998,
+        1.0045944838399998,
+        0.9930994538400001,
+        0.96749876584,
+        1.01853608884,
+        0.9850157648400001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

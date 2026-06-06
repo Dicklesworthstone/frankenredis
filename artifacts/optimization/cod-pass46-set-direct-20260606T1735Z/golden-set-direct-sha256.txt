@@ -1,0 +1,3 @@
+09000457d9d24c2632b10129f2bdcd7f442ccf16e8f9ce82221e2d34090135b6  artifacts/optimization/cod-pass46-set-direct-20260606T1735Z/golden-set-direct-input.resp
+dfb555a4a8a67b66ee78296c231deb8ef024426befb1132411582fd2c6e6bb3f  artifacts/optimization/cod-pass46-set-direct-20260606T1735Z/golden-set-direct-baseline.raw
+dfb555a4a8a67b66ee78296c231deb8ef024426befb1132411582fd2c6e6bb3f  artifacts/optimization/cod-pass46-set-direct-20260606T1735Z/golden-set-direct-candidate.raw

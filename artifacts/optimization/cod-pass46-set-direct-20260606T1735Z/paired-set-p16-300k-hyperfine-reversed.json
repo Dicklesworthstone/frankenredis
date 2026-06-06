@@ -1,0 +1,80 @@
+{
+  "results": [
+    {
+      "command": "PORT=6492; LOG=/data/projects/frankenredis/artifacts/optimization/cod-pass46-set-direct-20260606T1735Z/rev-candidate-server-$PORT-$$.log; /data/projects/frankenredis/target-cod-pass46-set-direct-candidate/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true' EXIT; sleep 0.25; /data/projects/frankenredis/target-cod-pass45-current-baseline/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass46cand >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.0645356719066668,
+      "stddev": 0.09012120850053523,
+      "median": 1.01743263874,
+      "user": 0.8240017566666668,
+      "system": 0.7797454533333332,
+      "min": 1.0030216622400001,
+      "max": 1.27797894624,
+      "times": [
+        1.08575876324,
+        1.21584789124,
+        1.01696160524,
+        1.00462645624,
+        1.01638300124,
+        1.27797894624,
+        1.00467784324,
+        1.06433878924,
+        1.01355358424,
+        1.05337584824,
+        1.0030216622400001,
+        1.0179036722400001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "PORT=6493; LOG=/data/projects/frankenredis/artifacts/optimization/cod-pass46-set-direct-20260606T1735Z/rev-baseline-server-$PORT-$$.log; /data/projects/frankenredis/target-cod-pass45-current-baseline/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true' EXIT; sleep 0.25; /data/projects/frankenredis/target-cod-pass45-current-baseline/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass46base >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.0315139338233335,
+      "stddev": 0.0742298909061807,
+      "median": 1.01953602224,
+      "user": 0.8099814233333333,
+      "system": 0.7793518700000001,
+      "min": 0.95467791024,
+      "max": 1.20821597324,
+      "times": [
+        0.9555964962400001,
+        0.9912582722400001,
+        0.95467791024,
+        0.96122846624,
+        0.98860774924,
+        1.0555863942400001,
+        1.04692417924,
+        1.02283007824,
+        1.01624196624,
+        1.05936137824,
+        1.20821597324,
+        1.11763834224
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
