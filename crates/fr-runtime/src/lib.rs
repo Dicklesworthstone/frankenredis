@@ -15135,11 +15135,23 @@ replica_announced:1\r\n",
         self.session.transaction_state.executing_exec = false;
 
         if transaction_dirty {
-            self.capture_aof_record(&[b"MULTI".to_vec()]);
-            for argv in transaction_aof {
-                self.capture_aof_record(&argv);
+            // Upstream propagatePendingCommands wraps the queued effects in
+            // MULTI/EXEC only when MORE THAN ONE command propagates. A
+            // transaction whose effects reduce to a single command is
+            // propagated bare (an effect-free transaction propagates nothing —
+            // transaction_dirty is false there, so reaching here means >= 1).
+            // Mirror that threshold: a 1-write MULTI/EXEC must NOT emit a
+            // spurious MULTI/EXEC frame on the replica / AOF, which would drift
+            // the replication offset and the on-disk AOF bytes off upstream.
+            if transaction_aof.len() == 1 {
+                self.capture_aof_record(&transaction_aof[0]);
+            } else {
+                self.capture_aof_record(&[b"MULTI".to_vec()]);
+                for argv in &transaction_aof {
+                    self.capture_aof_record(argv);
+                }
+                self.capture_aof_record(&[b"EXEC".to_vec()]);
             }
-            self.capture_aof_record(&[b"EXEC".to_vec()]);
         }
 
         RespFrame::Array(Some(results))
@@ -19947,6 +19959,63 @@ mod tests {
         assert!(
             pos(b"GET", None).is_none(),
             "the GET that lazy-expired must NOT propagate, got {argvs:?}"
+        );
+    }
+
+    // Upstream propagatePendingCommands wraps a transaction's effects in
+    // MULTI/EXEC only when MORE THAN ONE command propagates. A single-effect
+    // transaction must propagate bare (no spurious MULTI/EXEC frame); a
+    // multi-effect one must be wrapped.
+    #[test]
+    fn exec_wraps_in_multi_only_when_more_than_one_effect_propagates() {
+        let verbs = |rt: &Runtime, from: usize| -> Vec<Vec<u8>> {
+            rt.aof_records()[from..]
+                .iter()
+                .map(|r| r.argv[0].to_ascii_uppercase())
+                .collect()
+        };
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(42);
+
+        // Single-write transaction -> propagated bare (no MULTI/EXEC).
+        let b0 = rt.aof_records().len();
+        rt.execute_frame(command(&[b"MULTI"]), 1);
+        rt.execute_frame(command(&[b"SET", b"x", b"1"]), 1);
+        rt.execute_frame(command(&[b"EXEC"]), 1);
+        let v = verbs(&rt, b0);
+        assert_eq!(
+            v,
+            vec![b"SET".to_vec()],
+            "a 1-write MULTI/EXEC must propagate bare, got {v:?}"
+        );
+
+        // Two-write transaction -> wrapped in MULTI ... EXEC.
+        let b1 = rt.aof_records().len();
+        rt.execute_frame(command(&[b"MULTI"]), 2);
+        rt.execute_frame(command(&[b"SET", b"a", b"1"]), 2);
+        rt.execute_frame(command(&[b"SET", b"b", b"2"]), 2);
+        rt.execute_frame(command(&[b"EXEC"]), 2);
+        let v = verbs(&rt, b1);
+        assert_eq!(
+            v,
+            vec![
+                b"MULTI".to_vec(),
+                b"SET".to_vec(),
+                b"SET".to_vec(),
+                b"EXEC".to_vec()
+            ],
+            "a 2-write MULTI/EXEC must be wrapped, got {v:?}"
+        );
+
+        // Effect-free transaction -> nothing propagated.
+        let b2 = rt.aof_records().len();
+        rt.execute_frame(command(&[b"MULTI"]), 3);
+        rt.execute_frame(command(&[b"GET", b"x"]), 3);
+        rt.execute_frame(command(&[b"EXEC"]), 3);
+        assert_eq!(
+            rt.aof_records().len(),
+            b2,
+            "an effect-free MULTI/EXEC must propagate nothing"
         );
     }
 
