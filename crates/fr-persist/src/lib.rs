@@ -1641,8 +1641,12 @@ fn encode_compact_set_listpack(
     let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
     let lp = encode_listpack_strings_blob(&refs)?;
     let mut out = Vec::with_capacity(lp.len() + 4);
-    rdb_encode_length(&mut out, lp.len());
-    out.extend_from_slice(&lp);
+    // Upstream rdbSaveObject persists a listpack via rdbSaveRawString, which LZF-
+    // compresses it when it is large enough to beat the wire overhead (>20 bytes
+    // and the compressed form is smaller). Emitting it raw made DUMP/RDB diverge
+    // from redis for large listpack hashes/sets/zsets (a 200-field hash dumped
+    // 2200 bytes vs redis's 1560). (frankenredis listpack DUMP LZF parity)
+    rdb_encode_string(&mut out, &lp);
     Some(out)
 }
 
@@ -1665,8 +1669,12 @@ fn encode_compact_hash_listpack(
     }
     let lp = encode_listpack_strings_blob(&flat)?;
     let mut out = Vec::with_capacity(lp.len() + 4);
-    rdb_encode_length(&mut out, lp.len());
-    out.extend_from_slice(&lp);
+    // Upstream rdbSaveObject persists a listpack via rdbSaveRawString, which LZF-
+    // compresses it when it is large enough to beat the wire overhead (>20 bytes
+    // and the compressed form is smaller). Emitting it raw made DUMP/RDB diverge
+    // from redis for large listpack hashes/sets/zsets (a 200-field hash dumped
+    // 2200 bytes vs redis's 1560). (frankenredis listpack DUMP LZF parity)
+    rdb_encode_string(&mut out, &lp);
     Some(out)
 }
 
@@ -1716,8 +1724,12 @@ fn encode_compact_zset_listpack(
     let flat: Vec<&[u8]> = flat_owned.iter().map(Vec::as_slice).collect();
     let lp = encode_listpack_strings_blob(&flat)?;
     let mut out = Vec::with_capacity(lp.len() + 4);
-    rdb_encode_length(&mut out, lp.len());
-    out.extend_from_slice(&lp);
+    // Upstream rdbSaveObject persists a listpack via rdbSaveRawString, which LZF-
+    // compresses it when it is large enough to beat the wire overhead (>20 bytes
+    // and the compressed form is smaller). Emitting it raw made DUMP/RDB diverge
+    // from redis for large listpack hashes/sets/zsets (a 200-field hash dumped
+    // 2200 bytes vs redis's 1560). (frankenredis listpack DUMP LZF parity)
+    rdb_encode_string(&mut out, &lp);
     Some(out)
 }
 
@@ -1754,8 +1766,8 @@ fn encode_compact_list_quicklist2(
                 } else {
                     let one_lp = encode_listpack_strings_blob(&[item.as_slice()])?;
                     rdb_encode_length(&mut buf, 2); // PACKED container
-                    rdb_encode_length(&mut buf, one_lp.len());
-                    buf.extend_from_slice(&one_lp);
+                    // rdbSaveRawString → LZF-aware (frankenredis listpack DUMP LZF parity)
+                    rdb_encode_string(&mut buf, &one_lp);
                 }
             }
             return Some(buf);
@@ -1765,8 +1777,8 @@ fn encode_compact_list_quicklist2(
     let mut buf = Vec::new();
     rdb_encode_length(&mut buf, 1); // node count = 1
     rdb_encode_length(&mut buf, 2); // container = PACKED
-    rdb_encode_length(&mut buf, lp.len());
-    buf.extend_from_slice(&lp);
+    // rdbSaveRawString → LZF-aware (frankenredis listpack DUMP LZF parity)
+    rdb_encode_string(&mut buf, &lp);
     Some(buf)
 }
 
