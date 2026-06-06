@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/.scratch/codex-fr-daefa-baseline-target/release/fr-bench --host 127.0.0.1 --port 16688 --workload set --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --json-out artifacts/optimization/icywolf-ohsk5-aclfast-20260606T0224Z/confirm-baseline-set-p16-1m-last.json --key-prefix ohsk5_acl1m_base_
+  Time (mean ± σ):      2.817 s ±  0.302 s    [User: 0.951 s, System: 1.687 s]
+  Range (min … max):    2.500 s …  3.498 s    15 runs
+ 
+Benchmark 2: /data/projects/.scratch/codex-fr-aclfast-candidate-target/release/fr-bench --host 127.0.0.1 --port 16689 --workload set --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --json-out artifacts/optimization/icywolf-ohsk5-aclfast-20260606T0224Z/confirm-candidate-set-p16-1m-last.json --key-prefix ohsk5_acl1m_cand_
+  Time (mean ± σ):      3.111 s ±  0.463 s    [User: 1.043 s, System: 1.768 s]
+  Range (min … max):    2.429 s …  4.098 s    15 runs
+ 
+Summary
+  /data/projects/.scratch/codex-fr-daefa-baseline-target/release/fr-bench --host 127.0.0.1 --port 16688 --workload set --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --json-out artifacts/optimization/icywolf-ohsk5-aclfast-20260606T0224Z/confirm-baseline-set-p16-1m-last.json --key-prefix ohsk5_acl1m_base_ ran
+    1.10 ± 0.20 times faster than /data/projects/.scratch/codex-fr-aclfast-candidate-target/release/fr-bench --host 127.0.0.1 --port 16689 --workload set --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --json-out artifacts/optimization/icywolf-ohsk5-aclfast-20260606T0224Z/confirm-candidate-set-p16-1m-last.json --key-prefix ohsk5_acl1m_cand_

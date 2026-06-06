@@ -1,0 +1,92 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/codex-fr-daefa-baseline-target/release/fr-bench --host 127.0.0.1 --port 16688 --workload set --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --json-out artifacts/optimization/icywolf-ohsk5-aclfast-20260606T0224Z/confirm-baseline-set-p16-1m-last.json --key-prefix ohsk5_acl1m_base_",
+      "mean": 2.8165536035600005,
+      "stddev": 0.3021334337397966,
+      "median": 2.68232363676,
+      "user": 0.9509515133333333,
+      "system": 1.6871882466666663,
+      "min": 2.49954257776,
+      "max": 3.4983924347600004,
+      "times": [
+        2.6393451287600005,
+        2.7070972177600003,
+        2.66027640876,
+        2.82396422576,
+        2.5356445727600003,
+        2.53737304876,
+        2.88134618776,
+        3.19130973076,
+        3.4983924347600004,
+        3.17781231876,
+        2.68232363676,
+        2.63158011476,
+        2.61786996876,
+        2.49954257776,
+        3.1644264807600004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/codex-fr-aclfast-candidate-target/release/fr-bench --host 127.0.0.1 --port 16689 --workload set --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --json-out artifacts/optimization/icywolf-ohsk5-aclfast-20260606T0224Z/confirm-candidate-set-p16-1m-last.json --key-prefix ohsk5_acl1m_cand_",
+      "mean": 3.1108249296933335,
+      "stddev": 0.463151246308273,
+      "median": 3.22398020976,
+      "user": 1.0427607799999998,
+      "system": 1.7683767133333332,
+      "min": 2.4285512807600003,
+      "max": 4.09778754176,
+      "times": [
+        3.3819046147600003,
+        2.6343223147600003,
+        3.48808338176,
+        3.31047106476,
+        2.83214955776,
+        4.09778754176,
+        3.64379138376,
+        3.33386609376,
+        2.7060466747600005,
+        3.1083768747600002,
+        2.6797284617600003,
+        2.5686959507600005,
+        2.4285512807600003,
+        3.22398020976,
+        3.2246185397600002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
++OK
+$1
+1
++OK
++OK
+$1
+1
+-NOPERM User u has no permissions to run the 'set' command
+-NOPERM User u has no permissions to run the 'quit' command
