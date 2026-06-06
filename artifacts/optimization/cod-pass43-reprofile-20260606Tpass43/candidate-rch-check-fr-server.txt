@@ -1,0 +1,298 @@
+  [2m2026-06-06T16:30:45.003080Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ts1 at ubuntu@192.168.1.107 (24 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:45.248911Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenredis-pass42-push-120950 (hash: a63b535479741d38)[0m
+    [2;3mat[0m rch/src/hook.rs:5987 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:45.248951Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6009 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:47.495818Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker ts1...[0m
+    [2;3mat[0m rch/src/hook.rs:6039 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:47.495879Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950 -> /data/projects/.scratch/frankenredis-pass42-push-120950 on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:49.027079Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1531ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:49.027142Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-bench -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-bench on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:49.253549Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 226ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:49.253627Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-command -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-command on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:49.473526Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 219ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:49.473609Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-config -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-config on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:49.692088Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 218ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:49.692152Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-conformance -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-conformance on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:49.913159Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 220ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:49.913238Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-eventloop -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-eventloop on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:50.138090Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 224ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:50.138167Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-expire -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-expire on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:50.352801Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 214ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:50.352860Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-persist -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-persist on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:50.581899Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 229ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:50.581962Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-protocol -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-protocol on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:50.808924Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 226ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:50.809001Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-repl -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-repl on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:51.041293Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 232ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:51.041390Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-runtime -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-runtime on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:51.265101Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 223ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:51.265163Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-sentinel -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-sentinel on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:51.487649Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 222ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:51.487724Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-server -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-server on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:51.727783Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 240ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:51.727847Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-store -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-store on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:51.954473Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 226ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:51.954507Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 88438 files, 4576309 bytes in 4450ms[0m
+    [2;3mat[0m rch/src/hook.rs:6202 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:52.547120Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: env cargo check -p fr-server --all-targets[0m
+    [2;3mat[0m rch/src/hook.rs:6240 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:30:52.547152Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /tmp/codex-fr-pass43-candidate-check-target -> /data/projects/.scratch/frankenredis-pass42-push-120950/.rch-target-ts1-job-29872254800112828-1780763447495810474-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+Warning: Identity file /home/ubuntu/.ssh/id_rsa not accessible: No such file or directory.
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded hex v0.4.3
+  Downloaded log v0.4.29
+  Downloaded typenum v1.20.0
+  Downloaded equivalent v1.0.2
+  Downloaded block-buffer v0.12.0
+  Downloaded itoa v1.0.18
+  Downloaded cpufeatures v0.3.0
+  Downloaded crypto-common v0.2.1
+  Downloaded cfg-if v1.0.4
+  Downloaded mimalloc v0.1.49
+  Downloaded cc v1.2.60
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded zmij v1.0.21
+  Downloaded shlex v1.3.0
+  Downloaded hybrid-array v0.4.10
+  Downloaded sha2 v0.11.0
+  Downloaded foldhash v0.1.5
+  Downloaded serde_core v1.0.228
+  Downloaded const-oid v0.10.2
+  Downloaded memchr v2.8.0
+  Downloaded indexmap v2.14.0
+  Downloaded mio v1.2.0
+  Downloaded serde_json v1.0.149
+  Downloaded hashbrown v0.17.0
+  Downloaded libmimalloc-sys v0.1.46
+  Downloaded libc v0.2.185
+  Downloaded digest v0.11.2
+   Compiling zmij v1.0.21
+   Compiling serde_core v1.0.228
+   Compiling serde_json v1.0.149
+    Checking typenum v1.20.0
+   Compiling libc v0.2.185
+   Compiling memchr v2.8.0
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling itoa v1.0.18
+    Checking fr-protocol v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-protocol)
+    Checking equivalent v1.0.2
+    Checking const-oid v0.10.2
+    Checking hashbrown v0.17.0
+    Checking cpufeatures v0.3.0
+    Checking fr-expire v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-expire)
+    Checking foldhash v0.1.5
+    Checking cfg-if v1.0.4
+    Checking log v0.4.29
+    Checking hex v0.4.3
+    Checking fr-repl v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-repl)
+    Checking fr-eventloop v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-eventloop)
+    Checking fr-config v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-config)
+   Compiling cc v1.2.60
+    Checking fr-persist v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-persist)
+    Checking fr-sentinel v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-sentinel)
+    Checking indexmap v2.14.0
+    Checking hybrid-array v0.4.10
+   Compiling libmimalloc-sys v0.1.46
+    Checking fr-store v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-store)
+    Checking mio v1.2.0
+    Checking block-buffer v0.12.0
+    Checking crypto-common v0.2.1
+    Checking digest v0.11.2
+    Checking sha2 v0.11.0
+    Checking mimalloc v0.1.49
+   Compiling fr-command v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-command)
+    Checking fr-runtime v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-runtime)
+    Checking fr-server v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-server)
+error[E0502]: cannot borrow `*conn` as mutable because it is also borrowed as immutable
+    --> crates/fr-server/src/main.rs:1606:27
+     |
+1606 |                       match process_argv_frame(
+     |  ___________________________^
+1607 | |                         token,
+1608 | |                         &argv,
+1609 | |                         conn,
+...    |
+1617 | |                         ts_us,
+1618 | |                     ) {
+     | |_____________________^ mutable borrow occurs here
+...
+1654 |                   let unparsed = &conn.read_buf[consumed_total..];
+     |                                   ------------- immutable borrow occurs here
+...
+1658 |                       &mut borrowed_args,
+     |                       ------------------ immutable borrow later used here
+
+error[E0502]: cannot borrow `*conn` as mutable because it is also borrowed as immutable
+    --> crates/fr-server/src/main.rs:1621:32
+     |
+1621 |                               if disconnect_if_output_limit_exceeded(
+     |  ________________________________^
+1622 | |                                 conn,
+1623 | |                                 runtime.server.output_buffer_limit,
+1624 | |                                 closing_tokens,
+1625 | |                                 token,
+1626 | |                             ) {
+     | |_____________________________^ mutable borrow occurs here
+...
+1654 |                   let unparsed = &conn.read_buf[consumed_total..];
+     |                                   ------------- immutable borrow occurs here
+...
+1658 |                       &mut borrowed_args,
+     |                       ------------------ immutable borrow later used here
+
+error[E0502]: cannot borrow `*conn` as mutable because it is also borrowed as immutable
+    --> crates/fr-server/src/main.rs:1639:24
+     |
+1639 |                     if handle_parse_error(err, conn, closing_tokens, token) {
+     |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
+...
+1654 |                 let unparsed = &conn.read_buf[consumed_total..];
+     |                                 ------------- immutable borrow occurs here
+...
+1658 |                     &mut borrowed_args,
+     |                     ------------------ immutable borrow later used here
+
+error[E0502]: cannot borrow `*conn` as mutable because it is also borrowed as immutable
+    --> crates/fr-server/src/main.rs:1680:27
+     |
+1654 |                   let unparsed = &conn.read_buf[consumed_total..];
+     |                                   ------------- immutable borrow occurs here
+...
+1658 |                       &mut borrowed_args,
+     |                       ------------------ immutable borrow later used here
+...
+1680 |                       match process_argv_frame(
+     |  ___________________________^
+1681 | |                         token,
+1682 | |                         argv,
+1683 | |                         conn,
+...    |
+1691 | |                         ts_us,
+1692 | |                     ) {
+     | |_____________________^ mutable borrow occurs here
+
+error[E0502]: cannot borrow `*conn` as mutable because it is also borrowed as immutable
+    --> crates/fr-server/src/main.rs:1695:32
+     |
+1654 |                   let unparsed = &conn.read_buf[consumed_total..];
+     |                                   ------------- immutable borrow occurs here
+...
+1658 |                       &mut borrowed_args,
+     |                       ------------------ immutable borrow later used here
+...
+1695 |                               if disconnect_if_output_limit_exceeded(
+     |  ________________________________^
+1696 | |                                 conn,
+1697 | |                                 runtime.server.output_buffer_limit,
+1698 | |                                 closing_tokens,
+1699 | |                                 token,
+1700 | |                             ) {
+     | |_____________________________^ mutable borrow occurs here
+
+error[E0502]: cannot borrow `*conn` as mutable because it is also borrowed as immutable
+    --> crates/fr-server/src/main.rs:1713:24
+     |
+1654 |                 let unparsed = &conn.read_buf[consumed_total..];
+     |                                 ------------- immutable borrow occurs here
+...
+1658 |                     &mut borrowed_args,
+     |                     ------------------ immutable borrow later used here
+...
+1713 |                     if handle_parse_error(err, conn, closing_tokens, token) {
+     |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
+
+error[E0502]: cannot borrow `*conn` as mutable because it is also borrowed as immutable
+    --> crates/fr-server/src/main.rs:1749:23
+     |
+1654 |                   let unparsed = &conn.read_buf[consumed_total..];
+     |                                   ------------- immutable borrow occurs here
+...
+1658 |                       &mut borrowed_args,
+     |                       ------------------ immutable borrow later used here
+...
+1749 |                   match process_argv_frame(
+     |  _______________________^
+1750 | |                     token,
+1751 | |                     &argv,
+1752 | |                     conn,
+...    |
+1760 | |                     ts_us,
+1761 | |                 ) {
+     | |_________________^ mutable borrow occurs here
+
+For more information about this error, try `rustc --explain E0502`.
+error: could not compile `fr-server` (bin "frankenredis") due to 7 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `fr-server` (bin "frankenredis" test) due to 7 previous errors
+  [2m2026-06-06T16:31:00.045671Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=101 in 7498ms[0m
+    [2;3mat[0m rch/src/hook.rs:6364 [2;3mon[0m ThreadId(1)
+
+[RCH] remote ts1 failed (exit 101)

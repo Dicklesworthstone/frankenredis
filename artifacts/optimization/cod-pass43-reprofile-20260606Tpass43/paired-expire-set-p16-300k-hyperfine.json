@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "env OUT=artifacts/optimization/cod-pass43-reprofile-20260606Tpass43 SERVER=/tmp/codex-fr-pass43-profile-target/release-perf/frankenredis BENCH=/tmp/codex-fr-pass43-profile-target/release-perf/fr-bench PORT=20672 PREFIX=cod-pass43-expire-base bash -lc 'log=\"$OUT/paired-baseline-server-$PORT-$$.log\"; \"$SERVER\" --bind 127.0.0.1 --port \"$PORT\" --mode strict >\"$log\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for i in {1..100}; do grep -q ready \"$log\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$log\" || exit 1; \"$BENCH\" --host 127.0.0.1 --port \"$PORT\" --clients 50 --requests 300000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"$OUT/paired-baseline-set-p16-300k-last.json\" --key-prefix \"$PREFIX\" >/dev/null; cleanup; trap - EXIT'",
+      "mean": 1.34781990068,
+      "stddev": 0.1149557286526074,
+      "median": 1.3518052690799998,
+      "user": 0.9321408999999999,
+      "system": 0.7523404599999999,
+      "min": 1.15788828158,
+      "max": 1.58787178658,
+      "times": [
+        1.30161012358,
+        1.27518181158,
+        1.4006305505799999,
+        1.3363411215799998,
+        1.41614332458,
+        1.36726941658,
+        1.58787178658,
+        1.15788828158,
+        1.38100718858,
+        1.25425540158
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "env OUT=artifacts/optimization/cod-pass43-reprofile-20260606Tpass43 SERVER=/tmp/codex-fr-pass43-expire-candidate-target/release-perf/frankenredis BENCH=/tmp/codex-fr-pass43-expire-candidate-target/release-perf/fr-bench PORT=20673 PREFIX=cod-pass43-expire-cand bash -lc 'log=\"$OUT/paired-candidate-server-$PORT-$$.log\"; \"$SERVER\" --bind 127.0.0.1 --port \"$PORT\" --mode strict >\"$log\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for i in {1..100}; do grep -q ready \"$log\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$log\" || exit 1; \"$BENCH\" --host 127.0.0.1 --port \"$PORT\" --clients 50 --requests 300000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"$OUT/paired-candidate-set-p16-300k-last.json\" --key-prefix \"$PREFIX\" >/dev/null; cleanup; trap - EXIT'",
+      "mean": 1.39126265688,
+      "stddev": 0.1298975988844659,
+      "median": 1.38361177158,
+      "user": 0.9839678,
+      "system": 0.83028236,
+      "min": 1.22117971858,
+      "max": 1.64093929758,
+      "times": [
+        1.4304863025799999,
+        1.64093929758,
+        1.43928325658,
+        1.38607026858,
+        1.22117971858,
+        1.25275828558,
+        1.38115327458,
+        1.29174547558,
+        1.54357693058,
+        1.32543375858
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,235 @@
+  [2m2026-06-06T16:33:18.087941Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ts1 at ubuntu@192.168.1.107 (12 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:18.343073Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenredis-pass42-push-120950 (hash: a63b535479741d38)[0m
+    [2;3mat[0m rch/src/hook.rs:5987 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:18.343159Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6009 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:20.755888Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker ts1...[0m
+    [2;3mat[0m rch/src/hook.rs:6039 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:20.755951Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950 -> /data/projects/.scratch/frankenredis-pass42-push-120950 on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:22.344721Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1588ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:22.344809Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-bench -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-bench on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:22.570889Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 226ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:22.570966Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-command -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-command on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:22.804826Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 233ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:22.804901Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-config -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-config on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:23.031844Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 226ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:23.031914Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-conformance -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-conformance on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:23.264789Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 232ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:23.264874Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-eventloop -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-eventloop on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:23.480208Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 215ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:23.480281Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-expire -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-expire on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:23.711739Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 231ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:23.711837Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-persist -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-persist on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:23.937009Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 225ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:23.937078Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-protocol -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-protocol on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:24.162429Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 225ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:24.162491Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-repl -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-repl on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:24.392019Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 229ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:24.392103Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-runtime -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-runtime on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:24.623154Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 231ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:24.623223Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-sentinel -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-sentinel on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:24.845450Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 222ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:24.845521Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-server -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-server on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:25.072874Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 227ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:25.072950Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-store -> /data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-store on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:1400 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:25.294163Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 221ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1469 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:25.294197Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 88439 files, 4576379 bytes in 4531ms[0m
+    [2;3mat[0m rch/src/hook.rs:6202 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:25.887890Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: env cargo check -p fr-runtime --all-targets[0m
+    [2;3mat[0m rch/src/hook.rs:6240 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:25.887938Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /tmp/codex-fr-pass43-expire-check-target -> /data/projects/.scratch/frankenredis-pass42-push-120950/.rch-target-ts1-job-29872254800112843-1780763600755880810-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+Warning: Identity file /home/ubuntu/.ssh/id_rsa not accessible: No such file or directory.
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded cfg-if v1.0.4
+  Downloaded block-buffer v0.12.0
+  Downloaded bitflags v2.11.1
+  Downloaded bit-set v0.8.0
+  Downloaded equivalent v1.0.2
+  Downloaded bit-vec v0.8.0
+  Downloaded fastrand v2.4.1
+  Downloaded fnv v1.0.7
+  Downloaded cpufeatures v0.3.0
+  Downloaded errno v0.3.14
+  Downloaded crypto-common v0.2.1
+  Downloaded itoa v1.0.18
+  Downloaded hex v0.4.3
+  Downloaded foldhash v0.1.5
+  Downloaded autocfg v1.5.0
+  Downloaded unarray v0.1.4
+  Downloaded wait-timeout v0.2.1
+  Downloaded quick-error v1.2.3
+  Downloaded digest v0.11.2
+  Downloaded rand_chacha v0.9.0
+  Downloaded rand_core v0.9.5
+  Downloaded rand_xorshift v0.4.0
+  Downloaded rusty-fork v0.3.1
+  Downloaded hybrid-array v0.4.10
+  Downloaded zmij v1.0.21
+  Downloaded sha2 v0.11.0
+  Downloaded once_cell v1.21.4
+  Downloaded getrandom v0.3.4
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded const-oid v0.10.2
+  Downloaded num-traits v0.2.19
+  Downloaded tempfile v3.27.0
+  Downloaded getrandom v0.4.2
+  Downloaded hashbrown v0.17.0
+  Downloaded indexmap v2.14.0
+  Downloaded serde_core v1.0.228
+  Downloaded memchr v2.8.0
+  Downloaded rand v0.9.4
+  Downloaded typenum v1.20.0
+  Downloaded serde_json v1.0.149
+  Downloaded proptest v1.11.0
+  Downloaded zerocopy v0.8.48
+  Downloaded regex-syntax v0.8.10
+  Downloaded rustix v1.1.4
+  Downloaded libc v0.2.185
+  Downloaded linux-raw-sys v0.12.1
+   Compiling libc v0.2.185
+    Checking cfg-if v1.0.4
+   Compiling zmij v1.0.21
+   Compiling serde_core v1.0.228
+    Checking typenum v1.20.0
+   Compiling serde_json v1.0.149
+   Compiling getrandom v0.3.4
+   Compiling getrandom v0.4.2
+   Compiling memchr v2.8.0
+   Compiling rustix v1.1.4
+   Compiling zerocopy v0.8.48
+   Compiling itoa v1.0.18
+    Checking fr-protocol v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-protocol)
+    Checking hashbrown v0.17.0
+    Checking const-oid v0.10.2
+    Checking equivalent v1.0.2
+    Checking bitflags v2.11.1
+   Compiling autocfg v1.5.0
+    Checking linux-raw-sys v0.12.1
+    Checking foldhash v0.1.5
+    Checking fr-expire v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-expire)
+    Checking cpufeatures v0.3.0
+    Checking once_cell v1.21.4
+    Checking fastrand v2.4.1
+    Checking fnv v1.0.7
+    Checking quick-error v1.2.3
+    Checking bit-vec v0.8.0
+    Checking unarray v0.1.4
+    Checking hex v0.4.3
+    Checking fr-repl v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-repl)
+    Checking fr-eventloop v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-eventloop)
+    Checking fr-config v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-config)
+    Checking regex-syntax v0.8.10
+    Checking fr-persist v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-persist)
+    Checking fr-sentinel v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-sentinel)
+    Checking bit-set v0.8.0
+   Compiling num-traits v0.2.19
+    Checking indexmap v2.14.0
+    Checking hybrid-array v0.4.10
+    Checking wait-timeout v0.2.1
+    Checking fr-store v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-store)
+    Checking rand_core v0.9.5
+    Checking crypto-common v0.2.1
+    Checking block-buffer v0.12.0
+    Checking rand_xorshift v0.4.0
+    Checking rand v0.9.4
+    Checking tempfile v3.27.0
+    Checking rusty-fork v0.3.1
+    Checking digest v0.11.2
+    Checking sha2 v0.11.0
+   Compiling fr-command v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-command)
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.9.0
+    Checking proptest v1.11.0
+    Checking fr-runtime v0.1.0 (/data/projects/.scratch/frankenredis-pass42-push-120950/crates/fr-runtime)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.82s
+  [2m2026-06-06T16:33:37.145850Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 11257ms[0m
+    [2;3mat[0m rch/src/hook.rs:6364 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:37.146100Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6413 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:37.146114Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenredis-pass42-push-120950 on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:2072 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:37.363471Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 217ms (1 files, 1442 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2111 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:37.363500Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 1442 bytes in 217ms[0m
+    [2;3mat[0m rch/src/hook.rs:6446 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:37.363694Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenredis-pass42-push-120950/.rch-target-ts1-job-29872254800112843-1780763600755880810-0 on ts1[0m
+    [2;3mat[0m rch/src/transfer.rs:2072 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:39.163445Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 1799ms (947 files, 15303 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2111 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-06T16:33:39.163471Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 947 files, 15303 bytes in 1799ms[0m
+    [2;3mat[0m rch/src/hook.rs:6570 [2;3mon[0m ThreadId(1)
+
+[RCH] remote ts1 (21.1s)

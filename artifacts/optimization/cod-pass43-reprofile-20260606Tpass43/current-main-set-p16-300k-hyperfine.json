@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "bash -lc 'log=\"$OUT/current-main-server-$PORT-$$.log\"; \"$SERVER\" --bind 127.0.0.1 --port \"$PORT\" --mode strict >\"$log\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for i in {1..100}; do grep -q ready \"$log\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$log\" || exit 1; \"$BENCH\" --host 127.0.0.1 --port \"$PORT\" --clients 50 --requests 300000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"$OUT/current-main-set-p16-300k-last.json\" --key-prefix cod-pass43-profile >/dev/null; cleanup; trap - EXIT'",
+      "mean": 1.0860445034200001,
+      "stddev": 0.18454004417329178,
+      "median": 1.0187990451200002,
+      "user": 0.9737111799999999,
+      "system": 0.99305608,
+      "min": 0.89781727862,
+      "max": 1.4240142966200002,
+      "times": [
+        0.92173040662,
+        0.89781727862,
+        1.0114984316200002,
+        1.3210391756200002,
+        1.2173157246200002,
+        1.4240142966200002,
+        1.1598451496200002,
+        1.0260996586200002,
+        0.9555374856200001,
+        0.92554742662
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

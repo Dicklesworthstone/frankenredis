@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780763748221,
+  "host": "127.0.0.1",
+  "port": 20672,
+  "workload": "set",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "cod-pass43-expire-base",
+  "total_time_ms": 1089,
+  "ops_per_sec": 275361.8164316385,
+  "bytes_sent": 19116919,
+  "bytes_received": 1500000,
+  "latency_us": {
+    "min": 83,
+    "p50": 2289,
+    "p95": 4103,
+    "p99": 5995,
+    "p999": 14783,
+    "max": 38879,
+    "mean": 2586.6235733333397,
+    "samples": 300000
+  }
+}
