@@ -225,6 +225,9 @@ fn processed_command_counts(argv: &[Vec<u8>]) -> (u64, u64) {
     let Some(command) = argv.first() else {
         return (0, 0);
     };
+    if eq_ascii_token(command, b"SET") {
+        return (0, 1);
+    }
     let Some(flags) = fr_command::get_command_flags(command) else {
         return (0, 0);
     };
@@ -239,6 +242,20 @@ fn processed_command_counts(argv: &[Vec<u8>]) -> (u64, u64) {
         }
     }
     (read_count, write_count)
+}
+
+fn set_command_arity_ok(argv: &[Vec<u8>]) -> Option<bool> {
+    argv.first()
+        .is_some_and(|command| eq_ascii_token(command, b"SET"))
+        .then_some(argv.len() >= 3)
+}
+
+fn set_command_keys(argv: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
+    (argv.len() >= 2
+        && argv
+            .first()
+            .is_some_and(|command| eq_ascii_token(command, b"SET")))
+    .then(|| vec![argv[1].clone()])
 }
 
 fn wrong_arity_error(command: &'static str) -> RespFrame {
@@ -5981,9 +5998,10 @@ impl Runtime {
             return reply;
         }
 
-        let command_arity_ok = argv
-            .first()
-            .is_some_and(|command| fr_command::check_command_arity(command, argv.len()).is_ok());
+        let command_arity_ok = set_command_arity_ok(argv).unwrap_or_else(|| {
+            argv.first()
+                .is_some_and(|command| fr_command::check_command_arity(command, argv.len()).is_ok())
+        });
         // Upstream server.c::processCommand:4067-4082 only enforces the
         // pubsub-mode allow-list when c->resp == 2. RESP3 subscribers can
         // freely interleave pubsub messages with any other command, since
@@ -6303,7 +6321,8 @@ impl Runtime {
 
         match result {
             Ok(reply) => {
-                let cmd_keys = fr_command::command_keys(argv);
+                let cmd_keys =
+                    set_command_keys(argv).unwrap_or_else(|| fr_command::command_keys(argv));
                 // (frankenredis-1d2xf) Propagate any lazy-expiry deletions this
                 // command triggered FIRST, before the command's own record, so a
                 // command that recreates the key (e.g. SET on an expired key)
