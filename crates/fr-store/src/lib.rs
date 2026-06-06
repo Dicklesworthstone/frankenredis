@@ -15699,19 +15699,19 @@ impl Store {
                     buf.push(RDB_TYPE_SET_LISTPACK);
                     let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
                     let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
-                    encode_dump_bulk(&mut buf, &encode_listpack_strings(&refs)?);
+                    encode_rdb_string(&mut buf, &encode_listpack_strings(&refs)?);
                 } else if s.len() <= self.set_max_intset_entries {
                     if let Some(mut integers) = integer_members {
                         integers.sort_unstable();
                         buf.push(RDB_TYPE_SET_INTSET);
-                        encode_dump_bulk(&mut buf, &encode_intset(&integers)?);
+                        encode_rdb_string(&mut buf, &encode_intset(&integers)?);
                     } else if s.len() <= self.set_max_listpack_entries
                         && s.iter().all(|member| member.len() <= 64)
                     {
                         buf.push(RDB_TYPE_SET_LISTPACK);
                         let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
                         let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
-                        encode_dump_bulk(&mut buf, &encode_listpack_strings(&refs)?);
+                        encode_rdb_string(&mut buf, &encode_listpack_strings(&refs)?);
                     } else {
                         buf.push(RDB_TYPE_SET);
                         encode_length(&mut buf, s.len());
@@ -15725,7 +15725,7 @@ impl Store {
                     buf.push(RDB_TYPE_SET_LISTPACK);
                     let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
                     let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
-                    encode_dump_bulk(&mut buf, &encode_listpack_strings(&refs)?);
+                    encode_rdb_string(&mut buf, &encode_listpack_strings(&refs)?);
                 } else {
                     buf.push(RDB_TYPE_SET);
                     encode_length(&mut buf, s.len());
@@ -15747,7 +15747,7 @@ impl Store {
                         pairs.push(field);
                         pairs.push(value);
                     }
-                    encode_dump_bulk(&mut buf, &encode_listpack_strings(&pairs)?);
+                    encode_rdb_string(&mut buf, &encode_listpack_strings(&pairs)?);
                 } else {
                     buf.push(RDB_TYPE_HASH);
                     encode_length(&mut buf, h.len());
@@ -15770,7 +15770,7 @@ impl Store {
                         pairs.push(redis_score_to_string(score).into_bytes());
                     }
                     let pair_refs: Vec<&[u8]> = pairs.iter().map(Vec::as_slice).collect();
-                    encode_dump_bulk(&mut buf, &encode_listpack_strings(&pair_refs)?);
+                    encode_rdb_string(&mut buf, &encode_listpack_strings(&pair_refs)?);
                 } else {
                     buf.push(RDB_TYPE_ZSET_2);
                     encode_length(&mut buf, zs.len());
@@ -28762,6 +28762,49 @@ mod tests {
         let v = store.getdel(b"k", 0).unwrap();
         assert_eq!(v, Some(b"v".to_vec()));
         assert_eq!(store.get(b"k", 0).unwrap(), None);
+    }
+
+    /// (frankenredis listpack DUMP LZF parity) Upstream rdbSaveObject persists a
+    /// listpack/intset blob via rdbSaveRawString, which LZF-compresses it once it
+    /// is large enough to beat the wire overhead. fr emitted these blobs raw, so
+    /// DUMP of a large compressible hash/list/zset/set was bytes-larger than and
+    /// non-identical to redis. The compressed payload must still RESTORE.
+    #[test]
+    fn dump_large_listpack_blob_is_lzf_compressed_and_round_trips() {
+        let mut store = Store::new();
+        // 200 highly compressible fields -> listpack blob >> 20 bytes.
+        for i in 0..200 {
+            store
+                .hset(b"h", format!("k{i}").into_bytes(), format!("v{i}").into_bytes(), 0)
+                .unwrap();
+        }
+        let raw_listpack_len = {
+            let pairs: Vec<Vec<u8>> = (0..200)
+                .flat_map(|i| [format!("k{i}").into_bytes(), format!("v{i}").into_bytes()])
+                .collect();
+            let refs: Vec<&[u8]> = pairs.iter().map(Vec::as_slice).collect();
+            encode_listpack_strings(&refs).unwrap().len()
+        };
+        let payload = store.dump_key(b"h", 0).expect("dump hash");
+        // Type byte (HASH_LISTPACK) then 0xC3 LZF marker for the blob.
+        assert_eq!(payload[0], RDB_TYPE_HASH_LISTPACK);
+        assert_eq!(payload[1], 0xC3, "large listpack blob must be LZF-compressed");
+        // Compressed payload is materially smaller than the raw listpack.
+        assert!(
+            payload.len() < raw_listpack_len,
+            "compressed dump {} should be < raw listpack {}",
+            payload.len(),
+            raw_listpack_len
+        );
+        // And it still restores to the same hash.
+        let mut store2 = Store::new();
+        store2.restore_key(b"h2", 0, &payload, false, 0).expect("restore");
+        for i in 0..200 {
+            assert_eq!(
+                store2.hget(b"h2", format!("k{i}").as_bytes(), 0).unwrap(),
+                Some(format!("v{i}").into_bytes())
+            );
+        }
     }
 
     #[test]
