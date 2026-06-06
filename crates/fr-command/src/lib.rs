@@ -3662,10 +3662,14 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
         None
     };
 
-    let key_exists = if get {
-        old_value.is_some()
+    let key_exists = if nx || xx {
+        if get {
+            old_value.is_some()
+        } else {
+            store.exists_no_touch(&argv[1], now_ms)
+        }
     } else {
-        store.exists_no_touch(&argv[1], now_ms)
+        false
     };
     if nx && key_exists {
         return Ok(if get {
@@ -25027,7 +25031,13 @@ fn bitfield_cmd(
                 bitfield_signed_set_resolve(value, bits, overflow_mode)
             } else {
                 let trigger_pos_overflow = value < 0;
-                bitfield_clamp_with_overflow(value, trigger_pos_overflow, bits, false, overflow_mode)
+                bitfield_clamp_with_overflow(
+                    value,
+                    trigger_pos_overflow,
+                    bits,
+                    false,
+                    overflow_mode,
+                )
             };
             if overflowed && overflow_mode == BitfieldOverflow::Fail {
                 // Upstream still ran lookupStringForBitCommand, so the key is
@@ -25276,11 +25286,7 @@ fn bitfield_sign_extend(value: i64, bits: u8) -> i64 {
 /// `SET i32 0 -9223372036854775808 SAT` → redis 2147483647, fr was
 /// -2147483648). WRAP/FAIL were already byte-exact and keep their behaviour.
 /// (frankenredis BITFIELD signed-SET SAT extreme-literal parity)
-fn bitfield_signed_set_resolve(
-    value: i64,
-    bits: u8,
-    overflow: BitfieldOverflow,
-) -> (i64, bool) {
+fn bitfield_signed_set_resolve(value: i64, bits: u8, overflow: BitfieldOverflow) -> (i64, bool) {
     let max: i64 = if bits >= 64 {
         i64::MAX
     } else {
@@ -28924,6 +28930,24 @@ mod tests {
         let get = vec![b"GET".to_vec(), b"k".to_vec()];
         let val = dispatch_argv(&get, &mut store, 0).expect("get");
         assert_eq!(val, RespFrame::BulkString(Some(b"new".to_vec())));
+    }
+
+    #[test]
+    fn plain_set_does_not_count_keyspace_lookup() {
+        let mut store = Store::new();
+        let first = vec![b"SET".to_vec(), b"k".to_vec(), b"v1".to_vec()];
+        let second = vec![b"SET".to_vec(), b"k".to_vec(), b"v2".to_vec()];
+
+        assert_eq!(
+            dispatch_argv(&first, &mut store, 0).expect("initial SET"),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(&second, &mut store, 0).expect("overwrite SET"),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(store.stat_keyspace_hits, 0);
+        assert_eq!(store.stat_keyspace_misses, 0);
     }
 
     #[test]
@@ -32588,7 +32612,10 @@ mod tests {
         ];
         for cmd in inverted {
             let argv: Vec<Vec<u8>> = cmd.iter().map(|a| a.to_vec()).collect();
-            let label = cmd.iter().map(|a| String::from_utf8_lossy(a)).collect::<Vec<_>>();
+            let label = cmd
+                .iter()
+                .map(|a| String::from_utf8_lossy(a))
+                .collect::<Vec<_>>();
             match dispatch_argv(&argv, &mut store, 0) {
                 Err(CommandError::Store(StoreError::WrongType)) => {}
                 other => panic!("cmd={label:?} expected WrongType, got {other:?}"),
@@ -32598,7 +32625,12 @@ mod tests {
         // Inverted range on a MISSING key → empty / 0 (not an error).
         assert_eq!(
             dispatch_argv(
-                &[b"ZRANGEBYSCORE".to_vec(), b"nope".to_vec(), b"10".to_vec(), b"1".to_vec()],
+                &[
+                    b"ZRANGEBYSCORE".to_vec(),
+                    b"nope".to_vec(),
+                    b"10".to_vec(),
+                    b"1".to_vec()
+                ],
                 &mut store,
                 0,
             )
@@ -32607,7 +32639,12 @@ mod tests {
         );
         assert_eq!(
             dispatch_argv(
-                &[b"ZCOUNT".to_vec(), b"nope".to_vec(), b"10".to_vec(), b"1".to_vec()],
+                &[
+                    b"ZCOUNT".to_vec(),
+                    b"nope".to_vec(),
+                    b"10".to_vec(),
+                    b"1".to_vec()
+                ],
                 &mut store,
                 0,
             )
@@ -32617,14 +32654,24 @@ mod tests {
 
         // Inverted range on a real zset → empty / 0 (type check passes).
         dispatch_argv(
-            &[b"ZADD".to_vec(), b"z".to_vec(), b"1".to_vec(), b"a".to_vec()],
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+            ],
             &mut store,
             0,
         )
         .unwrap();
         assert_eq!(
             dispatch_argv(
-                &[b"ZRANGEBYSCORE".to_vec(), b"z".to_vec(), b"10".to_vec(), b"1".to_vec()],
+                &[
+                    b"ZRANGEBYSCORE".to_vec(),
+                    b"z".to_vec(),
+                    b"10".to_vec(),
+                    b"1".to_vec()
+                ],
                 &mut store,
                 0,
             )
@@ -54228,7 +54275,10 @@ mod tests {
                 .collect(),
         ));
         assert_eq!(asc, want_asc, "tied numeric ASC = element order");
-        assert_eq!(desc, want_desc, "tied numeric DESC = reversed element order");
+        assert_eq!(
+            desc, want_desc,
+            "tied numeric DESC = reversed element order"
+        );
     }
 
     #[test]
@@ -54507,11 +54557,19 @@ mod tests {
         };
         // i64::MIN literal: redis saturates to field MAX for narrow signed types.
         let imin = "-9223372036854775808";
-        for (ty, want_max) in [("i8", 127i64), ("i16", 32767), ("i31", 1073741823), ("i32", 2147483647)] {
+        for (ty, want_max) in [
+            ("i8", 127i64),
+            ("i16", 32767),
+            ("i31", 1073741823),
+            ("i32", 2147483647),
+        ] {
             let _ = store.del(&[b"bf".to_vec()], 0);
             assert_eq!(
                 run(&mut store, ty, imin),
-                RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(want_max)])),
+                RespFrame::Array(Some(vec![
+                    RespFrame::Integer(0),
+                    RespFrame::Integer(want_max)
+                ])),
                 "{ty} SAT of i64::MIN should saturate to MAX"
             );
         }
