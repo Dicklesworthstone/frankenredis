@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "PORT=6494; LOG=/data/projects/.scratch/frankenredis-pass47-cod-clean/artifacts/optimization/cod-pass47-reprofile-20260606T1745Z/baseline-server-$PORT-$$.log; /data/projects/.scratch/frankenredis-pass47-cod-clean/target-cod-pass47-clean-baseline/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true' EXIT; sleep 0.25; /data/projects/.scratch/frankenredis-pass47-cod-clean/target-cod-pass47-clean-baseline/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass47base >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.17458180878,
+      "stddev": 0.13510092676368946,
+      "median": 1.16582558218,
+      "user": 0.9346324600000001,
+      "system": 0.8766751000000002,
+      "min": 1.01999920068,
+      "max": 1.4219760326800002,
+      "times": [
+        1.21308305468,
+        1.4219760326800002,
+        1.32384164668,
+        1.2769837946800002,
+        1.06047581268,
+        1.05755190068,
+        1.0402554806800002,
+        1.16352732868,
+        1.01999920068,
+        1.1681238356800001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

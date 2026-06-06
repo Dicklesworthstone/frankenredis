@@ -1,0 +1,3 @@
+1eece928f4a5ec738b73db3047e60dafe0ae8c618ca695f3bbde4e61a0a861ab  /data/projects/.scratch/frankenredis-pass47-cod-clean/artifacts/optimization/cod-pass47-static-acl-20260606T1751Z/golden-static-acl-input.resp
+8bd8baffef27e6b2e883c3477006530e1c6e0426e75a791764c3a04b0d8685ae  /data/projects/.scratch/frankenredis-pass47-cod-clean/artifacts/optimization/cod-pass47-static-acl-20260606T1751Z/golden-static-acl-baseline.raw
+8bd8baffef27e6b2e883c3477006530e1c6e0426e75a791764c3a04b0d8685ae  /data/projects/.scratch/frankenredis-pass47-cod-clean/artifacts/optimization/cod-pass47-static-acl-20260606T1751Z/golden-static-acl-candidate.raw
