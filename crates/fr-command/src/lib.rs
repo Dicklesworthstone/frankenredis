@@ -2273,7 +2273,8 @@ pub fn dispatch_argv(
     // commands directly. Default user has all_commands=true so the
     // helper short-circuits to None and the cost on the hot path is
     // negligible.
-    if let Some(permissions) = &store.dispatch_client_ctx.acl_permissions
+    if (!store.dispatch_client_ctx.acl_checked_by_runtime || store.script_nesting_level >= 1)
+        && let Some(permissions) = &store.dispatch_client_ctx.acl_permissions
         && let Some(permission_error) = dispatch_acl_permission_error_for_argv(argv, permissions)
     {
         let command_name = String::from_utf8_lossy(raw_cmd).into_owned();

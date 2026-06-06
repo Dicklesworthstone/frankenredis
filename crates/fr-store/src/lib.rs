@@ -2590,6 +2590,10 @@ pub struct DispatchClientContext {
     pub client_no_evict: bool,
     /// Mirrors the per-session CLIENT NO-TOUCH flag, same pattern.
     pub client_no_touch: bool,
+    /// Runtime-mediated top-level commands already passed the runtime ACL gate
+    /// before dispatching into fr-command. Direct command-crate callers and
+    /// nested script calls leave this false so dispatch_argv still enforces ACL.
+    pub acl_checked_by_runtime: bool,
     pub acl_permissions: Option<DispatchAclPermissions>,
 }
 
@@ -2621,6 +2625,7 @@ impl Default for DispatchClientContext {
             client_reply: ClientReplyState::default(),
             client_no_evict: false,
             client_no_touch: false,
+            acl_checked_by_runtime: false,
             acl_permissions: None,
         }
     }
@@ -18819,11 +18824,10 @@ fn parse_hex_long_double(negative: bool, after_prefix: &[u8]) -> Option<IntegerL
         None => (after_prefix, 0),
     };
     // Split integer and fractional hex digits.
-    let (int_part, frac_part): (&[u8], &[u8]) =
-        match significand.iter().position(|&b| b == b'.') {
-            Some(pos) => (&significand[..pos], &significand[pos + 1..]),
-            None => (significand, b""),
-        };
+    let (int_part, frac_part): (&[u8], &[u8]) = match significand.iter().position(|&b| b == b'.') {
+        Some(pos) => (&significand[..pos], &significand[pos + 1..]),
+        None => (significand, b""),
+    };
     if int_part.is_empty() && frac_part.is_empty() {
         return None;
     }
@@ -18956,7 +18960,10 @@ pub fn long_double_text_is_valid(text: &[u8]) -> bool {
 
 /// Exact 80-bit long double addition (then a single round-half-even back to f80)
 /// via BigNat, so cancellation and sticky bits are exact.
-fn add_long_doubles(left: IntegerLongDouble, right: IntegerLongDouble) -> Option<IntegerLongDouble> {
+fn add_long_doubles(
+    left: IntegerLongDouble,
+    right: IntegerLongDouble,
+) -> Option<IntegerLongDouble> {
     if left.is_zero() {
         return Some(right);
     }
@@ -28727,14 +28734,14 @@ mod tests {
         // decimal-only and used to reject these. Golden results captured from
         // vendored redis 7.2.4 INCRBYFLOAT against a fresh key.
         let cases: &[(&[u8], &[u8])] = &[
-            (b"0x10", b"16"),          // 16
-            (b"0xff", b"255"),         // 255
-            (b"0x1.8p1", b"3"),        // 1.5 * 2 = 3
-            (b"0x1.5p3", b"10.5"),     // 1.3125 * 8 = 10.5
-            (b"0xa.bp2", b"42.75"),    // 10.6875 * 4 = 42.75
-            (b"-0x10", b"-16"),        // negative
-            (b"0X1P4", b"16"),         // uppercase 0X / P
-            (b"0x0p0", b"0"),          // zero
+            (b"0x10", b"16"),       // 16
+            (b"0xff", b"255"),      // 255
+            (b"0x1.8p1", b"3"),     // 1.5 * 2 = 3
+            (b"0x1.5p3", b"10.5"),  // 1.3125 * 8 = 10.5
+            (b"0xa.bp2", b"42.75"), // 10.6875 * 4 = 42.75
+            (b"-0x10", b"-16"),     // negative
+            (b"0X1P4", b"16"),      // uppercase 0X / P
+            (b"0x0p0", b"0"),       // zero
         ];
         for (delta_text, expected) in cases {
             let mut store = Store::new();
@@ -28878,12 +28885,20 @@ mod tests {
     fn incrbyfloat_long_double_matches_vendored() {
         let cases: &[(&str, &str, &str)] = &[
             ("694.867474", "-764.162593", "-69.29511899999999996"),
-            ("3.14159265358979323846", "-827064.8205435034", "-827061.67895084981023501"),
+            (
+                "3.14159265358979323846",
+                "-827064.8205435034",
+                "-827061.67895084981023501",
+            ),
             ("0.1", "0.2", "0.3"),
             ("486.29332", "0.0001", "486.29341999999999999"),
             ("0", "0.1", "0.1"),
             ("100000000000000000.5", "1e-300", "100000000000000000.5"),
-            ("3536970797.0994870001450181", "0.1", "3536970797.19948700023815036"),
+            (
+                "3536970797.0994870001450181",
+                "0.1",
+                "3536970797.19948700023815036",
+            ),
             ("-0.5", "0.5", "0"),
             ("1e-300", "1", "1"),
             ("5", "3", "8"),
@@ -28894,7 +28909,12 @@ mod tests {
             let mut store = Store::new();
             store.set(b"k".to_vec(), cur.as_bytes().to_vec(), None, 0);
             let got = store
-                .incrbyfloat_text(b"k", delta.as_bytes(), delta.parse::<f64>().unwrap_or(0.0), 0)
+                .incrbyfloat_text(
+                    b"k",
+                    delta.as_bytes(),
+                    delta.parse::<f64>().unwrap_or(0.0),
+                    0,
+                )
                 .unwrap();
             assert_eq!(
                 got,
@@ -28904,9 +28924,17 @@ mod tests {
             );
             // HINCRBYFLOAT shares the long-double path.
             let mut hstore = Store::new();
-            hstore.hset(b"h", b"f".to_vec(), cur.as_bytes().to_vec(), 0).unwrap();
+            hstore
+                .hset(b"h", b"f".to_vec(), cur.as_bytes().to_vec(), 0)
+                .unwrap();
             let hgot = hstore
-                .hincrbyfloat_text(b"h", b"f", delta.as_bytes(), delta.parse::<f64>().unwrap_or(0.0), 0)
+                .hincrbyfloat_text(
+                    b"h",
+                    b"f",
+                    delta.as_bytes(),
+                    delta.parse::<f64>().unwrap_or(0.0),
+                    0,
+                )
                 .unwrap();
             assert_eq!(hgot, expected.as_bytes(), "HINCRBYFLOAT {cur} + {delta}");
         }
@@ -28960,7 +28988,12 @@ mod tests {
         // 200 highly compressible fields -> listpack blob >> 20 bytes.
         for i in 0..200 {
             store
-                .hset(b"h", format!("k{i}").into_bytes(), format!("v{i}").into_bytes(), 0)
+                .hset(
+                    b"h",
+                    format!("k{i}").into_bytes(),
+                    format!("v{i}").into_bytes(),
+                    0,
+                )
                 .unwrap();
         }
         let raw_listpack_len = {
@@ -28973,7 +29006,10 @@ mod tests {
         let payload = store.dump_key(b"h", 0).expect("dump hash");
         // Type byte (HASH_LISTPACK) then 0xC3 LZF marker for the blob.
         assert_eq!(payload[0], RDB_TYPE_HASH_LISTPACK);
-        assert_eq!(payload[1], 0xC3, "large listpack blob must be LZF-compressed");
+        assert_eq!(
+            payload[1], 0xC3,
+            "large listpack blob must be LZF-compressed"
+        );
         // Compressed payload is materially smaller than the raw listpack.
         assert!(
             payload.len() < raw_listpack_len,
@@ -28983,7 +29019,9 @@ mod tests {
         );
         // And it still restores to the same hash.
         let mut store2 = Store::new();
-        store2.restore_key(b"h2", 0, &payload, false, 0).expect("restore");
+        store2
+            .restore_key(b"h2", 0, &payload, false, 0)
+            .expect("restore");
         for i in 0..200 {
             assert_eq!(
                 store2.hget(b"h2", format!("k{i}").as_bytes(), 0).unwrap(),

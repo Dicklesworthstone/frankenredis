@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "PORT=6421; LOG=artifacts/optimization/cod-pass40-reprofile/baseline-server-$PORT-$$.log; target-cod-pass40-base/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.2; target-cod-pass40-base/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass40base >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.18385213416,
+      "stddev": 0.13305737155482616,
+      "median": 1.1317721832599998,
+      "user": 0.9951176399999998,
+      "system": 0.9536861799999998,
+      "min": 1.05879229176,
+      "max": 1.48466821776,
+      "times": [
+        1.2244444537599999,
+        1.2087516597599999,
+        1.05879229176,
+        1.09645009976,
+        1.0843790817599999,
+        1.12790560176,
+        1.09317643076,
+        1.13563876476,
+        1.48466821776,
+        1.32431473976
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

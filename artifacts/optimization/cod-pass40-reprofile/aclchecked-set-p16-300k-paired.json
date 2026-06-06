@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "PORT=6423; LOG=artifacts/optimization/cod-pass40-reprofile/aclchecked-base-server-$PORT-$$.log; target-cod-pass40-base-fair/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.2; target-cod-pass40-base-fair/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass40aclbase >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.0751839432799999,
+      "stddev": 0.16979221084195828,
+      "median": 1.01674466478,
+      "user": 0.8667587400000001,
+      "system": 0.8476090399999998,
+      "min": 0.89597128278,
+      "max": 1.32944916978,
+      "times": [
+        1.26794758378,
+        1.32944916978,
+        1.2948415977799999,
+        1.14355832378,
+        0.9342303427800001,
+        1.02496763078,
+        0.89996555078,
+        0.95238625178,
+        0.89597128278,
+        1.0085216987799999
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "PORT=6424; LOG=artifacts/optimization/cod-pass40-reprofile/aclchecked-cand-server-$PORT-$$.log; target-cod-pass40-candidate/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.2; target-cod-pass40-candidate/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass40aclcand >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 0.8852492885800001,
+      "stddev": 0.020313722222346023,
+      "median": 0.88176509278,
+      "user": 0.6943156399999999,
+      "system": 0.6806398399999999,
+      "min": 0.86010029478,
+      "max": 0.92384982078,
+      "times": [
+        0.89148864778,
+        0.90357801278,
+        0.90211878678,
+        0.92384982078,
+        0.87846434978,
+        0.86010029478,
+        0.87270447578,
+        0.86039432178,
+        0.87472833978,
+        0.88506583578
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

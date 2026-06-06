@@ -4800,6 +4800,12 @@ impl Runtime {
 
     /// Returns true if the current client has any active pub/sub subscriptions.
     pub fn is_in_subscription_mode(&self) -> bool {
+        if self.server.pubsub_client_channels.is_empty()
+            && self.server.pubsub_client_patterns.is_empty()
+            && self.server.pubsub_client_shard_channels.is_empty()
+        {
+            return false;
+        }
         self.is_pubsub_client(self.session.client_id)
     }
 
@@ -7518,6 +7524,7 @@ impl Runtime {
         ctx.client_reply.clone_from(&session.client_reply);
         ctx.client_no_evict = session.client_no_evict;
         ctx.client_no_touch = session.client_no_touch;
+        ctx.acl_checked_by_runtime = true;
     }
 
     fn apply_existing_client_reply_suppression_to_undispatched_reply(&mut self) {
