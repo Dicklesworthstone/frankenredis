@@ -7691,6 +7691,16 @@ impl Runtime {
         //   e = no-evict, T = no-touch, r = readonly, b = blocked, ...
         // 'N' is the fallback when no flag is set. (br-frankenredis-s10v)
         let mut flag_chars = String::new();
+        // (frankenredis-clreplflag) Upstream networking.c::catClientInfoString
+        // emits the replication/monitor role flags FIRST: 'O' for a monitor
+        // (CLIENT_SLAVE|CLIENT_MONITOR), else 'S' for a replica connection
+        // (CLIENT_SLAVE). fr previously omitted these, so replica connections
+        // showed flags=N — monitoring tools parse this field to find replicas.
+        if self.server.monitor_clients.contains(&session.client_id) {
+            flag_chars.push('O');
+        } else if self.is_replica(session.client_id) {
+            flag_chars.push('S');
+        }
         if session.transaction_state.in_transaction {
             flag_chars.push('x');
         }
@@ -21458,6 +21468,32 @@ mod tests {
         // cross-connection — `SET k vvvvv` (9+8*3) + `GET k` (4+8*2) = 53, verified
         // e2e vs redis 7.2.4 (it can't be read by the MULTI client itself, since
         // CLIENT LIST is queued in a transaction).
+    }
+
+    /// (frankenredis-clreplflag) A replica connection reports flags=S in
+    /// CLIENT INFO/LIST (upstream catClientInfoString); a normal client is N.
+    /// Verified vs redis 7.2.4 (monitor 'O' confirmed live).
+    #[test]
+    fn client_info_flags_mark_replica_connections() {
+        fn flags_of(rt: &mut Runtime) -> String {
+            let info = match rt.execute_frame(command(&[b"CLIENT", b"INFO"]), 1) {
+                RespFrame::BulkString(Some(b)) => String::from_utf8(b).expect("utf8"),
+                other => unreachable!("unexpected CLIENT INFO: {other:?}"),
+            };
+            info.split("flags=")
+                .nth(1)
+                .and_then(|s| s.split(' ').next())
+                .expect("flags field")
+                .to_string()
+        }
+        let mut rt = Runtime::default_strict();
+        assert_eq!(flags_of(&mut rt), "N", "normal client should be flags=N");
+
+        // Entering the replica handshake (REPLCONF listening-port registers the
+        // connection as a replica) flips the flag to 'S'.
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"REPLCONF", b"listening-port", b"1234"]), 0);
+        assert_eq!(flags_of(&mut rt), "S", "replica connection should be flags=S");
     }
 
     #[test]
