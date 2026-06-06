@@ -1,0 +1,11 @@
++PONG
++OK
++OK
+-NOREPLICAS Not enough good replicas to write.
+$2
+v1
++OK
++OK
+$2
+v2
++OK
