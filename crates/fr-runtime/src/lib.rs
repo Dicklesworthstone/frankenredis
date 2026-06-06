@@ -7139,6 +7139,21 @@ impl Runtime {
         std::mem::take(&mut self.server.ready_keys)
     }
 
+    /// Read-only, no-stat type peeks for the blocked-client serve path: only a
+    /// key whose *current* type matches what a blocked client is waiting for may
+    /// be served (a non-list write like SET must NOT wake a BLPOP waiter).
+    /// Mirrors upstream `handleClientsBlockedOnKey`, which dispatches strictly by
+    /// the key's live type via a `LOOKUP_NOSTATS` read.
+    #[must_use]
+    pub fn peek_is_list(&self, key: &[u8], now_ms: u64) -> bool {
+        self.server.store.peek_value_type(key, now_ms) == Some(fr_store::ValueType::List)
+    }
+
+    #[must_use]
+    pub fn peek_is_zset(&self, key: &[u8], now_ms: u64) -> bool {
+        self.server.store.peek_value_type(key, now_ms) == Some(fr_store::ValueType::ZSet)
+    }
+
     // ── MONITOR support ─────────────────────────────────────────────
 
     /// Register the current client as a MONITOR client.

@@ -5282,6 +5282,27 @@ impl Store {
         self.value_type(key, now_ms).map(ValueType::as_str)
     }
 
+    /// Read-only, no-stat type peek: returns the logical type of `key` (treating
+    /// an already-expired key as absent) WITHOUT recording a keyspace hit/miss or
+    /// lazily evicting. Mirrors upstream's `LOOKUP_NOSTATS` read used by the
+    /// blocked-client serve path (`handleClientsBlockedOnKey`), which dispatches
+    /// strictly by the key's *current* type and must not perturb stats.
+    #[must_use]
+    pub fn peek_value_type(&self, key: &[u8], now_ms: u64) -> Option<ValueType> {
+        let entry = self.entries.get(key)?;
+        if entry.expiry_ms().is_some_and(|deadline| now_ms >= deadline) {
+            return None;
+        }
+        Some(match &entry.value {
+            Value::String(_) | Value::Integer(_) => ValueType::String,
+            Value::Hash(_) => ValueType::Hash,
+            Value::List(_) => ValueType::List,
+            Value::Set(_) => ValueType::Set,
+            Value::SortedSet(_) => ValueType::ZSet,
+            Value::Stream(_) => ValueType::Stream,
+        })
+    }
+
     /// Return the Redis-compatible encoding name for the value at `key`.
     #[must_use]
     pub fn object_encoding(&mut self, key: &[u8], now_ms: u64) -> Option<&'static str> {

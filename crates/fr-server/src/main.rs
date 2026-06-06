@@ -3295,7 +3295,14 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
     match op {
         BlockingOp::BLpop { keys } => {
             for key in keys {
-                // Build LPOP command and execute.
+                // Only a key that currently holds a LIST may serve a list
+                // waiter. A non-list write (SET/SADD/HSET/…) must NOT unblock a
+                // BLPOP — upstream signals readiness only on list pushes and
+                // dispatches serve-by-type, so a wrong-type/absent key keeps the
+                // client blocked (→ nil on timeout) rather than erroring.
+                if !runtime.peek_is_list(key, now_ms) {
+                    continue;
+                }
                 let argv = [b"LPOP".to_vec(), key.clone()];
                 let frame = RespFrame::Array(Some(
                     argv.iter()
@@ -3303,9 +3310,6 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                         .collect(),
                 ));
                 let response = runtime.execute_frame(frame, now_ms);
-                if matches!(response, RespFrame::Error(_)) {
-                    return Some(response);
-                }
                 if response != RespFrame::BulkString(None) {
                     // Got data — return [key, value] array.
                     return Some(RespFrame::Array(Some(vec![
@@ -3318,6 +3322,9 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
         }
         BlockingOp::BRpop { keys } => {
             for key in keys {
+                if !runtime.peek_is_list(key, now_ms) {
+                    continue;
+                }
                 let argv = [b"RPOP".to_vec(), key.clone()];
                 let frame = RespFrame::Array(Some(
                     argv.iter()
@@ -3325,9 +3332,6 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                         .collect(),
                 ));
                 let response = runtime.execute_frame(frame, now_ms);
-                if matches!(response, RespFrame::Error(_)) {
-                    return Some(response);
-                }
                 if response != RespFrame::BulkString(None) {
                     return Some(RespFrame::Array(Some(vec![
                         RespFrame::BulkString(Some(key.clone())),
@@ -3339,6 +3343,11 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
         }
         BlockingOp::BZpopMax { keys } => {
             for key in keys {
+                // Only a key currently holding a SORTED SET may serve a zset
+                // waiter; a non-zset write must not unblock BZPOPMAX.
+                if !runtime.peek_is_zset(key, now_ms) {
+                    continue;
+                }
                 let argv = [b"ZPOPMAX".to_vec(), key.clone()];
                 let frame = RespFrame::Array(Some(
                     argv.iter()
@@ -3346,9 +3355,6 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                         .collect(),
                 ));
                 let response = runtime.execute_frame(frame, now_ms);
-                if matches!(response, RespFrame::Error(_)) {
-                    return Some(response);
-                }
                 // ZPOPMAX returns [member, score]. BZPOPMAX needs [key, member, score]
                 if response != RespFrame::Array(None)
                     && let RespFrame::Array(Some(mut items)) = response
@@ -3363,6 +3369,9 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
         }
         BlockingOp::BZpopMin { keys } => {
             for key in keys {
+                if !runtime.peek_is_zset(key, now_ms) {
+                    continue;
+                }
                 let argv = [b"ZPOPMIN".to_vec(), key.clone()];
                 let frame = RespFrame::Array(Some(
                     argv.iter()
@@ -3370,9 +3379,6 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                         .collect(),
                 ));
                 let response = runtime.execute_frame(frame, now_ms);
-                if matches!(response, RespFrame::Error(_)) {
-                    return Some(response);
-                }
                 if response != RespFrame::Array(None)
                     && let RespFrame::Array(Some(mut items)) = response
                     && items.len() == 2
@@ -3390,6 +3396,14 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
             wherefrom,
             whereto,
         } => {
+            // Only serve when the SOURCE (the awaited key) currently holds a
+            // list — a non-list write to source must not unblock. Once source is
+            // a real list, propagate whatever LMOVE returns, INCLUDING a
+            // WRONGTYPE error from a wrong-type DESTINATION (upstream serves the
+            // woken client and surfaces the dst error). (frankenredis blocking-serve type gate)
+            if !runtime.peek_is_list(source, now_ms) {
+                return None;
+            }
             let argv = [
                 b"LMOVE".to_vec(),
                 source.clone(),
@@ -3417,7 +3431,12 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                     .collect(),
             ));
             let response = runtime.execute_frame(frame, now_ms);
-            if response != RespFrame::Array(None) {
+            // *MPOP has no destination: a serve-time WRONGTYPE means one of the
+            // awaited keys was overwritten with a non-list/non-zset value, which
+            // upstream never signals as ready — stay blocked, don't error.
+            if matches!(response, RespFrame::Error(_)) {
+                None
+            } else if response != RespFrame::Array(None) {
                 Some(response)
             } else {
                 None
@@ -3431,6 +3450,17 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                     .collect(),
             ));
             let response = runtime.execute_frame(frame, now_ms);
+            // A serve-time WRONGTYPE means an awaited key was overwritten with a
+            // non-stream value (e.g. SET); upstream never signals such a key as
+            // stream-ready, so the client stays blocked (→ nil on timeout). Other
+            // errors (e.g. NOGROUP from a destroyed consumer group) still
+            // propagate, matching upstream. (frankenredis blocking-serve type gate)
+            if let RespFrame::Error(msg) = &response {
+                if msg.starts_with("WRONGTYPE") {
+                    return None;
+                }
+                return Some(response);
+            }
             // XREAD/XREADGROUP returns Array(None) when no data is available.
             if response == RespFrame::Array(None) {
                 None
@@ -5729,14 +5759,19 @@ mod tests {
             keys: vec![b"myzset".to_vec()],
         };
         let response = try_fulfill_blocked(&op, &mut runtime, now_ms + 1);
+        // A non-zset write (SET) to the awaited key must NOT serve/unblock a
+        // BZPOPMAX waiter: upstream signals readiness only on zset adds and
+        // dispatches serve-by-type, so the client stays blocked (→ nil on
+        // timeout) rather than receiving a spurious WRONGTYPE. (verified vs
+        // redis 7.2.4: BZPOPMIN/BZPOPMAX woken by SET → nil)
         assert!(
-            matches!(response, Some(RespFrame::Error(_))),
-            "expected wrongtype error, got {response:?}"
+            response.is_none(),
+            "expected to stay blocked (None) on a non-zset key, got {response:?}"
         );
     }
 
     #[test]
-    fn xread_wrongtype_unblocks_with_error() {
+    fn xread_block_stays_blocked_when_key_becomes_wrong_type() {
         let mut runtime = Runtime::new(RuntimePolicy::hardened());
         let now_ms = 1_000;
         let _ = runtime.execute_frame(
@@ -5759,9 +5794,13 @@ mod tests {
             ],
         };
         let response = try_fulfill_blocked(&op, &mut runtime, now_ms + 1);
+        // A non-stream write (SET) to the awaited key must NOT serve/unblock an
+        // XREAD BLOCK waiter with a spurious WRONGTYPE: upstream signals
+        // stream-readiness only on XADD, so the client stays blocked (→ nil on
+        // timeout). (verified vs redis 7.2.4: XREAD BLOCK woken by SET → nil)
         assert!(
-            matches!(response, Some(RespFrame::Error(_))),
-            "expected wrongtype error, got {response:?}"
+            response.is_none(),
+            "expected to stay blocked (None) on a non-stream key, got {response:?}"
         );
     }
 
