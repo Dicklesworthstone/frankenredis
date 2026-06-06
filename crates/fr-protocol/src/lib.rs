@@ -369,6 +369,10 @@ impl RespFrame {
 /// byte-exact against the oracle across 437 magnitudes. (frankenredis-sk4ss)
 #[must_use]
 pub fn format_redis_double(value: f64) -> String {
+    // Faithful port of util.c::d2string (the path addReplyHumanLongDouble /
+    // addReplyDouble take for RESP2 scores): special-case nan/inf/±0, take the
+    // exact-integer ll2string fast path ONLY inside the ±2^52 window upstream
+    // uses, otherwise grisu2 via fpconv_dtoa. (frankenredis-sk4ss)
     if value.is_nan() {
         return "nan".to_string();
     }
@@ -379,74 +383,384 @@ pub fn format_redis_double(value: f64) -> String {
         return if value.is_sign_negative() { "-0" } else { "0" }.to_string();
     }
 
-    // Exact-integer fast path (double2ll → ll2string).
-    //
-    // NOTE: upstream util.c::d2string only takes the ll2string path for
-    // `|value| < 2^52`; above that it uses fpconv_dtoa (grisu2), whose SHORTEST
-    // decimal usually equals the exact integer (so this wider window matches)
-    // but occasionally shortens it (e.g. 6.30082e18 → upstream
-    // "6300820258065051000", here the exact "6300820258065050624"). Narrowing
-    // to the 2^52 window does NOT fix that — it merely moves the divergence to
-    // round magnitudes (1e18 → fpconv "1000000000000000000", but fr's
-    // {:e}-driven fallback emits "1e+18"), which is worse and more frequent. A
-    // faithful fix is a real fpconv_dtoa/grisu2 port replacing the Ryū piggyback
-    // below; until then the i64 window is the closest approximation.
-    // (frankenredis d2string large-integer residual — see scripts/float_format_differ.py)
-    if value >= i64::MIN as f64 && value <= i64::MAX as f64 {
+    // Exact-integer fast path — faithful port of util.c::double2ll: take it iff
+    // `value` is in the safe range `[-LLONG_MAX/2, LLONG_MAX/2]` (≈ ±2^62) AND
+    // is an exact integer (`(i64)v == v`). Every integer-valued double in that
+    // range is losslessly an i64, so ll2string prints it exactly; ABOVE that
+    // (e.g. 6.30082e18) upstream falls to fpconv_dtoa, whose shortest decimal
+    // can drop trailing digits of the exact integer. The window is ±2^62, NOT
+    // ±2^52 — narrowing it wrongly routes values like 1.37e18 through grisu2.
+    let lo = (-i64::MAX / 2) as f64;
+    let hi = (i64::MAX / 2) as f64;
+    if value >= lo && value <= hi {
         let truncated = value as i64;
         if truncated as f64 == value {
             return truncated.to_string();
         }
     }
 
-    // fpconv_dtoa::emit_digits, driven by Rust's shortest-roundtrip {:e}.
-    let sci = format!("{value:e}");
-    let (mantissa, exp_str) = sci.split_once('e').expect("{:e} always emits 'e'");
-    let scientific_exp: i32 = exp_str.parse().expect("{:e} exponent is an integer");
-    let neg = mantissa.starts_with('-');
-    let digits: String = mantissa
-        .bytes()
-        .filter(u8::is_ascii_digit)
-        .map(char::from)
-        .collect();
-    let ndigits = digits.len() as i32;
-    let k = scientific_exp - (ndigits - 1);
-    let exp_abs = scientific_exp.abs();
+    fpconv_dtoa(value)
+}
 
-    let mut out = String::with_capacity(digits.len() + 8);
-    if neg {
-        out.push('-');
-    }
-    if k >= 0 && exp_abs < ndigits + 7 {
-        out.push_str(&digits);
-        for _ in 0..k {
-            out.push('0');
-        }
-    } else if k < 0 && (k > -7 || exp_abs < 4) {
-        let offset = ndigits - k.abs();
-        if offset <= 0 {
-            out.push_str("0.");
-            for _ in 0..(-offset) {
-                out.push('0');
-            }
-            out.push_str(&digits);
-        } else {
-            let o = offset as usize;
-            out.push_str(&digits[..o]);
-            out.push('.');
-            out.push_str(&digits[o..]);
-        }
+// ───────────────────────── fpconv_dtoa (grisu2) ────────────────────────────
+//
+// Faithful safe-Rust port of redis deps/fpconv/fpconv_dtoa.c (Florian Loitsch's
+// Grisu2), so ZSET-score / GEODIST / RESP3-double replies are byte-identical to
+// vendored redis 7.2.4 — including the cases where grisu2's shortest digits
+// differ in the last place from Rust's Ryū. All unsigned arithmetic uses the
+// wrapping ops the C relies on (uint64_t is modular), so the debug build does
+// not panic on the deliberate overflows in `multiply`/`generate_digits`.
+// (frankenredis fpconv grisu2 port)
+
+const FPCONV_FRACMASK: u64 = 0x000F_FFFF_FFFF_FFFF;
+const FPCONV_EXPMASK: u64 = 0x7FF0_0000_0000_0000;
+const FPCONV_HIDDENBIT: u64 = 0x0010_0000_0000_0000;
+const FPCONV_SIGNMASK: u64 = 0x8000_0000_0000_0000;
+const FPCONV_EXPBIAS: i32 = 1023 + 52;
+
+const FPCONV_TENS: [u64; 20] = [
+    10_000_000_000_000_000_000,
+    1_000_000_000_000_000_000,
+    100_000_000_000_000_000,
+    10_000_000_000_000_000,
+    1_000_000_000_000_000,
+    100_000_000_000_000,
+    10_000_000_000_000,
+    1_000_000_000_000,
+    100_000_000_000,
+    10_000_000_000,
+    1_000_000_000,
+    100_000_000,
+    10_000_000,
+    1_000_000,
+    100_000,
+    10_000,
+    1_000,
+    100,
+    10,
+    1,
+];
+
+const FPCONV_NPOWERS: i32 = 87;
+const FPCONV_STEPPOWERS: i32 = 8;
+const FPCONV_FIRSTPOWER: i32 = -348;
+const FPCONV_EXPMAX: i32 = -32;
+const FPCONV_EXPMIN: i32 = -60;
+
+/// `(frac, exp)` cached powers of ten (87 entries), verbatim from fpconv_powers.h.
+const FPCONV_POWERS: [(u64, i32); 87] = [
+    (18054884314459144840, -1220), (13451937075301367670, -1193),
+    (10022474136428063862, -1166), (14934650266808366570, -1140),
+    (11127181549972568877, -1113), (16580792590934885855, -1087),
+    (12353653155963782858, -1060), (18408377700990114895, -1034),
+    (13715310171984221708, -1007), (10218702384817765436, -980),
+    (15227053142812498563, -954), (11345038669416679861, -927),
+    (16905424996341287883, -901), (12595523146049147757, -874),
+    (9384396036005875287, -847), (13983839803942852151, -821),
+    (10418772551374772303, -794), (15525180923007089351, -768),
+    (11567161174868858868, -741), (17236413322193710309, -715),
+    (12842128665889583758, -688), (9568131466127621947, -661),
+    (14257626930069360058, -635), (10622759856335341974, -608),
+    (15829145694278690180, -582), (11793632577567316726, -555),
+    (17573882009934360870, -529), (13093562431584567480, -502),
+    (9755464219737475723, -475), (14536774485912137811, -449),
+    (10830740992659433045, -422), (16139061738043178685, -396),
+    (12024538023802026127, -369), (17917957937422433684, -343),
+    (13349918974505688015, -316), (9946464728195732843, -289),
+    (14821387422376473014, -263), (11042794154864902060, -236),
+    (16455045573212060422, -210), (12259964326927110867, -183),
+    (18268770466636286478, -157), (13611294676837538539, -130),
+    (10141204801825835212, -103), (15111572745182864684, -77),
+    (11258999068426240000, -50), (16777216000000000000, -24),
+    (12500000000000000000, 3), (9313225746154785156, 30),
+    (13877787807814456755, 56), (10339757656912845936, 83),
+    (15407439555097886824, 109), (11479437019748901445, 136),
+    (17105694144590052135, 162), (12744735289059618216, 189),
+    (9495567745759798747, 216), (14149498560666738074, 242),
+    (10542197943230523224, 269), (15709099088952724970, 295),
+    (11704190886730495818, 322), (17440603504673385349, 348),
+    (12994262207056124023, 375), (9681479787123295682, 402),
+    (14426529090290212157, 428), (10748601772107342003, 455),
+    (16016664761464807395, 481), (11933345169920330789, 508),
+    (17782069995880619868, 534), (13248674568444952270, 561),
+    (9871031767461413346, 588), (14708983551653345445, 614),
+    (10959046745042015199, 641), (16330252207878254650, 667),
+    (12166986024289022870, 694), (18130221999122236476, 720),
+    (13508068024458167312, 747), (10064294952495520794, 774),
+    (14996968138956309548, 800), (11173611982879273257, 827),
+    (16649979327439178909, 853), (12405201291620119593, 880),
+    (9242595204427927429, 907), (13772540099066387757, 933),
+    (10261342003245940623, 960), (15290591125556738113, 986),
+    (11392378155556871081, 1013), (16975966327722178521, 1039),
+    (12648080533535911531, 1066),
+];
+
+#[derive(Clone, Copy)]
+struct Fp {
+    frac: u64,
+    exp: i32,
+}
+
+fn fpconv_build_fp(d: f64) -> Fp {
+    let bits = d.to_bits();
+    let mut frac = bits & FPCONV_FRACMASK;
+    let mut exp = ((bits & FPCONV_EXPMASK) >> 52) as i32;
+    if exp != 0 {
+        frac += FPCONV_HIDDENBIT;
+        exp -= FPCONV_EXPBIAS;
     } else {
-        out.push_str(&digits[..1]);
-        if ndigits > 1 {
-            out.push('.');
-            out.push_str(&digits[1..]);
-        }
-        out.push('e');
-        out.push(if scientific_exp < 0 { '-' } else { '+' });
-        out.push_str(&exp_abs.to_string());
+        exp = -FPCONV_EXPBIAS + 1;
     }
-    out
+    Fp { frac, exp }
+}
+
+fn fpconv_normalize(fp: &mut Fp) {
+    while fp.frac & FPCONV_HIDDENBIT == 0 {
+        fp.frac <<= 1;
+        fp.exp -= 1;
+    }
+    let shift = 64 - 52 - 1;
+    fp.frac <<= shift;
+    fp.exp -= shift;
+}
+
+fn fpconv_get_normalized_boundaries(fp: &Fp) -> (Fp, Fp) {
+    let mut upper = Fp {
+        frac: (fp.frac << 1) + 1,
+        exp: fp.exp - 1,
+    };
+    while upper.frac & (FPCONV_HIDDENBIT << 1) == 0 {
+        upper.frac <<= 1;
+        upper.exp -= 1;
+    }
+    let u_shift = 64 - 52 - 2;
+    upper.frac <<= u_shift;
+    upper.exp -= u_shift;
+
+    let l_shift = if fp.frac == FPCONV_HIDDENBIT { 2 } else { 1 };
+    let mut lower = Fp {
+        frac: (fp.frac << l_shift) - 1,
+        exp: fp.exp - l_shift,
+    };
+    lower.frac = lower.frac.wrapping_shl((lower.exp - upper.exp) as u32);
+    lower.exp = upper.exp;
+    (lower, upper)
+}
+
+fn fpconv_multiply(a: &Fp, b: &Fp) -> Fp {
+    let lomask: u64 = 0x0000_0000_FFFF_FFFF;
+    let ah_bl = (a.frac >> 32).wrapping_mul(b.frac & lomask);
+    let al_bh = (a.frac & lomask).wrapping_mul(b.frac >> 32);
+    let al_bl = (a.frac & lomask).wrapping_mul(b.frac & lomask);
+    let ah_bh = (a.frac >> 32).wrapping_mul(b.frac >> 32);
+
+    let tmp = (ah_bl & lomask)
+        .wrapping_add(al_bh & lomask)
+        .wrapping_add(al_bl >> 32)
+        .wrapping_add(1u64 << 31);
+
+    Fp {
+        frac: ah_bh
+            .wrapping_add(ah_bl >> 32)
+            .wrapping_add(al_bh >> 32)
+            .wrapping_add(tmp >> 32),
+        exp: a.exp + b.exp + 64,
+    }
+}
+
+fn fpconv_round_digit(
+    digits: &mut [u8],
+    ndigits: usize,
+    delta: u64,
+    mut rem: u64,
+    kappa: u64,
+    frac: u64,
+) {
+    while rem < frac
+        && delta.wrapping_sub(rem) >= kappa
+        && (rem.wrapping_add(kappa) < frac
+            || frac.wrapping_sub(rem) > rem.wrapping_add(kappa).wrapping_sub(frac))
+    {
+        digits[ndigits - 1] = digits[ndigits - 1].wrapping_sub(1);
+        rem = rem.wrapping_add(kappa);
+    }
+}
+
+fn fpconv_generate_digits(fp: &Fp, upper: &Fp, lower: &Fp, digits: &mut [u8], k: &mut i32) -> usize {
+    let wfrac = upper.frac.wrapping_sub(fp.frac);
+    let mut delta = upper.frac.wrapping_sub(lower.frac);
+
+    let one_exp = upper.exp;
+    let one_shift = (-one_exp) as u32;
+    let one_frac = 1u64 << one_shift;
+
+    let mut part1 = upper.frac >> one_shift;
+    let mut part2 = upper.frac & (one_frac - 1);
+
+    let mut idx = 0usize;
+    let mut kappa: i32 = 10;
+
+    // divp walks tens[10]=1_000_000_000 .. upward.
+    let mut divp = 10usize;
+    while kappa > 0 {
+        let div = FPCONV_TENS[divp];
+        let digit = (part1 / div) as u32;
+        if digit != 0 || idx != 0 {
+            digits[idx] = (digit as u8) + b'0';
+            idx += 1;
+        }
+        part1 -= digit as u64 * div;
+        kappa -= 1;
+
+        let tmp = (part1 << one_shift).wrapping_add(part2);
+        if tmp <= delta {
+            *k += kappa;
+            fpconv_round_digit(digits, idx, delta, tmp, div.wrapping_shl(one_shift), wfrac);
+            return idx;
+        }
+        divp += 1;
+    }
+
+    // tens[18] = 10.
+    let mut unit = 18usize;
+    loop {
+        part2 = part2.wrapping_mul(10);
+        delta = delta.wrapping_mul(10);
+        kappa -= 1;
+
+        let digit = (part2 >> one_shift) as u32;
+        if digit != 0 || idx != 0 {
+            digits[idx] = (digit as u8) + b'0';
+            idx += 1;
+        }
+        part2 &= one_frac - 1;
+        if part2 < delta {
+            *k += kappa;
+            fpconv_round_digit(
+                digits,
+                idx,
+                delta,
+                part2,
+                one_frac,
+                wfrac.wrapping_mul(FPCONV_TENS[unit]),
+            );
+            return idx;
+        }
+        unit -= 1;
+    }
+}
+
+fn fpconv_find_cachedpow10(exp: i32, k: &mut i32) -> Fp {
+    let one_log_ten = 0.301_029_995_663_981_14_f64;
+    let approx = ((-(exp + FPCONV_NPOWERS)) as f64 * one_log_ten) as i32;
+    let mut idx = ((approx - FPCONV_FIRSTPOWER) / FPCONV_STEPPOWERS) as usize;
+    loop {
+        let current = exp + FPCONV_POWERS[idx].1 + 64;
+        if current < FPCONV_EXPMIN {
+            idx += 1;
+            continue;
+        }
+        if current > FPCONV_EXPMAX {
+            idx -= 1;
+            continue;
+        }
+        *k = FPCONV_FIRSTPOWER + (idx as i32) * FPCONV_STEPPOWERS;
+        let (frac, e) = FPCONV_POWERS[idx];
+        return Fp { frac, exp: e };
+    }
+}
+
+fn fpconv_grisu2(d: f64, digits: &mut [u8], k: &mut i32) -> usize {
+    let mut w = fpconv_build_fp(d);
+    let (mut lower, mut upper) = fpconv_get_normalized_boundaries(&w);
+    fpconv_normalize(&mut w);
+
+    let mut kk = 0i32;
+    let cp = fpconv_find_cachedpow10(upper.exp, &mut kk);
+
+    w = fpconv_multiply(&w, &cp);
+    upper = fpconv_multiply(&upper, &cp);
+    lower = fpconv_multiply(&lower, &cp);
+
+    lower.frac = lower.frac.wrapping_add(1);
+    upper.frac = upper.frac.wrapping_sub(1);
+
+    *k = -kk;
+    fpconv_generate_digits(&w, &upper, &lower, digits, k)
+}
+
+fn fpconv_emit_digits(digits: &[u8], mut ndigits: usize, k: i32, neg: bool) -> String {
+    let exp = (k + ndigits as i32 - 1).abs();
+    let mut out: Vec<u8> = Vec::with_capacity(24);
+
+    // write plain integer
+    if k >= 0 && exp < ndigits as i32 + 7 {
+        out.extend_from_slice(&digits[..ndigits]);
+        out.resize(ndigits + k as usize, b'0');
+        return String::from_utf8(out).expect("ascii");
+    }
+
+    // write decimal w/o scientific notation
+    if k < 0 && (k > -7 || exp < 4) {
+        let offset = ndigits as i32 - k.abs();
+        if offset <= 0 {
+            let off = (-offset) as usize;
+            out.push(b'0');
+            out.push(b'.');
+            out.resize(2 + off, b'0');
+            out.extend_from_slice(&digits[..ndigits]);
+        } else {
+            let off = offset as usize;
+            out.extend_from_slice(&digits[..off]);
+            out.push(b'.');
+            out.extend_from_slice(&digits[off..ndigits]);
+        }
+        return String::from_utf8(out).expect("ascii");
+    }
+
+    // write decimal w/ scientific notation
+    ndigits = ndigits.min(18 - usize::from(neg));
+    out.push(digits[0]);
+    if ndigits > 1 {
+        out.push(b'.');
+        out.extend_from_slice(&digits[1..ndigits]);
+    }
+    out.push(b'e');
+    out.push(if k + ndigits as i32 - 1 < 0 { b'-' } else { b'+' });
+
+    let mut e = exp;
+    let mut cent = 0i32;
+    if e > 99 {
+        cent = e / 100;
+        out.push((cent as u8) + b'0');
+        e -= cent * 100;
+    }
+    if e > 9 {
+        let dec = e / 10;
+        out.push((dec as u8) + b'0');
+        e -= dec * 10;
+    } else if cent != 0 {
+        out.push(b'0');
+    }
+    out.push(((e % 10) as u8) + b'0');
+    String::from_utf8(out).expect("ascii")
+}
+
+/// `fpconv_dtoa` for a FINITE, NON-ZERO `d` (callers special-case nan/inf/0).
+fn fpconv_dtoa(d: f64) -> String {
+    let neg = d.to_bits() & FPCONV_SIGNMASK != 0;
+    let mut digits = [0u8; 24];
+    let mut k = 0i32;
+    let ndigits = fpconv_grisu2(d, &mut digits, &mut k);
+    let body = fpconv_emit_digits(&digits, ndigits, k, neg);
+    if neg {
+        let mut s = String::with_capacity(body.len() + 1);
+        s.push('-');
+        s.push_str(&body);
+        s
+    } else {
+        body
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2170,6 +2484,17 @@ mod tests {
             (1e-7, "1e-7"),
             (1e-10, "1e-10"),
             (1.6e-19, "1.6e-19"),
+            // (frankenredis fpconv grisu2 port) Cases the prior Ryū-piggyback
+            // diverged on — large integer-valued doubles where grisu2 shortens
+            // the exact integer, the 17-sig-digit grisu2 last-digit tie-break,
+            // and the ±2^62 double2ll window edges. Captured from redis 7.2.4.
+            (1234567890123456.7, "1234567890123456.7"),
+            (-1997107851181081.2, "-1997107851181081.2"),
+            (6300820258065050624.0, "6300820258065051000"),
+            (1373428634809579008.0, "1373428634809579008"),
+            (9223372036854774784.0, "9223372036854775000"),
+            (4611686018427387904.0, "4611686018427387904"),
+            (9223372036854775807.0, "9223372036854776000"),
         ];
         for (value, expected) in cases {
             assert_eq!(

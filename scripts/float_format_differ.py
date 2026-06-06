@@ -15,9 +15,11 @@ digit differently (both round-trip to the SAME f64). Those tie-break-only
 differences are tolerated and counted; any difference where fr's reply does NOT
 round-trip to the stored f64, or is longer than redis's, FAILS the gate.
 
-Known residual (documented, NOT a correctness bug): ~0.02% of f64 values differ
-in the last digit only (grisu2 vs Ryū tie-break). A faithful fix is a full
-fpconv_dtoa/grisu2 port replacing the Ryū piggyback in format_redis_double.
+As of the faithful fpconv_dtoa/grisu2 port (format_redis_double no longer
+piggybacks on Ryū), this is expected to report ZERO tie-breaks — fr is now
+byte-identical to redis d2string across the full f64 surface. The tolerance is
+kept as a defensive invariant: any non-round-tripping or longer reply still
+FAILS, and any reappearing tie-break flags a regression in the grisu2 port.
 
 Usage: float_format_differ.py [--oracle 16399] [--fr 16400] [--n 8000] [--seed 1]
 Exit 0 if every divergence is a same-f64 tie-break; exit 1 on any real fault.
