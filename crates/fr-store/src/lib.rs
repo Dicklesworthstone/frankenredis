@@ -16177,6 +16177,20 @@ impl Store {
         self.ordered_keys.iter().cloned().collect()
     }
 
+    /// Drop stale TTL-bearing keys before snapshot serialization.
+    ///
+    /// The volatile key index is maintained on every TTL transition, so
+    /// snapshot paths can reap expired keys without cloning and probing the
+    /// persistent keyspace. Each expired key still goes through the normal lazy
+    /// expiry path, preserving notifications, stats, dirty tracking, and
+    /// propagation records.
+    pub fn expire_snapshot_volatile_keys(&mut self, now_ms: u64) {
+        let volatile_keys: Vec<Vec<u8>> = self.volatile_keys.iter().cloned().collect();
+        for key in &volatile_keys {
+            self.drop_if_expired(key, now_ms);
+        }
+    }
+
     /// Drop a key if it has expired. Public wrapper for RDB/snapshot use.
     pub fn expire_key_if_stale(&mut self, key: &[u8], now_ms: u64) {
         self.drop_if_expired(key, now_ms);
@@ -20622,11 +20636,11 @@ mod tests {
             b"8388607".to_vec(),
             b"2147483647".to_vec(),
             b"9223372036854775807".to_vec(),
-            b"007".to_vec(),         // non-canonical int -> string-encoded
-            b"a".to_vec(),           // 1-byte string
-            vec![b'z'; 63],          // <64 header
-            vec![b'y'; 64],          // 2-byte header boundary
-            vec![b'w'; 4096],        // 5-byte header boundary
+            b"007".to_vec(),  // non-canonical int -> string-encoded
+            b"a".to_vec(),    // 1-byte string
+            vec![b'z'; 63],   // <64 header
+            vec![b'y'; 64],   // 2-byte header boundary
+            vec![b'w'; 4096], // 5-byte header boundary
         ];
 
         let mut l = ListValue::default();
@@ -21054,6 +21068,27 @@ mod tests {
         assert_eq!(result.sampled_keys, 3);
         assert_eq!(result.evicted_keys, 0);
         assert_eq!(result.next_cursor, None);
+    }
+
+    #[test]
+    fn snapshot_expire_uses_volatile_index_only() {
+        let mut store = Store::new();
+        store.set(b"persistent".to_vec(), b"p".to_vec(), None, 0);
+        store.set(b"expired".to_vec(), b"x".to_vec(), Some(100), 0);
+        store.set(b"live".to_vec(), b"l".to_vec(), Some(5_000), 0);
+
+        store.expire_snapshot_volatile_keys(1_000);
+
+        assert!(store.exists(b"persistent", 1_000));
+        assert!(!store.exists(b"expired", 1_000));
+        assert!(store.exists(b"live", 1_000));
+        assert!(!store.volatile_keys.contains(b"expired".as_slice()));
+        assert!(store.volatile_keys.contains(b"live".as_slice()));
+        assert_eq!(store.stat_expired_keys, 1);
+        assert_eq!(
+            store.take_lazy_expired_propagation(),
+            vec![b"expired".to_vec()]
+        );
     }
 
     #[test]

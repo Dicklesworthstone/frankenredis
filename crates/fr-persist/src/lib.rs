@@ -929,6 +929,16 @@ pub struct RdbEntry {
     pub expire_ms: Option<u64>,
 }
 
+/// Borrowed string-only RDB entry for snapshot paths that can prove all values
+/// are plain strings and preserve the canonical `(db, key)` order upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RdbStringEntryRef<'a> {
+    pub db: usize,
+    pub key: &'a [u8],
+    pub value: &'a [u8],
+    pub expire_ms: Option<u64>,
+}
+
 /// Decoded RDB payload plus the byte offset immediately after the checksum.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RdbDecodeResult {
@@ -1295,6 +1305,77 @@ pub fn encode_rdb_with_functions(
             compact: Some(CompactRdbThresholds::default()),
         },
     )
+}
+
+/// Encode a complete RDB file for an already-sorted, string-only keyspace.
+///
+/// This mirrors `encode_rdb_with_functions` for `RdbValue::String` entries but
+/// avoids materializing `RdbEntry`/`RdbValue` vectors when the runtime can borrow
+/// store keys and values directly. Callers must pass entries sorted by `(db,
+/// key)`; debug builds assert that contract.
+#[must_use]
+pub fn encode_rdb_string_entries_with_functions(
+    entries: &[RdbStringEntryRef<'_>],
+    aux: &[(&str, &str)],
+    functions: &[&[u8]],
+) -> Vec<u8> {
+    debug_assert!(entries.windows(2).all(|pair| {
+        pair[0].db < pair[1].db || (pair[0].db == pair[1].db && pair[0].key <= pair[1].key)
+    }));
+
+    let mut buf = Vec::new();
+
+    buf.extend_from_slice(b"REDIS");
+    let version_str = format!("{RDB_VERSION:04}");
+    buf.extend_from_slice(version_str.as_bytes());
+
+    for (key, value) in aux {
+        buf.push(RDB_OPCODE_AUX);
+        rdb_encode_string(&mut buf, key.as_bytes());
+        rdb_encode_string(&mut buf, value.as_bytes());
+    }
+
+    for code in functions {
+        buf.push(RDB_OPCODE_FUNCTION2);
+        rdb_encode_string(&mut buf, code);
+    }
+
+    let mut group_start = 0usize;
+    while group_start < entries.len() {
+        let db = entries[group_start].db;
+        let mut group_end = group_start;
+        let mut db_expires = 0usize;
+        while group_end < entries.len() && entries[group_end].db == db {
+            if entries[group_end].expire_ms.is_some() {
+                db_expires += 1;
+            }
+            group_end += 1;
+        }
+
+        buf.push(RDB_OPCODE_SELECTDB);
+        rdb_encode_length(&mut buf, db);
+        buf.push(RDB_OPCODE_RESIZEDB);
+        rdb_encode_length(&mut buf, group_end - group_start);
+        rdb_encode_length(&mut buf, db_expires);
+
+        for entry in &entries[group_start..group_end] {
+            if let Some(ms) = entry.expire_ms {
+                buf.push(RDB_OPCODE_EXPIRETIME_MS);
+                buf.extend_from_slice(&ms.to_le_bytes());
+            }
+
+            buf.push(RDB_TYPE_STRING);
+            rdb_encode_string(&mut buf, entry.key);
+            rdb_encode_string(&mut buf, entry.value);
+        }
+        group_start = group_end;
+    }
+
+    buf.push(RDB_OPCODE_EOF);
+    let checksum = crc64_redis(&buf);
+    buf.extend_from_slice(&checksum.to_le_bytes());
+
+    buf
 }
 
 /// Encode a complete RDB file from a set of entries.
@@ -4151,6 +4232,54 @@ mod tests {
         encoded.push(RDB_OPCODE_EOF);
         append_rdb_checksum(&mut encoded);
         encoded
+    }
+
+    #[test]
+    fn borrowed_string_entries_encode_like_generic_rdb_entries() {
+        let entries = vec![
+            RdbEntry {
+                db: 2,
+                key: b"z".to_vec(),
+                value: RdbValue::String(b"last".to_vec()),
+                expire_ms: Some(55),
+            },
+            RdbEntry {
+                db: 0,
+                key: b"a".to_vec(),
+                value: RdbValue::String(b"first".to_vec()),
+                expire_ms: None,
+            },
+            RdbEntry {
+                db: 2,
+                key: b"m".to_vec(),
+                value: RdbValue::String(b"middle".to_vec()),
+                expire_ms: None,
+            },
+        ];
+        let mut refs: Vec<crate::RdbStringEntryRef<'_>> = entries
+            .iter()
+            .map(|entry| {
+                let RdbValue::String(value) = &entry.value else {
+                    unreachable!("test entries are string-only");
+                };
+                crate::RdbStringEntryRef {
+                    db: entry.db,
+                    key: &entry.key,
+                    value,
+                    expire_ms: entry.expire_ms,
+                }
+            })
+            .collect();
+        refs.sort_by(|left, right| left.db.cmp(&right.db).then_with(|| left.key.cmp(right.key)));
+
+        let aux = [("redis-ver", "7.2.4"), ("frankenredis", "true")];
+        let lib = b"#!lua name=borrowed\nredis.register_function('bf', function() return 1 end)";
+        let functions = [lib.as_slice()];
+
+        assert_eq!(
+            crate::encode_rdb_string_entries_with_functions(&refs, &aux, &functions),
+            encode_rdb_with_functions(&entries, &aux, &functions)
+        );
     }
 
     #[cfg(feature = "upstream-stream-rdb")]

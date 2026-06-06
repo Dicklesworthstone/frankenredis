@@ -701,11 +701,19 @@ impl PackedList {
     }
 
     #[must_use]
+    #[expect(
+        dead_code,
+        reason = "packed-list public helper kept for follow-up wiring"
+    )]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
     #[must_use]
+    #[expect(
+        dead_code,
+        reason = "packed-list public helper kept for follow-up wiring"
+    )]
     pub fn byte_len(&self) -> usize {
         self.buf.len()
     }
@@ -1024,8 +1032,7 @@ impl ListValue {
     /// Account for an arbitrary bulk removal (LREM/LTRIM) by recomputing
     /// `lp_bytes` from the survivors, then applying hysteresis.
     fn on_remove_bulk(&mut self) {
-        self.lp_bytes =
-            LIST_LP_OVERHEAD + self.iter().map(list_lp_entry_bytes).sum::<u64>();
+        self.lp_bytes = LIST_LP_OVERHEAD + self.iter().map(list_lp_entry_bytes).sum::<u64>();
         self.shrink_hysteresis();
     }
 

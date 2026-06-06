@@ -29,8 +29,8 @@ use fr_eventloop::{
     validate_fd_registration_bounds, validate_pending_write_delivery, validate_read_path,
 };
 use fr_persist::{
-    AofRecord, PersistError, RdbEntry, RdbValue, decode_aof_stream, encode_aof_stream,
-    read_rdb_file,
+    AofRecord, PersistError, RdbEntry, RdbStringEntryRef, RdbValue, decode_aof_stream,
+    encode_aof_stream, read_rdb_file,
 };
 use fr_protocol::{RespFrame, RespParseError};
 use fr_repl::{
@@ -3778,10 +3778,16 @@ impl Runtime {
         // serialize the live store via encode_rdb, decode the bytes
         // back, then replace the store. This validates the
         // encoder/decoder pair without touching disk.
-        let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
         let fn_codes = self.rdb_function_codes();
         let fn_refs: Vec<&[u8]> = fn_codes.iter().map(Vec::as_slice).collect();
-        let bytes = fr_persist::encode_rdb_with_functions(&entries, &[], &fn_refs);
+        let bytes = if let Some(bytes) =
+            try_encode_string_only_rdb_snapshot(&mut self.server.store, now_ms, &[], &fn_refs)
+        {
+            bytes
+        } else {
+            let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
+            fr_persist::encode_rdb_with_functions(&entries, &[], &fn_refs)
+        };
         let decoded = match fr_persist::decode_rdb_prefix(&bytes) {
             Ok(out) if out.consumed == bytes.len() => out,
             _ => {
@@ -3999,17 +4005,20 @@ impl Runtime {
 
     #[must_use]
     pub fn encoded_rdb_snapshot(&mut self, now_ms: u64) -> Vec<u8> {
-        let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
         let fn_codes = self.rdb_function_codes();
         let fn_refs: Vec<&[u8]> = fn_codes.iter().map(Vec::as_slice).collect();
-        fr_persist::encode_rdb_with_functions(
-            &entries,
-            &[
-                ("redis-ver", fr_store::REDIS_COMPAT_VERSION),
-                ("frankenredis", "true"),
-            ],
-            &fn_refs,
-        )
+        let aux = [
+            ("redis-ver", fr_store::REDIS_COMPAT_VERSION),
+            ("frankenredis", "true"),
+        ];
+        if let Some(bytes) =
+            try_encode_string_only_rdb_snapshot(&mut self.server.store, now_ms, &aux, &fn_refs)
+        {
+            bytes
+        } else {
+            let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
+            fr_persist::encode_rdb_with_functions(&entries, &aux, &fn_refs)
+        }
     }
 
     pub fn replay_aof_stream(
@@ -12496,14 +12505,20 @@ impl Runtime {
             .unwrap_or_else(|| std::path::PathBuf::from("appendonly.aof"));
         let (dir, basename) = aof_manifest_target(&path);
         let seq = self.server.aof_current_seq.saturating_add(1);
-        let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
         let fn_codes = self.rdb_function_codes();
         let fn_refs: Vec<&[u8]> = fn_codes.iter().map(Vec::as_slice).collect();
         let aux = [
             ("redis-ver", fr_store::REDIS_COMPAT_VERSION),
             ("frankenredis", "true"),
         ];
-        let base_rdb = fr_persist::encode_rdb_with_functions(&entries, &aux, &fn_refs);
+        let base_rdb = if let Some(bytes) =
+            try_encode_string_only_rdb_snapshot(&mut self.server.store, now_ms, &aux, &fn_refs)
+        {
+            bytes
+        } else {
+            let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
+            fr_persist::encode_rdb_with_functions(&entries, &aux, &fn_refs)
+        };
         fr_persist::write_aof_manifest_dir(&dir, &basename, seq, &base_rdb, &[])?;
         self.server.aof_current_seq = seq;
         // The base now fully represents current state; the incremental flush
@@ -15307,18 +15322,51 @@ fn build_hello_response(protocol_version: i64, client_id: u64) -> RespFrame {
     }
 }
 
+/// Borrow store keys/values directly for the all-string snapshot case.
+fn try_encode_string_only_rdb_snapshot(
+    store: &mut Store,
+    now_ms: u64,
+    aux: &[(&str, &str)],
+    functions: &[&[u8]],
+) -> Option<Vec<u8>> {
+    use fr_store::Value;
+
+    store.expire_snapshot_volatile_keys(now_ms);
+
+    let keys = store.all_keys();
+    let mut entries = Vec::with_capacity(keys.len());
+    for key in &keys {
+        let Some((value, expires_at_ms)) = store.get_value_and_expiry(key) else {
+            continue;
+        };
+        let (db, logical_key) = decode_db_key(key).unwrap_or((0, key.as_slice()));
+        let Value::String(value) = value else {
+            return None;
+        };
+        entries.push(RdbStringEntryRef {
+            db,
+            key: logical_key,
+            value,
+            expire_ms: expires_at_ms,
+        });
+    }
+
+    entries.sort_by(|left, right| left.db.cmp(&right.db).then_with(|| left.key.cmp(right.key)));
+    Some(fr_persist::encode_rdb_string_entries_with_functions(
+        &entries, aux, functions,
+    ))
+}
+
 /// Convert Store entries to RDB entries for snapshot persistence.
 fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
     use fr_store::Value;
 
-    // Expire stale keys first.
-    let all_keys = store.all_keys();
-    for key in &all_keys {
-        store.expire_key_if_stale(key, now_ms);
-    }
+    // Expire stale TTL keys first so they are not serialized.
+    store.expire_snapshot_volatile_keys(now_ms);
 
-    let mut entries = Vec::new();
-    for key in store.all_keys() {
+    let keys = store.all_keys();
+    let mut entries = Vec::with_capacity(keys.len());
+    for key in keys {
         let Some((value, expires_at_ms)) = store.get_value_and_expiry(&key) else {
             continue;
         };
@@ -18694,6 +18742,101 @@ mod tests {
         assert!(entries.iter().any(|entry| {
             entry.db == 4 && entry.key == b"four" && entry.value == RdbValue::String(b"4".to_vec())
         }));
+    }
+
+    #[test]
+    fn rdb_snapshot_expire_prepass_preserves_order_ttls_and_side_effects() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"persistent", b"p"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"expired", b"x"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"PEXPIREAT", b"expired", b"100"]), 2),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"1"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"middle", b"m"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"2"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"live", b"l"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"PEXPIREAT", b"live", b"5000"]), 7),
+            RespFrame::Integer(1)
+        );
+
+        let snapshot = rt.encoded_rdb_snapshot(1_000);
+        let decoded = fr_persist::decode_rdb_prefix(&snapshot).expect("decode snapshot");
+        let projected: Vec<_> = decoded
+            .entries
+            .iter()
+            .map(|entry| {
+                let RdbValue::String(value) = &entry.value else {
+                    panic!("expected string entry, got {:?}", entry.value);
+                };
+                (entry.db, entry.key.clone(), entry.expire_ms, value.clone())
+            })
+            .collect();
+
+        assert_eq!(
+            projected,
+            vec![
+                (0, b"persistent".to_vec(), None, b"p".to_vec()),
+                (1, b"middle".to_vec(), None, b"m".to_vec()),
+                (2, b"live".to_vec(), Some(5_000), b"l".to_vec()),
+            ]
+        );
+        assert_eq!(rt.server.store.stat_expired_keys, 1);
+        assert_eq!(
+            rt.server.store.take_lazy_expired_propagation(),
+            vec![b"expired".to_vec()]
+        );
+    }
+
+    #[test]
+    fn encoded_rdb_snapshot_string_fast_path_matches_generic_encoder() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"zero", b"0"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"PEXPIREAT", b"zero", b"100000"]), 1),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"2"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"two", b"2"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let snapshot = rt.encoded_rdb_snapshot(50);
+        let entries = store_to_rdb_entries(&mut rt.server.store, 50);
+        let aux = [
+            ("redis-ver", fr_store::REDIS_COMPAT_VERSION),
+            ("frankenredis", "true"),
+        ];
+        let generic = fr_persist::encode_rdb_with_functions(&entries, &aux, &[]);
+
+        assert_eq!(snapshot, generic);
     }
 
     #[test]
