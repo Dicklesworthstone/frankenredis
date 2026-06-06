@@ -25020,14 +25020,15 @@ fn bitfield_cmd(
             // fr was writing the wrap value and returning Integer(0) regardless; switch to
             // returning BulkString(None) without touching the store under FAIL-on-overflow.
             // (frankenredis-bfsetovrflw)
-            let trigger_pos_overflow = !signed && value < 0;
-            let (clamped, overflowed) = bitfield_clamp_with_overflow(
-                value,
-                trigger_pos_overflow,
-                bits,
-                signed,
-                overflow_mode,
-            );
+            let (clamped, overflowed) = if signed {
+                // Signed SET routes through the faithful checkSignedBitfieldOverflow
+                // port so extreme-negative literals saturate like redis. (INCRBY
+                // and unsigned SET keep the existing clamp.)
+                bitfield_signed_set_resolve(value, bits, overflow_mode)
+            } else {
+                let trigger_pos_overflow = value < 0;
+                bitfield_clamp_with_overflow(value, trigger_pos_overflow, bits, false, overflow_mode)
+            };
             if overflowed && overflow_mode == BitfieldOverflow::Fail {
                 // Upstream still ran lookupStringForBitCommand, so the key is
                 // created/extended to this write's offset even though the value
@@ -25261,6 +25262,61 @@ fn bitfield_sign_extend(value: i64, bits: u8) -> i64 {
     }
     let shift = 64 - u32::from(bits); // 1..=63 here
     (value << shift) >> shift
+}
+
+/// Resolve a SIGNED `BITFIELD SET` value into (stored_value, overflowed),
+/// faithfully matching upstream bitops.c. SET routes the literal through
+/// `checkSignedBitfieldOverflow(value, incr=0, bits)` whose `maxincr = max -
+/// value` is computed in WRAPPING (uint64) arithmetic: for a literal far below
+/// the field min (`value < max - INT64_MAX`) that subtraction overflows i64 and
+/// goes negative, so `0 > maxincr` spuriously fires the MAX-saturation branch.
+/// The net effect is that SAT saturates such extreme-NEGATIVE literals to the
+/// field MAX (not min). A plain `value.clamp(min, max)` produces the
+/// arithmetically-sensible min instead and so diverged from redis (e.g.
+/// `SET i32 0 -9223372036854775808 SAT` → redis 2147483647, fr was
+/// -2147483648). WRAP/FAIL were already byte-exact and keep their behaviour.
+/// (frankenredis BITFIELD signed-SET SAT extreme-literal parity)
+fn bitfield_signed_set_resolve(
+    value: i64,
+    bits: u8,
+    overflow: BitfieldOverflow,
+) -> (i64, bool) {
+    let max: i64 = if bits >= 64 {
+        i64::MAX
+    } else {
+        (1i64 << (bits - 1)) - 1
+    };
+    let min: i64 = (-max) - 1;
+
+    // checkSignedBitfieldOverflow specialised to incr == 0 (the SET path).
+    // `maxincr`/`minincr` mirror redis's `(uint64_t)max - value` / `min - value`
+    // exactly, including the i64 wraparound that drives the corner above.
+    let maxincr = (max as u64).wrapping_sub(value as u64) as i64;
+    let minincr = min.wrapping_sub(value);
+    let limit = if value > max || (bits != 64 && maxincr < 0) {
+        Some(max)
+    } else if value < min || (bits != 64 && minincr > 0) {
+        Some(min)
+    } else {
+        None
+    };
+
+    match limit {
+        None => (value, false),
+        Some(limit) => match overflow {
+            BitfieldOverflow::Sat => (limit, true),
+            BitfieldOverflow::Wrap => {
+                if bits >= 64 {
+                    (value, true)
+                } else {
+                    let shift = 64 - bits as u32;
+                    ((value as u64).wrapping_shl(shift) as i64 >> shift, true)
+                }
+            }
+            // FAIL: caller emits nil + reserves the key; the value is unused.
+            BitfieldOverflow::Fail => (value, true),
+        },
+    }
 }
 
 /// Clamp a value and report whether overflow occurred.
@@ -54419,6 +54475,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(255)])));
+    }
+
+    /// (BITFIELD signed-SET SAT extreme-literal parity) Upstream's
+    /// checkSignedBitfieldOverflow computes `maxincr = max - value` in wrapping
+    /// arithmetic; for a literal far below the field min that subtraction
+    /// overflows i64 and the SAT branch saturates to the field MAX, not min. A
+    /// plain clamp would give min. Match redis byte-for-byte.
+    #[test]
+    fn bitfield_signed_set_sat_extreme_negative_saturates_to_max() {
+        let mut store = Store::new();
+        let run = |store: &mut Store, ty: &str, val: &str| {
+            dispatch_argv(
+                &[
+                    b"BITFIELD".to_vec(),
+                    b"bf".to_vec(),
+                    b"OVERFLOW".to_vec(),
+                    b"SAT".to_vec(),
+                    b"SET".to_vec(),
+                    ty.as_bytes().to_vec(),
+                    b"0".to_vec(),
+                    val.as_bytes().to_vec(),
+                    b"GET".to_vec(),
+                    ty.as_bytes().to_vec(),
+                    b"0".to_vec(),
+                ],
+                store,
+                0,
+            )
+            .unwrap()
+        };
+        // i64::MIN literal: redis saturates to field MAX for narrow signed types.
+        let imin = "-9223372036854775808";
+        for (ty, want_max) in [("i8", 127i64), ("i16", 32767), ("i31", 1073741823), ("i32", 2147483647)] {
+            let _ = store.del(&[b"bf".to_vec()], 0);
+            assert_eq!(
+                run(&mut store, ty, imin),
+                RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(want_max)])),
+                "{ty} SAT of i64::MIN should saturate to MAX"
+            );
+        }
+        // A merely-out-of-range (not extreme) negative still saturates to MIN.
+        let _ = store.del(&[b"bf".to_vec()], 0);
+        assert_eq!(
+            run(&mut store, "i8", "-1000000000000000000"),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(-128)])),
+        );
+        // Positive overflow still saturates to MAX (unchanged).
+        let _ = store.del(&[b"bf".to_vec()], 0);
+        assert_eq!(
+            run(&mut store, "i8", "9223372036854775807"),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(127)])),
+        );
     }
 
     #[test]
