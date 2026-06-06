@@ -1,0 +1,2 @@
+------------------------------------------------------------
+PASS — fr CLIENT TRACKING matches redis 7.2.4 across 18 scenarios

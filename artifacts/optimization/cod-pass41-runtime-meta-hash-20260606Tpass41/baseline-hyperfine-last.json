@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780761272314,
+  "host": "127.0.0.1",
+  "port": 20651,
+  "workload": "set",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "cod-pass41-base-hf",
+  "total_time_ms": 815,
+  "ops_per_sec": 367670.0805577157,
+  "bytes_sent": 17916875,
+  "bytes_received": 1500000,
+  "latency_us": {
+    "min": 98,
+    "p50": 1958,
+    "p95": 3213,
+    "p99": 4523,
+    "p999": 6663,
+    "max": 11063,
+    "mean": 2133.5619166666684,
+    "samples": 300000
+  }
+}

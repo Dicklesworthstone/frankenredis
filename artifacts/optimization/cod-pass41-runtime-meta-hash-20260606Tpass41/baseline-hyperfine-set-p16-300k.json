@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "env OUT=artifacts/optimization/cod-pass41-runtime-meta-hash-20260606Tpass41 SERVER=/tmp/codex-fr-pass41-runtimehash-baseline-target/release-perf/frankenredis BENCH=/tmp/codex-fr-pass41-runtimehash-baseline-target/release-perf/fr-bench PORT=20651 bash -lc 'set -euo pipefail; LOG=\"$OUT/baseline-hyperfine-server.log\"; \"$SERVER\" --port \"$PORT\" --mode strict > \"$LOG\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for _ in {1..100}; do grep -q ready \"$LOG\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$LOG\"; \"$BENCH\" --host 127.0.0.1 --port \"$PORT\" --clients 50 --requests 300000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"$OUT/baseline-hyperfine-last.json\" --key-prefix cod-pass41-base-hf >/dev/null'",
+      "mean": 0.88115280714,
+      "stddev": 0.06626889410510739,
+      "median": 0.88943185214,
+      "user": 0.8076082000000001,
+      "system": 0.86835478,
+      "min": 0.79050636014,
+      "max": 0.98621526814,
+      "times": [
+        0.84357554714,
+        0.81269871214,
+        0.79050636014,
+        0.98621526814,
+        0.94199915314,
+        0.88913396314,
+        0.80580782614,
+        0.88972974114,
+        0.94388415214,
+        0.90797734814
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

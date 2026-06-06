@@ -1,0 +1,2 @@
+FrankenRedis v0.1.0 ready (mode=strict, port=20653)
+warn: client read error (eventloop.read.fatal_error_disconnect): Connection reset by peer (os error 104)
