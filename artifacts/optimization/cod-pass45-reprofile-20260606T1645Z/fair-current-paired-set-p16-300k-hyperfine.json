@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "PORT=6470; LOG=/data/projects/frankenredis/artifacts/optimization/cod-pass45-reprofile-20260606T1645Z/fair-current-baseline-server-$PORT-$$.log; /data/projects/frankenredis/target-cod-pass45-current-baseline/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true' EXIT; sleep 0.25; /data/projects/frankenredis/target-cod-pass45-current-baseline/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass45fairbase >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 0.9692700548600002,
+      "stddev": 0.011778335384915834,
+      "median": 0.9698910678600001,
+      "user": 0.7159504800000002,
+      "system": 0.7321533,
+      "min": 0.9515589993600001,
+      "max": 0.9932072563600001,
+      "times": [
+        0.9775057293600001,
+        0.9932072563600001,
+        0.9683886733600001,
+        0.9699367243600001,
+        0.9746588473600001,
+        0.9515589993600001,
+        0.9608414983600001,
+        0.9698454113600001,
+        0.97122144736,
+        0.9555359613600001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "PORT=6471; LOG=/data/projects/frankenredis/artifacts/optimization/cod-pass45-reprofile-20260606T1645Z/fair-current-candidate-server-$PORT-$$.log; /data/projects/frankenredis/target-cod-pass45-parser-range-candidate/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true' EXIT; sleep 0.25; /data/projects/frankenredis/target-cod-pass45-parser-range-candidate/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass45faircand >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 0.9697070397600001,
+      "stddev": 0.013338231538178098,
+      "median": 0.96929641586,
+      "user": 0.7253845800000001,
+      "system": 0.7232478999999999,
+      "min": 0.9443830483600001,
+      "max": 0.9937213683600001,
+      "times": [
+        0.9632691563600001,
+        0.96936309736,
+        0.9728086723600001,
+        0.9587786223600001,
+        0.9662572853600001,
+        0.9443830483600001,
+        0.9809565343600001,
+        0.96922973436,
+        0.9783028783600001,
+        0.9937213683600001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

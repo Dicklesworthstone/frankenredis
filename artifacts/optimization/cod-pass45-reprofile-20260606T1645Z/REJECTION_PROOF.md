@@ -77,13 +77,23 @@ Candidate direct run:
 
 - SET P16/300k: `391830.47 ops/sec`, p99 `3689 us`
 
-Paired hyperfine:
+The initial paired run used a stale baseline binary from before peer replication
+commits changed `fr-runtime`, `fr-command`, and `fr-server`, so it is retained
+only as superseded evidence:
 
 - Baseline: `1.00738096844 s +/- 0.03120246971259863`
 - Candidate: `1.10004165394 s +/- 0.10696099883964477`
 - Result: baseline ran `1.09x` faster than candidate.
 
-Decision: reject under Score >= 2.0. The production source hunk was removed.
+Fair current-source paired hyperfine after rebuilding baseline from the current
+source without the candidate:
+
+- Baseline: `0.96927005486 s +/- 0.011778335384915834`
+- Candidate: `0.96970703976 s +/- 0.013338231538178098`
+- Result: baseline ran only `1.00x +/- 0.02x` faster than candidate.
+
+Decision: reject under Score >= 2.0 because the fair current-source comparison
+produced no measurable win. The production source hunk was removed.
 
 Next primitive: stop parser scratch metadata. Attack zero-copy RESP frame
 routing into a borrowed dispatch API that removes the `Vec<Vec<u8>>` argv copy
