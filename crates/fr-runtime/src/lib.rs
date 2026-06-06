@@ -6509,8 +6509,22 @@ impl Runtime {
                         if let Some(script_commands) =
                             self.take_script_propagation_commands_for_capture(argv)
                         {
-                            for script_argv in script_commands {
-                                self.capture_aof_record(&script_argv);
+                            // Upstream propagatePendingCommands wraps a script's
+                            // replicated effects in MULTI/EXEC when MORE THAN ONE
+                            // command propagates, so the replica and AOF apply the
+                            // script's writes atomically; a single-effect script
+                            // propagates bare. Mirror that threshold (same rule as
+                            // the MULTI/EXEC transaction path).
+                            if script_commands.len() >= 2 {
+                                self.capture_aof_record(&[b"MULTI".to_vec()]);
+                                for script_argv in &script_commands {
+                                    self.capture_aof_record(script_argv);
+                                }
+                                self.capture_aof_record(&[b"EXEC".to_vec()]);
+                            } else {
+                                for script_argv in &script_commands {
+                                    self.capture_aof_record(script_argv);
+                                }
                             }
                         } else if let Some(rewritten) =
                             fr_command::rewrite_effect_command_for_propagation(
@@ -20139,9 +20153,15 @@ mod tests {
         );
         assert_eq!(reply, RespFrame::BulkString(Some(b"5".to_vec())));
 
+        // Four effects propagate (b is REPL_NONE, filtered out). Upstream wraps a
+        // script's >1 propagated effects in MULTI/EXEC so they replay atomically,
+        // so the captured stream is MULTI .. EXEC around the four SETs.
         assert_eq!(
             rt.aof_records(),
             [
+                AofRecord {
+                    argv: vec![b"MULTI".to_vec()],
+                },
                 AofRecord {
                     argv: vec![b"SET".to_vec(), b"a".to_vec(), b"1".to_vec()],
                 },
@@ -20154,12 +20174,63 @@ mod tests {
                 AofRecord {
                     argv: vec![b"SET".to_vec(), b"e".to_vec(), b"5".to_vec()],
                 },
+                AofRecord {
+                    argv: vec![b"EXEC".to_vec()],
+                },
             ]
         );
 
         let decoded =
             decode_aof_stream(&rt.encoded_aof_stream_from_offset(0)).expect("decode backlog");
         assert_eq!(decoded, rt.aof_records());
+    }
+
+    // A script that propagates exactly one effect must NOT be MULTI/EXEC-wrapped
+    // (upstream wraps only when MORE THAN ONE command propagates); a multi-effect
+    // script must be wrapped. Mirrors the MULTI/EXEC transaction threshold.
+    #[test]
+    fn eval_wraps_in_multi_only_when_more_than_one_effect_propagates() {
+        let verbs = |rt: &Runtime, from: usize| -> Vec<Vec<u8>> {
+            rt.aof_records()[from..]
+                .iter()
+                .map(|r| r.argv[0].to_ascii_uppercase())
+                .collect()
+        };
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(42);
+
+        // Single redis.call write -> propagated bare.
+        let b0 = rt.aof_records().len();
+        rt.execute_frame(
+            command(&[b"EVAL", b"redis.call('set','a','1'); return 1", b"0"]),
+            1,
+        );
+        assert_eq!(
+            verbs(&rt, b0),
+            vec![b"SET".to_vec()],
+            "a single-effect script must propagate bare"
+        );
+
+        // Two redis.call writes -> wrapped in MULTI .. EXEC.
+        let b1 = rt.aof_records().len();
+        rt.execute_frame(
+            command(&[
+                b"EVAL",
+                b"redis.call('set','b','1'); redis.call('set','c','2'); return 1",
+                b"0",
+            ]),
+            2,
+        );
+        assert_eq!(
+            verbs(&rt, b1),
+            vec![
+                b"MULTI".to_vec(),
+                b"SET".to_vec(),
+                b"SET".to_vec(),
+                b"EXEC".to_vec()
+            ],
+            "a multi-effect script must be wrapped in MULTI/EXEC"
+        );
     }
 
     #[test]
