@@ -5529,6 +5529,17 @@ impl Runtime {
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.refresh_store_runtime_info_context();
+        // (frankenredis-replro) Expose read-only-replica state to the store so a
+        // write attempted from inside a script/function — whose inner redis.call
+        // bypasses the top-level read-only gate (reject_write_on_readonly_replica)
+        // — is still rejected with -READONLY. Cleared while replaying the
+        // primary's stream so propagated writes always apply.
+        self.server.store.is_read_only_replica = self.server.replica_read_only
+            && !self.server.applying_master_stream
+            && matches!(
+                self.server.replication_runtime_state.role,
+                ReplicationRoleState::Replica { .. }
+            );
         // argv was materialized once by the caller (cloned from a borrowed frame
         // on the owned/conformance path, or moved out of the parsed frame on the
         // server hot path) and reused for both stats and execution.
@@ -23268,6 +23279,44 @@ mod tests {
             rt.execute_frame(command(&[b"SET", b"k2", b"v2"]), 0),
             RespFrame::SimpleString("OK".to_string())
         );
+    }
+
+    /// (frankenredis-replro) A write attempted from inside a script/function on
+    /// a read-only replica must be rejected with -READONLY and must NOT mutate
+    /// the keyspace — the inner redis.call bypasses the top-level read-only gate.
+    /// Verified vs redis 7.2.4.
+    #[test]
+    fn readonly_replica_rejects_writes_inside_scripts() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6390"]), 0);
+        // EVAL that writes -> READONLY, and the key is not created.
+        let r = rt.execute_frame(
+            command(&[b"EVAL", b"return redis.call('SET','k','v')", b"0"]),
+            0,
+        );
+        assert!(
+            matches!(&r, RespFrame::Error(e) if e.starts_with("READONLY")),
+            "in-script write on a read-only replica should be READONLY, got {r:?}"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXISTS", b"k"]), 0),
+            RespFrame::Integer(0),
+            "the rejected in-script write must not have created the key"
+        );
+        // A read inside a script is allowed.
+        assert!(!matches!(
+            rt.execute_frame(command(&[b"EVAL", b"return redis.call('GET','k')", b"0"]), 0),
+            RespFrame::Error(_)
+        ));
+        // Disabling read-only re-allows in-script writes.
+        rt.execute_frame(command(&[b"CONFIG", b"SET", b"replica-read-only", b"no"]), 0);
+        assert!(!matches!(
+            rt.execute_frame(
+                command(&[b"EVAL", b"return redis.call('SET','k','v')", b"0"]),
+                0
+            ),
+            RespFrame::Error(_)
+        ));
     }
 
     #[test]

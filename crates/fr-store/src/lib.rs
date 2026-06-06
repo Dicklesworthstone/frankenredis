@@ -2835,6 +2835,12 @@ pub struct Store {
     pub script_nesting_level: usize,
     /// Whether the current script/function execution context forbids writes.
     pub script_read_only: bool,
+    /// Set by the runtime when this instance is a read-only replica serving a
+    /// client command, so writes attempted from inside a script/function (whose
+    /// inner redis.call bypasses the runtime's top-level read-only gate) are
+    /// rejected with -READONLY. Cleared while applying the primary's stream.
+    /// (frankenredis-replro)
+    pub is_read_only_replica: bool,
     /// 1-based source line of the most recent Lua script runtime error, set by
     /// `eval_script` when it returns an Err so the command layer can stamp the
     /// real line into the `script: <sha>, on @user_script:N.` envelope suffix
@@ -3223,6 +3229,7 @@ impl Default for Store {
             aof_enabled: false,
             script_nesting_level: 0,
             script_read_only: false,
+            is_read_only_replica: false,
             lua_error_line: 1,
             script_propagation_mode: SCRIPT_PROPAGATE_ALL,
             script_propagation_records: Vec::new(),

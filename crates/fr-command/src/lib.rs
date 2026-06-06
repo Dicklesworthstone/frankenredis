@@ -2265,6 +2265,19 @@ pub fn dispatch_argv(
     {
         return Err(read_only_script_write_command_error());
     }
+    // (frankenredis-replro) A script/function on a read-only replica must not
+    // write: the inner redis.call bypasses the runtime's top-level read-only
+    // gate, so reject the write here with the same -READONLY error a client
+    // write gets. (Top-level writes are already gated in the runtime; this only
+    // fires for the in-script case, script_nesting_level >= 1.)
+    if store.script_nesting_level >= 1
+        && store.is_read_only_replica
+        && command_writes_or_may_replicate_in_readonly_script(argv)
+    {
+        return Err(CommandError::Custom(
+            "READONLY You can't write against a read only replica.".to_string(),
+        ));
+    }
     // (frankenredis-7ymk5) P0 security fix: ACL permissions must be
     // enforced for every dispatched command, not only for those running
     // inside a Lua script. The previous gate scoped this check to
