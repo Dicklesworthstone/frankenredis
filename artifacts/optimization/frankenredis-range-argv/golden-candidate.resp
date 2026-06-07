@@ -1,0 +1,21 @@
++OK
+$5
+value
+*2
+$5
+value
+$-1
+:1
+:1
+*2
+$1
+v
+$-1
+:1
+:42
+$3
+val
+:5
+$-1
++PONG
+-ERR Protocol error: invalid bulk length

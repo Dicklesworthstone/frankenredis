@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "/tmp/codex-fr-range-argv-baseline-target/release-perf/fr-bench --host 127.0.0.1 --port 6429 --clients 16 --requests 300000 --pipeline 16 --workload get --key-prefix fr:range:baseline --json-out artifacts/optimization/frankenredis-range-argv/baseline-get-p16-300k-last.json",
+      "mean": 0.4389724889800001,
+      "stddev": 0.040249036666209013,
+      "median": 0.42774374618,
+      "user": 0.19736589999999996,
+      "system": 0.40070890000000003,
+      "min": 0.38824896668000003,
+      "max": 0.53565580568,
+      "times": [
+        0.42599483768,
+        0.42679600568000003,
+        0.46596232868000004,
+        0.53565580568,
+        0.45415118868000004,
+        0.43196343668000003,
+        0.42575975268,
+        0.40650108068,
+        0.42869148668,
+        0.38824896668000003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

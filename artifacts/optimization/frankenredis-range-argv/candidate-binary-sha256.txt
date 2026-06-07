@@ -1,0 +1,2 @@
+a06b90890f98c76682abb5f24299bb05370ce3adf8a81f4af13f91270ec050bd  /tmp/codex-fr-range-argv-candidate-target/release-perf/frankenredis
+9ccb602c590c508575a18c17a22cf358d2732b5da031e4dbcde42add07138643  /tmp/codex-fr-range-argv-candidate-target/release-perf/fr-bench

@@ -1,0 +1,2 @@
+2d424af64b473ce3ddb1b2d2d5a2af2aa0d5b557338e11c61f3bf6ce15236354  artifacts/optimization/frankenredis-range-argv/golden-baseline.resp
+2d424af64b473ce3ddb1b2d2d5a2af2aa0d5b557338e11c61f3bf6ce15236354  artifacts/optimization/frankenredis-range-argv/golden-candidate.resp
