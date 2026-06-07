@@ -1,0 +1,48 @@
+{
+  "results": [
+    {
+      "command": "/tmp/codex-fr-pass64-profile-target/release-perf/fr-bench --host 127.0.0.1 --port 6468 --clients 16 --requests 300000 --pipeline 16 --workload get --key-prefix pass64-paired-baseline --json-out artifacts/optimization/frankenredis-pass64-profile/baseline-get-p16-300k-paired-last.json",
+      "mean": 0.46250530959333336,
+      "stddev": 0.0265088599734583,
+      "median": 0.46839933086,
+      "user": 0.18809322666666667,
+      "system": 0.39468738,
+      "min": 0.40667457286,
+      "max": 0.50218932486,
+      "times": [
+        0.50218932486,
+        0.48663197086000004,
+        0.48759167786,
+        0.44226629886,
+        0.46545088686,
+        0.48416718286000004,
+        0.48175180786000005,
+        0.46839933086,
+        0.45893869386,
+        0.47297295186000005,
+        0.44314941086000004,
+        0.45052157286000005,
+        0.40667457286,
+        0.41819507086,
+        0.46867888986
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

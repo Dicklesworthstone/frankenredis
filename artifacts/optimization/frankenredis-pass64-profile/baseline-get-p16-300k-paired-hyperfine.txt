@@ -1,0 +1,4 @@
+Benchmark 1: /tmp/codex-fr-pass64-profile-target/release-perf/fr-bench --host 127.0.0.1 --port 6468 --clients 16 --requests 300000 --pipeline 16 --workload get --key-prefix pass64-paired-baseline --json-out artifacts/optimization/frankenredis-pass64-profile/baseline-get-p16-300k-paired-last.json
+  Time (mean ± σ):     462.5 ms ±  26.5 ms    [User: 188.1 ms, System: 394.7 ms]
+  Range (min … max):   406.7 ms … 502.2 ms    15 runs
+ 
