@@ -25085,6 +25085,78 @@ fn bitfield_cmd(
         return Err(CommandError::WrongArity("BITFIELD"));
     }
     let key = &argv[1];
+
+    // (frankenredis-bitfieldorder) Upstream bitfieldCommand validates EVERY
+    // subcommand's args (encoding / offset / value / overflow) BEFORE looking up
+    // and type-checking the key, and it type-checks the key even with no GET/SET/
+    // INCRBY op (e.g. `BITFIELD wrongtypekey` or `... OVERFLOW SAT`). fr's
+    // execution loop interleaved per-op store access, so a valid early op
+    // surfaced WRONGTYPE before a later op's arg error, and an op-less command
+    // skipped the type check entirely. Validate all args first, then type-check.
+    {
+        let mut j = 2;
+        while j < argv.len() {
+            let sub =
+                std::str::from_utf8(&argv[j]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            let invalid_type = || {
+                Ok(RespFrame::Error(
+                    "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
+                        .to_string(),
+                ))
+            };
+            let invalid_offset = || {
+                Ok(RespFrame::Error(
+                    "ERR bit offset is not an integer or out of range".to_string(),
+                ))
+            };
+            if sub.eq_ignore_ascii_case("GET")
+                || sub.eq_ignore_ascii_case("SET")
+                || sub.eq_ignore_ascii_case("INCRBY")
+            {
+                let needs_value = !sub.eq_ignore_ascii_case("GET");
+                let last = if needs_value { j + 3 } else { j + 2 };
+                if last >= argv.len() {
+                    return Ok(RespFrame::Error("ERR syntax error".to_string()));
+                }
+                let Some((_signed, bits)) = bitfield_parse_encoding(&argv[j + 1]) else {
+                    return invalid_type();
+                };
+                if bitfield_parse_offset(&argv[j + 2], bits).is_none() {
+                    return invalid_offset();
+                }
+                if needs_value {
+                    parse_i64_arg(&argv[j + 3])?;
+                }
+                j += if needs_value { 4 } else { 3 };
+            } else if sub.eq_ignore_ascii_case("OVERFLOW") {
+                if j + 1 >= argv.len() {
+                    return Ok(RespFrame::Error("ERR syntax error".to_string()));
+                }
+                let mode = std::str::from_utf8(&argv[j + 1])
+                    .map_err(|_| CommandError::InvalidUtf8Argument)?;
+                if !(mode.eq_ignore_ascii_case("WRAP")
+                    || mode.eq_ignore_ascii_case("SAT")
+                    || mode.eq_ignore_ascii_case("FAIL"))
+                {
+                    return Ok(RespFrame::Error(
+                        "ERR Invalid OVERFLOW type specified".to_string(),
+                    ));
+                }
+                j += 2;
+            } else {
+                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            }
+        }
+    }
+    // All args valid: now type-check the key once (WRONGTYPE for a non-string
+    // present key, even with no read/write op). No-stat peek leaves keyspace
+    // accounting untouched; the execution loop below does the real stat-bearing
+    // accesses for the success path.
+    match store.peek_value_type(key, now_ms) {
+        None | Some(ValueType::String) => {}
+        Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
+    }
+
     let mut results: Vec<RespFrame> = Vec::new();
     let mut overflow_mode = BitfieldOverflow::Wrap;
     let mut i = 2;
@@ -54690,6 +54762,69 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+    }
+
+    #[test]
+    fn bitfield_validates_all_args_then_type_checks_key() {
+        // (frankenredis-bitfieldorder) Upstream bitfieldCommand validates every
+        // subcommand's args BEFORE looking up + type-checking the key, and it
+        // type-checks even with no GET/SET/INCRBY op. fr previously interleaved
+        // per-op store access (so a valid early op surfaced WRONGTYPE before a
+        // later op's arg error) and skipped the type check for op-less commands.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"RPUSH".to_vec(), b"lst".to_vec(), b"x".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        let wt = CommandError::Store(fr_store::StoreError::WrongType);
+        // op-less / OVERFLOW-only on a wrong-type key -> WRONGTYPE (was empty array)
+        assert_eq!(
+            dispatch_argv(&argv(&["BITFIELD", "lst"]), &mut store, 0).expect_err("x"),
+            wt
+        );
+        assert_eq!(
+            dispatch_argv(
+                &argv(&["BITFIELD", "lst", "OVERFLOW", "SAT"]),
+                &mut store,
+                0
+            )
+            .expect_err("x"),
+            wt
+        );
+        // a later op's arg error beats WRONGTYPE (all args validated first)
+        assert_eq!(
+            dispatch_argv(
+                &argv(&["BITFIELD", "lst", "GET", "u8", "0", "GET", "BADTYPE", "0"]),
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::Error(
+                "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
+                    .to_string()
+            )
+        );
+        // a valid op on a wrong-type key still WRONGTYPEs
+        assert_eq!(
+            dispatch_argv(&argv(&["BITFIELD", "lst", "GET", "u8", "0"]), &mut store, 0)
+                .expect_err("x"),
+            wt
+        );
+        // op-less on a missing key is an empty array (no WRONGTYPE)
+        assert_eq!(
+            dispatch_argv(
+                &argv(&["BITFIELD", "nokey", "OVERFLOW", "SAT"]),
+                &mut store,
+                0
+            )
+            .unwrap(),
+            RespFrame::Array(Some(vec![]))
+        );
     }
 
     #[test]
