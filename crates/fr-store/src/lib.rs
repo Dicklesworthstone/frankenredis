@@ -12893,7 +12893,11 @@ impl Store {
                 let Some(data) = entry.value.string_bytes() else {
                     return Err(StoreError::WrongType);
                 };
-                let (encoding, registers) = hll_parse(data.as_ref())?;
+                // PFADD mirrors hllSparseSet, which only walks to each element's
+                // target register and tolerates ANY trailing opcode garbage (VAL
+                // or XZERO) past a complete register set (returns :1, not an
+                // error). (frankenredis-yiu5p)
+                let (encoding, registers) = hll_parse(data.as_ref(), HllDecode::Add)?;
                 (registers, encoding, true)
             }
             None => (vec![0u8; HLL_REGISTERS], HllEncoding::Sparse, false),
@@ -12990,7 +12994,10 @@ impl Store {
                     if let Some(card) = hll_cache_read(data) {
                         Outcome::Hit(card)
                     } else {
-                        let registers = hll_parse_registers(data)?;
+                        // Single-key PFCOUNT uses hllCount → hllSparseRegHisto,
+                        // which strictly requires the opcodes to cover exactly
+                        // HLL_REGISTERS (no VAL-overflow tolerance). (frankenredis-yiu5p)
+                        let registers = hll_parse_registers(data, HllDecode::Strict)?;
                         let card = hll_estimate(&registers);
                         let wrote = hll_cache_write(data, card);
                         Outcome::Recomputed(card, wrote)
@@ -12998,7 +13005,7 @@ impl Store {
                 }
                 Value::Integer(value) => {
                     let data = value.to_string();
-                    let registers = hll_parse_registers(data.as_bytes())?;
+                    let registers = hll_parse_registers(data.as_bytes(), HllDecode::Strict)?;
                     Outcome::Recomputed(hll_estimate(&registers), false)
                 }
                 _ => return Err(StoreError::WrongType),
@@ -13034,7 +13041,10 @@ impl Store {
                 let Some(data) = entry.value.string_bytes() else {
                     return Err(StoreError::WrongType);
                 };
-                let registers = hll_parse_registers(data.as_ref())?;
+                // Multi-key PFCOUNT merges via hllMerge, which tolerates a
+                // trailing VAL overflow (breaks the walk) the same way PFMERGE
+                // does — unlike single-key PFCOUNT's strict histogram. (frankenredis-yiu5p)
+                let registers = hll_parse_registers(data.as_ref(), HllDecode::Tolerant)?;
                 for i in 0..HLL_REGISTERS {
                     merged[i] = merged[i].max(registers[i]);
                 }
@@ -13062,7 +13072,9 @@ impl Store {
             let Some(data) = entry.value.string_bytes() else {
                 return Err(StoreError::WrongType);
             };
-            let (encoding, registers) = hll_parse(data.as_ref())?;
+            // PFMERGE mirrors hllMerge, which breaks on a VAL run that would
+            // overflow the register set (trailing VAL garbage tolerated). (frankenredis-yiu5p)
+            let (encoding, registers) = hll_parse(data.as_ref(), HllDecode::Tolerant)?;
             saw_dense_input |= encoding == HllEncoding::Dense;
             for i in 0..HLL_REGISTERS {
                 merged[i] = merged[i].max(registers[i]);
@@ -13076,7 +13088,7 @@ impl Store {
                 let Some(data) = entry.value.string_bytes() else {
                     return Err(StoreError::WrongType);
                 };
-                let (encoding, registers) = hll_parse(data.as_ref())?;
+                let (encoding, registers) = hll_parse(data.as_ref(), HllDecode::Tolerant)?;
                 saw_dense_input |= encoding == HllEncoding::Dense;
                 for i in 0..HLL_REGISTERS {
                     merged[i] = merged[i].max(registers[i]);
@@ -13108,11 +13120,13 @@ impl Store {
         self.drop_if_expired(key, now_ms);
         match self.entries.get_mut(key) {
             Some(entry) => {
+                // PFDEBUG GETREG converts to dense via hllSparseToDense, which
+                // tolerates a trailing VAL overflow. (frankenredis-yiu5p)
                 let (encoding, registers) = match &entry.value {
-                    Value::String(data) => hll_parse(data)?,
+                    Value::String(data) => hll_parse(data, HllDecode::Tolerant)?,
                     Value::Integer(value) => {
                         let data = value.to_string();
-                        hll_parse(data.as_bytes())?
+                        hll_parse(data.as_bytes(), HllDecode::Tolerant)?
                     }
                     _ => return Err(StoreError::WrongType),
                 };
@@ -13142,7 +13156,7 @@ impl Store {
                 let Some(data) = entry.value.string_bytes() else {
                     return Err(StoreError::WrongType);
                 };
-                hll_parse(data.as_ref())?;
+                hll_parse(data.as_ref(), HllDecode::Tolerant)?;
                 entry.touch(now_ms);
                 Ok(Some(()))
             }
@@ -13161,7 +13175,7 @@ impl Store {
                 let Some(data) = entry.value.string_bytes() else {
                     return Err(StoreError::WrongType);
                 };
-                let (encoding, registers) = hll_parse(data.as_ref())?;
+                let (encoding, registers) = hll_parse(data.as_ref(), HllDecode::Tolerant)?;
                 entry.touch(now_ms);
                 match encoding {
                     HllEncoding::Sparse => Ok(Some(hll_sparse_decode(&registers)?)),
@@ -13185,7 +13199,10 @@ impl Store {
                 let Some(data) = entry.value.string_bytes() else {
                     return Err(StoreError::WrongType);
                 };
-                let (encoding, _) = hll_parse(data.as_ref())?;
+                // PFDEBUG ENCODING reports hdr->encoding after the structural
+                // gate only — it never decodes the register payload, so a
+                // gate-valid-but-corrupt body still reports its encoding. (frankenredis-yiu5p)
+                let encoding = hll_parse_encoding(data.as_ref())?;
                 entry.touch(now_ms);
                 Ok(Some(encoding.as_str()))
             }
@@ -13201,11 +13218,13 @@ impl Store {
         self.drop_if_expired(key, now_ms);
         match self.entries.get_mut(key) {
             Some(entry) => {
+                // PFDEBUG TODENSE is a direct hllSparseToDense, which tolerates
+                // a trailing VAL overflow. (frankenredis-yiu5p)
                 let (encoding, registers) = match &entry.value {
-                    Value::String(data) => hll_parse(data)?,
+                    Value::String(data) => hll_parse(data, HllDecode::Tolerant)?,
                     Value::Integer(value) => {
                         let data = value.to_string();
-                        hll_parse(data.as_bytes())?
+                        hll_parse(data.as_bytes(), HllDecode::Tolerant)?
                     }
                     _ => return Err(StoreError::WrongType),
                 };
@@ -19637,7 +19656,7 @@ fn hll_rho(w: u64) -> u8 {
     (tz + 1) as u8
 }
 
-fn hll_parse(data: &[u8]) -> Result<(HllEncoding, Vec<u8>), StoreError> {
+fn hll_parse(data: &[u8], mode: HllDecode) -> Result<(HllEncoding, Vec<u8>), StoreError> {
     if data.starts_with(HLL_REDIS_MAGIC) {
         let Some(&encoding) = data.get(HLL_REDIS_MAGIC.len()) else {
             return Err(StoreError::InvalidHllValue);
@@ -19652,7 +19671,7 @@ fn hll_parse(data: &[u8]) -> Result<(HllEncoding, Vec<u8>), StoreError> {
             HLL_REDIS_SPARSE_ENCODING if data.len() >= HLL_REDIS_HEADER_SIZE => {
                 return Ok((
                     HllEncoding::Sparse,
-                    hll_decode_sparse_registers(&data[HLL_REDIS_HEADER_SIZE..])?,
+                    hll_decode_sparse_registers(&data[HLL_REDIS_HEADER_SIZE..], mode)?,
                 ));
             }
             _ => {}
@@ -19670,8 +19689,8 @@ fn hll_parse(data: &[u8]) -> Result<(HllEncoding, Vec<u8>), StoreError> {
     Err(StoreError::InvalidHllValue)
 }
 
-fn hll_parse_registers(data: &[u8]) -> Result<Vec<u8>, StoreError> {
-    hll_parse(data).map(|(_, registers)| registers)
+fn hll_parse_registers(data: &[u8], mode: HllDecode) -> Result<Vec<u8>, StoreError> {
+    hll_parse(data, mode).map(|(_, registers)| registers)
 }
 
 /// True when `data` is the Redis HLL serialization — `HYLL` magic plus a
@@ -19827,35 +19846,126 @@ fn hll_encode_sparse_registers(registers: &[u8]) -> Option<Vec<u8>> {
     Some(payload)
 }
 
-fn hll_decode_sparse_registers(payload: &[u8]) -> Result<Vec<u8>, StoreError> {
-    let mut registers = Vec::with_capacity(HLL_REGISTERS);
-    let mut index = 0;
-    while index < payload.len() {
-        let byte = payload[index];
-        if byte & 0xc0 == 0 {
-            let len = usize::from(byte & 0x3f) + 1;
-            registers.resize(registers.len().saturating_add(len), 0);
-            index += 1;
+/// Which upstream sparse walk a PF command emulates when it decodes a sparse
+/// HLL whose opcodes pass the structural gate but do not cleanly cover exactly
+/// `HLL_REGISTERS` registers. Redis surfaces register-level corruption
+/// *per command* rather than uniformly, so the same gate-valid-but-corrupt
+/// value can be tolerated by one command and rejected by another.
+/// (frankenredis-yiu5p)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HllDecode {
+    /// Mirrors `hyperloglog.c::hllSparseRegHisto` (single-key `PFCOUNT`): every
+    /// opcode is walked and the accumulated register index must land on exactly
+    /// `HLL_REGISTERS`. There is no overflow tolerance — a `VAL` run that would
+    /// push the index past the end still accumulates, so the final
+    /// `idx != HLL_REGISTERS` check reports the object corrupt.
+    Strict,
+    /// Mirrors `hyperloglog.c::hllSparseToDense` / `hllMerge` (`PFMERGE`,
+    /// multi-key `PFCOUNT`, and the `PFDEBUG GETREG/DECODE/TODENSE` debug ops):
+    /// a `VAL` opcode whose run would overflow past `HLL_REGISTERS` stops the
+    /// walk cleanly, so trailing `VAL` garbage after a complete register set is
+    /// tolerated. `ZERO`/`XZERO` overflow is *not* tolerated (upstream advances
+    /// the index unconditionally for those), so a final index other than
+    /// `HLL_REGISTERS` is still rejected.
+    Tolerant,
+    /// Mirrors `hyperloglog.c::hllSparseSet` (`PFADD`): the add only walks far
+    /// enough to reach each element's target register — always one of the first
+    /// `HLL_REGISTERS` positions — so *any* trailing opcode garbage (VAL or
+    /// XZERO) past a complete register set is ignored. The walk fills up to
+    /// exactly `HLL_REGISTERS` and stops; an opcode stream that never covers a
+    /// full register set is still rejected. (Upstream's per-element tolerance of
+    /// a *truncated* prefix is target-index-and-byte dependent — undefined on
+    /// corrupt input — and is not reproduced.)
+    Add,
+}
+
+/// Parse just the structural header of a (potentially Redis-form) HLL string,
+/// mirroring `isHLLObjectOrReply` followed by a read of `hdr->encoding` with no
+/// register decode. Used by `PFDEBUG ENCODING`, which upstream reports the
+/// encoding from the header alone and so tolerates a corrupt register payload.
+/// (frankenredis-yiu5p)
+fn hll_parse_encoding(data: &[u8]) -> Result<HllEncoding, StoreError> {
+    if data.starts_with(HLL_REDIS_MAGIC) {
+        let Some(&encoding) = data.get(HLL_REDIS_MAGIC.len()) else {
+            return Err(StoreError::InvalidHllValue);
+        };
+        match encoding {
+            HLL_REDIS_DENSE_ENCODING if data.len() == HLL_REDIS_DENSE_SIZE => {
+                return Ok(HllEncoding::Dense);
+            }
+            HLL_REDIS_SPARSE_ENCODING if data.len() >= HLL_REDIS_HEADER_SIZE => {
+                return Ok(HllEncoding::Sparse);
+            }
+            _ => {}
+        }
+        if data.len() == HLL_LEGACY_DATA_SIZE {
+            return Ok(HllEncoding::Dense);
+        }
+        return Err(StoreError::InvalidHllValue);
+    }
+    if data.len() == HLL_DATA_SIZE && data.starts_with(HLL_MAGIC_V2) {
+        return HllEncoding::from_byte(data[HLL_MAGIC_V2.len()]).ok_or(StoreError::InvalidHllValue);
+    }
+    Err(StoreError::InvalidHllValue)
+}
+
+fn hll_decode_sparse_registers(payload: &[u8], mode: HllDecode) -> Result<Vec<u8>, StoreError> {
+    // A fixed-size register array (zero-filled) lets ZERO/XZERO runs advance the
+    // index without allocating, exactly like upstream which only writes VAL
+    // runs into the dense buffer; `iter_mut().skip().take()` is bounds-safe when
+    // a strict-mode overflow pushes `idx` past the end (the trailing
+    // `idx != HLL_REGISTERS` check then rejects the object).
+    let mut registers = vec![0u8; HLL_REGISTERS];
+    let mut idx: usize = 0;
+    let mut p = 0;
+    while p < payload.len() {
+        let byte = payload[p];
+        let (value, runlen, advance) = if byte & 0xc0 == 0 {
+            (0u8, usize::from(byte & 0x3f) + 1, 1)
         } else if byte & 0xc0 == HLL_SPARSE_XZERO_BIT {
-            let Some(&next) = payload.get(index + 1) else {
+            let Some(&next) = payload.get(p + 1) else {
                 // A dangling XZERO opcode in an otherwise gate-valid sparse HLL
                 // is corruption, not a non-HLL string → INVALIDOBJ upstream.
                 return Err(StoreError::CorruptedHllValue);
             };
-            let len = (((usize::from(byte & 0x3f)) << 8) | usize::from(next)) + 1;
-            registers.resize(registers.len().saturating_add(len), 0);
-            index += 2;
+            (
+                0u8,
+                (((usize::from(byte & 0x3f)) << 8) | usize::from(next)) + 1,
+                2,
+            )
         } else {
-            let value = ((byte >> 2) & 0x1f) + 1;
-            let len = usize::from(byte & 0x03) + 1;
-            registers.resize(registers.len().saturating_add(len), value);
-            index += 1;
+            (((byte >> 2) & 0x1f) + 1, usize::from(byte & 0x03) + 1, 1)
+        };
+        // `value == 0` ⟺ a ZERO/XZERO run (VAL values are 1..=32).
+        let is_val = value != 0;
+        if mode == HllDecode::Add && idx.saturating_add(runlen) >= HLL_REGISTERS {
+            // PFADD (hllSparseSet) only walks to each target register, which
+            // always lies in the first HLL_REGISTERS positions — so it fills the
+            // remainder of the register set and ignores ALL trailing opcode
+            // garbage (VAL or XZERO) past it.
+            if is_val {
+                for r in registers.iter_mut().skip(idx) {
+                    *r = value;
+                }
+            }
+            idx = HLL_REGISTERS;
+            break;
         }
-        if registers.len() > HLL_REGISTERS {
-            return Err(StoreError::CorruptedHllValue);
+        if mode == HllDecode::Tolerant && is_val && idx + runlen > HLL_REGISTERS {
+            // Upstream hllSparseToDense / hllMerge break on a VAL run that would
+            // overflow, tolerating trailing VAL garbage; the strict (histogram)
+            // walk instead keeps accumulating and rejects below.
+            break;
         }
+        if is_val {
+            for r in registers.iter_mut().skip(idx).take(runlen) {
+                *r = value;
+            }
+        }
+        idx = idx.saturating_add(runlen);
+        p += advance;
     }
-    if registers.len() == HLL_REGISTERS {
+    if idx == HLL_REGISTERS {
         Ok(registers)
     } else {
         // Opcodes that pass the gate but don't sum to HLL_REGISTERS (truncated or
@@ -20028,7 +20138,7 @@ fn hll_run_selftest() -> Result<(), String> {
             *value = (next_u64() & 63) as u8;
         }
         let encoded = hll_encode(&expected, HllEncoding::Sparse);
-        let decoded = hll_parse_registers(&encoded)
+        let decoded = hll_parse_registers(&encoded, HllDecode::Strict)
             .map_err(|_| "TESTFAILED encoded register payload did not round-trip".to_string())?;
         if decoded != expected {
             return Err("TESTFAILED register round-trip mismatch".to_string());
@@ -30688,6 +30798,94 @@ mod tests {
             store.pfcount(&[b"g"], 0),
             Err(StoreError::InvalidHllValue),
             "a non-HLL string must stay InvalidHllValue (WRONGTYPE)"
+        );
+    }
+
+    #[test]
+    fn hll_corruption_is_handled_per_command_like_upstream() {
+        // Upstream surfaces register-level corruption of a gate-valid sparse HLL
+        // *per command*, not uniformly (frankenredis-yiu5p):
+        //   * PFADD (hllSparseSet) only walks to each target register, so it
+        //     tolerates ANY trailing opcode garbage (VAL or XZERO) past a
+        //     complete register set -> :1.
+        //   * PFMERGE / multi-key PFCOUNT (hllMerge) break only on a VAL run that
+        //     would overflow; trailing VAL garbage is tolerated, but a trailing
+        //     XZERO that overruns the register count is rejected (INVALIDOBJ).
+        //   * Single-key PFCOUNT (hllSparseRegHisto) requires the opcodes to sum
+        //     to exactly HLL_REGISTERS -> any overflow is INVALIDOBJ.
+        let valid = {
+            let mut s = Store::new();
+            s.pfadd(b"v", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 0)
+                .unwrap();
+            s.get(b"v", 0).unwrap().unwrap()
+        };
+        // A trailing VAL opcode (top bit set) past a complete register set.
+        let mut ov_val = valid.clone();
+        ov_val.extend_from_slice(&[0xFFu8; 8]);
+        // A trailing XZERO opcode (0b01xxxxxx, second byte) that overruns.
+        let mut ov_xzero = valid.clone();
+        ov_xzero.extend_from_slice(&[0x7F, 0xFF]);
+
+        let with = |raw: &[u8]| {
+            let mut s = Store::new();
+            s.set(b"h".to_vec(), raw.to_vec(), None, 0);
+            s
+        };
+        let new_elems = [b"x".to_vec(), b"y".to_vec(), b"z".to_vec()];
+
+        // PFADD tolerates both flavours of trailing garbage.
+        assert_eq!(
+            with(&ov_val).pfadd(b"h", &new_elems, 0),
+            Ok(true),
+            "PFADD must tolerate trailing VAL garbage (hllSparseSet)"
+        );
+        assert_eq!(
+            with(&ov_xzero).pfadd(b"h", &new_elems, 0),
+            Ok(true),
+            "PFADD must tolerate trailing XZERO garbage (hllSparseSet)"
+        );
+
+        // PFMERGE / multi-key PFCOUNT tolerate trailing VAL, reject trailing XZERO.
+        {
+            let mut s = with(&ov_val);
+            assert_eq!(
+                s.pfmerge(b"d", &[b"h"], 0),
+                Ok(()),
+                "PFMERGE must tolerate trailing VAL garbage (hllMerge breaks on VAL overflow)"
+            );
+        }
+        {
+            let mut s = with(&ov_val);
+            s.set(b"h2".to_vec(), ov_val.clone(), None, 0);
+            assert!(
+                s.pfcount(&[b"h", b"h2"], 0).is_ok(),
+                "multi-key PFCOUNT must tolerate trailing VAL garbage (hllMerge)"
+            );
+        }
+        assert_eq!(
+            with(&ov_xzero).pfmerge(b"d", &[b"h"], 0),
+            Err(StoreError::CorruptedHllValue),
+            "PFMERGE must reject a trailing XZERO overrun (INVALIDOBJ)"
+        );
+
+        // Single-key PFCOUNT is strict: any overflow is corrupt.
+        assert_eq!(
+            with(&ov_val).pfcount(&[b"h"], 0),
+            Err(StoreError::CorruptedHllValue),
+            "single-key PFCOUNT must reject trailing VAL overflow (hllSparseRegHisto)"
+        );
+        assert_eq!(
+            with(&ov_xzero).pfcount(&[b"h"], 0),
+            Err(StoreError::CorruptedHllValue),
+            "single-key PFCOUNT must reject trailing XZERO overflow"
+        );
+
+        // PFDEBUG ENCODING reads the header only -> reports the encoding even
+        // with a corrupt body; a non-HLL value still fails the gate (WRONGTYPE).
+        assert_eq!(
+            with(&ov_xzero).hll_debug_encoding(b"h", 0),
+            Ok(Some("sparse")),
+            "PFDEBUG ENCODING must report the header encoding without decoding the body"
         );
     }
 
