@@ -1702,6 +1702,14 @@ fn process_buffered_frames(
                                     consumed: parsed.consumed,
                                     response,
                                 })
+                            } else if let Some(key) = borrowed_plain_strlen_args(&borrowed_args)
+                                && let Some(response) =
+                                    runtime.execute_plain_strlen_borrowed(key, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
                             } else {
                                 copy_borrowed_argv_into_scratch(&borrowed_args, &mut argv_scratch);
                                 Ok(BorrowedMultibulkAction::Parsed {
@@ -1922,6 +1930,13 @@ fn borrowed_plain_exists_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [
         [command, keys @ ..] if !keys.is_empty() && command.eq_ignore_ascii_case(b"EXISTS") => {
             Some(keys)
         }
+        _ => None,
+    }
+}
+
+fn borrowed_plain_strlen_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
+    match borrowed_args {
+        [command, key] if command.eq_ignore_ascii_case(b"STRLEN") => Some(*key),
         _ => None,
     }
 }
