@@ -1,0 +1,2 @@
+b8e3b19bb14fedaf6805e3ac2555b2afceed27a36e13f34309b277e5e9b20d7b  /tmp/codex-fr-get-store-fast-read-baseline-target/release-perf/frankenredis
+d4ffb6a77a604c0a7dc85161c06fd401c45aefc217505ded38f1c744a83ecef4  /tmp/codex-fr-get-store-fast-read-baseline-target/release-perf/fr-bench

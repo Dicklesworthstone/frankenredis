@@ -1,0 +1,42 @@
+{
+  "results": [
+    {
+      "command": "/tmp/codex-fr-get-store-fast-read-baseline-target/release-perf/fr-bench --host 127.0.0.1 --port 16572 --clients 50 --requests 300000 --pipeline 16 --workload get --keyspace 10000 --datasize 3 --json-out artifacts/optimization/frankenredis-get-store-fast-read-5rpzl/baseline-get-p16-300k-last.json --key-prefix getstore:baseline",
+      "mean": 0.4726515380500001,
+      "stddev": 0.04722349064104269,
+      "median": 0.45681908930000004,
+      "user": 0.2188518766666667,
+      "system": 0.4756036466666666,
+      "min": 0.41252544930000007,
+      "max": 0.5842947183,
+      "times": [
+        0.44408383630000003,
+        0.4593971713000001,
+        0.5214462933,
+        0.5842947183,
+        0.5233810373000001,
+        0.44420352230000004,
+        0.45712573030000003,
+        0.45651244830000004,
+        0.45274861930000004,
+        0.41252544930000007,
+        0.47168310430000004,
+        0.44441652630000006
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+3f4dda84862d9f15c69f8f43ab87f3421030f624494f1b25fb0a9c8f8f482063  artifacts/optimization/frankenredis-get-store-fast-read-5rpzl/golden-baseline.resp
+3f4dda84862d9f15c69f8f43ab87f3421030f624494f1b25fb0a9c8f8f482063  artifacts/optimization/frankenredis-get-store-fast-read-5rpzl/golden-candidate.resp
