@@ -300,6 +300,10 @@ fn plain_lindex_owned_argv(key: &[u8], index: &[u8]) -> Vec<Vec<u8>> {
     vec![b"LINDEX".to_vec(), key.to_vec(), index.to_vec()]
 }
 
+fn plain_zscore_owned_argv(key: &[u8], member: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"ZSCORE".to_vec(), key.to_vec(), member.to_vec()]
+}
+
 fn plain_getrange_owned_argv(key: &[u8], start: &[u8], end: &[u8]) -> Vec<Vec<u8>> {
     vec![
         b"GETRANGE".to_vec(),
@@ -7446,6 +7450,155 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'LINDEX' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    fn can_execute_plain_zscore_borrowed(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"ZSCORE".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || member.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Conservative borrowed runtime fast path for `ZSCORE key member`: mirrors
+    /// `execute_plain_hexists_borrowed` (key + member borrowed, generic argv
+    /// materialization + dispatch skipped). The reply is protocol-dependent
+    /// exactly like the generic handler: a present score is a RESP3 Double
+    /// (`double_from_f64`) or a RESP2 bulk string (`redis_score_to_string`); a
+    /// missing key/member is a nil bulk string in both protocols; a non-zset key
+    /// is WRONGTYPE. Returns None (fall back) on any disabling state.
+    /// (frankenredis-h8gbc)
+    pub fn execute_plain_zscore_borrowed(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_zscore_borrowed(key, member, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("zscore");
+        self.session.last_argv_len_sum = b"ZSCORE".len() + key.len() + member.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let resp3 = self.session.resp_protocol_version == 3;
+        let start = Instant::now();
+        let result = self.server.store.zscore(key, member, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match result {
+            Ok(Some(score)) => {
+                if resp3 {
+                    RespFrame::double_from_f64(score)
+                } else {
+                    RespFrame::BulkString(Some(fr_store::redis_score_to_string(score).into_bytes()))
+                }
+            }
+            Ok(None) => RespFrame::BulkString(None),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_zscore_borrowed_metrics(
+            key, member, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_reads_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_zscore_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_zscore_owned_argv(key, member));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_zscore_owned_argv(key, member));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_with_kind("zscore", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_zscore_owned_argv(key, member));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'ZSCORE' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -18772,6 +18925,90 @@ mod tests {
         assert!(rt.execute_plain_lindex_borrowed(b"l", b"0", 2).is_some());
         rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
         assert!(rt.execute_plain_lindex_borrowed(b"l", b"0", 4).is_none());
+    }
+
+    #[test]
+    fn plain_zscore_borrowed_fast_path_matches_generic_resp2_and_resp3() {
+        // (frankenredis-h8gbc) ZSCORE borrowed fast path == generic dispatch in
+        // BOTH protocols: present score is a RESP2 bulk string / RESP3 Double;
+        // missing member/key is a nil bulk string (both); non-zset is WRONGTYPE.
+        for resp3 in [false, true] {
+            let mut fast = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            if resp3 {
+                fast.session.resp_protocol_version = 3;
+                generic.session.resp_protocol_version = 3;
+            }
+            for rt in [&mut fast, &mut generic] {
+                rt.execute_frame(command(&[b"ZADD", b"z", b"1.5", b"a", b"3", b"b"]), 1);
+                rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1); // wrong type
+            }
+
+            let hit = fast
+                .execute_plain_zscore_borrowed(b"z", b"a", 2)
+                .expect("default ZSCORE should take borrowed fast path");
+            assert_eq!(
+                hit,
+                generic.execute_frame(command(&[b"ZSCORE", b"z", b"a"]), 2),
+                "resp3={resp3}"
+            );
+
+            let miss_member = fast
+                .execute_plain_zscore_borrowed(b"z", b"nope", 3)
+                .expect("missing-member ZSCORE should take borrowed fast path");
+            assert_eq!(
+                miss_member,
+                generic.execute_frame(command(&[b"ZSCORE", b"z", b"nope"]), 3)
+            );
+            assert_eq!(miss_member, RespFrame::BulkString(None));
+
+            let miss_key = fast
+                .execute_plain_zscore_borrowed(b"nokey", b"a", 4)
+                .expect("missing-key ZSCORE should take borrowed fast path");
+            assert_eq!(
+                miss_key,
+                generic.execute_frame(command(&[b"ZSCORE", b"nokey", b"a"]), 4)
+            );
+
+            let wt = fast
+                .execute_plain_zscore_borrowed(b"str", b"a", 5)
+                .expect("wrong-type ZSCORE should take borrowed fast path");
+            assert_eq!(
+                wt,
+                generic.execute_frame(command(&[b"ZSCORE", b"str", b"a"]), 5)
+            );
+            assert!(matches!(wt, RespFrame::Error(_)));
+
+            assert_eq!(
+                fast.server.store.stat_total_commands_processed,
+                generic.server.store.stat_total_commands_processed
+            );
+            assert_eq!(
+                fast.server.store.stat_total_reads_processed,
+                generic.server.store.stat_total_reads_processed
+            );
+            assert_eq!(
+                fast.server.store.stat_keyspace_hits,
+                generic.server.store.stat_keyspace_hits
+            );
+            assert_eq!(
+                fast.server.store.stat_keyspace_misses,
+                generic.server.store.stat_keyspace_misses
+            );
+            assert_eq!(
+                fast.session.last_command_name,
+                generic.session.last_command_name
+            );
+        }
+    }
+
+    #[test]
+    fn plain_zscore_borrowed_fast_path_disabled_in_non_default_states() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"ZADD", b"z", b"1", b"a"]), 1);
+        assert!(rt.execute_plain_zscore_borrowed(b"z", b"a", 2).is_some());
+        rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
+        assert!(rt.execute_plain_zscore_borrowed(b"z", b"a", 4).is_none());
     }
 
     #[test]
