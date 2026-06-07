@@ -15114,6 +15114,14 @@ fn zunionstore(
         return Err(CommandError::SyntaxError);
     }
     let keys: Vec<&[u8]> = argv[3..3 + numkeys].iter().map(|v| v.as_slice()).collect();
+    // (frankenredis-zsetop-wrongtype) Upstream zunionInterDiffGenericCommand
+    // reads + type-checks every source key (ZSET/SET ok, else WRONGTYPE) at
+    // t_zset.c:2603-2621 BEFORE parsing the WEIGHTS/AGGREGATE options at :2623,
+    // so a wrong-type source key surfaces WRONGTYPE ahead of any option syntax
+    // error. (The numkeys-overflow syntax check still precedes the type-check.)
+    for &key in &keys {
+        store.ensure_zset_or_set_source(key, now_ms)?;
+    }
     let (weights, aggregate) = parse_zstore_args(argv, 3 + numkeys, numkeys)?;
     let count = store
         .zunionstore(dest, &keys, &weights, &aggregate, now_ms)
@@ -15142,6 +15150,11 @@ fn zinterstore(
         return Err(CommandError::SyntaxError);
     }
     let keys: Vec<&[u8]> = argv[3..3 + numkeys].iter().map(|v| v.as_slice()).collect();
+    // (frankenredis-zsetop-wrongtype) Source-key type-check precedes the
+    // WEIGHTS/AGGREGATE option parse — see zunionstore().
+    for &key in &keys {
+        store.ensure_zset_or_set_source(key, now_ms)?;
+    }
     let (weights, aggregate) = parse_zstore_args(argv, 3 + numkeys, numkeys)?;
     let count = store
         .zinterstore(dest, &keys, &weights, &aggregate, now_ms)
@@ -22886,6 +22899,19 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     if argv.len() < 2_usize.saturating_add(numkeys) {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
+    let keys: Vec<&[u8]> = (0..numkeys)
+        .map(|i| argv[2_usize.saturating_add(i)].as_slice())
+        .collect();
+    // (frankenredis-sdiffwt) Validate every source type up front: upstream
+    // checks all sources before computing, so an empty/missing first key must
+    // not mask a wrong-type later key (which the per-member loop would skip).
+    // (frankenredis-zsetop-wrongtype) This source-key type-check also runs
+    // BEFORE the trailing-option (WITHSCORES) parse, matching upstream
+    // t_zset.c:2603-2621 (key read+checkType) preceding the option loop at
+    // :2623 — so a wrong-type key surfaces WRONGTYPE ahead of a syntax error.
+    for &key in &keys {
+        store.ensure_zset_or_set_source(key, now_ms)?;
+    }
     let mut withscores = false;
     let mut idx = 2 + numkeys;
     while idx < argv.len() {
@@ -22895,15 +22921,6 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         } else {
             return Err(CommandError::SyntaxError);
         }
-    }
-    let keys: Vec<&[u8]> = (0..numkeys)
-        .map(|i| argv[2_usize.saturating_add(i)].as_slice())
-        .collect();
-    // (frankenredis-sdiffwt) Validate every source type up front: upstream
-    // checks all sources before computing, so an empty/missing first key must
-    // not mask a wrong-type later key (which the per-member loop would skip).
-    for &key in &keys {
-        store.ensure_zset_or_set_source(key, now_ms)?;
     }
     // Compute difference: members in first set not in any other
     let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
@@ -22955,15 +22972,19 @@ fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() < 3_usize.saturating_add(numkeys) {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
-    if argv.len() != 3_usize.saturating_add(numkeys) {
-        return Err(CommandError::SyntaxError);
-    }
     let keys: Vec<&[u8]> = (0..numkeys)
         .map(|i| argv[3_usize.saturating_add(i)].as_slice())
         .collect();
     // (frankenredis-sdiffwt) Validate every source type up front (see zdiff).
+    // (frankenredis-zsetop-wrongtype) The source-key type-check runs BEFORE the
+    // trailing-token syntax check: upstream reads+checkType the keys
+    // (t_zset.c:2603-2621) before the option loop (:2623) rejects extra tokens,
+    // so a wrong-type key beats the "extra argument" syntax error.
     for &key in &keys {
         store.ensure_zset_or_set_source(key, now_ms)?;
+    }
+    if argv.len() != 3_usize.saturating_add(numkeys) {
+        return Err(CommandError::SyntaxError);
     }
     let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
     let mut result: std::collections::HashMap<Vec<u8>, f64> = std::collections::HashMap::new();
@@ -23006,6 +23027,11 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     let keys: Vec<&[u8]> = (0..numkeys)
         .map(|i| argv[2_usize.saturating_add(i)].as_slice())
         .collect();
+    // (frankenredis-zsetop-wrongtype) Source-key type-check precedes the
+    // WEIGHTS/AGGREGATE/WITHSCORES option parse — see zunionstore().
+    for &key in &keys {
+        store.ensure_zset_or_set_source(key, now_ms)?;
+    }
     let (weights, aggregate, withscores) =
         parse_zset_algebra_options(argv, 2 + numkeys, numkeys, true)?;
     let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
@@ -23063,6 +23089,11 @@ fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     let keys: Vec<&[u8]> = (0..numkeys)
         .map(|i| argv[2_usize.saturating_add(i)].as_slice())
         .collect();
+    // (frankenredis-zsetop-wrongtype) Source-key type-check precedes the
+    // WEIGHTS/AGGREGATE/WITHSCORES option parse — see zunionstore().
+    for &key in &keys {
+        store.ensure_zset_or_set_source(key, now_ms)?;
+    }
     let (weights, aggregate, withscores) =
         parse_zset_algebra_options(argv, 2 + numkeys, numkeys, true)?;
     let mut combined: std::collections::HashMap<Vec<u8>, f64> = std::collections::HashMap::new();
@@ -39333,6 +39364,57 @@ mod tests {
             };
             assert_eq!(&got, *expected, "argv: {argv_in:?}");
         }
+    }
+
+    #[test]
+    fn zsetop_source_type_check_precedes_option_parse() {
+        // (frankenredis-8g0ad) Upstream zunionInterDiffGenericCommand reads +
+        // type-checks every source key (ZSET/SET ok, else WRONGTYPE) BEFORE
+        // parsing WEIGHTS/AGGREGATE/WITHSCORES, so a wrong-type source key with
+        // a malformed trailing option surfaces WRONGTYPE — not a syntax error.
+        // The numkeys-overflow syntax check still precedes the type-check, and a
+        // SET source counts as valid (proceeds to the option syntax check).
+        let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        let is_wrongtype = |r: Result<RespFrame, CommandError>| -> bool {
+            matches!(r, Err(CommandError::Store(fr_store::StoreError::WrongType)))
+        };
+        let mut store = Store::new();
+        store.set(b"str".to_vec(), b"v".to_vec(), None, 0);
+        dispatch_argv(&argv(&["SADD", "set", "a"]), &mut store, 0).unwrap();
+        dispatch_argv(&argv(&["ZADD", "zs", "1", "a"]), &mut store, 0).unwrap();
+
+        // wrong-type source + malformed option -> WRONGTYPE (all six commands)
+        for c in [
+            &["ZUNIONSTORE", "d", "1", "str", "WEIGHTS"][..],
+            &["ZINTERSTORE", "d", "1", "str", "str", "str"][..],
+            &["ZDIFFSTORE", "d", "2", "set", "str", "WEIGHTS"][..],
+            &["ZUNION", "1", "str", "AGGREGATE", "BAD"][..],
+            &["ZINTER", "2", "str", "zs", "WEIGHTS", "1"][..],
+            &["ZDIFF", "2", "str", "none", "WITHSCORES", "EXTRA"][..],
+        ] {
+            assert!(
+                is_wrongtype(dispatch_argv(&argv(c), &mut store, 0)),
+                "{c:?} must be WRONGTYPE"
+            );
+        }
+
+        // numkeys overflow still beats the type-check (syntax error).
+        assert!(matches!(
+            dispatch_argv(&argv(&["ZUNIONSTORE", "d", "9", "str"]), &mut store, 0),
+            Err(CommandError::SyntaxError)
+        ));
+
+        // A SET source is valid -> reaches the option syntax check (bad AGGREGATE).
+        assert!(matches!(
+            dispatch_argv(
+                &argv(&["ZUNIONSTORE", "d", "1", "set", "AGGREGATE", "BAD"]),
+                &mut store,
+                0
+            ),
+            Err(CommandError::SyntaxError)
+        ));
     }
 
     #[test]
