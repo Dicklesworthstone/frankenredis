@@ -9799,9 +9799,17 @@ fn xrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         let parsed = parse_i64_arg(&argv[5])?;
         // Upstream parses COUNT via getLongFromObjectOrReply, clamps
         // negative values to 0, then emits a null array when count is 0.
-        // (br-frankenredis-xrangenegcount)
+        // (br-frankenredis-xrangenegcount) But the key is resolved FIRST —
+        // lookupKeyReadOrReply(emptyarray)+checkType (t_stream.c:2133) run
+        // before the count==0 null reply — so a wrong-type key is WRONGTYPE
+        // and a missing key is an empty array even when COUNT<=0, not the
+        // null array. (frankenredis-xrangecounttype)
         if parsed <= 0 {
-            return Ok(RespFrame::Array(None));
+            return match store.peek_value_type(&argv[1], now_ms) {
+                Some(fr_store::ValueType::Stream) => Ok(RespFrame::Array(None)),
+                None => Ok(RespFrame::Array(Some(Vec::new()))),
+                Some(_) => Err(CommandError::Store(fr_store::StoreError::WrongType)),
+            };
         }
         Some(usize::try_from(parsed).unwrap_or(usize::MAX))
     } else {
@@ -9848,9 +9856,15 @@ fn xrevrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             return Err(CommandError::SyntaxError);
         }
         let parsed = parse_i64_arg(&argv[5])?;
-        // (br-frankenredis-xrangenegcount) — see xrange.
+        // (br-frankenredis-xrangenegcount / -xrangecounttype) — see xrange:
+        // resolve the key (wrong-type → WRONGTYPE, missing → empty array)
+        // before emitting the count<=0 null array.
         if parsed <= 0 {
-            return Ok(RespFrame::Array(None));
+            return match store.peek_value_type(&argv[1], now_ms) {
+                Some(fr_store::ValueType::Stream) => Ok(RespFrame::Array(None)),
+                None => Ok(RespFrame::Array(Some(Vec::new()))),
+                Some(_) => Err(CommandError::Store(fr_store::StoreError::WrongType)),
+            };
         }
         Some(usize::try_from(parsed).unwrap_or(usize::MAX))
     } else {
@@ -34626,6 +34640,62 @@ mod tests {
             err,
             CommandError::Store(fr_store::StoreError::WrongType)
         ));
+    }
+
+    #[test]
+    fn xrange_count_zero_resolves_key_before_null_array() {
+        // (frankenredis-vd28h) Upstream resolves the key (lookupKeyReadOrReply
+        // emptyarray + checkType) BEFORE emitting the COUNT<=0 null array, so a
+        // wrong-type key is WRONGTYPE and a missing key is an empty array even
+        // when COUNT<=0 — only an existing stream yields the null array.
+        let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        let mut store = Store::new();
+        store.set(b"s".to_vec(), b"v".to_vec(), None, 0);
+        dispatch_argv(&argv(&["XADD", "st", "1-1", "f", "v"]), &mut store, 0).unwrap();
+
+        for cmd in [
+            ["XRANGE", "s", "-", "+", "COUNT", "-1"],
+            ["XREVRANGE", "s", "+", "-", "COUNT", "0"],
+        ] {
+            assert!(
+                matches!(
+                    dispatch_argv(&argv(&cmd), &mut store, 0),
+                    Err(CommandError::Store(fr_store::StoreError::WrongType))
+                ),
+                "wrong-type key + COUNT<=0 must be WRONGTYPE: {cmd:?}"
+            );
+        }
+        // Missing key + COUNT<=0 -> empty array (not null).
+        assert_eq!(
+            dispatch_argv(
+                &argv(&["XRANGE", "missing", "-", "+", "COUNT", "-1"]),
+                &mut store,
+                0
+            )
+            .unwrap(),
+            RespFrame::Array(Some(Vec::new()))
+        );
+        // Existing stream + COUNT<=0 -> null array.
+        assert_eq!(
+            dispatch_argv(
+                &argv(&["XRANGE", "st", "-", "+", "COUNT", "0"]),
+                &mut store,
+                0
+            )
+            .unwrap(),
+            RespFrame::Array(None)
+        );
+        assert_eq!(
+            dispatch_argv(
+                &argv(&["XREVRANGE", "st", "+", "-", "COUNT", "-5"]),
+                &mut store,
+                0
+            )
+            .unwrap(),
+            RespFrame::Array(None)
+        );
     }
 
     #[test]
