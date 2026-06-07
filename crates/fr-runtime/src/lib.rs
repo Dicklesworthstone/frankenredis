@@ -305,6 +305,10 @@ fn plain_hmget_owned_argv(key: &[u8], fields: &[&[u8]]) -> Vec<Vec<u8>> {
     argv
 }
 
+fn plain_sismember_owned_argv(key: &[u8], member: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"SISMEMBER".to_vec(), key.to_vec(), member.to_vec()]
+}
+
 fn wrong_arity_error(command: &'static str) -> RespFrame {
     RespFrame::Error(format!(
         "ERR wrong number of arguments for '{}' command",
@@ -6754,6 +6758,144 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'HMGET' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    fn can_execute_plain_sismember_borrowed(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"SISMEMBER".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || member.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Conservative borrowed runtime fast path for `SISMEMBER key member`:
+    /// mirrors `execute_plain_get_borrowed` (key + member borrowed, generic argv
+    /// materialization + dispatch skipped). Returns Integer 1/0, or a WRONGTYPE
+    /// error reply for a non-set key, exactly like the generic handler. Returns
+    /// None (fall back) on any disabling state. (frankenredis-h8gbc)
+    pub fn execute_plain_sismember_borrowed(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_sismember_borrowed(key, member, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("sismember");
+        self.session.last_argv_len_sum = b"SISMEMBER".len() + key.len() + member.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let result = self.server.store.sismember(key, member, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match result {
+            Ok(is_member) => RespFrame::Integer(i64::from(is_member)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_sismember_borrowed_metrics(
+            key, member, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_reads_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_sismember_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_sismember_owned_argv(key, member));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_sismember_owned_argv(key, member));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_with_kind("sismember", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_sismember_owned_argv(key, member));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'SISMEMBER' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -18042,6 +18184,93 @@ mod tests {
         let mut rt = Runtime::default_strict();
         let fields = vec![b"f".as_slice(); super::MAX_COMMAND_ARITY - 1];
         assert!(rt.execute_plain_hmget_borrowed(b"h", &fields, 1).is_none());
+    }
+
+    #[test]
+    fn plain_sismember_borrowed_fast_path_matches_generic_member_nonmember_wrongtype() {
+        // (frankenredis-h8gbc) SISMEMBER borrowed fast path == generic dispatch:
+        // 1 for a member, 0 for a non-member / missing key, WRONGTYPE on a
+        // non-set key.
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"SADD", b"s", b"a", b"b"]), 1);
+            rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1); // wrong type
+        }
+
+        let yes = fast
+            .execute_plain_sismember_borrowed(b"s", b"a", 2)
+            .expect("default SISMEMBER should take borrowed fast path");
+        assert_eq!(
+            yes,
+            generic.execute_frame(command(&[b"SISMEMBER", b"s", b"a"]), 2)
+        );
+        assert_eq!(yes, RespFrame::Integer(1));
+
+        let no = fast
+            .execute_plain_sismember_borrowed(b"s", b"z", 3)
+            .expect("non-member SISMEMBER should take borrowed fast path");
+        assert_eq!(
+            no,
+            generic.execute_frame(command(&[b"SISMEMBER", b"s", b"z"]), 3)
+        );
+        assert_eq!(no, RespFrame::Integer(0));
+
+        let missing = fast
+            .execute_plain_sismember_borrowed(b"nokey", b"a", 4)
+            .expect("missing-key SISMEMBER should take borrowed fast path");
+        assert_eq!(
+            missing,
+            generic.execute_frame(command(&[b"SISMEMBER", b"nokey", b"a"]), 4)
+        );
+        assert_eq!(missing, RespFrame::Integer(0));
+
+        let wt = fast
+            .execute_plain_sismember_borrowed(b"str", b"a", 5)
+            .expect("wrong-type SISMEMBER should take borrowed fast path");
+        assert_eq!(
+            wt,
+            generic.execute_frame(command(&[b"SISMEMBER", b"str", b"a"]), 5)
+        );
+        assert!(matches!(wt, RespFrame::Error(_)));
+
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_reads_processed,
+            generic.server.store.stat_total_reads_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            fast.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+        assert_eq!(
+            fast.session.last_command_name,
+            generic.session.last_command_name
+        );
+        assert_eq!(
+            fast.session.last_argv_len_sum,
+            generic.session.last_argv_len_sum
+        );
+    }
+
+    #[test]
+    fn plain_sismember_borrowed_fast_path_disabled_in_non_default_states() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SADD", b"s", b"a"]), 1);
+        assert!(rt.execute_plain_sismember_borrowed(b"s", b"a", 2).is_some());
+        rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
+        assert!(rt.execute_plain_sismember_borrowed(b"s", b"a", 4).is_none());
     }
 
     #[test]
