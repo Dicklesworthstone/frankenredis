@@ -1,0 +1,2 @@
+[ perf record: Woken up 1 times to write data ]
+[ perf record: Captured and wrote 0.084 MB artifacts/optimization/cod-pass50-profile-20260607T0030Z/current-set-p16-1m.perf.data (1079 samples) ]

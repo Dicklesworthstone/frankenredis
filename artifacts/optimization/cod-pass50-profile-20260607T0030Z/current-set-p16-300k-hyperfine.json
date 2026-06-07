@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "PORT=6540; LOG=artifacts/optimization/cod-pass50-profile-20260607T0030Z/current-hf-server-$PORT-$$.log; target-cod-pass50-current/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.25; target-cod-pass50-current/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass50current >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 0.7593064669799999,
+      "stddev": 0.04001429665351508,
+      "median": 0.75232933218,
+      "user": 0.5066436999999999,
+      "system": 0.7107267199999998,
+      "min": 0.70910718868,
+      "max": 0.86176212868,
+      "times": [
+        0.77019835368,
+        0.70910718868,
+        0.73689587368,
+        0.74526449768,
+        0.74640865568,
+        0.75825000868,
+        0.75909602168,
+        0.7402133896800001,
+        0.76586855168,
+        0.86176212868
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

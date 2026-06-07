@@ -1,0 +1,56 @@
+{
+  "results": [
+    {
+      "command": "PORT=6545; LOG=artifacts/optimization/cod-pass50-profile-20260607T0030Z/candidate-runtime-info-1m-hf-server-$PORT-$$.log; target-cod-pass50-runtime-info-candidate/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.25; target-cod-pass50-runtime-info-candidate/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 1000000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass50cand1m >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.7512875261599998,
+      "stddev": 0.028320308342690222,
+      "median": 1.7499690436600002,
+      "user": 1.5181720933333331,
+      "system": 2.2275881133333333,
+      "min": 1.7068848091600002,
+      "max": 1.7954361011600002,
+      "times": [
+        1.7068848091600002,
+        1.7505609751600002,
+        1.75910271716,
+        1.7954361011600002,
+        1.74636344216,
+        1.7493771121600001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "PORT=6544; LOG=artifacts/optimization/cod-pass50-profile-20260607T0030Z/baseline-runtime-info-1m-hf-server-$PORT-$$.log; target-cod-pass50-current/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.25; target-cod-pass50-current/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 1000000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass50base1m >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.82360906516,
+      "stddev": 0.04462154952825832,
+      "median": 1.80088481116,
+      "user": 1.5745857599999997,
+      "system": 2.22255878,
+      "min": 1.78596919716,
+      "max": 1.88601922416,
+      "times": [
+        1.87505868816,
+        1.78596919716,
+        1.7928376591600002,
+        1.88601922416,
+        1.79797798916,
+        1.8037916331600001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

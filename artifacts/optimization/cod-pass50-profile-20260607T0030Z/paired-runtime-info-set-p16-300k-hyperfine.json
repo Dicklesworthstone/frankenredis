@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "PORT=6542; LOG=artifacts/optimization/cod-pass50-profile-20260607T0030Z/baseline-runtime-info-hf-server-$PORT-$$.log; target-cod-pass50-current/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.25; target-cod-pass50-current/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass50base >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 0.7616661457800001,
+      "stddev": 0.017768650821358038,
+      "median": 0.7591623200800001,
+      "user": 0.53936104,
+      "system": 0.6917309599999999,
+      "min": 0.7214026840800001,
+      "max": 0.78707446008,
+      "times": [
+        0.77319785108,
+        0.7592555560800001,
+        0.7588484360800001,
+        0.7590690840800001,
+        0.77029108408,
+        0.75782086908,
+        0.77733794408,
+        0.7214026840800001,
+        0.7523634890800001,
+        0.78707446008
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "PORT=6543; LOG=artifacts/optimization/cod-pass50-profile-20260607T0030Z/candidate-runtime-info-hf-server-$PORT-$$.log; target-cod-pass50-runtime-info-candidate/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.25; target-cod-pass50-runtime-info-candidate/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass50cand >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 0.7197366100800001,
+      "stddev": 0.05364136725065282,
+      "median": 0.7149579595800001,
+      "user": 0.47606893999999994,
+      "system": 0.6878624600000001,
+      "min": 0.66419673708,
+      "max": 0.8642868410800001,
+      "times": [
+        0.7156816960800001,
+        0.71660751008,
+        0.7142342230800001,
+        0.71774669808,
+        0.7166186710800001,
+        0.7040939430800001,
+        0.68656324008,
+        0.66419673708,
+        0.8642868410800001,
+        0.6973365410800001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
