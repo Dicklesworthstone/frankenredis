@@ -1,0 +1,7 @@
+$-1
++OK
+$1
+v
+-ERR unknown command 'FOO', with args beginning with: 'k' 
+-ERR wrong number of arguments for 'get' command
+-ERR Protocol error: invalid bulk length

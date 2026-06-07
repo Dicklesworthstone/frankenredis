@@ -1,0 +1,2 @@
+72539004e0d45552e143826bf8b46a8f1d11b2475bb2e16803b3e318f812cdff  /tmp/codex-fr-1k5km-candidate-target/release-perf/frankenredis
+1a32a94fb61c6f1a6c7aa3b0ff94120f88c72bfd21c5da58e928a1906a4ea037  /tmp/codex-fr-1k5km-candidate-target/release-perf/fr-bench

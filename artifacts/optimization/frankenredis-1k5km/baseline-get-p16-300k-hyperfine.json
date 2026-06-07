@@ -1,0 +1,42 @@
+{
+  "results": [
+    {
+      "command": "/tmp/codex-fr-1k5km-baseline-target/release-perf/fr-bench --host 127.0.0.1 --port 16600 --clients 50 --requests 300000 --pipeline 16 --workload get --keyspace 10000 --datasize 3 --json-out artifacts/optimization/frankenredis-1k5km/baseline-get-p16-300k-last.json --key-prefix token:baseline",
+      "mean": 0.4736406820200001,
+      "stddev": 0.0517774196327191,
+      "median": 0.45691548301999996,
+      "user": 0.21482594,
+      "system": 0.44880721999999995,
+      "min": 0.43565937802,
+      "max": 0.6001969050200001,
+      "times": [
+        0.43565937802,
+        0.44144906702000003,
+        0.43880274702,
+        0.45620899402,
+        0.45762197202,
+        0.55910451502,
+        0.6001969050200001,
+        0.47351234202000003,
+        0.47111375302,
+        0.45427060402,
+        0.45804485002,
+        0.43770305702
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

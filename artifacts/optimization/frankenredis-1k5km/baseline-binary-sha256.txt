@@ -1,0 +1,2 @@
+34bfe0a9adca0f30693f7de6a674197c61a15e049ac09e3fbfe5c8b5d2d1fc54  /tmp/codex-fr-1k5km-baseline-target/release-perf/frankenredis
+b514c7afae9a2e6bd65382c1d6487d8b24a91c4cbc99b0e89c1dd705831194f4  /tmp/codex-fr-1k5km-baseline-target/release-perf/fr-bench

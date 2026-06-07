@@ -1,0 +1,2 @@
+b3976425e4b416c0261d0ac124b169726f5e15b44732a0fe0b19bbb0c81dc289  artifacts/optimization/frankenredis-1k5km/golden-baseline.resp
+b3976425e4b416c0261d0ac124b169726f5e15b44732a0fe0b19bbb0c81dc289  artifacts/optimization/frankenredis-1k5km/golden-candidate.resp
