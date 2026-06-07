@@ -366,6 +366,113 @@ fn config_set_failed(field: &str, detail: &str) -> RespFrame {
     ))
 }
 
+/// One client class's output-buffer limit triple: `hard`/`soft` are byte sizes
+/// (0 == unlimited, matching redis), `soft_seconds` is in seconds. Mirrors a
+/// `clientBufferLimitsConfig` entry in config.c. (frankenredis-8sb0l)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutputBufferClassLimit {
+    pub hard: u64,
+    pub soft: u64,
+    pub soft_seconds: u64,
+}
+
+/// `client-output-buffer-limit` for the three redis client classes. Mirrors
+/// `server.client_obuf_limits[CLIENT_TYPE_*]` (normal / slave / pubsub).
+/// The `Default` is the redis 7.2 compiled default (strict = redis-exact); the
+/// hardened-mode OOM guard for `normal` is installed in `Runtime::new`.
+/// (frankenredis-8sb0l)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientOutputBufferLimits {
+    pub normal: OutputBufferClassLimit,
+    pub slave: OutputBufferClassLimit,
+    pub pubsub: OutputBufferClassLimit,
+}
+
+impl Default for ClientOutputBufferLimits {
+    fn default() -> Self {
+        Self {
+            normal: OutputBufferClassLimit {
+                hard: 0,
+                soft: 0,
+                soft_seconds: 0,
+            },
+            slave: OutputBufferClassLimit {
+                hard: 256 * 1024 * 1024,
+                soft: 64 * 1024 * 1024,
+                soft_seconds: 60,
+            },
+            pubsub: OutputBufferClassLimit {
+                hard: 32 * 1024 * 1024,
+                soft: 8 * 1024 * 1024,
+                soft_seconds: 60,
+            },
+        }
+    }
+}
+
+impl ClientOutputBufferLimits {
+    /// The `CONFIG GET client-output-buffer-limit` value: a single
+    /// space-separated string `normal H S SS slave H S SS pubsub H S SS`,
+    /// byte-exact with redis's `sds` rendering in `getClientOutputBufferLimit`.
+    fn config_get_value(&self) -> Vec<u8> {
+        format!(
+            "normal {} {} {} slave {} {} {} pubsub {} {} {}",
+            self.normal.hard,
+            self.normal.soft,
+            self.normal.soft_seconds,
+            self.slave.hard,
+            self.slave.soft,
+            self.slave.soft_seconds,
+            self.pubsub.hard,
+            self.pubsub.soft,
+            self.pubsub.soft_seconds,
+        )
+        .into_bytes()
+    }
+}
+
+/// Parse a `CONFIG SET client-output-buffer-limit` argument onto `base`: one or
+/// more `<class> <hard> <soft> <soft-seconds>` quadruples (an empty string is a
+/// no-op). Mirrors config.c `client-output-buffer-limit`'s SET handler; returns
+/// the static error *detail* (for `config_set_failed`) on failure. `replica` is
+/// accepted as an alias for `slave`. (frankenredis-8sb0l)
+fn parse_client_output_buffer_limit(
+    base: ClientOutputBufferLimits,
+    arg: &[u8],
+) -> Result<ClientOutputBufferLimits, &'static str> {
+    const WRONG_ARGS: &str = "Wrong number of arguments in buffer limit configuration.";
+    const BAD_CLASS: &str = "Invalid client class specified in buffer limit configuration.";
+    const BAD_VALUE: &str =
+        "Error in hard, soft or soft_seconds setting in buffer limit configuration.";
+    let text = std::str::from_utf8(arg).map_err(|_| WRONG_ARGS)?;
+    let tokens: Vec<&str> = text.split_ascii_whitespace().collect();
+    if tokens.len() % 4 != 0 {
+        return Err(WRONG_ARGS);
+    }
+    let mut out = base;
+    for chunk in tokens.chunks(4) {
+        let hard = parse_memory_size_arg(chunk[1].as_bytes()).map_err(|()| BAD_VALUE)?;
+        let soft = parse_memory_size_arg(chunk[2].as_bytes()).map_err(|()| BAD_VALUE)?;
+        // soft-seconds is a plain non-negative integer (seconds), not a size.
+        let soft_seconds: i64 = chunk[3].parse().map_err(|_| BAD_VALUE)?;
+        if soft_seconds < 0 {
+            return Err(BAD_VALUE);
+        }
+        let limit = OutputBufferClassLimit {
+            hard,
+            soft,
+            soft_seconds: soft_seconds as u64,
+        };
+        match chunk[0].to_ascii_lowercase().as_str() {
+            "normal" => out.normal = limit,
+            "slave" | "replica" => out.slave = limit,
+            "pubsub" => out.pubsub = limit,
+            _ => return Err(BAD_CLASS),
+        }
+    }
+    Ok(out)
+}
+
 /// Compose the upstream `cmd->fullname` for an argv vector: the bare
 /// lowercased command for top-level entries, or `parent|sub` for any
 /// known container subcommand. Used by the subscribe-context error
@@ -2606,8 +2713,11 @@ pub struct ServerState {
     pub cluster_link_sendbuf_limit: u64,
     pub cluster_node_timeout: u64,
     pub cluster_migration_barrier: u64,
-    /// Client output buffer hard limit (CONFIG SET client-output-buffer-limit). Default 256 MiB.
-    pub output_buffer_limit: usize,
+    /// Per-class client-output-buffer-limit (normal / slave / pubsub), each a
+    /// (hard, soft, soft-seconds) triple. Strict default is redis-exact
+    /// (normal 0 0 0 = unlimited); hardened mode caps `normal` (see
+    /// `Runtime::new`). (frankenredis-8sb0l)
+    pub client_output_buffer_limits: ClientOutputBufferLimits,
     /// Client query buffer limit (CONFIG SET client-query-buffer-limit). Default 1 GiB.
     pub query_buffer_limit: usize,
     /// Maximum bulk string length in RESP protocol (CONFIG SET proto-max-bulk-len). Default 512 MiB.
@@ -2750,7 +2860,7 @@ impl Default for ServerState {
             cluster_link_sendbuf_limit: 0,
             cluster_node_timeout: 15_000,
             cluster_migration_barrier: 1,
-            output_buffer_limit: 256 * 1024 * 1024, // 256 MiB (reasonable default)
+            client_output_buffer_limits: ClientOutputBufferLimits::default(),
             query_buffer_limit: 1024 * 1024 * 1024, // 1 GiB (Redis default)
             proto_max_bulk_len: 536_870_912,        // Redis 7.2 default (512 MiB)
             shutdown_requested: false,
@@ -3638,7 +3748,14 @@ const MAX_COMMAND_ARITY: usize = 1024 * 1024;
 impl Runtime {
     #[must_use]
     pub fn new(policy: RuntimePolicy) -> Self {
-        let server = ServerState::default();
+        let mut server = ServerState::default();
+        // (frankenredis-8sb0l) Strict mode is redis-exact: the `normal` client
+        // class is unlimited (hard 0). Hardened mode keeps fr's 256 MiB OOM
+        // guard for normal clients — a safety guard, per the Compatibility
+        // Doctrine's mode-split (same pattern as the CompatibilityGate caps).
+        if policy.mode == Mode::Hardened {
+            server.client_output_buffer_limits.normal.hard = 256 * 1024 * 1024;
+        }
         let session = ClientSession::new_for_server(&server);
         Self {
             policy,
@@ -4308,6 +4425,40 @@ impl Runtime {
             .replication_runtime_state
             .replicas
             .contains_key(&client_id)
+    }
+
+    /// The client-output-buffer-limit HARD limit (in bytes) that applies to the
+    /// connection `client_id`, by its redis client class (slave / pubsub /
+    /// normal). A hard limit of 0 means "unlimited" in redis, returned here as
+    /// `usize::MAX` so the fr-server write-buffer guard never disconnects such a
+    /// client. (frankenredis-8sb0l)
+    #[must_use]
+    pub fn effective_output_hard_limit(&self, client_id: u64) -> usize {
+        let limits = &self.server.client_output_buffer_limits;
+        let class = if self.is_replica(client_id) {
+            limits.slave
+        } else if self.is_pubsub_client(client_id) {
+            limits.pubsub
+        } else {
+            limits.normal
+        };
+        if class.hard == 0 {
+            usize::MAX
+        } else {
+            usize::try_from(class.hard).unwrap_or(usize::MAX)
+        }
+    }
+
+    /// The slave-class HARD limit (bytes; 0 → `usize::MAX`). Used for the
+    /// replica→primary link write buffer. (frankenredis-8sb0l)
+    #[must_use]
+    pub fn replica_link_output_hard_limit(&self) -> usize {
+        let hard = self.server.client_output_buffer_limits.slave.hard;
+        if hard == 0 {
+            usize::MAX
+        } else {
+            usize::try_from(hard).unwrap_or(usize::MAX)
+        }
     }
 
     #[must_use]
@@ -9894,7 +10045,7 @@ impl Runtime {
                 b"client-output-buffer-limit".to_vec(),
             )));
             entries.push(RespFrame::BulkString(Some(
-                self.server.output_buffer_limit.to_string().into_bytes(),
+                self.server.client_output_buffer_limits.config_get_value(),
             )));
         }
         // Dynamic hz — override the static default
@@ -10264,7 +10415,7 @@ impl Runtime {
         let mut next_stop_writes_on_bgsave_error: Option<bool> = None;
         let mut next_query_buffer_limit: Option<usize> = None;
         let mut next_proto_max_bulk_len: Option<usize> = None;
-        let mut next_output_buffer_limit: Option<usize> = None;
+        let mut next_client_output_buffer_limits: Option<ClientOutputBufferLimits> = None;
         let mut next_maxmemory_samples: Option<usize> = None;
         let mut next_command_time_budget: Option<u64> = None;
         let mut next_appendonly: Option<bool> = None;
@@ -11134,19 +11285,22 @@ impl Runtime {
                 continue;
             }
             if parameter.eq_ignore_ascii_case("client-output-buffer-limit") {
-                // (br-frankenredis-ky4n follow-up)
-                let parsed = match parse_memory_size_arg(&pair[1]) {
-                    Ok(value) => value as usize,
-                    Err(()) => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'client-output-buffer-limit'"
-                                .to_string(),
-                        );
+                // (frankenredis-8sb0l) Per-class form: one or more
+                // `<class> <hard> <soft> <soft-seconds>` quadruples, applied
+                // onto the live (or already-staged this command) limits.
+                let base = next_client_output_buffer_limits
+                    .unwrap_or(self.server.client_output_buffer_limits);
+                let updated = match parse_client_output_buffer_limit(base, &pair[1]) {
+                    Ok(limits) => limits,
+                    Err(detail) => {
+                        return config_set_failed("client-output-buffer-limit", detail);
                     }
                 };
-                next_output_buffer_limit = Some(parsed);
-                static_override_updates
-                    .push(("client-output-buffer-limit".to_string(), parsed.to_string()));
+                next_client_output_buffer_limits = Some(updated);
+                static_override_updates.push((
+                    "client-output-buffer-limit".to_string(),
+                    String::from_utf8(updated.config_get_value()).unwrap_or_default(),
+                ));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("maxmemory-samples") {
@@ -12064,8 +12218,8 @@ impl Runtime {
         if let Some(proto_max_bulk_len) = next_proto_max_bulk_len {
             self.server.proto_max_bulk_len = proto_max_bulk_len;
         }
-        if let Some(output_buffer_limit) = next_output_buffer_limit {
-            self.server.output_buffer_limit = output_buffer_limit;
+        if let Some(limits) = next_client_output_buffer_limits {
+            self.server.client_output_buffer_limits = limits;
         }
         if let Some(maxmemory_samples) = next_maxmemory_samples {
             self.server.maxmemory_eviction_sample_limit = maxmemory_samples;
@@ -16376,12 +16530,12 @@ mod tests {
     use super::{
         ACL_FILE_NOT_CONFIGURED_ERR, AOF_DISK_ERROR_WRITE_DENIED, AclPubsubDefault, ClientSession,
         ClientUnblockMode, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER,
-        RDB_DISK_ERROR_WRITE_DENIED, Runtime, ServerState, acl_list_entries_from_rules,
-        build_hello_response, canonical_static_config_param, canonicalize_acl_rules,
-        classify_cluster_subcommand, classify_cluster_subcommand_linear,
+        OutputBufferClassLimit, RDB_DISK_ERROR_WRITE_DENIED, Runtime, ServerState,
+        acl_list_entries_from_rules, build_hello_response, canonical_static_config_param,
+        canonicalize_acl_rules, classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
-        client_wrong_subcommand_arity, digest_bytes, parse_acl_key_selector, parse_aof_history_seq,
-        sha256_hex_bytes, store_to_rdb_entries, wrong_arity_error,
+        client_wrong_subcommand_arity, config_set_failed, digest_bytes, parse_acl_key_selector,
+        parse_aof_history_seq, sha256_hex_bytes, store_to_rdb_entries, wrong_arity_error,
     };
 
     fn command(parts: &[&[u8]]) -> RespFrame {
@@ -28185,25 +28339,113 @@ mod tests {
     fn config_set_client_output_buffer_limit_updates_live_runtime_state() {
         let mut rt = Runtime::default_strict();
 
+        // Strict default is redis-exact: normal unlimited, slave/pubsub capped.
         assert_eq!(
             rt.execute_frame(
-                command(&[b"CONFIG", b"SET", b"client-output-buffer-limit", b"1024"]),
+                command(&[b"CONFIG", b"GET", b"client-output-buffer-limit"]),
                 0
             ),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"client-output-buffer-limit".to_vec())),
+                RespFrame::BulkString(Some(
+                    b"normal 0 0 0 slave 268435456 67108864 60 pubsub 33554432 8388608 60".to_vec()
+                )),
+            ]))
+        );
+
+        // Per-class SET (single call may update several classes), human sizes.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"client-output-buffer-limit",
+                    b"normal 1mb 512kb 10 pubsub 0 0 0",
+                ]),
+                1
+            ),
             RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.server.client_output_buffer_limits.normal,
+            OutputBufferClassLimit {
+                hard: 1024 * 1024,
+                soft: 512 * 1024,
+                soft_seconds: 10
+            }
+        );
+        assert_eq!(rt.server.client_output_buffer_limits.pubsub.hard, 0);
+        // Unmentioned class (slave) is preserved.
+        assert_eq!(
+            rt.server.client_output_buffer_limits.slave.hard,
+            256 * 1024 * 1024
         );
 
         assert_eq!(
             rt.execute_frame(
                 command(&[b"CONFIG", b"GET", b"client-output-buffer-limit"]),
-                1
+                2
             ),
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"client-output-buffer-limit".to_vec())),
-                RespFrame::BulkString(Some(b"1024".to_vec())),
+                RespFrame::BulkString(Some(
+                    b"normal 1048576 524288 10 slave 268435456 67108864 60 pubsub 0 0 0".to_vec()
+                )),
             ]))
         );
-        assert_eq!(rt.server.output_buffer_limit, 1024);
+
+        // A bare number is a syntax error (wrong arg count), matching redis.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"client-output-buffer-limit", b"1024"]),
+                3
+            ),
+            config_set_failed(
+                "client-output-buffer-limit",
+                "Wrong number of arguments in buffer limit configuration."
+            )
+        );
+        // An invalid class is rejected.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"client-output-buffer-limit", b"foo 1mb 1mb 1"]),
+                4
+            ),
+            config_set_failed(
+                "client-output-buffer-limit",
+                "Invalid client class specified in buffer limit configuration."
+            )
+        );
+    }
+
+    #[test]
+    fn client_output_buffer_limit_mode_split_strict_redis_exact_hardened_caps_normal() {
+        // (frankenredis-8sb0l) Compatibility Doctrine mode-split: strict mode is
+        // redis-exact (normal class unlimited, hard 0); hardened mode reinstalls
+        // fr's 256 MiB OOM guard for normal clients. slave/pubsub are identical
+        // across modes (redis defaults).
+        let strict = Runtime::default_strict();
+        assert_eq!(strict.server.client_output_buffer_limits.normal.hard, 0);
+        // An unknown/normal client_id is unlimited in strict → never disconnected.
+        assert_eq!(strict.effective_output_hard_limit(99_999), usize::MAX);
+
+        let hardened = Runtime::default_hardened();
+        assert_eq!(
+            hardened.server.client_output_buffer_limits.normal.hard,
+            256 * 1024 * 1024
+        );
+        assert_eq!(hardened.effective_output_hard_limit(99_999), 256 * 1024 * 1024);
+
+        for rt in [&strict, &hardened] {
+            assert_eq!(
+                rt.server.client_output_buffer_limits.slave.hard,
+                256 * 1024 * 1024
+            );
+            assert_eq!(
+                rt.server.client_output_buffer_limits.pubsub.hard,
+                32 * 1024 * 1024
+            );
+        }
     }
 
     #[test]

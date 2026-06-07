@@ -1558,7 +1558,7 @@ fn process_buffered_frames(
         }
 
         // Check write buffer limit before processing more frames.
-        if conn.write_buf.len() > runtime.server.output_buffer_limit {
+        if conn.write_buf.len() > runtime.effective_output_hard_limit(conn.session.client_id) {
             eprintln!("warn: client write buffer exceeded limit, disconnecting");
             conn.closing = true;
             closing_tokens.insert(token);
@@ -1619,7 +1619,7 @@ fn process_buffered_frames(
                             consumed_total += consumed;
                             if disconnect_if_output_limit_exceeded(
                                 conn,
-                                runtime.server.output_buffer_limit,
+                                runtime.effective_output_hard_limit(conn.session.client_id),
                                 closing_tokens,
                                 token,
                             ) {
@@ -1707,7 +1707,7 @@ fn process_buffered_frames(
                     consumed_total += consumed;
                     if disconnect_if_output_limit_exceeded(
                         conn,
-                        runtime.server.output_buffer_limit,
+                        runtime.effective_output_hard_limit(conn.session.client_id),
                         closing_tokens,
                         token,
                     ) {
@@ -1743,7 +1743,7 @@ fn process_buffered_frames(
                             consumed_total += consumed;
                             if disconnect_if_output_limit_exceeded(
                                 conn,
-                                runtime.server.output_buffer_limit,
+                                runtime.effective_output_hard_limit(conn.session.client_id),
                                 closing_tokens,
                                 token,
                             ) {
@@ -1818,7 +1818,7 @@ fn process_buffered_frames(
                     ProcessArgvAction::BreakWithoutConsume => break,
                 }
 
-                if conn.write_buf.len() > runtime.server.output_buffer_limit {
+                if conn.write_buf.len() > runtime.effective_output_hard_limit(conn.session.client_id) {
                     eprintln!("warn: client write buffer exceeded limit, disconnecting");
                     conn.closing = true;
                     closing_tokens.insert(token);
@@ -2585,7 +2585,7 @@ fn drain_replica_stream(
                     connection.write_buf.extend_from_slice(&follow_up);
                     validate_replica_write_buffer_limit(
                         connection,
-                        runtime.server.output_buffer_limit,
+                        runtime.replica_link_output_hard_limit(),
                     )?;
                 }
                 frame_index = frame_index.saturating_add(1);
@@ -2615,7 +2615,7 @@ fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState
     if let Some(connection) = replica_sync.connection.as_mut() {
         queue_replica_periodic_ack(runtime, connection, now_ms);
         if let Err(err) =
-            validate_replica_write_buffer_limit(connection, runtime.server.output_buffer_limit)
+            validate_replica_write_buffer_limit(connection, runtime.replica_link_output_hard_limit())
         {
             replica_sync.connection = None;
             replica_sync.schedule_retry(now_ms);
@@ -3657,7 +3657,7 @@ fn deliver_monitor_output(
             continue; // don't buffer output for dying connections
         }
         conn.write_buf.extend_from_slice(&line);
-        if conn.write_buf.len() > runtime.server.output_buffer_limit {
+        if conn.write_buf.len() > runtime.effective_output_hard_limit(conn.session.client_id) {
             eprintln!(
                 "warn: client write buffer exceeded limit during monitor delivery, disconnecting"
             );
@@ -3720,7 +3720,7 @@ fn deliver_pubsub_messages(
             }
         }
 
-        if conn.write_buf.len() > runtime.server.output_buffer_limit {
+        if conn.write_buf.len() > runtime.effective_output_hard_limit(conn.session.client_id) {
             eprintln!(
                 "warn: client write buffer exceeded limit during pubsub delivery, disconnecting"
             );
@@ -5655,7 +5655,9 @@ mod tests {
         });
 
         let mut runtime = Runtime::default_strict();
-        runtime.server.output_buffer_limit = 0;
+        // A tiny slave-class hard limit forces the replica-link write guard to
+        // trip (0 would mean unlimited under redis semantics). (frankenredis-8sb0l)
+        runtime.server.client_output_buffer_limits.slave.hard = 1;
         let stream = StdTcpStream::connect(addr).expect("connect primary");
         stream
             .set_read_timeout(Some(std::time::Duration::from_millis(50)))
@@ -7060,7 +7062,9 @@ mod tests {
 
         let mut runtime = Runtime::default_strict();
         let ts = 0;
-        runtime.server.output_buffer_limit = 0;
+        // A tiny normal-class hard limit forces the per-client write guard to
+        // trip after the PING reply (0 would mean unlimited). (frankenredis-8sb0l)
+        runtime.server.client_output_buffer_limits.normal.hard = 1;
         let session = runtime.new_session();
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
