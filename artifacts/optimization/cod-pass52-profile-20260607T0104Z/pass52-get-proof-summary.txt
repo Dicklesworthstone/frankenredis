@@ -1,0 +1,54 @@
+Pass 52 kept lever: borrowed exact GET fast path.
+
+Profile-backed target:
+- Current main GET P16/1M: 308015.08 ops/sec, p50 2243us, p95 4005us, p99 5071us.
+- Top flat profile samples: refresh_store_runtime_info_context 7.51%, __memcmp_avx2_movbe 6.02%, vdso/clock 4.81%, dispatch_with_client_context 4.69%, execute_frame_internal 3.70%, Store::drop_if_expired 3.64%, SplitWhitespace::try_fold 2.95%, parse_command_args_borrowed_into 2.28%, command_table_index 2.27%.
+
+Behavior proof:
+- RCH cargo check -p fr-runtime -p fr-server --all-targets: pass.
+- RCH cargo test -p fr-runtime plain_get_borrowed_fast_path_matches_generic_hit_miss_stats -- --nocapture: pass.
+- RCH cargo clippy -p fr-runtime -p fr-server --all-targets -- -D warnings: pass.
+- RCH cargo build --release -p fr-server -p fr-bench: pass.
+- cargo fmt -p fr-runtime -- --check: pass.
+- cargo fmt -p fr-server -- --check: pass.
+- git diff --check: pass after committing clean text artifacts only.
+
+Golden output proof:
+- Raw TCP transcript covered SET, GET hit, GET miss, wrong-type GET after LPUSH, and QUIT.
+- Input SHA-256: f091358dcdd24332e1c37ac7fdf5df7bc91f24fa1d27b8c7386af67e067259cf.
+- Baseline output SHA-256: b79d023e586718789382bba51c903392bb6ac4aed9dfa1405cd97bc151fe87ef.
+- Candidate output SHA-256: b79d023e586718789382bba51c903392bb6ac4aed9dfa1405cd97bc151fe87ef.
+- Output bytes: 94 baseline, 94 candidate; cmp passed.
+
+Isomorphism:
+- Ordering preserved: exact GET still runs active-expire before store read and propagates lazy expirations before returning the reply.
+- Tie-breaking unchanged: no ordered/ranked collection behavior touched.
+- Floating-point: N/A.
+- RNG: N/A.
+- Session and stats parity: focused runtime test compares reply bytes, command count, read count, keyspace hit/miss counters, last command name, and argv length sum against generic dispatch.
+
+Benchmarks:
+- Paired GET P16/300k baseline: 0.9642s +/- 0.0380.
+- Paired GET P16/300k candidate: 0.7272s +/- 0.0290.
+- Result: candidate 1.33x +/- 0.07 faster.
+- Reversed GET P16/1M candidate: 1.791s +/- 0.181.
+- Reversed GET P16/1M baseline: 2.521s +/- 0.140.
+- Result: candidate 1.41x +/- 0.16 faster.
+- Score: 10.0 = Impact 4 x Confidence 5 / Effort 2.
+
+Rebase confirmation:
+- Remote advanced to parent 383df997b with strict-mode bulk/multibulk cap changes before push.
+- Rebuilt parent and candidate release binaries via RCH, using a clean detached baseline worktree.
+- Rebased raw TCP golden input SHA-256: f091358dcdd24332e1c37ac7fdf5df7bc91f24fa1d27b8c7386af67e067259cf.
+- Rebased baseline/candidate output SHA-256: b79d023e586718789382bba51c903392bb6ac4aed9dfa1405cd97bc151fe87ef, 94 bytes each, cmp passed.
+- Rebased paired GET P16/300k baseline: 1.002s +/- 0.084.
+- Rebased paired GET P16/300k candidate: 0.7306s +/- 0.0447.
+- Result: candidate 1.37x +/- 0.14 faster.
+- Rebased reversed GET P16/1M candidate: 1.827s +/- 0.218.
+- Rebased reversed GET P16/1M baseline: 2.420s +/- 0.033.
+- Result: candidate 1.32x +/- 0.16 faster.
+
+Post-keep reprofile:
+- Candidate GET P16/1M: 688261.81 ops/sec, p50 1108us, p95 1469us, p99 1841us.
+- Top residual flat samples: mi_theap_malloc_aligned 6.93%, refresh_store_runtime_info_context 6.74%, vdso/clock 4.62%, Value::string_owned 3.58%, _mi_page_malloc_zero 1.96%, parse_command_args_borrowed_into 1.83%, execute_plain_get_borrowed 1.36%, process_buffered_frames 1.08%, RespFrame::encode_into 1.05%.
+- Next route: read-reply allocator/string-copy primitive, or dirty-bit runtime-info/time-read primitive if fresh profile keeps those higher than parser costs.

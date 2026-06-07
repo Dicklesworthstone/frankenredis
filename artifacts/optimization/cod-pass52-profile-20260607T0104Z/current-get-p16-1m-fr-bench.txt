@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:63964
+workload: get
+clients: 50  requests: 1000000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 3246 ms  throughput: 308015.08 ops/sec
+latency(us): min=70 p50=2243 p95=4005 p99=5071 p999=10871 max=22479 mean=2455.85
+bytes: sent=47888990 received=9000000 key_prefix=pass52getprofile

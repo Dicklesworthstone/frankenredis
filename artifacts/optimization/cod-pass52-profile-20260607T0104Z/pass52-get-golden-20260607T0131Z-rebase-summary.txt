@@ -1,0 +1,6 @@
+golden_cmp=0
+input_bytes=142
+baseline_bytes=94
+candidate_bytes=94
+baseline_replies=7
+candidate_replies=7

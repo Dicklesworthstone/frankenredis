@@ -262,6 +262,10 @@ fn plain_set_owned_argv(key: &[u8], value: &[u8]) -> Vec<Vec<u8>> {
     vec![b"SET".to_vec(), key.to_vec(), value.to_vec()]
 }
 
+fn plain_get_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"GET".to_vec(), key.to_vec()]
+}
+
 fn wrong_arity_error(command: &'static str) -> RespFrame {
     RespFrame::Error(format!(
         "ERR wrong number of arguments for '{}' command",
@@ -5642,7 +5646,7 @@ impl Runtime {
             return false;
         }
         if self.session.requires_auth(&self.server.auth_state)
-            || !self.current_acl_allows_plain_set()
+            || !self.current_acl_allows_default_key_command()
         {
             return false;
         }
@@ -5679,7 +5683,104 @@ impl Runtime {
         true
     }
 
-    fn current_acl_allows_plain_set(&self) -> bool {
+    pub fn execute_plain_get_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
+        if !self.can_execute_plain_get_borrowed(key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("get");
+        self.session.last_argv_len_sum = b"GET".len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let result = self.server.store.get(key, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match result {
+            Ok(value) => RespFrame::BulkString(value),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_get_borrowed_metrics(key, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_reads_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn can_execute_plain_get_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < b"GET".len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        if self.session.requires_auth(&self.server.auth_state)
+            || !self.current_acl_allows_default_key_command()
+        {
+            return false;
+        }
+        if self.session.selected_db != 0
+            || self.session.client_no_touch
+            || self.session.transaction_state.in_transaction
+            || self.session.transaction_state.executing_exec
+            || self.is_in_subscription_mode()
+            || self.is_client_paused(now_ms)
+            || self.server.maxmemory_bytes != 0
+            || self.server.aof_path.is_some()
+            || !matches!(
+                self.server.replication_runtime_state.role,
+                ReplicationRoleState::Master
+            )
+            || self
+                .server
+                .replication_runtime_state
+                .any_replica_ever_connected
+            || !self.server.replication_runtime_state.replicas.is_empty()
+            || !self.server.blocked_client_ids.is_empty()
+            || self.server.store.notify_keyspace_events != 0
+            || !self.server.store.keyspace_notifications.is_empty()
+            || !self.server.client_tracking_observed_keys.is_empty()
+            || !self.server.client_tracking_bcast_clients.is_empty()
+            || self.should_record_client_tracking_keys()
+            || !self.server.monitor_clients.is_empty()
+            || self.server.store.script_nesting_level != 0
+        {
+            return false;
+        }
+        true
+    }
+
+    fn current_acl_allows_default_key_command(&self) -> bool {
         let Some(user) = self
             .server
             .auth_state
@@ -5738,6 +5839,61 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'SET' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    fn record_plain_get_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_get_owned_argv(key));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_get_owned_argv(key));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_with_kind("get", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_get_owned_argv(key));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'GET' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -16358,6 +16514,58 @@ mod tests {
             Some(RespFrame::SimpleString("OK".to_string()))
         );
         assert!(rt.last_eviction_loop_result().is_none());
+    }
+
+    #[test]
+    fn plain_get_borrowed_fast_path_matches_generic_hit_miss_stats() {
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+
+        assert_eq!(
+            fast.execute_frame(command(&[b"SET", b"k", b"v"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            generic.execute_frame(command(&[b"SET", b"k", b"v"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let fast_hit = fast
+            .execute_plain_get_borrowed(b"k", 2)
+            .expect("default GET should take borrowed fast path");
+        let generic_hit = generic.execute_frame(command(&[b"GET", b"k"]), 2);
+        assert_eq!(fast_hit, generic_hit);
+
+        let fast_miss = fast
+            .execute_plain_get_borrowed(b"missing", 3)
+            .expect("default missing GET should take borrowed fast path");
+        let generic_miss = generic.execute_frame(command(&[b"GET", b"missing"]), 3);
+        assert_eq!(fast_miss, generic_miss);
+
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_reads_processed,
+            generic.server.store.stat_total_reads_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            fast.session.last_command_name,
+            generic.session.last_command_name
+        );
+        assert_eq!(
+            fast.session.last_argv_len_sum,
+            generic.session.last_argv_len_sum
+        );
     }
 
     #[test]

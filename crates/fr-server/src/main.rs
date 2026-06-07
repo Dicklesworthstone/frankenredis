@@ -1661,7 +1661,15 @@ fn process_buffered_frames(
                         let argv_len = borrowed_args.len();
                         if matches!(parsed.kind, BorrowedCommandArgsKind::Arguments) && argv_len > 0
                         {
-                            if let Some((key, value)) = borrowed_plain_set_args(&borrowed_args)
+                            if let Some(key) = borrowed_plain_get_args(&borrowed_args)
+                                && let Some(response) = runtime.execute_plain_get_borrowed(key, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
+                            } else if let Some((key, value)) =
+                                borrowed_plain_set_args(&borrowed_args)
                                 && let Some(response) =
                                     runtime.execute_plain_set_borrowed(key, value, ts)
                             {
@@ -1850,6 +1858,13 @@ enum BorrowedMultibulkAction {
         consumed: usize,
         response: RespFrame,
     },
+}
+
+fn borrowed_plain_get_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
+    match borrowed_args {
+        [command, key] if command.eq_ignore_ascii_case(b"GET") => Some(*key),
+        _ => None,
+    }
 }
 
 fn borrowed_plain_set_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
@@ -5709,7 +5724,10 @@ mod tests {
         assert_eq!(args, vec![b"PING".to_vec(), b"PING".to_vec()]);
         // A CR inside a quoted run is preserved, not treated as a separator.
         let args = fr_server::split_inline_args(b"SET qk \"a\rb\"").expect("parse quoted cr");
-        assert_eq!(args, vec![b"SET".to_vec(), b"qk".to_vec(), b"a\rb".to_vec()]);
+        assert_eq!(
+            args,
+            vec![b"SET".to_vec(), b"qk".to_vec(), b"a\rb".to_vec()]
+        );
     }
 
     #[test]
