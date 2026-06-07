@@ -494,7 +494,7 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("loglevel", "notice"),
     ("logfile", ""),
     ("databases", "16"),
-    ("always-show-logo", "yes"),
+    ("always-show-logo", "no"),
     ("set-proc-title", "yes"),
     ("proc-title-template", "{title} {laddr} {server-mode}"),
     // Memory
@@ -12351,12 +12351,19 @@ impl Runtime {
                 {
                     continue;
                 }
-                if filter_laddr.is_some() {
-                    // Sessions don't currently track their listener's
-                    // local address; LADDR filters never match. This
-                    // mirrors upstream behavior for non-matching values
-                    // (returns 0). (br-frankenredis-clkilladdr)
-                    continue;
+                if let Some(laddr) = &filter_laddr {
+                    // Every fr client reports the same local address —
+                    // 127.0.0.1:<server_port> — in CLIENT INFO/LIST (see
+                    // client_info_line_for_session). A LADDR filter therefore
+                    // matches all clients when it equals that reported string
+                    // and none otherwise, mirroring the laddr clients actually
+                    // advertise (previously LADDR matched nothing, so CLIENT
+                    // KILL LADDR <real-laddr> killed 0 vs upstream's all).
+                    // (br-frankenredis-clkilladdr / frankenredis-2n10q)
+                    let reported = format!("127.0.0.1:{}", self.server.store.server_port);
+                    if laddr.as_str() != reported {
+                        continue;
+                    }
                 }
                 targets.push(session.client_id);
             }
@@ -25987,7 +25994,9 @@ mod tests {
             rt.execute_frame(command(&[b"CONFIG", b"GET", b"always-show-logo"]), 0),
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"always-show-logo".to_vec())),
-                RespFrame::BulkString(Some(b"yes".to_vec())),
+                // Upstream default is `no` (createBoolConfig default 0); the
+                // value is immutable so this default is the only observable form.
+                RespFrame::BulkString(Some(b"no".to_vec())),
             ]))
         );
         assert_eq!(
