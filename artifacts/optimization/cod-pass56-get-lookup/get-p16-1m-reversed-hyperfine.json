@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "/tmp/codex-fr-xssbh-candidate-clean-target/release-perf/fr-bench --host 127.0.0.1 --port 16458 --clients 50 --requests 1000000 --pipeline 16 --workload get --keyspace 10000 --datasize 3 --json-out artifacts/optimization/cod-pass56-get-lookup/candidate-get-p16-1m-last.json --key-prefix xssbh:get:rev",
+      "mean": 1.59342443452,
+      "stddev": 0.06432465098159049,
+      "median": 1.5827826210199998,
+      "user": 0.72613748,
+      "system": 1.5194699799999998,
+      "min": 1.50416234302,
+      "max": 1.68331756702,
+      "times": [
+        1.68331756702,
+        1.63048906402,
+        1.6779110820199998,
+        1.52408716802,
+        1.50416234302,
+        1.5738463430199998,
+        1.64955839702,
+        1.53394759102,
+        1.56520589102,
+        1.59171889902
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/tmp/codex-fr-xssbh-baseline-target/release-perf/fr-bench --host 127.0.0.1 --port 16457 --clients 50 --requests 1000000 --pipeline 16 --workload get --keyspace 10000 --datasize 3 --json-out artifacts/optimization/cod-pass56-get-lookup/baseline-get-p16-1m-last.json --key-prefix xssbh:get:rev",
+      "mean": 1.59694004182,
+      "stddev": 0.1458254677132804,
+      "median": 1.53654225202,
+      "user": 0.75341608,
+      "system": 1.5602956799999999,
+      "min": 1.50337970902,
+      "max": 1.9887718540200001,
+      "times": [
+        1.50337970902,
+        1.5211760910199998,
+        1.5139773100199998,
+        1.57261189402,
+        1.52753650202,
+        1.54554800202,
+        1.64198910302,
+        1.9887718540200001,
+        1.63020824002,
+        1.5242017130199998
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

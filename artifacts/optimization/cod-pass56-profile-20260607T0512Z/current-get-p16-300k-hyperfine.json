@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "/tmp/codex-fr-pass56-profile-target/release-perf/fr-bench --host 127.0.0.1 --port 16456 --clients 50 --requests 300000 --pipeline 16 --workload get --keyspace 10000 --datasize 3 --json-out artifacts/optimization/cod-pass56-profile-20260607T0512Z/current-get-p16-300k-last.json --key-prefix pass56:get",
+      "mean": 0.8791634673657143,
+      "stddev": 0.08156181651872982,
+      "median": 0.89239460508,
+      "user": 0.21617994000000001,
+      "system": 0.36421518857142854,
+      "min": 0.75144222208,
+      "max": 0.97665434508,
+      "times": [
+        0.89239460508,
+        0.97665434508,
+        0.9103698760800001,
+        0.86642764208,
+        0.75144222208,
+        0.7984759140800001,
+        0.9583796670800001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

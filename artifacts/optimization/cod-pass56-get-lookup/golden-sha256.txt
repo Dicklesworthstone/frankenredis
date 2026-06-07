@@ -1,0 +1,2 @@
+bfc4a4b15cf9000ca55cb2a9c9988c90aab1bd45a5ed2aebb4cb3f385174f4a9  artifacts/optimization/cod-pass56-get-lookup/baseline-golden.resp
+bfc4a4b15cf9000ca55cb2a9c9988c90aab1bd45a5ed2aebb4cb3f385174f4a9  artifacts/optimization/cod-pass56-get-lookup/candidate-golden.resp
