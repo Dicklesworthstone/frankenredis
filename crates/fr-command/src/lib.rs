@@ -4497,7 +4497,13 @@ fn lset_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
         Some(fr_store::ValueType::List) => {}
         Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
     }
-    let index = parse_i64_arg(&argv[2])?;
+    // (frankenredis-4zv7a) Upstream t_list.c::listTypeReplaceAtIndex declares
+    // its index parameter as a 32-bit `int`, so lsetCommand's parsed 64-bit
+    // `long` index is silently truncated to 32 bits before the seek — e.g.
+    // LSET at i64::MAX targets index -1 (the last element) and i64::MIN / 2^32
+    // target index 0. Mirror that truncation for byte-exact parity; LINDEX et al
+    // take a 64-bit index upstream and are unaffected.
+    let index = i64::from(parse_i64_arg(&argv[2])? as i32);
     store.lset(&argv[1], index, argv[3].clone(), now_ms)?;
     Ok(RespFrame::SimpleString("OK".to_string()))
 }
@@ -31891,6 +31897,98 @@ mod tests {
         )
         .expect("happy path");
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn lset_truncates_index_to_i32_like_upstream() {
+        // (frankenredis-4zv7a) Upstream listTypeReplaceAtIndex takes a 32-bit
+        // `int` index, so LSET silently truncates its parsed 64-bit index to 32
+        // bits: i64::MAX -> -1 (last element), i64::MIN / 2^32 -> 0 (first), and
+        // a value whose low 32 bits land out of [-len, len) is still rejected.
+        let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        let reset = |store: &mut Store| {
+            dispatch_argv(&argv(&["DEL", "l"]), store, 0).unwrap();
+            dispatch_argv(&argv(&["RPUSH", "l", "a", "b", "c", "d"]), store, 0).unwrap();
+        };
+        let lrange = |store: &mut Store| -> Vec<Vec<u8>> {
+            match dispatch_argv(&argv(&["LRANGE", "l", "0", "-1"]), store, 0).unwrap() {
+                RespFrame::Array(Some(items)) => items
+                    .into_iter()
+                    .map(|f| match f {
+                        RespFrame::BulkString(Some(b)) => b,
+                        other => panic!("got {other:?}"),
+                    })
+                    .collect(),
+                other => panic!("got {other:?}"),
+            }
+        };
+        let mut store = Store::new();
+
+        // i64::MAX truncates to -1 -> the LAST element.
+        reset(&mut store);
+        assert_eq!(
+            dispatch_argv(
+                &argv(&["LSET", "l", "9223372036854775807", "X"]),
+                &mut store,
+                0
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            lrange(&mut store),
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"X".to_vec()]
+        );
+
+        // i64::MIN truncates to 0 -> the FIRST element.
+        reset(&mut store);
+        dispatch_argv(
+            &argv(&["LSET", "l", "-9223372036854775808", "Y"]),
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            lrange(&mut store),
+            vec![b"Y".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]
+        );
+
+        // 2^32 truncates to 0 -> the FIRST element.
+        reset(&mut store);
+        dispatch_argv(&argv(&["LSET", "l", "4294967296", "Z"]), &mut store, 0).unwrap();
+        assert_eq!(
+            lrange(&mut store),
+            vec![b"Z".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]
+        );
+
+        // (2^63-5) truncates to -5 -> out of range on a 4-element list.
+        reset(&mut store);
+        let err = dispatch_argv(
+            &argv(&["LSET", "l", "9223372036854775803", "W"]),
+            &mut store,
+            0,
+        )
+        .expect_err("low-32-bits out of range");
+        assert!(
+            matches!(
+                err,
+                CommandError::Store(fr_store::StoreError::IndexOutOfRange)
+            ),
+            "got {err:?}"
+        );
+
+        // A plain out-of-range index (4) still errors.
+        reset(&mut store);
+        let err = dispatch_argv(&argv(&["LSET", "l", "4", "V"]), &mut store, 0).expect_err("oob");
+        assert!(
+            matches!(
+                err,
+                CommandError::Store(fr_store::StoreError::IndexOutOfRange)
+            ),
+            "got {err:?}"
+        );
     }
 
     #[test]
