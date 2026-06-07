@@ -6560,6 +6560,17 @@ fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     if argv.len() < 6 {
         return Err(CommandError::WrongArity("GEORADIUS"));
     }
+    // (frankenredis-geowrongtype) Upstream geo.c::georadiusGeneric runs
+    // lookupKeyRead + checkType(OBJ_ZSET) BEFORE extracting the coords/radius/
+    // unit or parsing the option tail, so a wrong-type key surfaces WRONGTYPE
+    // ahead of any 'need numeric radius' / 'unsupported unit' / 'radius cannot
+    // be negative' option error. A missing key still falls through to option
+    // parsing (upstream proceeds with a NULL zobj and replies empty at the end);
+    // the no-stat peek leaves the valid-path keyspace hit to geo_search_core.
+    match store.peek_value_type(&argv[1], now_ms) {
+        None | Some(fr_store::ValueType::ZSet) => {}
+        Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
+    }
     let center_lon = match parse_geo_f64(&argv[2]) {
         Ok(v) => v,
         Err(e) => return Ok(e),
@@ -6720,6 +6731,14 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // (br-frankenredis-geosearcharity)
     if argv.len() < 7 {
         return Err(CommandError::WrongArity("GEOSEARCH"));
+    }
+    // (frankenredis-geowrongtype) Upstream geo.c::geoSearchCommand type-checks
+    // the key (checkType OBJ_ZSET) before parsing FROM.../BY... and the option
+    // tail, so a wrong-type key surfaces WRONGTYPE ahead of any shape/unit/count
+    // option error; a missing key still falls through (replies empty later).
+    match store.peek_value_type(&argv[1], now_ms) {
+        None | Some(fr_store::ValueType::ZSet) => {}
+        Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
     }
     let mut i = 2;
     let mut center_lon: Option<f64> = None;
@@ -7007,6 +7026,14 @@ fn geosearchstore(
     }
     let dest = argv[1].clone();
     let source = argv[2].clone();
+    // (frankenredis-geowrongtype) Upstream geo.c::georadiusGeneric (the
+    // GEOSEARCHSTORE path) type-checks the SOURCE key (argv[2]) before parsing
+    // FROM.../BY... and the option tail, so a wrong-type source surfaces
+    // WRONGTYPE ahead of any shape/unit/count option error.
+    match store.peek_value_type(&source, now_ms) {
+        None | Some(fr_store::ValueType::ZSet) => {}
+        Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
+    }
     let mut storedist = false;
 
     // Check for STOREDIST flag
@@ -53509,6 +53536,89 @@ mod tests {
         } else {
             panic!("expected array, got {out:?}"); // ubs:ignore — AI triage
         }
+    }
+
+    #[test]
+    fn geo_read_commands_type_check_before_option_parse() {
+        // (frankenredis-i9uq4) Upstream geo.c type-checks the (source) key before
+        // parsing the shape/unit/radius/count options, so a wrong-type key yields
+        // WRONGTYPE ahead of any option error. A missing key still falls through
+        // to option parsing (matches the NULL-zobj upstream path).
+        let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        let is_wrongtype = |r: Result<RespFrame, CommandError>| -> bool {
+            matches!(r, Err(CommandError::Store(fr_store::StoreError::WrongType)))
+        };
+        let mut store = Store::new();
+        dispatch_argv(&argv(&["RPUSH", "l", "a", "b"]), &mut store, 0).unwrap();
+
+        // Wrong-type key + garbage options -> WRONGTYPE (not the option error).
+        assert!(is_wrongtype(dispatch_argv(
+            &argv(&["GEORADIUS", "l", "15", "37", "-1", "X", "COUNT", "-1"]),
+            &mut store,
+            0
+        )));
+        assert!(is_wrongtype(dispatch_argv(
+            &argv(&[
+                "GEOSEARCH",
+                "l",
+                "FROMLONLAT",
+                "15",
+                "37",
+                "BYBOX",
+                "-1",
+                "-1",
+                "X"
+            ]),
+            &mut store,
+            0
+        )));
+        assert!(is_wrongtype(dispatch_argv(
+            &argv(&[
+                "GEOSEARCHSTORE",
+                "d",
+                "l",
+                "FROMLONLAT",
+                "15",
+                "37",
+                "BYRADIUS",
+                "-1",
+                "X"
+            ]),
+            &mut store,
+            0
+        )));
+
+        // Missing key still parses options: a bad radius unit still errors.
+        let missing = dispatch_argv(
+            &argv(&["GEORADIUS", "nope", "15", "37", "100", "X"]),
+            &mut store,
+            0,
+        );
+        assert!(
+            matches!(missing, Ok(RespFrame::Error(ref s)) if s.contains("unsupported unit")),
+            "missing key must still parse options, got {missing:?}"
+        );
+        // Missing key + valid options -> empty array.
+        let empty = dispatch_argv(
+            &argv(&[
+                "GEOSEARCH",
+                "nope",
+                "FROMLONLAT",
+                "15",
+                "37",
+                "BYRADIUS",
+                "100",
+                "km",
+            ]),
+            &mut store,
+            0,
+        );
+        assert!(
+            matches!(empty, Ok(RespFrame::Array(Some(ref v))) if v.is_empty()),
+            "got {empty:?}"
+        );
     }
 
     #[test]
