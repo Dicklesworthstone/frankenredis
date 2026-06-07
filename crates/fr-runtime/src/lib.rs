@@ -270,6 +270,13 @@ fn plain_hget_owned_argv(key: &[u8], field: &[u8]) -> Vec<Vec<u8>> {
     vec![b"HGET".to_vec(), key.to_vec(), field.to_vec()]
 }
 
+fn plain_mget_owned_argv(keys: &[&[u8]]) -> Vec<Vec<u8>> {
+    let mut argv = Vec::with_capacity(keys.len() + 1);
+    argv.push(b"MGET".to_vec());
+    argv.extend(keys.iter().map(|k| k.to_vec()));
+    argv
+}
+
 fn wrong_arity_error(command: &'static str) -> RespFrame {
     RespFrame::Error(format!(
         "ERR wrong number of arguments for '{}' command",
@@ -6070,6 +6077,117 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'HGET' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    fn can_execute_plain_mget_borrowed(&mut self, keys: &[&[u8]], now_ms: u64) -> bool {
+        // argv is [MGET, key, key, ...]; the gate bounds the whole multibulk.
+        if keys.is_empty()
+            || self.policy.gate.max_array_len < keys.len().saturating_add(1)
+            || self.policy.gate.max_bulk_len < b"MGET".len()
+            || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Conservative borrowed runtime fast path for `MGET key [key ...]`: mirrors
+    /// `execute_plain_get_borrowed` for the multi-key batch read (all keys
+    /// borrowed from the read buffer, generic argv materialization + dispatch
+    /// skipped). MGET never errors per key (wrong-type / missing both yield a
+    /// nil element via `Store::mget`), so there is no error-stat path. Returns
+    /// None (fall back to the generic path) on any disabling state.
+    /// (frankenredis-uz39v)
+    pub fn execute_plain_mget_borrowed(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_mget_borrowed(keys, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("mget");
+        self.session.last_argv_len_sum =
+            b"MGET".len() + keys.iter().map(|k| k.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let values = self.server.store.mget(keys, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = RespFrame::Array(Some(
+            values.into_iter().map(RespFrame::BulkString).collect(),
+        ));
+
+        self.record_plain_mget_borrowed_metrics(keys, elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_reads_processed += 1;
+
+        Some(reply)
+    }
+
+    fn record_plain_mget_borrowed_metrics(
+        &mut self,
+        keys: &[&[u8]],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_mget_owned_argv(keys));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_mget_owned_argv(keys));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            // MGET never returns an error reply.
+            self.server.store.record_command_histogram_with_kind(
+                "mget",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_mget_owned_argv(keys));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'MGET' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -16964,6 +17082,80 @@ mod tests {
         // subscription mode
         rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 4);
         assert!(rt.execute_plain_hget_borrowed(b"h", b"f", 5).is_none());
+    }
+
+    #[test]
+    fn plain_mget_borrowed_fast_path_matches_generic_mixed_stats() {
+        // (frankenredis-uz39v) MGET borrowed fast path must be observably
+        // identical to generic dispatch: same array reply across present /
+        // missing / wrong-type keys (each missing or wrong-type -> nil), and the
+        // same stat/session deltas.
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"a", b"1"]), 1);
+            rt.execute_frame(command(&[b"SET", b"b", b"2"]), 1);
+            rt.execute_frame(command(&[b"LPUSH", b"l", b"x"]), 1); // wrong type for MGET -> nil
+        }
+
+        let keys: [&[u8]; 4] = [b"a", b"missing", b"b", b"l"];
+        let fast_reply = fast
+            .execute_plain_mget_borrowed(&keys, 2)
+            .expect("default MGET should take borrowed fast path");
+        let generic_reply =
+            generic.execute_frame(command(&[b"MGET", b"a", b"missing", b"b", b"l"]), 2);
+        assert_eq!(fast_reply, generic_reply);
+        // sanity on the shape: [\"1\", nil, \"2\", nil]
+        assert_eq!(
+            fast_reply,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"1".to_vec())),
+                RespFrame::BulkString(None),
+                RespFrame::BulkString(Some(b"2".to_vec())),
+                RespFrame::BulkString(None),
+            ]))
+        );
+
+        // single-key MGET also fast-pathed
+        let one = fast
+            .execute_plain_mget_borrowed(&[b"a"], 3)
+            .expect("single-key MGET should take borrowed fast path");
+        assert_eq!(one, generic.execute_frame(command(&[b"MGET", b"a"]), 3));
+
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_reads_processed,
+            generic.server.store.stat_total_reads_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            fast.session.last_command_name,
+            generic.session.last_command_name
+        );
+        assert_eq!(
+            fast.session.last_argv_len_sum,
+            generic.session.last_argv_len_sum
+        );
+    }
+
+    #[test]
+    fn plain_mget_borrowed_fast_path_disabled_in_non_default_states() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"a", b"1"]), 1);
+        let keys: [&[u8]; 1] = [b"a"];
+        assert!(rt.execute_plain_mget_borrowed(&keys, 2).is_some());
+        rt.execute_frame(command(&[b"MULTI"]), 3);
+        assert!(rt.execute_plain_mget_borrowed(&keys, 4).is_none());
     }
 
     #[test]

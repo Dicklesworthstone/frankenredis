@@ -1686,6 +1686,14 @@ fn process_buffered_frames(
                                     consumed: parsed.consumed,
                                     response,
                                 })
+                            } else if let Some(keys) = borrowed_plain_mget_args(&borrowed_args)
+                                && let Some(response) =
+                                    runtime.execute_plain_mget_borrowed(keys, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
                             } else {
                                 copy_borrowed_argv_into_scratch(&borrowed_args, &mut argv_scratch);
                                 Ok(BorrowedMultibulkAction::Parsed {
@@ -1888,6 +1896,15 @@ fn borrowed_plain_set_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8
 fn borrowed_plain_hget_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
     match borrowed_args {
         [command, key, field] if command.eq_ignore_ascii_case(b"HGET") => Some((*key, *field)),
+        _ => None,
+    }
+}
+
+fn borrowed_plain_mget_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [&'a [u8]]> {
+    match borrowed_args {
+        [command, keys @ ..] if !keys.is_empty() && command.eq_ignore_ascii_case(b"MGET") => {
+            Some(keys)
+        }
         _ => None,
     }
 }
