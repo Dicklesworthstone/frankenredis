@@ -1717,6 +1717,14 @@ fn process_buffered_frames(
                                     consumed: parsed.consumed,
                                     response,
                                 })
+                            } else if let Some(key) = borrowed_plain_scard_args(&borrowed_args)
+                                && let Some(response) =
+                                    runtime.execute_plain_scard_borrowed(key, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
                             } else if let Some((key, start, end)) =
                                 borrowed_plain_getrange_args(&borrowed_args)
                                 && let Some(response) =
@@ -2001,6 +2009,13 @@ fn borrowed_plain_strlen_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [
 fn borrowed_plain_llen_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
     match borrowed_args {
         [command, key] if command.eq_ignore_ascii_case(b"LLEN") => Some(*key),
+        _ => None,
+    }
+}
+
+fn borrowed_plain_scard_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
+    match borrowed_args {
+        [command, key] if command.eq_ignore_ascii_case(b"SCARD") => Some(*key),
         _ => None,
     }
 }
