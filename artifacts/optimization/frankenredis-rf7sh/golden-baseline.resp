@@ -1,0 +1,6 @@
++PONG
++OK
+$5
+value
+$-1
+-ERR Protocol error: expected '$', got '1'

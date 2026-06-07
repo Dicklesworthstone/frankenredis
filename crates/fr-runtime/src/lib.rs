@@ -7345,9 +7345,11 @@ impl Runtime {
 
     /// Conservative borrowed runtime fast path for `SCARD key`: mirrors
     /// `execute_plain_llen_borrowed` (key borrowed, generic argv materialization
-    /// + dispatch skipped). Returns the set cardinality, or a WRONGTYPE error
-    /// reply for a non-set key, exactly like the generic handler. Returns None
-    /// (fall back) on any disabling state. (frankenredis-h8gbc)
+    /// and dispatch skipped).
+    ///
+    /// Returns the set cardinality, or a WRONGTYPE error reply for a non-set key,
+    /// exactly like the generic handler. Returns None (fall back) on any
+    /// disabling state. (frankenredis-h8gbc)
     pub fn execute_plain_scard_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
         if !self.can_execute_plain_scard_borrowed(key, now_ms) {
             return None;

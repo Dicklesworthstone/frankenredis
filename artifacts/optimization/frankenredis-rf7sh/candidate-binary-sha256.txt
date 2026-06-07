@@ -1,0 +1,2 @@
+75f189dcebbd73e76db5a6941ee9c1d3f3b3629e397fc75fcd6e289ab195df82  /tmp/codex-fr-rf7sh-candidate-target/release-perf/frankenredis
+c80f40c833c4acf27057b613e45f6c13e8860ff02ebedca971823e66248fa9b3  /tmp/codex-fr-rf7sh-candidate-target/release-perf/fr-bench

@@ -1,0 +1,2 @@
+8178da50e7685fddbaef1bf8cde80d9834f7c6d5bcace93a6a54cfc563f9e8a9  artifacts/optimization/frankenredis-rf7sh/golden-baseline.resp
+8178da50e7685fddbaef1bf8cde80d9834f7c6d5bcace93a6a54cfc563f9e8a9  artifacts/optimization/frankenredis-rf7sh/golden-candidate.resp

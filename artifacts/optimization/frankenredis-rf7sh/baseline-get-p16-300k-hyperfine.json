@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "/tmp/codex-fr-rf7sh-baseline-target/release-perf/fr-bench --host 127.0.0.1 --port 16459 --clients 50 --requests 300000 --pipeline 16 --workload get --keyspace 10000 --datasize 3 --json-out artifacts/optimization/frankenredis-rf7sh/baseline-get-p16-300k-last.json --key-prefix rf7sh:base:get",
+      "mean": 0.58395562562,
+      "stddev": 0.060321377664023845,
+      "median": 0.5710173228200001,
+      "user": 0.27565649999999997,
+      "system": 0.55901026,
+      "min": 0.4987210418200001,
+      "max": 0.69296320182,
+      "times": [
+        0.5877464198200001,
+        0.57415982982,
+        0.69296320182,
+        0.66031263882,
+        0.5667138368200001,
+        0.55080150782,
+        0.5678748158200001,
+        0.6231523698200001,
+        0.4987210418200001,
+        0.51711059382
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

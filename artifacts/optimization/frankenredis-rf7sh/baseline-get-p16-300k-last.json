@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780855911883,
+  "host": "127.0.0.1",
+  "port": 16459,
+  "workload": "get",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "rf7sh:base:get",
+  "total_time_ms": 502,
+  "ops_per_sec": 597293.9644723099,
+  "bytes_sent": 13766864,
+  "bytes_received": 2700000,
+  "latency_us": {
+    "min": 36,
+    "p50": 1265,
+    "p95": 1697,
+    "p99": 2151,
+    "p999": 2937,
+    "max": 3959,
+    "mean": 1305.6797833333326,
+    "samples": 300000
+  }
+}
