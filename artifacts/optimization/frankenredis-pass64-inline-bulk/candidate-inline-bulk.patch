@@ -1,0 +1,309 @@
+diff --git a/crates/fr-command/src/lua_eval.rs b/crates/fr-command/src/lua_eval.rs
+index 2a163c4cf..04f2f1156 100644
+--- a/crates/fr-command/src/lua_eval.rs
++++ b/crates/fr-command/src/lua_eval.rs
+@@ -9232,6 +9232,7 @@ fn config_get_resp_to_lua_map(frame: &RespFrame) -> Option<LuaTable> {
+     for chunk in items.chunks_exact(2) {
+         let key = match &chunk[0] {
+             RespFrame::BulkString(Some(bytes)) => bytes.clone(),
++            RespFrame::BulkStringInline(bytes) => bytes.as_slice().to_vec(),
+             RespFrame::SimpleString(text) => text.as_bytes().to_vec(),
+             _ => return None,
+         };
+@@ -9262,6 +9263,7 @@ fn resp_to_lua(frame: &RespFrame) -> LuaValue {
+         RespFrame::Integer(n) => LuaValue::Number(*n as f64),
+         RespFrame::BulkString(None) => LuaValue::Bool(false),
+         RespFrame::BulkString(Some(data)) => LuaValue::Str(data.clone()),
++        RespFrame::BulkStringInline(data) => LuaValue::Str(data.as_slice().to_vec()),
+         RespFrame::Array(None) => LuaValue::Bool(false),
+         RespFrame::Array(Some(items)) | RespFrame::Push(items) | RespFrame::Sequence(items) => {
+             let t = LuaTable::new();
+diff --git a/crates/fr-protocol/src/lib.rs b/crates/fr-protocol/src/lib.rs
+index 18918c147..b9b603b61 100644
+--- a/crates/fr-protocol/src/lib.rs
++++ b/crates/fr-protocol/src/lib.rs
+@@ -3,12 +3,56 @@
+ use std::error::Error;
+ use std::fmt::{self, Display};
+ 
+-#[derive(Debug, Clone, PartialEq, Eq)]
++pub const INLINE_BULK_STRING_CAP: usize = 15;
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct InlineBulkString {
++    len: u8,
++    bytes: [u8; INLINE_BULK_STRING_CAP],
++}
++
++impl InlineBulkString {
++    #[must_use]
++    pub fn new(bytes: &[u8]) -> Option<Self> {
++        if bytes.len() > INLINE_BULK_STRING_CAP {
++            return None;
++        }
++        let mut inline = [0; INLINE_BULK_STRING_CAP];
++        inline[..bytes.len()].copy_from_slice(bytes);
++        Some(Self {
++            len: u8::try_from(bytes.len()).expect("inline bulk length fits in u8"),
++            bytes: inline,
++        })
++    }
++
++    #[must_use]
++    pub const fn len(self) -> usize {
++        self.len as usize
++    }
++
++    #[must_use]
++    pub const fn is_empty(self) -> bool {
++        self.len == 0
++    }
++
++    #[must_use]
++    pub fn as_slice(&self) -> &[u8] {
++        &self.bytes[..usize::from(self.len)]
++    }
++
++    #[must_use]
++    pub fn to_vec(&self) -> Vec<u8> {
++        self.as_slice().to_vec()
++    }
++}
++
++#[derive(Debug, Clone)]
+ pub enum RespFrame {
+     SimpleString(String),
+     Error(String),
+     Integer(i64),
+     BulkString(Option<Vec<u8>>),
++    BulkStringInline(InlineBulkString),
+     Array(Option<Vec<RespFrame>>),
+     Map(Option<Vec<(RespFrame, RespFrame)>>),
+     Push(Vec<RespFrame>),
+@@ -25,6 +69,37 @@ pub enum RespFrame {
+     BigNumber(String),
+ }
+ 
++impl PartialEq for RespFrame {
++    fn eq(&self, other: &Self) -> bool {
++        match (self, other) {
++            (Self::SimpleString(left), Self::SimpleString(right))
++            | (Self::Error(left), Self::Error(right))
++            | (Self::Double(left), Self::Double(right))
++            | (Self::Verbatim(left), Self::Verbatim(right))
++            | (Self::BigNumber(left), Self::BigNumber(right)) => left == right,
++            (Self::Integer(left), Self::Integer(right)) => left == right,
++            (Self::BulkString(None), Self::BulkString(None)) => true,
++            (Self::BulkString(Some(left)), Self::BulkString(Some(right))) => left == right,
++            (Self::BulkString(Some(left)), Self::BulkStringInline(right)) => {
++                left.as_slice() == right.as_slice()
++            }
++            (Self::BulkStringInline(left), Self::BulkString(Some(right))) => {
++                left.as_slice() == right.as_slice()
++            }
++            (Self::BulkStringInline(left), Self::BulkStringInline(right)) => left == right,
++            (Self::Array(left), Self::Array(right)) | (Self::Set(left), Self::Set(right)) => {
++                left == right
++            }
++            (Self::Map(left), Self::Map(right)) => left == right,
++            (Self::Push(left), Self::Push(right))
++            | (Self::Sequence(left), Self::Sequence(right)) => left == right,
++            _ => false,
++        }
++    }
++}
++
++impl Eq for RespFrame {}
++
+ /// Sanitize bytes destined for an inline RESP frame body (`SimpleString`
+ /// or `Error`). RESP inline frames are terminated by the first `\r\n`,
+ /// so any embedded `\r` or `\n` in the payload would split the frame
+@@ -152,6 +227,11 @@ impl RespFrame {
+                 .checked_add(2)?
+                 .checked_add(bytes.len())?
+                 .checked_add(2),
++            Self::BulkStringInline(bytes) => 1usize
++                .checked_add(decimal_usize_len(bytes.len()))?
++                .checked_add(2)?
++                .checked_add(bytes.len())?
++                .checked_add(2),
+             Self::Array(None) => Some(5),
+             Self::Array(Some(frames)) | Self::Set(Some(frames)) => {
+                 let mut len = 1usize
+@@ -226,6 +306,13 @@ impl RespFrame {
+                 out.extend_from_slice(bytes);
+                 out.extend_from_slice(b"\r\n");
+             }
++            Self::BulkStringInline(bytes) => {
++                out.extend_from_slice(b"$");
++                push_usize(out, bytes.len());
++                out.extend_from_slice(b"\r\n");
++                out.extend_from_slice(bytes.as_slice());
++                out.extend_from_slice(b"\r\n");
++            }
+             Self::Array(None) => out.extend_from_slice(b"*-1\r\n"),
+             Self::Array(Some(frames)) => {
+                 out.extend_from_slice(b"*");
+@@ -448,6 +535,7 @@ const FPCONV_EXPMAX: i32 = -32;
+ const FPCONV_EXPMIN: i32 = -60;
+ 
+ /// `(frac, exp)` cached powers of ten (87 entries), verbatim from fpconv_powers.h.
++#[rustfmt::skip]
+ const FPCONV_POWERS: [(u64, i32); 87] = [
+     (18054884314459144840, -1220), (13451937075301367670, -1193),
+     (10022474136428063862, -1166), (14934650266808366570, -1140),
+@@ -586,7 +674,13 @@ fn fpconv_round_digit(
+     }
+ }
+ 
+-fn fpconv_generate_digits(fp: &Fp, upper: &Fp, lower: &Fp, digits: &mut [u8], k: &mut i32) -> usize {
++fn fpconv_generate_digits(
++    fp: &Fp,
++    upper: &Fp,
++    lower: &Fp,
++    digits: &mut [u8],
++    k: &mut i32,
++) -> usize {
+     let wfrac = upper.frac.wrapping_sub(fp.frac);
+     let mut delta = upper.frac.wrapping_sub(lower.frac);
+ 
+@@ -726,7 +820,11 @@ fn fpconv_emit_digits(digits: &[u8], mut ndigits: usize, k: i32, neg: bool) -> S
+         out.extend_from_slice(&digits[1..ndigits]);
+     }
+     out.push(b'e');
+-    out.push(if k + ndigits as i32 - 1 < 0 { b'-' } else { b'+' });
++    out.push(if k + ndigits as i32 - 1 < 0 {
++        b'-'
++    } else {
++        b'+'
++    });
+ 
+     let mut e = exp;
+     let mut cent = 0i32;
+@@ -3038,6 +3136,21 @@ mod tests {
+             assert_eq!(frame.to_bytes(), golden, "Bulk string encoding changed");
+         }
+ 
++        #[test]
++        fn golden_inline_bulk_matches_owned_bulk() {
++            let inline = crate::InlineBulkString::new(b"hello")
++                .expect("small payload should fit inline bulk");
++            let frame = RespFrame::BulkStringInline(inline);
++            let owned = RespFrame::BulkString(Some(b"hello".to_vec()));
++            let golden = b"$5\r\nhello\r\n";
++            assert_eq!(frame, owned, "inline bulk equality must match owned bulk");
++            assert_eq!(
++                frame.to_bytes(),
++                golden,
++                "Inline bulk string encoding changed"
++            );
++        }
++
+         /// Golden test: bulk string with binary data (including null bytes).
+         #[test]
+         fn golden_bulk_binary() {
+diff --git a/crates/fr-runtime/src/lib.rs b/crates/fr-runtime/src/lib.rs
+index 407d8311b..723c77ac4 100644
+--- a/crates/fr-runtime/src/lib.rs
++++ b/crates/fr-runtime/src/lib.rs
+@@ -6342,10 +6342,11 @@ impl Runtime {
+         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+ 
+         let start = Instant::now();
+-        let result = self.server.store.get(key, now_ms);
++        let result = self.server.store.get_read_value(key, now_ms);
+         let elapsed_us = start.elapsed().as_micros() as u64;
+         let reply = match result {
+-            Ok(value) => RespFrame::BulkString(value),
++            Ok(Some(value)) => value.into_resp_bulk_frame(),
++            Ok(None) => RespFrame::BulkString(None),
+             Err(err) => CommandError::Store(err).to_resp(),
+         };
+         let failed = matches!(reply, RespFrame::Error(_));
+diff --git a/crates/fr-store/src/lib.rs b/crates/fr-store/src/lib.rs
+index fa37316f8..18e41a40c 100644
+--- a/crates/fr-store/src/lib.rs
++++ b/crates/fr-store/src/lib.rs
+@@ -1676,6 +1676,22 @@ pub enum Value {
+     Stream(StreamEntries),
+ }
+ 
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum StringReadValue {
++    Inline(fr_protocol::InlineBulkString),
++    Owned(Vec<u8>),
++}
++
++impl StringReadValue {
++    #[must_use]
++    pub fn into_resp_bulk_frame(self) -> fr_protocol::RespFrame {
++        match self {
++            Self::Inline(bytes) => fr_protocol::RespFrame::BulkStringInline(bytes),
++            Self::Owned(bytes) => fr_protocol::RespFrame::BulkString(Some(bytes)),
++        }
++    }
++}
++
+ const SMALL_STR_INLINE_CAP: usize = 15;
+ 
+ /// Small string payload for `Value::String`.
+@@ -1782,6 +1798,21 @@ impl Value {
+         }
+     }
+ 
++    fn string_read_value(&self) -> Option<StringReadValue> {
++        match self {
++            Self::String(SmallStr::Inline { len, bytes }) => {
++                let len = usize::from(*len);
++                Some(StringReadValue::Inline(
++                    fr_protocol::InlineBulkString::new(&bytes[..len])
++                        .expect("inline store string fits inline RESP bulk"),
++                ))
++            }
++            Self::String(SmallStr::Heap(bytes)) => Some(StringReadValue::Owned(bytes.clone())),
++            Self::Integer(value) => Some(StringReadValue::Owned(value.to_string().into_bytes())),
++            _ => None,
++        }
++    }
++
+     fn string_len(&self) -> Option<usize> {
+         match self {
+             Self::String(bytes) => Some(bytes.len()),
+@@ -4049,6 +4080,37 @@ impl Store {
+         }
+     }
+ 
++    pub fn get_read_value(
++        &mut self,
++        key: &[u8],
++        now_ms: u64,
++    ) -> Result<Option<StringReadValue>, StoreError> {
++        if !self.record_keyspace_lookup(key, now_ms) {
++            return Ok(None);
++        }
++        let lfu_tracking_enabled = self.lfu_tracking_enabled();
++        let lfu_decay = self.lfu_decay_time;
++        let lfu_log_factor = self.lfu_log_factor;
++        let rand_sample = if lfu_tracking_enabled {
++            self.next_rand()
++        } else {
++            0
++        };
++        match self.entries.get_mut(key) {
++            Some(entry) => {
++                let Some(v) = entry.value.string_read_value() else {
++                    return Err(StoreError::WrongType);
++                };
++                if lfu_tracking_enabled {
++                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
++                }
++                entry.touch(now_ms);
++                Ok(Some(v))
++            }
++            None => Ok(None),
++        }
++    }
++
+     pub fn set(&mut self, key: Vec<u8>, value: Vec<u8>, px_ttl_ms: Option<u64>, now_ms: u64) {
+         self.drop_if_expired(key.as_slice(), now_ms);
+         let expires_at_ms = px_ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
