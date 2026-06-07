@@ -1,0 +1,2 @@
+8fdf28754495751525095b51e969ee5c1d106899dd09c254e530f30813a3bdba  /tmp/codex-fr-pass62-profile-target/release-perf/frankenredis
+18463e448f8a6c7345964ee77c36e2cbc91fa10c203081713784574e192733b0  /tmp/codex-fr-pass62-profile-target/release-perf/fr-bench

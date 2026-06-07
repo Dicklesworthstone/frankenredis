@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780865086524,
+  "host": "127.0.0.1",
+  "port": 6464,
+  "workload": "get",
+  "clients": 16,
+  "requests": 1000000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "fr:pass62:reversed-candidate",
+  "total_time_ms": 1310,
+  "ops_per_sec": 762851.002288,
+  "bytes_sent": 59888953,
+  "bytes_received": 9000000,
+  "latency_us": {
+    "min": 38,
+    "p50": 302,
+    "p95": 441,
+    "p99": 1005,
+    "p999": 2993,
+    "max": 3997,
+    "mean": 327.34717600000033,
+    "samples": 1000000
+  }
+}

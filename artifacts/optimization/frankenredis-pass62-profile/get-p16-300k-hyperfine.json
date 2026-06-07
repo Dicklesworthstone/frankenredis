@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "command": "/tmp/codex-fr-pass62-profile-target/release-perf/fr-bench --host 127.0.0.1 --port 6462 --clients 16 --requests 300000 --pipeline 16 --workload get --key-prefix fr:pass62:baseline --json-out artifacts/optimization/frankenredis-pass62-profile/get-p16-300k-last.json",
+      "mean": 0.39191270116,
+      "stddev": 0.007158361109774542,
+      "median": 0.39088989836000004,
+      "user": 0.20007051999999997,
+      "system": 0.36225925999999997,
+      "min": 0.38445022636000004,
+      "max": 0.40212034136,
+      "times": [
+        0.39566425736,
+        0.38445022636000004,
+        0.39088989836000004,
+        0.38643878236,
+        0.40212034136
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
