@@ -1,0 +1,64 @@
+{
+  "results": [
+    {
+      "command": "bash artifacts/optimization/frankenredis-jbhwq/run_hmget_bench.sh baseline /tmp/codex-fr-jbhwq-baseline-target/release-perf/frankenredis 21666",
+      "mean": 3.795269902845,
+      "stddev": 0.7811858616962786,
+      "median": 3.56026878172,
+      "user": 2.94352257,
+      "system": 2.4016465699999996,
+      "min": 3.10600130822,
+      "max": 5.47125953522,
+      "times": [
+        5.47125953522,
+        3.10600130822,
+        4.23950534122,
+        3.90381690922,
+        3.77895530822,
+        3.27761217422,
+        3.34158225522,
+        3.24342639122
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "bash artifacts/optimization/frankenredis-jbhwq/run_hmget_bench.sh candidate /tmp/codex-fr-jbhwq-nobleriver-candidate-target/release-perf/frankenredis 21667",
+      "mean": 2.092932412345,
+      "stddev": 0.18836737775278606,
+      "median": 2.1400788667199997,
+      "user": 1.55851957,
+      "system": 2.0339300700000003,
+      "min": 1.8231037752200001,
+      "max": 2.31249262122,
+      "times": [
+        1.97283869922,
+        2.31249262122,
+        2.20183553122,
+        2.07832220222,
+        1.8614712662200001,
+        1.8231037752200001,
+        2.24526098922,
+        2.2481342142200003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

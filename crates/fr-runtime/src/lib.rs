@@ -297,6 +297,14 @@ fn plain_getrange_owned_argv(key: &[u8], start: &[u8], end: &[u8]) -> Vec<Vec<u8
     ]
 }
 
+fn plain_hmget_owned_argv(key: &[u8], fields: &[&[u8]]) -> Vec<Vec<u8>> {
+    let mut argv = Vec::with_capacity(fields.len() + 2);
+    argv.push(b"HMGET".to_vec());
+    argv.push(key.to_vec());
+    argv.extend(fields.iter().map(|f| f.to_vec()));
+    argv
+}
+
 fn wrong_arity_error(command: &'static str) -> RespFrame {
     RespFrame::Error(format!(
         "ERR wrong number of arguments for '{}' command",
@@ -6599,6 +6607,153 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'GETRANGE' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    fn can_execute_plain_hmget_borrowed(
+        &mut self,
+        key: &[u8],
+        fields: &[&[u8]],
+        now_ms: u64,
+    ) -> bool {
+        // argv is [HMGET, key, field, ...]; the gate bounds the whole multibulk.
+        if fields.is_empty()
+            || fields.len().saturating_add(2) > MAX_COMMAND_ARITY
+            || self.policy.gate.max_array_len < fields.len().saturating_add(2)
+            || self.policy.gate.max_bulk_len < b"HMGET".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || fields
+                .iter()
+                .any(|f| f.len() > self.policy.gate.max_bulk_len)
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Conservative borrowed runtime fast path for `HMGET key field [field ...]`:
+    /// mirrors `execute_plain_get_borrowed` (key + fields borrowed, generic argv
+    /// materialization + dispatch skipped). Combines MGET's array reply with
+    /// HGET's WRONGTYPE error path (a non-hash key errors; missing key / missing
+    /// field yield nil elements). Returns None (fall back) on any disabling
+    /// state. (frankenredis-jbhwq)
+    pub fn execute_plain_hmget_borrowed(
+        &mut self,
+        key: &[u8],
+        fields: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_hmget_borrowed(key, fields, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("hmget");
+        self.session.last_argv_len_sum =
+            b"HMGET".len() + key.len() + fields.iter().map(|f| f.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let result = self.server.store.hmget(key, fields, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match result {
+            Ok(values) => RespFrame::Array(Some(
+                values.into_iter().map(RespFrame::BulkString).collect(),
+            )),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_hmget_borrowed_metrics(
+            key, fields, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_reads_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_hmget_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        fields: &[&[u8]],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_hmget_owned_argv(key, fields));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_hmget_owned_argv(key, fields));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_with_kind("hmget", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_hmget_owned_argv(key, fields));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'HMGET' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -17783,6 +17938,110 @@ mod tests {
             rt.execute_plain_getrange_borrowed(b"s", b"0", b"-1", 4)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn plain_hmget_borrowed_fast_path_matches_generic_mixed_and_wrongtype() {
+        // (frankenredis-jbhwq) HMGET borrowed fast path == generic dispatch:
+        // array of present/missing fields, nil array on a missing key, and a
+        // WRONGTYPE error on a non-hash key.
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"HSET", b"h", b"f1", b"v1", b"f2", b"v2"]), 1);
+            rt.execute_frame(command(&[b"SET", b"s", b"x"]), 1); // wrong type for HMGET
+        }
+
+        let f = fast
+            .execute_plain_hmget_borrowed(b"h", &[b"f1", b"nope", b"f2"], 2)
+            .expect("default HMGET should take borrowed fast path");
+        let g = generic.execute_frame(command(&[b"HMGET", b"h", b"f1", b"nope", b"f2"]), 2);
+        assert_eq!(f, g);
+        assert_eq!(
+            f,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"v1".to_vec())),
+                RespFrame::BulkString(None),
+                RespFrame::BulkString(Some(b"v2".to_vec())),
+            ]))
+        );
+
+        let miss_key = fast
+            .execute_plain_hmget_borrowed(b"nokey", &[b"f1", b"f2"], 3)
+            .expect("missing-key HMGET should take borrowed fast path");
+        assert_eq!(
+            miss_key,
+            generic.execute_frame(command(&[b"HMGET", b"nokey", b"f1", b"f2"]), 3)
+        );
+        assert_eq!(
+            miss_key,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(None),
+                RespFrame::BulkString(None),
+            ]))
+        );
+
+        let wt = fast
+            .execute_plain_hmget_borrowed(b"s", &[b"f1"], 4)
+            .expect("wrong-type HMGET should take borrowed fast path");
+        assert_eq!(
+            wt,
+            generic.execute_frame(command(&[b"HMGET", b"s", b"f1"]), 4)
+        );
+        assert!(matches!(wt, RespFrame::Error(_)));
+
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_reads_processed,
+            generic.server.store.stat_total_reads_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            fast.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+        assert_eq!(
+            fast.server.store.stat_unexpected_error_replies,
+            generic.server.store.stat_unexpected_error_replies
+        );
+        assert_eq!(
+            fast.server.store.errorstats_per_type,
+            generic.server.store.errorstats_per_type
+        );
+        assert_eq!(
+            fast.session.last_command_name,
+            generic.session.last_command_name
+        );
+        assert_eq!(
+            fast.session.last_argv_len_sum,
+            generic.session.last_argv_len_sum
+        );
+    }
+
+    #[test]
+    fn plain_hmget_borrowed_fast_path_disabled_in_non_default_states() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"HSET", b"h", b"f", b"v"]), 1);
+        assert!(rt.execute_plain_hmget_borrowed(b"h", &[b"f"], 2).is_some());
+        rt.execute_frame(command(&[b"MULTI"]), 3);
+        assert!(rt.execute_plain_hmget_borrowed(b"h", &[b"f"], 4).is_none());
+    }
+
+    #[test]
+    fn plain_hmget_borrowed_fast_path_defers_over_max_command_arity() {
+        let mut rt = Runtime::default_strict();
+        let fields = vec![b"f".as_slice(); super::MAX_COMMAND_ARITY - 1];
+        assert!(rt.execute_plain_hmget_borrowed(b"h", &fields, 1).is_none());
     }
 
     #[test]

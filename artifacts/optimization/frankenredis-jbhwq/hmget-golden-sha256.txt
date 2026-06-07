@@ -1,0 +1,3 @@
+3955a8a6d854e8c8a2fae717ab77183aa70ff733f002b89d3d77c2f1f2f73a1c  baseline-hmget-golden-output.resp  199 bytes
+3955a8a6d854e8c8a2fae717ab77183aa70ff733f002b89d3d77c2f1f2f73a1c  candidate-hmget-golden-output.resp  199 bytes
+3955a8a6d854e8c8a2fae717ab77183aa70ff733f002b89d3d77c2f1f2f73a1c  redis724-hmget-golden-output.resp  199 bytes

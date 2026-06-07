@@ -1719,6 +1719,15 @@ fn process_buffered_frames(
                                     consumed: parsed.consumed,
                                     response,
                                 })
+                            } else if let Some((key, fields)) =
+                                borrowed_plain_hmget_args(&borrowed_args)
+                                && let Some(response) =
+                                    runtime.execute_plain_hmget_borrowed(key, fields, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
                             } else {
                                 copy_borrowed_argv_into_scratch(&borrowed_args, &mut argv_scratch);
                                 Ok(BorrowedMultibulkAction::Parsed {
@@ -1938,6 +1947,20 @@ fn borrowed_plain_exists_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [
     match borrowed_args {
         [command, keys @ ..] if !keys.is_empty() && command.eq_ignore_ascii_case(b"EXISTS") => {
             Some(keys)
+        }
+        _ => None,
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn borrowed_plain_hmget_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(&'a [u8], &'a [&'a [u8]])> {
+    match borrowed_args {
+        [command, key, fields @ ..]
+            if !fields.is_empty() && command.eq_ignore_ascii_case(b"HMGET") =>
+        {
+            Some((*key, fields))
         }
         _ => None,
     }

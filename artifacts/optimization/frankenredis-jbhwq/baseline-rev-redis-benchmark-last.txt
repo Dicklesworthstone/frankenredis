@@ -1,0 +1,2 @@
+"test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms","p95_latency_ms","p99_latency_ms","max_latency_ms"
+"HMGET jbhwq:hash field1 field2 field3 field4 field5","346140.53","2.161","0.448","2.143","3.183","3.823","6.879"
