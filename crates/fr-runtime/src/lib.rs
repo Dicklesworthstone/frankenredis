@@ -266,6 +266,10 @@ fn plain_get_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"GET".to_vec(), key.to_vec()]
 }
 
+fn plain_hget_owned_argv(key: &[u8], field: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"HGET".to_vec(), key.to_vec(), field.to_vec()]
+}
+
 fn wrong_arity_error(command: &'static str) -> RespFrame {
     RespFrame::Error(format!(
         "ERR wrong number of arguments for '{}' command",
@@ -446,7 +450,7 @@ fn parse_client_output_buffer_limit(
         "Error in hard, soft or soft_seconds setting in buffer limit configuration.";
     let text = std::str::from_utf8(arg).map_err(|_| WRONG_ARGS)?;
     let tokens: Vec<&str> = text.split_ascii_whitespace().collect();
-    if tokens.len() % 4 != 0 {
+    if !tokens.len().is_multiple_of(4) {
         return Err(WRONG_ARGS);
     }
     let mut out = base;
@@ -5895,6 +5899,18 @@ impl Runtime {
         {
             return false;
         }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Shared disabling predicate for the conservative borrowed read fast paths
+    /// (GET, HGET, …): auth/ACL must permit an all-keys/all-commands default
+    /// command, and every server/session state that the generic dispatch path
+    /// observes (non-db0, NO-TOUCH, transactions, subscription, pause,
+    /// maxmemory, AOF, replica role/links, blocked clients, keyspace
+    /// notifications, client tracking, monitors, scripts) must be inactive.
+    /// Per-command argv-shape/gate checks are the caller's responsibility.
+    /// (frankenredis-uz39v) KEEP IN SYNC across all borrowed read fast paths.
+    fn plain_borrowed_default_key_read_allows(&mut self, now_ms: u64) -> bool {
         if self.session.requires_auth(&self.server.auth_state)
             || !self.current_acl_allows_default_key_command()
         {
@@ -5929,6 +5945,137 @@ impl Runtime {
             return false;
         }
         true
+    }
+
+    fn can_execute_plain_hget_borrowed(&mut self, key: &[u8], field: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"HGET".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || field.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Conservative borrowed runtime fast path for `HGET key field`: mirrors
+    /// `execute_plain_get_borrowed` (skips generic argv materialization +
+    /// dispatch, key/field borrowed from the read buffer) for the next-hottest
+    /// read after GET. Returns None (fall back to the generic path) whenever any
+    /// disabling state is active. (frankenredis-uz39v)
+    pub fn execute_plain_hget_borrowed(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_hget_borrowed(key, field, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("hget");
+        self.session.last_argv_len_sum = b"HGET".len() + key.len() + field.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let result = self.server.store.hget(key, field, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match result {
+            Ok(value) => RespFrame::BulkString(value),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_hget_borrowed_metrics(key, field, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_reads_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_hget_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_hget_owned_argv(key, field));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_hget_owned_argv(key, field));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_with_kind("hget", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_hget_owned_argv(key, field));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'HGET' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
     }
 
     fn current_acl_allows_default_key_command(&self) -> bool {
@@ -16720,6 +16867,103 @@ mod tests {
             fast.session.last_argv_len_sum,
             generic.session.last_argv_len_sum
         );
+    }
+
+    #[test]
+    fn plain_hget_borrowed_fast_path_matches_generic_hit_miss_wrongtype_stats() {
+        // (frankenredis-uz39v) The HGET borrowed fast path must be observably
+        // identical to the generic dispatch path: same reply for hit / missing
+        // field / missing key / wrong-type, and the same stat/session deltas.
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"HSET", b"h", b"f", b"v"]), 1),
+                RespFrame::Integer(1)
+            );
+            // a wrong-type key (string) to exercise the HGET WRONGTYPE path
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"s", b"x"]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+
+        let hit = fast
+            .execute_plain_hget_borrowed(b"h", b"f", 2)
+            .expect("default HGET should take borrowed fast path");
+        assert_eq!(
+            hit,
+            generic.execute_frame(command(&[b"HGET", b"h", b"f"]), 2)
+        );
+
+        let miss_field = fast
+            .execute_plain_hget_borrowed(b"h", b"nofield", 3)
+            .expect("missing-field HGET should take borrowed fast path");
+        assert_eq!(
+            miss_field,
+            generic.execute_frame(command(&[b"HGET", b"h", b"nofield"]), 3)
+        );
+
+        let miss_key = fast
+            .execute_plain_hget_borrowed(b"nokey", b"f", 4)
+            .expect("missing-key HGET should take borrowed fast path");
+        assert_eq!(
+            miss_key,
+            generic.execute_frame(command(&[b"HGET", b"nokey", b"f"]), 4)
+        );
+
+        let wrongtype = fast
+            .execute_plain_hget_borrowed(b"s", b"f", 5)
+            .expect("wrong-type HGET should take borrowed fast path");
+        assert_eq!(
+            wrongtype,
+            generic.execute_frame(command(&[b"HGET", b"s", b"f"]), 5)
+        );
+        assert!(matches!(wrongtype, RespFrame::Error(_)));
+
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_reads_processed,
+            generic.server.store.stat_total_reads_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            fast.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+        assert_eq!(
+            fast.session.last_command_name,
+            generic.session.last_command_name
+        );
+        assert_eq!(
+            fast.session.last_argv_len_sum,
+            generic.session.last_argv_len_sum
+        );
+    }
+
+    #[test]
+    fn plain_hget_borrowed_fast_path_disabled_in_non_default_states() {
+        // A few representative disabling conditions must force fallback (None).
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"HSET", b"h", b"f", b"v"]), 1);
+        // non-db0
+        rt.execute_frame(command(&[b"SELECT", b"1"]), 1);
+        assert!(rt.execute_plain_hget_borrowed(b"h", b"f", 2).is_none());
+        rt.execute_frame(command(&[b"SELECT", b"0"]), 2);
+        assert!(rt.execute_plain_hget_borrowed(b"h", b"f", 3).is_some());
+        // subscription mode
+        rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 4);
+        assert!(rt.execute_plain_hget_borrowed(b"h", b"f", 5).is_none());
     }
 
     #[test]
@@ -28408,7 +28652,12 @@ mod tests {
         // An invalid class is rejected.
         assert_eq!(
             rt.execute_frame(
-                command(&[b"CONFIG", b"SET", b"client-output-buffer-limit", b"foo 1mb 1mb 1"]),
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"client-output-buffer-limit",
+                    b"foo 1mb 1mb 1"
+                ]),
                 4
             ),
             config_set_failed(
@@ -28434,7 +28683,10 @@ mod tests {
             hardened.server.client_output_buffer_limits.normal.hard,
             256 * 1024 * 1024
         );
-        assert_eq!(hardened.effective_output_hard_limit(99_999), 256 * 1024 * 1024);
+        assert_eq!(
+            hardened.effective_output_hard_limit(99_999),
+            256 * 1024 * 1024
+        );
 
         for rt in [&strict, &hardened] {
             assert_eq!(

@@ -1677,6 +1677,15 @@ fn process_buffered_frames(
                                     consumed: parsed.consumed,
                                     response,
                                 })
+                            } else if let Some((key, field)) =
+                                borrowed_plain_hget_args(&borrowed_args)
+                                && let Some(response) =
+                                    runtime.execute_plain_hget_borrowed(key, field, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
                             } else {
                                 copy_borrowed_argv_into_scratch(&borrowed_args, &mut argv_scratch);
                                 Ok(BorrowedMultibulkAction::Parsed {
@@ -1818,7 +1827,9 @@ fn process_buffered_frames(
                     ProcessArgvAction::BreakWithoutConsume => break,
                 }
 
-                if conn.write_buf.len() > runtime.effective_output_hard_limit(conn.session.client_id) {
+                if conn.write_buf.len()
+                    > runtime.effective_output_hard_limit(conn.session.client_id)
+                {
                     eprintln!("warn: client write buffer exceeded limit, disconnecting");
                     conn.closing = true;
                     closing_tokens.insert(token);
@@ -1870,6 +1881,13 @@ fn borrowed_plain_get_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]
 fn borrowed_plain_set_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
     match borrowed_args {
         [command, key, value] if command.eq_ignore_ascii_case(b"SET") => Some((*key, *value)),
+        _ => None,
+    }
+}
+
+fn borrowed_plain_hget_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
+    match borrowed_args {
+        [command, key, field] if command.eq_ignore_ascii_case(b"HGET") => Some((*key, *field)),
         _ => None,
     }
 }
@@ -2614,9 +2632,10 @@ fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState
     }
     if let Some(connection) = replica_sync.connection.as_mut() {
         queue_replica_periodic_ack(runtime, connection, now_ms);
-        if let Err(err) =
-            validate_replica_write_buffer_limit(connection, runtime.replica_link_output_hard_limit())
-        {
+        if let Err(err) = validate_replica_write_buffer_limit(
+            connection,
+            runtime.replica_link_output_hard_limit(),
+        ) {
             replica_sync.connection = None;
             replica_sync.schedule_retry(now_ms);
             runtime.set_replica_connection_state("reconnect");
