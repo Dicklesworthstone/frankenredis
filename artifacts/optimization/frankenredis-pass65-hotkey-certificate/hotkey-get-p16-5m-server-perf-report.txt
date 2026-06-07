@@ -1,0 +1,459 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 204  of event 'cycles:P'
+# Event count (approx.): 17463610
+#
+# Overhead  Symbol                                                                                        IPC   [IPC Coverage]
+# ........  ............................................................................................  ....................
+#
+    16.54%  [k] 0xffffffff850a7846                                                                        -      -            
+            |
+            ---0xffffffff85088546
+               0xffffffff850886ad
+               0xffffffff85089377
+               0xffffffff85089ac8
+               0xffffffff850718cb
+               0xffffffff850720a2
+               0xffffffff8622f2a2
+               0xffffffff8622f947
+               0xffffffff862378d8
+               0xffffffff86237943
+               0xffffffff854feada
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+    15.39%  [k] 0xffffffff850bc53b                                                                        -      -            
+            |
+            ---0xffffffff8530b8c4
+               0xffffffff8530ba72
+               0xffffffff8530d57e
+               0xffffffff853149a2
+               0xffffffff85069c68
+               0xffffffff8622f38a
+               0xffffffff8622f947
+               0xffffffff862378d8
+               0xffffffff86237943
+               0xffffffff854feada
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+    12.69%  [k] 0xffffffff85089359                                                                        -      -            
+            |
+            ---0xffffffff85088546
+               0xffffffff850886ad
+               0xffffffff85089377
+               0xffffffff85089ac8
+               0xffffffff850718cb
+               0xffffffff850720a2
+               0xffffffff8622f2a2
+               0xffffffff8622f947
+               0xffffffff862378d8
+               0xffffffff86237943
+               0xffffffff854feada
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+    12.69%  [k] 0xffffffff850c03b3                                                                        -      -            
+            |
+            ---0xffffffff8530ba72
+               0xffffffff8530d57e
+               0xffffffff853149a2
+               0xffffffff85069c68
+               0xffffffff8622f38a
+               0xffffffff8622f947
+               0xffffffff862378d8
+               0xffffffff86237943
+               0xffffffff854feada
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+    10.59%  [.] <fr_runtime::Runtime>::clear_ready_keys                                                   -      -            
+            |
+            ---0
+
+     9.59%  [k] 0xffffffff85492573                                                                        -      -            
+            |
+            ---0xffffffff854c10fb
+               0xffffffff85699a08
+               0xffffffff8519f6d4
+               0xffffffff851a2f82
+               0xffffffff85492b44
+               0xffffffff85498e93
+               0xffffffff854990f4
+               0xffffffff8547a407
+               0xffffffff8547a93f
+               0xffffffff84f25032
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __GI___libc_open
+               <std::sys::fs::unix::File>::open_c
+               fr_store::read_rss_bytes
+               0
+
+     1.31%  [.] frankenredis::main                                                                        -      -            
+            |          
+            |--0.76%--<fr_runtime::Runtime>::pubsub_clients_with_pending
+            |          0
+            |          
+             --0.54%--clock_gettime@@GLIBC_2.17
+                       frankenredis::main
+
+     1.04%  [.] epoll_wait                                                                                -      -            
+     1.01%  [k] 0xffffffff85090647                                                                        -      -            
+            |
+            ---0xffffffff8622f607
+               0xffffffff8622f947
+               0xffffffff862378d8
+               0xffffffff86237943
+               0xffffffff854feada
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+     0.90%  [k] 0xffffffff84d04109                                                                        -      -            
+            |
+            ---0xffffffff850718cb
+               0xffffffff850720a2
+               0xffffffff8622f2a2
+               0xffffffff8622f947
+               0xffffffff862378d8
+               0xffffffff86237943
+               0xffffffff854feada
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+     0.88%  [k] 0xffffffff851a21f6                                                                        -      -            
+            |
+            ---0xffffffff853267c9
+               0xffffffff85326b38
+               0xffffffff85124156
+               0xffffffff86220691
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+     0.74%  [.] <fr_runtime::Runtime>::check_child_processes                                              -      -            
+            |
+            ---0
+
+     0.73%  [k] 0xffffffff85080fb1                                                                        -      -            
+            |
+            ---0xffffffff8622f2bd
+               0xffffffff8622f947
+               0xffffffff862378d8
+               0xffffffff86237943
+               0xffffffff854feada
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+     0.72%  [k] 0xffffffff85080faa                                                                        -      -            
+            |
+            ---0xffffffff8506fd7b
+               0xffffffff8622f2bd
+               0xffffffff8622f947
+               0xffffffff862378d8
+               0xffffffff86237943
+               0xffffffff854feada
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+     0.72%  [k] 0xffffffff85138530                                                                        -      -            
+            |
+            ---0xffffffff8508890e
+               0xffffffff85089239
+               0xffffffff85089ac8
+               0xffffffff850718cb
+               0xffffffff850720a2
+               0xffffffff8622f2a2
+               0xffffffff8622f947
+               0xffffffff862378d8
+               0xffffffff86237943
+               0xffffffff854feada
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+     0.70%  [.] <std::time::Instant>::elapsed                                                             -      -            
+            |
+            ---0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+     0.69%  [.] 0x0000000000000983                                                                        -      -            
+            |
+            ---0x6a2603ab
+
+     0.69%  [k] 0xffffffff8506b7c7                                                                        -      -            
+            |
+            ---0xffffffff8504d972
+               0xffffffff851241b0
+               0xffffffff86220691
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+     0.68%  [.] <fr_runtime::Runtime>::flush_aof_to_disk                                                  -      -            
+            |
+            ---0
+
+     0.66%  [k] 0xffffffff854fe769                                                                        -      -            
+            |
+            ---0xffffffff8622f947
+               0xffffffff862378d8
+               0xffffffff86237943
+               0xffffffff854feada
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+     0.66%  [k] 0xffffffff8507e663                                                                        -      -            
+            |
+            ---0xffffffff862252e9
+               0xffffffff84f88cf0
+               0xffffffff850c03ab
+               0xffffffff8509038f
+               0xffffffff85090788
+               0xffffffff8506ca13
+               0xffffffff8506fd7b
+               0xffffffff8622f2bd
+               0xffffffff8622f947
+               0xffffffff862378d8
+               0xffffffff86237943
+               0xffffffff854feada
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+     0.64%  [k] 0xffffffff85080ffc                                                                        -      -            
+            |
+            ---0xffffffff8509039b
+               0xffffffff85090788
+               0xffffffff8506ca13
+               0xffffffff8506fd7b
+               0xffffffff8622f2bd
+               0xffffffff8622f947
+               0xffffffff862378d8
+               0xffffffff86237943
+               0xffffffff854feada
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+     0.63%  [.] <fr_runtime::Runtime>::replica_sync_target                                                -      -            
+            |
+            ---0
+
+     0.62%  [k] 0xffffffff85124146                                                                        -      -            
+            |
+            ---__syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+     0.61%  [k] 0xffffffff850bc597                                                                        -      -            
+            |
+            ---0xffffffff8530b746
+               0xffffffff8530b8c4
+               0xffffffff8530ba72
+               0xffffffff8530d57e
+               0xffffffff853149a2
+               0xffffffff85069c68
+               0xffffffff8622f38a
+               0xffffffff8622f947
+               0xffffffff862378d8
+               0xffffffff86237943
+               0xffffffff854feada
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+     0.59%  [k] 0xffffffff8548f97b                                                                        -      -            
+            |
+            ---0xffffffff853f19cf
+               0xffffffff854bf0ef
+               0xffffffff85552bab
+               0xffffffff85477a53
+               0xffffffff85479ddc
+               0xffffffff85492ab8
+               0xffffffff85498e93
+               0xffffffff854990f4
+               0xffffffff8547a407
+               0xffffffff8547a93f
+               0xffffffff84f25032
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __GI___libc_open
+               <std::sys::fs::unix::File>::open_c
+               fr_store::read_rss_bytes
+               0
+
+     0.59%  [k] 0xffffffff84f2485a                                                                        -      -            
+            |
+            ---0xffffffff85326b38
+               0xffffffff85124156
+               0xffffffff86220691
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+     0.54%  [k] 0xffffffff86214d06                                                                        -      -            
+            |
+            ---0xffffffff8555d7c2
+               0xffffffff85554b99
+               0xffffffff854c00e0
+               0xffffffff854c056b
+               0xffffffff8547e7df
+               0xffffffff8547f8b1
+               0xffffffff8547f959
+               0xffffffff84f252d5
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               read
+               fr_store::read_rss_bytes
+               0
+
+     0.49%  [.] __vdso_clock_gettime                                                                      -      -            
+     0.48%  [k] 0xffffffff84f8c9d1                                                                        -      -            
+     0.48%  [.] <fr_runtime::Runtime>::pubsub_clients_with_pending                                        -      -            
+     0.46%  [k] 0xffffffff8507e5c9                                                                        -      -            
+     0.45%  [k] 0xffffffff850c03b5                                                                        -      -            
+     0.44%  [k] 0xffffffff84c001bd                                                                        -      -            
+     0.44%  [k] 0xffffffff85090427                                                                        -      -            
+     0.44%  [k] 0xffffffff85080fa4                                                                        -      -            
+     0.44%  [k] 0xffffffff84d0410b                                                                        -      -            
+     0.43%  [.] <fr_store::Store>::run_active_expire_cycle                                                -      -            
+     0.41%  [k] 0xffffffff8506cb7a                                                                        -      -            
+     0.41%  [k] 0xffffffff8506cab9                                                                        -      -            
+     0.10%  [k] 0xffffffff8621c6a9                                                                        -      -            
+     0.04%  [k] 0xffffffff853ec7d6                                                                        -      -            
+     0.03%  [.] core::ptr::drop_in_place::<core::option::Option<frankenredis::ReplicaPrimaryConnection>>  -      -            
+     0.02%  [k] 0xffffffff84c01248                                                                        -      -            
+     0.02%  [k] 0xffffffff851a2b6a                                                                        -      -            
+     0.02%  [k] 0xffffffff851a030f                                                                        -      -            
+     0.02%  [k] 0xffffffff8508a42f                                                                        -      -            
+     0.02%  [k] 0xffffffff85152482                                                                        -      -            
+     0.02%  [k] 0xffffffff85087f04                                                                        -      -            
+     0.02%  [k] 0xffffffff851a058d                                                                        -      -            
+     0.02%  [k] 0xffffffff851965e6                                                                        -      -            
+     0.02%  [k] 0xffffffff8530d2bc                                                                        -      -            
+     0.02%  [k] 0xffffffff85087573                                                                        -      -            
+     0.02%  [k] 0xffffffff85139eb3                                                                        -      -            
+     0.02%  [k] 0xffffffff862206af                                                                        -      -            
+     0.02%  [k] 0xffffffff8530d2c3                                                                        -      -            
+     0.02%  [k] 0xffffffff84f9ce95                                                                        -      -            
+     0.02%  [k] 0xffffffff8519f73f                                                                        -      -            
+     0.02%  [k] 0xffffffff8623a6a5                                                                        -      -            
+     0.02%  [k] 0xffffffff8621c6a1                                                                        -      -            
+     0.02%  [k] 0xffffffff862378d8                                                                        -      -            
+     0.02%  [k] 0xffffffff84fc01c9                                                                        -      -            
+     0.02%  [k] 0xffffffff854ff5bc                                                                        -      -            
+     0.02%  [k] 0xffffffff8622f947                                                                        -      -            
+     0.02%  [k] 0xffffffff8622889f                                                                        -      -            
+     0.02%  [k] 0xffffffff854feada                                                                        -      -            
+     0.02%  [k] 0xffffffff854fea5b                                                                        -      -            
+     0.02%  [k] 0xffffffff85124bd5                                                                        -      -            
+     0.02%  [k] 0xffffffff854fe7b9                                                                        -      -            
+     0.02%  [k] 0xffffffff851a2a86                                                                        -      -            
+     0.02%  [k] 0xffffffff8530580c                                                                        -      -            
+     0.02%  [k] 0xffffffff84fdedcb                                                                        -      -            
+     0.01%  [k] 0xffffffff862251d0                                                                        -      -            
+     0.01%  [k] 0xffffffff85300b65                                                                        -      -            
+     0.01%  [k] 0xffffffff85300b80                                                                        -      -            
+     0.01%  [k] 0xffffffff8530d2cc                                                                        -      -            
+     0.00%  [k] 0xffffffff862251cb                                                                        -      -            
+     0.00%  [k] 0xffffffff85300b60                                                                        -      -            
+     0.00%  [k] 0xffffffff85300b6b                                                                        -      -            
+     0.00%  [k] 0xffffffff84f32f8e                                                                        -      -            
+     0.00%  [k] 0xffffffff8530d280                                                                        -      -            
+     0.00%  [k] 0xffffffff8530d2d7                                                                        -      -            
+     0.00%  [k] 0xffffffff8530d2db                                                                        -      -            
+     0.00%  [k] 0xffffffff862251b0                                                                        -      -            
+     0.00%  [k] 0xffffffff862252e0                                                                        -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

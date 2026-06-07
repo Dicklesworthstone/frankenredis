@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780876143588,
+  "host": "127.0.0.1",
+  "port": 35441,
+  "workload": "get",
+  "clients": 50,
+  "requests": 1000000,
+  "pipeline": 16,
+  "keyspace": 1,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "pass65-profile-hotkey",
+  "total_time_ms": 1168,
+  "ops_per_sec": 855851.8862451792,
+  "bytes_sent": 50000000,
+  "bytes_received": 9000000,
+  "latency_us": {
+    "min": 53,
+    "p50": 871,
+    "p95": 1229,
+    "p99": 1457,
+    "p999": 1836,
+    "max": 2765,
+    "mean": 920.5636489999995,
+    "samples": 1000000
+  }
+}
