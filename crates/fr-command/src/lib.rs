@@ -12808,6 +12808,14 @@ fn bitcount(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
             // so a malformed integer takes precedence over a bad unit.
             let start = parse_i64_arg(&argv[2])?;
             let end = parse_i64_arg(&argv[3])?;
+            // (frankenredis-bitcountnegunit) Upstream's fully-negative
+            // reversed-range early-return `if (start<0 && end<0 && start>end)
+            // { addReply(czero); return; }` runs BEFORE the BYTE|BIT unit
+            // check, so e.g. `BITCOUNT k -1 -2 BAD` is 0, not a syntax error.
+            // fr validated the unit first, surfacing the syntax error instead.
+            if start < 0 && end < 0 && start > end {
+                return Ok(RespFrame::Integer(0));
+            }
             let unit = if argv[4].eq_ignore_ascii_case(b"bit") {
                 BitRangeUnit::Bit
             } else if argv[4].eq_ignore_ascii_case(b"byte") {
@@ -42023,6 +42031,69 @@ mod tests {
         )
         .expect("bitcount BYTE");
         assert!(matches!(byte_alone, RespFrame::Integer(_)));
+    }
+
+    #[test]
+    fn bitcount_fully_negative_reversed_range_returns_zero_before_unit_check() {
+        // (frankenredis-bitcountnegunit) Upstream's `if (start<0 && end<0 &&
+        // start>end) { addReply(czero); return; }` runs BEFORE the BYTE|BIT unit
+        // validation, so a fully-negative reversed range yields 0 even with an
+        // invalid unit token. fr previously validated the unit first and wrongly
+        // returned a syntax error.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"x".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+        for unit in [b"BAD".as_slice(), b"BYTE", b"BIT", b"alsobad"] {
+            let r = dispatch_argv(
+                &[
+                    b"BITCOUNT".to_vec(),
+                    b"k".to_vec(),
+                    b"-1".to_vec(),
+                    b"-2".to_vec(),
+                    unit.to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("negative reversed range short-circuits to 0");
+            assert_eq!(r, RespFrame::Integer(0), "unit={unit:?}");
+        }
+        // a non-reversed range with a bad unit is still a syntax error
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"BITCOUNT".to_vec(),
+                    b"k".to_vec(),
+                    b"0".to_vec(),
+                    b"0".to_vec(),
+                    b"BAD".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect_err("bad unit on valid range"),
+            CommandError::SyntaxError
+        );
+        // a POSITIVE reversed range with a bad unit is still a syntax error
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"BITCOUNT".to_vec(),
+                    b"k".to_vec(),
+                    b"5".to_vec(),
+                    b"1".to_vec(),
+                    b"BAD".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect_err("bad unit on positive reversed range"),
+            CommandError::SyntaxError
+        );
     }
 
     #[test]
