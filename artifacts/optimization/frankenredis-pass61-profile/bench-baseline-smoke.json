@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780862921744,
+  "host": "127.0.0.1",
+  "port": 6444,
+  "workload": "get",
+  "clients": 1,
+  "requests": 10,
+  "pipeline": 1,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "fr:directget:smoke:base",
+  "total_time_ms": 1,
+  "ops_per_sec": 9936.041699579804,
+  "bytes_sent": 548,
+  "bytes_received": 90,
+  "latency_us": {
+    "min": 33,
+    "p50": 36,
+    "p95": 121,
+    "p99": 121,
+    "p999": 121,
+    "max": 121,
+    "mean": 44.7,
+    "samples": 10
+  }
+}

@@ -1,0 +1,2 @@
+1da8120e3ba74621829d436f8008a95949b3acdcdab46a8ad337b7e69cfb23a2  artifacts/optimization/frankenredis-pass61-profile/golden-baseline.resp
+1da8120e3ba74621829d436f8008a95949b3acdcdab46a8ad337b7e69cfb23a2  artifacts/optimization/frankenredis-pass61-profile/golden-candidate.resp

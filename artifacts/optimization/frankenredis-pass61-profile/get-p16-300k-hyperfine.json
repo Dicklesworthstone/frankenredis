@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "/tmp/codex-fr-pass61-profile-target/release-perf/fr-bench --host 127.0.0.1 --port 6441 --clients 16 --requests 300000 --pipeline 16 --workload get --key-prefix fr:pass61:get --json-out artifacts/optimization/frankenredis-pass61-profile/get-p16-300k-last.json",
+      "mean": 0.39995608635999996,
+      "stddev": 0.009341586710659306,
+      "median": 0.40092847686,
+      "user": 0.1958575,
+      "system": 0.40435732,
+      "min": 0.38376943936,
+      "max": 0.41188995936,
+      "times": [
+        0.40017253536,
+        0.40157736636,
+        0.40027958736,
+        0.39231198836000003,
+        0.40236411836,
+        0.38847146036,
+        0.41095980636,
+        0.41188995936,
+        0.38376943936,
+        0.40776460236
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

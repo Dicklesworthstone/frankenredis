@@ -1,0 +1,47 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 714  of event 'cycles:P'
+# Event count (approx.): 5133357016
+#
+# Overhead  Symbol                                                                                               IPC   [IPC Coverage]
+# ........  ...................................................................................................  ....................
+#
+     8.70%  [.] <fr_store::Value>::string_owned                                                                  -      -
+     6.02%  [.] __memmove_avx_unaligned_erms                                                                     -      -
+     5.57%  [.] 0x0000000000000983                                                                               -      -
+     3.48%  [.] frankenredis::process_buffered_frames                                                            -      -
+     2.75%  [k] 0xffffffff84c001bd                                                                               -      -
+     2.23%  [.] <fr_runtime::Runtime>::refresh_store_runtime_info_context                                        -      -
+     2.18%  [k] 0xffffffff84f87bc0                                                                               -      -
+     1.22%  [k] 0xffffffff84d04109                                                                               -      -
+     1.07%  [.] <fr_runtime::Runtime>::plain_borrowed_default_key_read_allows                                    -      -
+     1.00%  [k] 0xffffffff85ffba18                                                                               -      -
+     0.98%  [.] fr_protocol::parse_command_args_borrowed_into                                                    -      -
+     0.92%  [.] __memcmp_avx2_movbe                                                                              -      -
+     0.86%  [k] 0xffffffff85f2e332                                                                               -      -
+     0.83%  [k] 0xffffffff85835fc8                                                                               -      -
+     0.83%  [.] <fr_store::CommandHistogramTracker>::record_with_kind                                            -      -
+     0.83%  [.] <fr_runtime::Runtime>::execute_plain_get_borrowed                                                -      -
+     0.83%  [k] 0xffffffff84d0410b                                                                               -      -
+     0.83%  [k] 0xffffffff8602eb19                                                                               -      -
+     0.67%  [k] 0xffffffff8602f7fb                                                                               -      -
+     0.66%  [k] 0xffffffff850b8f26                                                                               -      -
+     0.66%  [k] 0xffffffff8508352a                                                                               -      -
+     0.65%  [.] <fr_store::Store>::get                                                                           -      -
+     0.65%  [k] 0xffffffff85835fd6                                                                               -      -
+     0.60%  [.] __memset_avx2_unaligned_erms                                                                     -      -
+     0.51%  [k] 0xffffffffc0fddc8b                                                                               -      -
+     0.51%  [.] <fr_runtime::Runtime>::drain_pending_pubsub                                                      -      -
+     0.50%  [.] <fr_runtime::Runtime>::is_pubsub_client                                                          -      -
+     0.50%  [k] 0xffffffff86001802                                                                               -      -
+     0.50%  [.] <alloc::raw_vec::RawVecInner>::finish_grow                                                       -      -
+     0.50%  [.] <fr_runtime::ServerState>::run_active_expire_cycle                                               -      -
+     0.50%  [.] fr_protocol::push_usize                                                                          -      -
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780862921763,
+  "host": "127.0.0.1",
+  "port": 6445,
+  "workload": "get",
+  "clients": 1,
+  "requests": 10,
+  "pipeline": 1,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "fr:directget:smoke:cand",
+  "total_time_ms": 1,
+  "ops_per_sec": 7851.795784213807,
+  "bytes_sent": 549,
+  "bytes_received": 90,
+  "latency_us": {
+    "min": 33,
+    "p50": 43,
+    "p95": 182,
+    "p99": 182,
+    "p999": 182,
+    "max": 182,
+    "mean": 57.099999999999994,
+    "samples": 10
+  }
+}

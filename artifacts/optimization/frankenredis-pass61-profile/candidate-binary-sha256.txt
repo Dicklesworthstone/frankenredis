@@ -1,0 +1,2 @@
+f67b6e8dbf5bc4d2ef4c74dc78a1f0a92984ba9b28f5f13378d02c0c79de6d9f  /tmp/codex-fr-direct-get-candidate-target/release-perf/frankenredis
+36a898d0f036661a156c6c6b6d74a29d97ee1ce35ece1186b3188ca5fc9265ab  /tmp/codex-fr-direct-get-candidate-target/release-perf/fr-bench
