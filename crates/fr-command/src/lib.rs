@@ -8836,9 +8836,16 @@ fn xautoclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             // Upstream uses getRangeLongFromObjectOrReply that
             // returns 'COUNT must be > 0' for any non-positive or
             // unparseable value. (br-frankenredis-xautoclaim)
+            // It also bounds COUNT to [1, LONG_MAX / max(sizeof(streamID)=16,
+            // attempts_factor=10)] = [1, i64::MAX / 16]; a too-LARGE count is
+            // rejected with the same wording, and this range-check runs BEFORE
+            // the key type-check (t_stream.c:3361-3377 precedes the checkType
+            // at :3380), so a wrong-type key still surfaces 'COUNT must be > 0'
+            // for an out-of-range count. (frankenredis-zlpqd)
+            const XAUTOCLAIM_MAX_COUNT: i64 = i64::MAX / 16;
             let bad_count = || CommandError::Custom("ERR COUNT must be > 0".to_string());
             let parsed = parse_i64_arg(&argv[idx + 1]).map_err(|_| bad_count())?;
-            if parsed <= 0 {
+            if !(1..=XAUTOCLAIM_MAX_COUNT).contains(&parsed) {
                 return Err(bad_count());
             }
             count = usize::try_from(parsed).unwrap_or(usize::MAX);
@@ -37922,6 +37929,46 @@ mod tests {
             xautoclaim_missing,
             RespFrame::Error("NOGROUP No such key 's' or consumer group 'g1'".to_string())
         );
+    }
+
+    #[test]
+    fn xautoclaim_count_upper_bound_precedes_type_check() {
+        // (frankenredis-zlpqd) Upstream bounds COUNT to [1, i64::MAX/16] via
+        // getRangeLongFromObjectOrReply, and that range-check runs BEFORE the
+        // key type-check — so a too-LARGE count surfaces 'COUNT must be > 0'
+        // even on a wrong-type key, while exactly i64::MAX/16 passes the range
+        // and reaches the type-check (WRONGTYPE).
+        let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        let bad_count = CommandError::Custom("ERR COUNT must be > 0".to_string());
+        let max = (i64::MAX / 16).to_string();
+        let over = (i64::MAX / 16 + 1).to_string();
+        let mut store = Store::new();
+        store.set(b"wt".to_vec(), b"v".to_vec(), None, 0);
+
+        // Too-large count on a wrong-type key -> COUNT error (range before type).
+        for cnt in [over.as_str(), "9223372036854775807", "0", "-1"] {
+            assert_eq!(
+                dispatch_argv(
+                    &argv(&["XAUTOCLAIM", "wt", "g", "c", "0", "0", "COUNT", cnt]),
+                    &mut store,
+                    0
+                )
+                .expect_err("count error"),
+                bad_count,
+                "COUNT {cnt} on a wrong-type key must be the COUNT range error"
+            );
+        }
+        // Exactly i64::MAX/16 is in range -> reaches the type-check -> WRONGTYPE.
+        assert!(matches!(
+            dispatch_argv(
+                &argv(&["XAUTOCLAIM", "wt", "g", "c", "0", "0", "COUNT", &max]),
+                &mut store,
+                0
+            ),
+            Err(CommandError::Store(fr_store::StoreError::WrongType))
+        ));
     }
 
     #[test]
