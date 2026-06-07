@@ -288,6 +288,15 @@ fn plain_strlen_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"STRLEN".to_vec(), key.to_vec()]
 }
 
+fn plain_getrange_owned_argv(key: &[u8], start: &[u8], end: &[u8]) -> Vec<Vec<u8>> {
+    vec![
+        b"GETRANGE".to_vec(),
+        key.to_vec(),
+        start.to_vec(),
+        end.to_vec(),
+    ]
+}
+
 fn wrong_arity_error(command: &'static str) -> RespFrame {
     RespFrame::Error(format!(
         "ERR wrong number of arguments for '{}' command",
@@ -6438,6 +6447,158 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'STRLEN' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    fn can_execute_plain_getrange_borrowed(
+        &mut self,
+        key: &[u8],
+        start: &[u8],
+        end: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"GETRANGE".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || start.len() > self.policy.gate.max_bulk_len
+            || end.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Conservative borrowed runtime fast path for `GETRANGE key start end`:
+    /// mirrors `execute_plain_get_borrowed` (key borrowed, generic argv
+    /// materialization + dispatch skipped). To keep the error-path stats exactly
+    /// in sync with the generic handler, the fast path engages ONLY when both
+    /// `start` and `end` parse as integers — a non-integer arg returns None so
+    /// the command falls back to the generic path (which emits the identical
+    /// "value is not an integer" error). A wrong-type key is served here as the
+    /// same WRONGTYPE error reply as the generic handler. Returns None on any
+    /// disabling state. (frankenredis-uz39v)
+    pub fn execute_plain_getrange_borrowed(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        end_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_getrange_borrowed(key, start_arg, end_arg, now_ms) {
+            return None;
+        }
+        // Only fast-path well-formed integer ranges; defer the
+        // not-an-integer error (and its stats) to the generic path.
+        let start = parse_i64_arg(start_arg).ok()?;
+        let end = parse_i64_arg(end_arg).ok()?;
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("getrange");
+        self.session.last_argv_len_sum =
+            b"GETRANGE".len() + key.len() + start_arg.len() + end_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let started = Instant::now();
+        let result = self.server.store.getrange(key, start, end, now_ms);
+        let elapsed_us = started.elapsed().as_micros() as u64;
+        let reply = match result {
+            Ok(value) => RespFrame::BulkString(Some(value)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_getrange_borrowed_metrics(
+            key, start_arg, end_arg, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_reads_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_plain_getrange_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        start: &[u8],
+        end: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_getrange_owned_argv(key, start, end));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_getrange_owned_argv(key, start, end));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_with_kind("getrange", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_getrange_owned_argv(key, start, end));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'GETRANGE' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -17546,6 +17707,82 @@ mod tests {
         assert!(rt.execute_plain_strlen_borrowed(b"s", 2).is_some());
         rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
         assert!(rt.execute_plain_strlen_borrowed(b"s", 4).is_none());
+    }
+
+    #[test]
+    fn plain_getrange_borrowed_fast_path_matches_generic_and_defers_bad_int() {
+        // (frankenredis-uz39v) GETRANGE borrowed fast path == generic dispatch
+        // for well-formed ranges (incl. negative/inverted), serves WRONGTYPE for
+        // a non-string key, and DEFERS (returns None) on a non-integer arg so the
+        // generic path emits the not-an-integer error.
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"s", b"Hello World"]), 1);
+            rt.execute_frame(command(&[b"LPUSH", b"l", b"x"]), 1);
+        }
+
+        for (start, end) in [
+            (b"0".as_slice(), b"4".as_slice()),
+            (b"0", b"-1"),
+            (b"-5", b"-1"),
+            (b"-1", b"-5"), // inverted -> empty
+            (b"100", b"200"),
+        ] {
+            let f = fast
+                .execute_plain_getrange_borrowed(b"s", start, end, 2)
+                .expect("well-formed GETRANGE should take fast path");
+            let g = generic.execute_frame(command(&[b"GETRANGE", b"s", start, end]), 2);
+            assert_eq!(f, g, "start={start:?} end={end:?}");
+        }
+
+        // wrong-type key -> WRONGTYPE (served on the fast path)
+        let wt = fast
+            .execute_plain_getrange_borrowed(b"l", b"0", b"-1", 3)
+            .expect("wrong-type GETRANGE should take fast path");
+        assert_eq!(
+            wt,
+            generic.execute_frame(command(&[b"GETRANGE", b"l", b"0", b"-1"]), 3)
+        );
+        assert!(matches!(wt, RespFrame::Error(_)));
+
+        // non-integer arg -> fast path defers (None), generic emits the error
+        assert!(
+            fast.execute_plain_getrange_borrowed(b"s", b"x", b"4", 4)
+                .is_none()
+        );
+
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_reads_processed,
+            generic.server.store.stat_total_reads_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            fast.session.last_command_name,
+            generic.session.last_command_name
+        );
+    }
+
+    #[test]
+    fn plain_getrange_borrowed_fast_path_disabled_in_non_default_states() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"s", b"hi"]), 1);
+        assert!(
+            rt.execute_plain_getrange_borrowed(b"s", b"0", b"-1", 2)
+                .is_some()
+        );
+        rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
+        assert!(
+            rt.execute_plain_getrange_borrowed(b"s", b"0", b"-1", 4)
+                .is_none()
+        );
     }
 
     #[test]
