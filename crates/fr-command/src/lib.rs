@@ -7671,30 +7671,23 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     // (= or absent qualifier) always executes and rejects LIMIT
     // upstream of this block. (br-frankenredis-r71v + LIMIT clause
     // follow-up)
-    // (frankenredis-hpz8a) Approximate (~) inline trim follows the
-    // same node-boundary rule as XTRIM: round the would-be exact
-    // trim count down to the nearest multiple of
-    // stream-node-max-entries (default 100), then cap by LIMIT if
-    // given. Exact trim (= or absent qualifier) honors the target
-    // verbatim.
-    const STREAM_NODE_MAX_ENTRIES: usize = 100;
-    let should_run_inline_trim = !trim_approx || limit_given;
-    if let Some(max_len) = trim_maxlen
-        && should_run_inline_trim
-    {
+    // (frankenredis-c6j11) Inline MAXLEN trim mirrors upstream xaddCommand's
+    // streamTrim: exact trim honors the target verbatim; approximate (~) trim
+    // removes whole nodes via stream_approx_trim_target (an un-LIMITed `~` gets
+    // the upstream default cap of 100 * stream-node-max-entries). Crucially this
+    // runs for `~` even WITHOUT an explicit LIMIT — upstream is not a no-op, so
+    // `XADD ... MAXLEN ~ N` trims on every add (and `~ 0` clears the stream).
+    if let Some(max_len) = trim_maxlen {
         let effective_max_len = if trim_approx {
-            // xlen returns Result<usize, StoreError>; on error, fall
-            // through to a no-op (effective_max_len = max_len means
-            // "trim to target"). With approximate semantics we treat
-            // unknown length as "single node" → no trim.
-            let current_len = store.xlen(&argv[1], now_ms).unwrap_or(0);
-            let exact_to_trim = current_len.saturating_sub(max_len);
-            let mut node_boundary_trim =
-                (exact_to_trim / STREAM_NODE_MAX_ENTRIES) * STREAM_NODE_MAX_ENTRIES;
-            if let Some(lim) = trim_limit_usize {
-                node_boundary_trim = node_boundary_trim.min(lim);
-            }
-            current_len.saturating_sub(node_boundary_trim)
+            // xlen returns Result<usize, StoreError>; on error, fall through to a
+            // no-op (effective_max_len = current_len means "trim to current").
+            let current_len = store.xlen(&argv[1], now_ms).unwrap_or(max_len);
+            let approx_limit = if limit_given {
+                trim_limit_usize
+            } else {
+                Some(STREAM_APPROX_TRIM_DEFAULT_LIMIT)
+            };
+            stream_approx_trim_target(current_len, max_len, approx_limit)
         } else {
             max_len
         };
@@ -7704,8 +7697,11 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             .unwrap_or(0);
         trimmed_entries = trimmed_entries.saturating_add(removed);
     }
+    // MINID retains the approx-without-LIMIT no-op shortcut (node-boundary MINID
+    // trimming is a separate follow-up; see xtrim_cmd).
+    let should_run_minid_trim = !trim_approx || limit_given;
     if let Some(min_id) = trim_minid
-        && should_run_inline_trim
+        && should_run_minid_trim
     {
         // MINID approximate inline trim mirrors XTRIM MINID's
         // pre-existing behavior; pass through with the LIMIT cap
@@ -7919,36 +7915,30 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     // nodes (default `stream-node-max-entries` = 100). For exact (=
     // or no qualifier), the requested target is honored verbatim.
     //
-    // fr's storage doesn't have node boundaries, so simulate the
-    // semantics for MAXLEN by computing how many entries *would* be
-    // removed in exact mode and rounding DOWN to the nearest
-    // multiple of the node size. A LIMIT, when given, caps the
-    // result.
+    // fr's storage doesn't expose rax node boundaries, so MAXLEN approximate
+    // (~) trimming is modeled by stream_approx_trim_target — upstream removes
+    // whole nodes from the head while the remaining length stays >= the target
+    // and (within a LIMIT) the evicted count fits, so the tail node is dropped
+    // only at MAXLEN ~ 0 and a sub-node LIMIT evicts nothing. An un-LIMITed `~`
+    // gets the upstream default cap of 100 * stream-node-max-entries; an
+    // explicit LIMIT 0 (limit == None below) means no cap. (frankenredis-c6j11)
     //
-    // Examples (node_size = 100):
-    //   len=10,  target=5  → exact=5,  node-boundary=0    (one node, refuse)
-    //   len=128, target=5  → exact=123, node-boundary=100 (one full node evict)
-    //   len=300, target=5  → exact=295, node-boundary=200 (two full nodes)
-    //   len=300, target=5, LIMIT=100 → min(200, 100) = 100
-    //
-    // MINID retains the previous "approx-without-LIMIT → no-op"
-    // shortcut; modeling MINID node-boundary trimming is left to a
-    // follow-up because the entry distribution required to compute
-    // an effective threshold isn't exposed by fr's store today.
-    const STREAM_NODE_MAX_ENTRIES: usize = 100;
+    // MINID retains the previous "approx-without-LIMIT → no-op" shortcut;
+    // modeling MINID node-boundary trimming is left to a follow-up because the
+    // entry distribution required to compute an effective threshold isn't
+    // exposed by fr's store today.
     let approx_noop_minid = approx && !limit_given;
 
     if is_maxlen {
         let max_len = maxlen_value.expect("maxlen_value set when strategy = MaxLen");
         let effective_max_len = if approx {
             let current_len = store.xlen(&argv[1], now_ms)?;
-            let exact_to_trim = current_len.saturating_sub(max_len);
-            let mut node_boundary_trim =
-                (exact_to_trim / STREAM_NODE_MAX_ENTRIES) * STREAM_NODE_MAX_ENTRIES;
-            if let Some(lim) = limit {
-                node_boundary_trim = node_boundary_trim.min(lim);
-            }
-            current_len.saturating_sub(node_boundary_trim)
+            let approx_limit = if limit_given {
+                limit
+            } else {
+                Some(STREAM_APPROX_TRIM_DEFAULT_LIMIT)
+            };
+            stream_approx_trim_target(current_len, max_len, approx_limit)
         } else {
             max_len
         };
@@ -7971,6 +7961,45 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             i64::try_from(removed).unwrap_or(i64::MAX),
         ))
     }
+}
+
+/// Number of entries per rax/listpack node — upstream's default
+/// `stream-node-max-entries`. (frankenredis-c6j11)
+const STREAM_NODE_MAX_ENTRIES: usize = 100;
+/// Default LIMIT applied to an approximate (`~`) trim with no explicit LIMIT,
+/// mirroring upstream's `args->limit = 100 * server.stream_node_max_entries`.
+const STREAM_APPROX_TRIM_DEFAULT_LIMIT: usize = 100 * STREAM_NODE_MAX_ENTRIES;
+
+/// Mirror upstream `t_stream.c::streamTrim`'s approximate (`~`) eviction: it
+/// removes WHOLE rax nodes (each holding up to `STREAM_NODE_MAX_ENTRIES`
+/// entries; the head nodes are full and the tail node may be partial) from the
+/// head of the stream while evicting the node keeps the remaining length
+/// `>= max_len` AND, when a LIMIT is in effect, the running evicted count would
+/// not exceed it. `limit == None` means no cap (an explicit `LIMIT 0`). Returns
+/// the post-trim target length (`current_len - removed`).
+///
+/// Consequences matched against vendored 7.2.4: the tail (partial) node is
+/// evicted only when `max_len == 0` (so `MAXLEN ~ 0` clears the stream), and a
+/// LIMIT smaller than the head node size evicts nothing (whole-node granularity)
+/// rather than a partial count. The earlier "round the exact count down to a
+/// node multiple, then `.min(limit)`" model diverged on both. (frankenredis-c6j11)
+fn stream_approx_trim_target(current_len: usize, max_len: usize, limit: Option<usize>) -> usize {
+    let mut removed = 0usize;
+    loop {
+        let remaining = current_len - removed;
+        let node = STREAM_NODE_MAX_ENTRIES.min(remaining);
+        if node == 0 {
+            break;
+        }
+        if limit.is_some_and(|lim| removed + node > lim) {
+            break;
+        }
+        if remaining - node < max_len {
+            break;
+        }
+        removed += node;
+    }
+    current_len - removed
 }
 
 fn stream_record_to_frame(id: StreamId, fields: Vec<(Vec<u8>, Vec<u8>)>) -> RespFrame {
@@ -35249,6 +35278,95 @@ mod tests {
         // No qualifier behaves like '='.
         add_n(&mut store, 10);
         assert_eq!(xtrim(&mut store, &[b"MAXLEN", b"5"]), 5);
+
+        // (frankenredis-c6j11) MAXLEN ~ 0 clears the whole stream (the partial
+        // tail node IS evicted at target 0), matching vendored 7.2.4 — the old
+        // round-down model left `len % 100` entries.
+        for n in [5usize, 50, 99, 100, 101, 150, 250] {
+            add_n(&mut store, n);
+            assert_eq!(
+                xtrim(&mut store, &[b"MAXLEN", b"~", b"0"]),
+                n as i64,
+                "len={n}"
+            );
+            assert_eq!(
+                dispatch_argv(&[b"XLEN".to_vec(), b"s".to_vec()], &mut store, 0).unwrap(),
+                RespFrame::Integer(0),
+                "len={n} not cleared"
+            );
+        }
+        // A sub-node LIMIT evicts NOTHING (whole-node granularity), not a partial.
+        add_n(&mut store, 150);
+        assert_eq!(
+            xtrim(&mut store, &[b"MAXLEN", b"~", b"0", b"LIMIT", b"1"]),
+            0
+        );
+        add_n(&mut store, 250);
+        assert_eq!(
+            xtrim(&mut store, &[b"MAXLEN", b"~", b"5", b"LIMIT", b"150"]),
+            100
+        );
+
+        // (frankenredis-c6j11) XADD inline `~` trim is NOT a no-op: XADD MAXLEN ~ 0
+        // clears the stream (the new entry is added, then everything is evicted),
+        // and XADD MAXLEN ~ N trims whole nodes even without an explicit LIMIT.
+        add_n(&mut store, 5);
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"~".to_vec(),
+                b"0".to_vec(),
+                b"*".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            dispatch_argv(&[b"XLEN".to_vec(), b"s".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::Integer(0),
+            "XADD ~0 must clear"
+        );
+        add_n(&mut store, 150);
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"~".to_vec(),
+                b"5".to_vec(),
+                b"*".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // 150 + 1 new = 151; one full head node (100) evicted -> 51 remain.
+        assert_eq!(
+            dispatch_argv(&[b"XLEN".to_vec(), b"s".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::Integer(51),
+            "XADD ~5 must trim a whole node without LIMIT"
+        );
+    }
+
+    #[test]
+    fn stream_approx_trim_target_matches_redis_node_model_c6j11() {
+        use super::{STREAM_APPROX_TRIM_DEFAULT_LIMIT, stream_approx_trim_target};
+        let d = STREAM_APPROX_TRIM_DEFAULT_LIMIT;
+        assert_eq!(stream_approx_trim_target(5, 0, Some(d)), 0);
+        assert_eq!(stream_approx_trim_target(5, 0, Some(1)), 5);
+        assert_eq!(stream_approx_trim_target(5, 0, Some(100)), 0);
+        assert_eq!(stream_approx_trim_target(150, 0, Some(d)), 0);
+        assert_eq!(stream_approx_trim_target(150, 5, Some(d)), 50);
+        assert_eq!(stream_approx_trim_target(250, 5, Some(150)), 150);
+        assert_eq!(stream_approx_trim_target(100, 0, Some(d)), 0);
+        assert_eq!(stream_approx_trim_target(250, 0, None), 0);
     }
 
     #[test]
