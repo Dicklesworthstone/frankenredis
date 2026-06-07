@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "PORT=6532; LOG=artifacts/optimization/cod-pass49-borrowed-set-v2-20260606T2353Z/rebase-hf-baseline-$PORT-$$.log; /data/projects/.scratch/frankenredis-pass49-rebase-baseline-20260607T0016Z/target-cod-pass49-rebase-baseline/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.25; /data/projects/.scratch/frankenredis-pass49-rebase-baseline-20260607T0016Z/target-cod-pass49-rebase-baseline/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass49rebasebase >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 0.7399418305000001,
+      "stddev": 0.024744215892165182,
+      "median": 0.7418352045000001,
+      "user": 0.49545040000000007,
+      "system": 0.70020822,
+      "min": 0.715439295,
+      "max": 0.797635523,
+      "times": [
+        0.797635523,
+        0.748905908,
+        0.745703882,
+        0.71771781,
+        0.722967165,
+        0.715439295,
+        0.748052212,
+        0.737966527,
+        0.716609783,
+        0.7484202
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "PORT=6533; LOG=artifacts/optimization/cod-pass49-borrowed-set-v2-20260606T2353Z/rebase-hf-candidate-$PORT-$$.log; target-cod-pass49-rebase-candidate/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.25; target-cod-pass49-rebase-candidate/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass49rebasecand >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 0.7331347502,
+      "stddev": 0.032430806236550425,
+      "median": 0.7281426925,
+      "user": 0.49055409999999994,
+      "system": 0.70465412,
+      "min": 0.684706353,
+      "max": 0.789032551,
+      "times": [
+        0.771540897,
+        0.721327582,
+        0.789032551,
+        0.694267484,
+        0.684706353,
+        0.722063567,
+        0.734221818,
+        0.74962726,
+        0.7476686,
+        0.71689139
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

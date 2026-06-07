@@ -1,0 +1,64 @@
+{
+  "results": [
+    {
+      "command": "PORT=6524; LOG=artifacts/optimization/cod-pass49-borrowed-set-v2-20260606T2353Z/hf-candidate-1m-$PORT-$$.log; target-cod-pass49-borrowed-set-release-v2/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.25; target-cod-pass49-borrowed-set-release-v2/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 1000000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass49v2cand1m >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.7225155400549998,
+      "stddev": 0.09825208265038039,
+      "median": 1.70396974918,
+      "user": 1.485642695,
+      "system": 2.195871355,
+      "min": 1.6203021686799999,
+      "max": 1.9123806276800002,
+      "times": [
+        1.75047920968,
+        1.65559538168,
+        1.6420231786800001,
+        1.65978188368,
+        1.6203021686799999,
+        1.9123806276800002,
+        1.79140425568,
+        1.7481576146800002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "PORT=6525; LOG=artifacts/optimization/cod-pass49-borrowed-set-v2-20260606T2353Z/hf-baseline-1m-$PORT-$$.log; target-cod-pass49-clean-baseline/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.25; target-cod-pass49-clean-baseline/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 1000000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass49v2base1m >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 2.62805242143,
+      "stddev": 0.1316216661330543,
+      "median": 2.59276469568,
+      "user": 2.40428482,
+      "system": 2.388429855,
+      "min": 2.50231903668,
+      "max": 2.89405444568,
+      "times": [
+        2.63904827768,
+        2.5225348416799998,
+        2.89405444568,
+        2.7082534326800003,
+        2.53738678368,
+        2.50231903668,
+        2.54648111368,
+        2.67434143968
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "results": [
+    {
+      "command": "PORT=6522; LOG=artifacts/optimization/cod-pass49-borrowed-set-v2-20260606T2353Z/hf-baseline-$PORT-$$.log; target-cod-pass49-clean-baseline/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.25; target-cod-pass49-clean-baseline/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass49v2base >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 0.9436540444033333,
+      "stddev": 0.02089091365573095,
+      "median": 0.9419339373200001,
+      "user": 0.6810130966666664,
+      "system": 0.7014067599999999,
+      "min": 0.9089409768200001,
+      "max": 0.98487080682,
+      "times": [
+        0.95427447082,
+        0.95888814182,
+        0.96492170182,
+        0.9443667708200001,
+        0.9251670068200001,
+        0.9089409768200001,
+        0.98487080682,
+        0.9395011038200001,
+        0.94903746982,
+        0.93678666182,
+        0.9387349218200001,
+        0.9183584998200001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "PORT=6523; LOG=artifacts/optimization/cod-pass49-borrowed-set-v2-20260606T2353Z/hf-candidate-$PORT-$$.log; target-cod-pass49-borrowed-set-release-v2/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.25; target-cod-pass49-borrowed-set-release-v2/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass49v2cand >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 0.7000215882366666,
+      "stddev": 0.015709356156085885,
+      "median": 0.69274823332,
+      "user": 0.4405630966666667,
+      "system": 0.6674289266666666,
+      "min": 0.68409718882,
+      "max": 0.7308437308200001,
+      "times": [
+        0.72307636482,
+        0.68409718882,
+        0.69184976582,
+        0.6863464408200001,
+        0.6917076978200001,
+        0.70401714782,
+        0.69364670082,
+        0.7308437308200001,
+        0.70668736682,
+        0.6868718558200001,
+        0.6867357888200001,
+        0.71437900982
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

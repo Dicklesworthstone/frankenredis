@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:6526
+workload: set
+clients: 50  requests: 1000000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 1440 ms  throughput: 693986.40 ops/sec
+latency(us): min=47 p50=1078 p95=1507 p99=1938 p999=2671 max=3853 mean=1136.96
+bytes: sent=52338794 received=5000000 key_prefix=pass49post

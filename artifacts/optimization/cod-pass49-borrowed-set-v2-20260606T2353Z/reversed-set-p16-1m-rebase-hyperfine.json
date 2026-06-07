@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "PORT=6534; LOG=artifacts/optimization/cod-pass49-borrowed-set-v2-20260606T2353Z/rebase-hf-candidate-1m-$PORT-$$.log; target-cod-pass49-rebase-candidate/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.25; target-cod-pass49-rebase-candidate/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 1000000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass49rebasecand1m >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.82175071972,
+      "stddev": 0.07563671286102563,
+      "median": 1.79525497162,
+      "user": 1.6052499400000002,
+      "system": 2.28483928,
+      "min": 1.76069987012,
+      "max": 2.01001006512,
+      "times": [
+        2.01001006512,
+        1.8575169951200001,
+        1.77719298112,
+        1.80531370112,
+        1.8590157581200002,
+        1.77013152012,
+        1.7638805911200002,
+        1.82854947312,
+        1.78519624212,
+        1.76069987012
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "PORT=6535; LOG=artifacts/optimization/cod-pass49-borrowed-set-v2-20260606T2353Z/rebase-hf-baseline-1m-$PORT-$$.log; /data/projects/.scratch/frankenredis-pass49-rebase-baseline-20260607T0016Z/target-cod-pass49-rebase-baseline/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.25; /data/projects/.scratch/frankenredis-pass49-rebase-baseline-20260607T0016Z/target-cod-pass49-rebase-baseline/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 1000000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass49rebasebase1m >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 1.9052516868199998,
+      "stddev": 0.13474398382470043,
+      "median": 1.8788271041200002,
+      "user": 1.6729554399999997,
+      "system": 2.2855655799999997,
+      "min": 1.7829835071200002,
+      "max": 2.2191252221199997,
+      "times": [
+        1.9064751451200002,
+        2.01711898812,
+        1.8511790631200002,
+        1.79782094012,
+        1.81868761912,
+        1.7829835071200002,
+        1.7884160201200001,
+        1.93528063412,
+        1.9354297291200002,
+        2.2191252221199997
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
