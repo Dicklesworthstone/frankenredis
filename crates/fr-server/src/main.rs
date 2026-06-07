@@ -1677,6 +1677,13 @@ fn process_buffered_frames(
                                     consumed: parsed.consumed,
                                     response,
                                 })
+                            } else if let Some(key) = borrowed_plain_incr_args(&borrowed_args)
+                                && let Some(response) = runtime.execute_plain_incr_borrowed(key, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
                             } else if let Some((key, field)) =
                                 borrowed_plain_hget_args(&borrowed_args)
                                 && let Some(response) =
@@ -1974,6 +1981,13 @@ fn borrowed_plain_get_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]
 fn borrowed_plain_set_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
     match borrowed_args {
         [command, key, value] if command.eq_ignore_ascii_case(b"SET") => Some((*key, *value)),
+        _ => None,
+    }
+}
+
+fn borrowed_plain_incr_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
+    match borrowed_args {
+        [command, key] if command.eq_ignore_ascii_case(b"INCR") => Some(*key),
         _ => None,
     }
 }

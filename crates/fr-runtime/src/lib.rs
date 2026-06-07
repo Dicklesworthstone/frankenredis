@@ -262,6 +262,10 @@ fn plain_set_owned_argv(key: &[u8], value: &[u8]) -> Vec<Vec<u8>> {
     vec![b"SET".to_vec(), key.to_vec(), value.to_vec()]
 }
 
+fn plain_incr_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"INCR".to_vec(), key.to_vec()]
+}
+
 fn plain_get_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"GET".to_vec(), key.to_vec()]
 }
@@ -5859,6 +5863,17 @@ impl Runtime {
         {
             return false;
         }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// Shared disabling predicate for the conservative borrowed WRITE fast paths
+    /// (SET, INCR, …): the read predicate's conditions PLUS the write-only gates
+    /// — no active disk-write denial, no min-replicas-to-write requirement — so a
+    /// plain write never needs to propagate (no AOF / replica), fire a keyspace
+    /// notification, or be rolled back. Per-command argv-shape/gate checks are
+    /// the caller's responsibility. (frankenredis-q0qym) KEEP IN SYNC across all
+    /// borrowed write fast paths.
+    fn plain_borrowed_default_key_write_allows(&mut self, now_ms: u64) -> bool {
         if self.session.requires_auth(&self.server.auth_state)
             || !self.current_acl_allows_default_key_command()
         {
@@ -5895,6 +5910,133 @@ impl Runtime {
             return false;
         }
         true
+    }
+
+    fn can_execute_plain_incr_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < b"INCR".len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// Conservative borrowed runtime fast path for `INCR key`: mirrors
+    /// `execute_plain_set_borrowed` (write path — key borrowed, generic argv
+    /// materialization + dispatch skipped). Returns the new integer value, or a
+    /// WRONGTYPE / "not an integer" / overflow error reply, exactly like the
+    /// generic handler. INCR is classified as a write, so it counts one write
+    /// regardless of outcome. Returns None (fall back) on any disabling state.
+    /// (frankenredis-q0qym)
+    pub fn execute_plain_incr_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
+        if !self.can_execute_plain_incr_borrowed(key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("incr");
+        self.session.last_argv_len_sum = b"INCR".len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let result = self.server.store.incr(key, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match result {
+            Ok(value) => RespFrame::Integer(value),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_incr_borrowed_metrics(key, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_writes_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_incr_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_incr_owned_argv(key));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_incr_owned_argv(key));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_with_kind("incr", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_incr_owned_argv(key));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'INCR' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
     }
 
     pub fn execute_plain_get_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
@@ -19009,6 +19151,84 @@ mod tests {
         assert!(rt.execute_plain_zscore_borrowed(b"z", b"a", 2).is_some());
         rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
         assert!(rt.execute_plain_zscore_borrowed(b"z", b"a", 4).is_none());
+    }
+
+    #[test]
+    fn plain_incr_borrowed_fast_path_matches_generic_create_increment_wrongtype_notint() {
+        // (frankenredis-q0qym) INCR borrowed fast path == generic dispatch:
+        // creates at 1, increments, persists the integer, and surfaces the same
+        // errors (WRONGTYPE on a non-string, "not an integer" on a non-numeric
+        // string). INCR is a write — counts one write regardless of outcome.
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"n", b"41"]), 1);
+            rt.execute_frame(command(&[b"SET", b"nan", b"abc"]), 1); // non-integer string
+            rt.execute_frame(command(&[b"RPUSH", b"l", b"x"]), 1); // wrong type
+        }
+
+        // existing integer -> increment
+        let inc = fast
+            .execute_plain_incr_borrowed(b"n", 2)
+            .expect("default INCR should take borrowed fast path");
+        assert_eq!(inc, generic.execute_frame(command(&[b"INCR", b"n"]), 2));
+        assert_eq!(inc, RespFrame::Integer(42));
+
+        // missing key -> created at 1
+        let created = fast
+            .execute_plain_incr_borrowed(b"fresh", 3)
+            .expect("new-key INCR should take borrowed fast path");
+        assert_eq!(
+            created,
+            generic.execute_frame(command(&[b"INCR", b"fresh"]), 3)
+        );
+        assert_eq!(created, RespFrame::Integer(1));
+
+        // non-integer string -> error
+        let nan = fast
+            .execute_plain_incr_borrowed(b"nan", 4)
+            .expect("not-an-int INCR should take borrowed fast path");
+        assert_eq!(nan, generic.execute_frame(command(&[b"INCR", b"nan"]), 4));
+        assert!(matches!(nan, RespFrame::Error(_)));
+
+        // wrong type -> WRONGTYPE
+        let wt = fast
+            .execute_plain_incr_borrowed(b"l", 5)
+            .expect("wrong-type INCR should take borrowed fast path");
+        assert_eq!(wt, generic.execute_frame(command(&[b"INCR", b"l"]), 5));
+        assert!(matches!(wt, RespFrame::Error(_)));
+
+        // the stored values must match (fast and generic each ran the same ops)
+        assert_eq!(
+            fast.execute_frame(command(&[b"GET", b"n"]), 6),
+            generic.execute_frame(command(&[b"GET", b"n"]), 6)
+        );
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_writes_processed,
+            generic.server.store.stat_total_writes_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+        assert_eq!(
+            fast.session.last_command_name,
+            generic.session.last_command_name
+        );
+    }
+
+    #[test]
+    fn plain_incr_borrowed_fast_path_disabled_in_non_default_states() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"n", b"1"]), 1);
+        assert!(rt.execute_plain_incr_borrowed(b"n", 2).is_some());
+        // a configured replica link disables the write fast path
+        rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
+        assert!(rt.execute_plain_incr_borrowed(b"n", 4).is_none());
     }
 
     #[test]
