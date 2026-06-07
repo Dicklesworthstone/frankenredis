@@ -1,0 +1,2 @@
+cee4e63decc99a8912ceecde31ee4a3c4f9f9d3ad91e9d3ce15c08ece938168e  artifacts/optimization/cod-pass51-profile-20260607T0055Z/baseline-golden-normalized.txt
+cee4e63decc99a8912ceecde31ee4a3c4f9f9d3ad91e9d3ce15c08ece938168e  artifacts/optimization/cod-pass51-profile-20260607T0055Z/candidate-golden-normalized.txt

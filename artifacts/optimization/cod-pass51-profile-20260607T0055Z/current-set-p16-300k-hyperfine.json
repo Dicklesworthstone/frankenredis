@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "PORT=63951; LOG=artifacts/optimization/cod-pass51-profile-20260607T0055Z/current-set-p16-300k-server.log; target-cod-pass51-current/release/frankenredis --bind 127.0.0.1 --port $PORT >\"$LOG\" 2>&1 & PID=$!; trap \"kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true\" EXIT; sleep 0.25; target-cod-pass51-current/release/fr-bench --host 127.0.0.1 --port $PORT --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --key-prefix pass51current >/dev/null; kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true; true",
+      "mean": 0.73814265446,
+      "stddev": 0.01272938432857368,
+      "median": 0.73843414776,
+      "user": 0.4943003,
+      "system": 0.7049289599999999,
+      "min": 0.71307047426,
+      "max": 0.75936217526,
+      "times": [
+        0.71307047426,
+        0.74699916726,
+        0.73635119626,
+        0.73325039926,
+        0.7254127542600001,
+        0.74031293326,
+        0.7471775552600001,
+        0.7365553622600001,
+        0.75936217526,
+        0.7429345272600001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
