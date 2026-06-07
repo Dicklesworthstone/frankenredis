@@ -14049,8 +14049,14 @@ impl Store {
 
     #[must_use]
     pub fn randomkey_with_prefix(&mut self, prefix: &[u8], now_ms: u64) -> Option<Vec<u8>> {
-        let all_keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
-        for key in &all_keys {
+        // Expire stale keys before sampling. `drop_if_expired` is a no-op for
+        // any key without a TTL, so probing only the volatile-key index reaps
+        // exactly the same set as the former clone-the-entire-keyspace loop —
+        // but allocates O(volatile) instead of O(dbsize) per call (the prior
+        // `entries.keys().cloned().collect()` cloned every key in the database
+        // on every RANDOMKEY). (clone-storm elimination)
+        let volatile: Vec<Vec<u8>> = self.volatile_keys.iter().cloned().collect();
+        for key in &volatile {
             self.drop_if_expired(key, now_ms);
         }
 
