@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "/tmp/codex-fr-mcklt-baseline-target/release-perf/fr-bench --host 127.0.0.1 --port 16470 --clients 50 --requests 1000000 --pipeline 16 --workload get --keyspace 10000 --datasize 3 --json-out artifacts/optimization/cod-pass57-context-refresh/baseline-get-p16-1m-paired-last.json --key-prefix mcklt:get:corrected1mpaired",
+      "mean": 1.58738057152,
+      "stddev": 0.06374002272164857,
+      "median": 1.5797502911199999,
+      "user": 0.6558525599999999,
+      "system": 1.4902184199999997,
+      "min": 1.52091173112,
+      "max": 1.68372510312,
+      "times": [
+        1.60976261312,
+        1.52091173112,
+        1.5797502911199999,
+        1.54275311912,
+        1.68372510312
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/tmp/codex-fr-mcklt-candidate-target/release-perf/fr-bench --host 127.0.0.1 --port 16471 --clients 50 --requests 1000000 --pipeline 16 --workload get --keyspace 10000 --datasize 3 --json-out artifacts/optimization/cod-pass57-context-refresh/candidate-get-p16-1m-paired-last.json --key-prefix mcklt:get:corrected1mpaired",
+      "mean": 1.59767813552,
+      "stddev": 0.07721453428770647,
+      "median": 1.59603892312,
+      "user": 0.6820023599999999,
+      "system": 1.5288760199999998,
+      "min": 1.48951649412,
+      "max": 1.70490559712,
+      "times": [
+        1.61693243912,
+        1.70490559712,
+        1.48951649412,
+        1.5809972241199999,
+        1.59603892312
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

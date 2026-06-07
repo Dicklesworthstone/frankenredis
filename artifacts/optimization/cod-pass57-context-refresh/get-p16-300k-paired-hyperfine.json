@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "/tmp/codex-fr-mcklt-baseline-target/release-perf/fr-bench --host 127.0.0.1 --port 16470 --clients 50 --requests 300000 --pipeline 16 --workload get --keyspace 10000 --datasize 3 --json-out artifacts/optimization/cod-pass57-context-refresh/baseline-get-p16-300k-paired-last.json --key-prefix mcklt:get:corrected300k",
+      "mean": 0.5234098006600001,
+      "stddev": 0.05454086873007422,
+      "median": 0.53961001436,
+      "user": 0.24190199999999998,
+      "system": 0.5170056599999999,
+      "min": 0.44863224686000003,
+      "max": 0.6038902128600001,
+      "times": [
+        0.44863224686000003,
+        0.46413802986,
+        0.45135872086,
+        0.5522638258600001,
+        0.6038902128600001,
+        0.5359318388600001,
+        0.54328818986,
+        0.5480379158600001,
+        0.5833939398600001,
+        0.5031630858600001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/tmp/codex-fr-mcklt-candidate-target/release-perf/fr-bench --host 127.0.0.1 --port 16471 --clients 50 --requests 300000 --pipeline 16 --workload get --keyspace 10000 --datasize 3 --json-out artifacts/optimization/cod-pass57-context-refresh/candidate-get-p16-300k-paired-last.json --key-prefix mcklt:get:corrected300k",
+      "mean": 0.50432995296,
+      "stddev": 0.04344587107620868,
+      "median": 0.48805845886,
+      "user": 0.22674219999999998,
+      "system": 0.49351326,
+      "min": 0.46289445086000003,
+      "max": 0.5958635688600001,
+      "times": [
+        0.55203238186,
+        0.48287905486000005,
+        0.49212140686000005,
+        0.48428653086,
+        0.49183038686,
+        0.47054881586,
+        0.46289445086000003,
+        0.47146301786,
+        0.5958635688600001,
+        0.53937991486
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

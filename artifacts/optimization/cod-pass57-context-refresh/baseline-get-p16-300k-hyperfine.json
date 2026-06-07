@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "/tmp/codex-fr-mcklt-baseline-target/release-perf/fr-bench --host 127.0.0.1 --port 16470 --clients 50 --requests 300000 --pipeline 16 --workload get --keyspace 10000 --datasize 3 --json-out artifacts/optimization/cod-pass57-context-refresh/baseline-get-p16-300k-last.json --key-prefix mcklt:get",
+      "mean": 0.5095666603800001,
+      "stddev": 0.03374206091723548,
+      "median": 0.50739933618,
+      "user": 0.24761476,
+      "system": 0.48962761999999993,
+      "min": 0.46012430618000005,
+      "max": 0.55771596818,
+      "times": [
+        0.48614988118,
+        0.50728967418,
+        0.49002190818,
+        0.53367847518,
+        0.5075089981800001,
+        0.55610742118,
+        0.55771596818,
+        0.5264030551800001,
+        0.46012430618000005,
+        0.47066691618
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
