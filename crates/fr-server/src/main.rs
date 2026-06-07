@@ -1737,6 +1737,15 @@ fn process_buffered_frames(
                                     consumed: parsed.consumed,
                                     response,
                                 })
+                            } else if let Some((key, field)) =
+                                borrowed_plain_hexists_args(&borrowed_args)
+                                && let Some(response) =
+                                    runtime.execute_plain_hexists_borrowed(key, field, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
                             } else {
                                 copy_borrowed_argv_into_scratch(&borrowed_args, &mut argv_scratch);
                                 Ok(BorrowedMultibulkAction::Parsed {
@@ -1989,6 +1998,13 @@ fn borrowed_plain_sismember_args<'a>(
         [command, key, member] if command.eq_ignore_ascii_case(b"SISMEMBER") => {
             Some((*key, *member))
         }
+        _ => None,
+    }
+}
+
+fn borrowed_plain_hexists_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
+    match borrowed_args {
+        [command, key, field] if command.eq_ignore_ascii_case(b"HEXISTS") => Some((*key, *field)),
         _ => None,
     }
 }
