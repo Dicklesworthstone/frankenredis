@@ -81,11 +81,15 @@ pub fn split_inline_args(line: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
     // upstream errors "unbalanced quotes" (any quote that isn't closed and
     // followed by whitespace/end is an error). The `\x`/escape handling and
     // the closing-quote-must-be-followed-by-whitespace rule (z1h45) are
-    // preserved. Separators are ' ' / '\t' only — try_parse_inline already
-    // strips the trailing CR/LF.
+    // preserved. Separators match upstream sds.c::sdssplitargs exactly —
+    // ' ' / '\t' / '\r' / '\n'. try_parse_inline strips the TRAILING CR/LF, but
+    // an EMBEDDED '\r' (e.g. `SET\rk v`) must still split the token: upstream
+    // treats it as whitespace anywhere in the line, so `SET\rk v` parses as
+    // `SET k v`; fr previously kept "\r" inside the token and rejected it as an
+    // unknown command. (Quotes still suppress separation inside a quoted run.)
     const UNBALANCED: &str = "ERR Protocol error: unbalanced quotes in request";
     let n = line.len();
-    let is_sep = |b: u8| b == b' ' || b == b'\t';
+    let is_sep = |b: u8| b == b' ' || b == b'\t' || b == b'\r' || b == b'\n';
 
     let mut args = Vec::new();
     let mut i = 0;
@@ -155,7 +159,7 @@ pub fn split_inline_args(line: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
                 }
             } else {
                 match line[i] {
-                    b' ' | b'\t' => done = true,
+                    b' ' | b'\t' | b'\r' | b'\n' => done = true,
                     b'"' => {
                         inq = true;
                         i += 1;

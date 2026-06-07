@@ -5698,6 +5698,21 @@ mod tests {
     }
 
     #[test]
+    fn inline_splits_on_cr_and_lf_like_sdssplitargs() {
+        // Upstream sds.c::sdssplitargs separates tokens on ' ' / '\t' / '\r' /
+        // '\n' anywhere in the line, not just at the trailing CRLF. An embedded
+        // CR must split the token: `SET\rk\rv` parses as three args, matching
+        // redis (which then runs it as `SET k v`).
+        let args = fr_server::split_inline_args(b"SET\rk\rv").expect("parse cr-separated");
+        assert_eq!(args, vec![b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()]);
+        let args = fr_server::split_inline_args(b"PING\nPING").expect("parse lf-separated");
+        assert_eq!(args, vec![b"PING".to_vec(), b"PING".to_vec()]);
+        // A CR inside a quoted run is preserved, not treated as a separator.
+        let args = fr_server::split_inline_args(b"SET qk \"a\rb\"").expect("parse quoted cr");
+        assert_eq!(args, vec![b"SET".to_vec(), b"qk".to_vec(), b"a\rb".to_vec()]);
+    }
+
+    #[test]
     fn inline_unbalanced_double_quotes_rejected() {
         let result = fr_server::split_inline_args(b"SET key \"unclosed");
         assert!(result.is_err());
