@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/frankenredis-srhju-baseline-20260607/target-srhju-baseline/release/fr-randomkey-bench --keys 10000 --requests 2000 --db 0 --dbs 1",
+      "mean": 2.0249289688600003,
+      "stddev": 0.42307635084481177,
+      "median": 1.88898364646,
+      "user": 2.00517262,
+      "system": 0.004678240000000001,
+      "min": 1.77438975546,
+      "max": 2.77444603146,
+      "times": [
+        1.90278960146,
+        2.77444603146,
+        1.88898364646,
+        1.7840358094600002,
+        1.77438975546
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.scratch/frankenredis-srhju-candidate-20260607/target-srhju-candidate-bench-local/release/fr-srhju-randomkey-bench --keys 10000 --requests 2000 --db 0 --dbs 1",
+      "mean": 0.01128384726,
+      "stddev": 0.0008555432660030703,
+      "median": 0.01082854846,
+      "user": 0.006746819999999999,
+      "system": 0.0046532399999999995,
+      "min": 0.01055626246,
+      "max": 0.01229668046,
+      "times": [
+        0.010610304459999999,
+        0.01082854846,
+        0.01055626246,
+        0.01229668046,
+        0.01212744046
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

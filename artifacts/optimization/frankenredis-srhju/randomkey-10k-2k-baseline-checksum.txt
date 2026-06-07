@@ -1,0 +1,1 @@
+keys=10000 requests=2000 db=0 dbs=1 elapsed_seconds=2.701044610 ops_per_sec=740.454 checksum=14880759090566317216

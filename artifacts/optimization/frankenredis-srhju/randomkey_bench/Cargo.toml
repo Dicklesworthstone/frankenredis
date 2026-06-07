@@ -1,0 +1,9 @@
+[package]
+name = "fr-srhju-randomkey-bench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fr-store = { path = "../../../../crates/fr-store" }
+
+[workspace]

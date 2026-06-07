@@ -2731,6 +2731,11 @@ pub struct Store {
     /// eviction sampling are already nondeterministic. (frankenredis-8kuy1)
     entries: HashMap<Vec<u8>, Entry, foldhash::quality::RandomState>,
     ordered_keys: BTreeSet<Vec<u8>>,
+    /// Physical keys by DB for O(1) RANDOMKEY sampling. `ordered_keys` remains
+    /// the deterministic SCAN/KEYS surface; these slots are intentionally
+    /// unordered because RANDOMKEY has no ordering contract. (frankenredis-srhju)
+    random_key_slots: Vec<Vec<Vec<u8>>>,
+    random_key_positions: HashMap<Vec<u8>, (usize, usize), foldhash::quality::RandomState>,
     /// Db-encoded keys that currently carry a TTL (a subset of `ordered_keys`).
     /// The active-expire cycle samples from this set instead of every key, so
     /// it finds expirable keys as efficiently as upstream's `activeExpireCycle`
@@ -3178,6 +3183,8 @@ impl Default for Store {
         Self {
             entries: HashMap::default(),
             ordered_keys: BTreeSet::new(),
+            random_key_slots: vec![Vec::new(); DEFAULT_NUM_DATABASES],
+            random_key_positions: HashMap::default(),
             volatile_keys: BTreeSet::new(),
             running_digest: 0,
             digest_mutations: 0,
@@ -5859,6 +5866,65 @@ impl Store {
         })
     }
 
+    fn random_key_index_insert(&mut self, db: usize, key: &Vec<u8>) {
+        if db >= self.database_count {
+            return;
+        }
+        if db >= self.random_key_slots.len() {
+            self.random_key_slots.resize_with(db + 1, Vec::new);
+        }
+        if self.random_key_positions.contains_key(key.as_slice()) {
+            return;
+        }
+        let Some(keys) = self.random_key_slots.get_mut(db) else {
+            return;
+        };
+        let slot = keys.len();
+        keys.push(key.clone());
+        self.random_key_positions.insert(key.clone(), (db, slot));
+    }
+
+    fn random_key_index_remove(&mut self, key: &[u8]) {
+        let Some((db, slot)) = self.random_key_positions.remove(key) else {
+            return;
+        };
+        let Some(keys) = self.random_key_slots.get_mut(db) else {
+            return;
+        };
+        if slot >= keys.len() {
+            return;
+        }
+        keys.swap_remove(slot);
+        if let Some(moved) = keys.get(slot) {
+            self.random_key_positions.insert(moved.clone(), (db, slot));
+        }
+    }
+
+    fn volatile_physical_keys_in_db(&self, db: usize) -> Vec<Vec<u8>> {
+        if db == 0 {
+            return self
+                .volatile_keys
+                .iter()
+                .filter(|key| decode_db_key(key).is_none())
+                .cloned()
+                .collect();
+        }
+
+        let prefix = encode_db_key(db, b"");
+        self.volatile_keys
+            .range(prefix.clone()..)
+            .take_while(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect()
+    }
+
+    fn expire_volatile_keys_in_db(&mut self, db: usize, now_ms: u64) {
+        let volatile = self.volatile_physical_keys_in_db(db);
+        for key in &volatile {
+            self.drop_if_expired(key, now_ms);
+        }
+    }
+
     fn internal_entries_insert(&mut self, key: Vec<u8>, mut entry: Entry) -> Option<Entry> {
         let db = decode_db_key(&key).map(|(db, _)| db).unwrap_or(0);
         let is_new_key = !self.entries.contains_key(&key);
@@ -5876,6 +5942,7 @@ impl Store {
         }
         if is_new_key {
             self.ordered_keys.insert(key.clone());
+            self.random_key_index_insert(db, &key);
         }
         // Keep the volatile-key sampling set in sync: the stored key is volatile
         // iff the entry replacing it carries a TTL (an overwrite that drops the
@@ -5912,6 +5979,7 @@ impl Store {
     fn internal_entries_remove(&mut self, key: &[u8]) -> Option<Entry> {
         if let Some(entry) = self.entries.remove(key) {
             self.ordered_keys.remove(key);
+            self.random_key_index_remove(key);
             self.volatile_keys.remove(key);
             let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
             if db < self.database_count {
@@ -6309,6 +6377,10 @@ impl Store {
         self.expires_count = 0;
         self.db_key_counts.fill(0);
         self.db_expires_counts.fill(0);
+        for keys in &mut self.random_key_slots {
+            keys.clear();
+        }
+        self.random_key_positions.clear();
         self.dirty = self.dirty.saturating_add(1);
     }
 
@@ -14087,12 +14159,21 @@ impl Store {
 
     #[must_use]
     pub fn randomkey_in_db(&mut self, db: usize, now_ms: u64) -> Option<Vec<u8>> {
-        let matching = self.keys_in_db(db, now_ms);
-        if matching.is_empty() {
+        if db >= self.database_count {
             return None;
         }
-        let idx = (self.next_rand() as usize) % matching.len();
-        matching.get(idx).cloned()
+
+        self.expire_volatile_keys_in_db(db, now_ms);
+
+        let len = self.random_key_slots.get(db).map_or(0, Vec::len);
+        if len == 0 {
+            return None;
+        }
+        let idx = (self.next_rand() as usize) % len;
+        let physical = self.random_key_slots.get(db)?.get(idx)?.clone();
+        decode_db_key(&physical)
+            .map(|(_, logical)| logical.to_vec())
+            .or(Some(physical))
     }
 
     /// Return up to `count` keys that hash to the given cluster slot.
@@ -21011,6 +21092,52 @@ mod tests {
         assert_eq!(
             store.drain_keyspace_notifications(),
             vec![(b"__keyevent@0__:expired".to_vec(), b"exp".to_vec())]
+        );
+    }
+
+    #[test]
+    fn randomkey_in_db_uses_positional_index_and_logical_names() {
+        let mut store = Store::new();
+        store.set(b"db0".to_vec(), b"v".to_vec(), None, 0);
+        let db1_a = encode_db_key(1, b"a");
+        let db1_b = encode_db_key(1, b"b");
+        store.set(db1_a.clone(), b"v".to_vec(), None, 0);
+        store.set(db1_b.clone(), b"v".to_vec(), None, 0);
+
+        for _ in 0..16 {
+            let key = store.randomkey_in_db(1, 0).expect("db1 has keys");
+            assert!(
+                key == b"a" || key == b"b",
+                "RANDOMKEY in db1 returned unexpected logical key {key:?}"
+            );
+            assert!(
+                super::decode_db_key(&key).is_none(),
+                "RANDOMKEY must return logical, not physical, key bytes"
+            );
+        }
+
+        assert_eq!(store.del(&[db1_a], 0), 1);
+        for _ in 0..8 {
+            assert_eq!(store.randomkey_in_db(1, 0), Some(b"b".to_vec()));
+        }
+
+        assert_eq!(store.del(&[db1_b], 0), 1);
+        assert_eq!(store.randomkey_in_db(1, 0), None);
+        assert_eq!(store.randomkey_in_db(0, 0), Some(b"db0".to_vec()));
+    }
+
+    #[test]
+    fn randomkey_in_db_expires_volatile_keys_before_sampling() {
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_EXPIRED;
+        store.set(encode_db_key(2, b"exp"), b"v".to_vec(), Some(5), 0);
+        store.set(encode_db_key(2, b"live"), b"v".to_vec(), None, 0);
+
+        assert_eq!(store.randomkey_in_db(2, 6), Some(b"live".to_vec()));
+        assert_eq!(store.stat_expired_keys, 1);
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![(b"__keyevent@2__:expired".to_vec(), b"exp".to_vec())]
         );
     }
 
