@@ -1,0 +1,16 @@
+requests=1000000 clients=16 keyspace=10000 unique_keys=10000
+ideal_fully_associative_after_warmup_hit_rate=0.990000
+min_count=62 max_count=138 mean=100.00
+direct_mapped_slots= 1024 hit_rate=0.102522 misses=897478
+direct_mapped_slots= 2048 hit_rate=0.204820 misses=795180
+direct_mapped_slots= 4096 hit_rate=0.407944 misses=592056
+direct_mapped_slots= 8192 hit_rate=0.812364 misses=187636
+direct_mapped_slots=16384 hit_rate=0.990000 misses=10000
+direct_mapped_slots=32768 hit_rate=0.990000 misses=10000
+direct_mapped_slots=65536 hit_rate=0.990000 misses=10000
+set_assoc_sets= 1024 ways=2 entries= 2048 hit_rate=0.204182 misses=795818
+set_assoc_sets= 2048 ways=2 entries= 4096 hit_rate=0.408161 misses=591839
+set_assoc_sets= 4096 ways=2 entries= 8192 hit_rate=0.812402 misses=187598
+set_assoc_sets= 8192 ways=2 entries=16384 hit_rate=0.990000 misses=10000
+set_assoc_sets= 4096 ways=4 entries=16384 hit_rate=0.990000 misses=10000
+set_assoc_sets= 8192 ways=4 entries=32768 hit_rate=0.990000 misses=10000
