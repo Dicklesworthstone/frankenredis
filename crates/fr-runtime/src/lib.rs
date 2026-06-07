@@ -270,6 +270,14 @@ fn plain_incrby_owned_argv(key: &[u8], delta: &[u8]) -> Vec<Vec<u8>> {
     vec![b"INCRBY".to_vec(), key.to_vec(), delta.to_vec()]
 }
 
+fn plain_decr_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"DECR".to_vec(), key.to_vec()]
+}
+
+fn plain_decrby_owned_argv(key: &[u8], delta: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"DECRBY".to_vec(), key.to_vec(), delta.to_vec()]
+}
+
 fn plain_get_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"GET".to_vec(), key.to_vec()]
 }
@@ -6035,6 +6043,277 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'INCR' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    fn can_execute_plain_decr_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < b"DECR".len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// Conservative borrowed runtime fast path for `DECR key`: the exact twin of
+    /// [`Self::execute_plain_incr_borrowed`], applying `store.incrby(key, -1)`
+    /// (upstream `decrCommand` is `incrDecrCommand(c, -1)`). Returns the new
+    /// value, or a WRONGTYPE / "not an integer" / overflow error, exactly like
+    /// the generic handler. Returns None (fall back) on any disabling state.
+    /// (frankenredis-q0qym)
+    pub fn execute_plain_decr_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
+        if !self.can_execute_plain_decr_borrowed(key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("decr");
+        self.session.last_argv_len_sum = b"DECR".len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let result = self.server.store.incrby(key, -1, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match result {
+            Ok(value) => RespFrame::Integer(value),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_decr_borrowed_metrics(key, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_writes_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_decr_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_decr_owned_argv(key));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_decr_owned_argv(key));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_with_kind("decr", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_decr_owned_argv(key));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'DECR' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    fn can_execute_plain_decrby_borrowed(
+        &mut self,
+        key: &[u8],
+        delta_arg: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"DECRBY".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || delta_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// Conservative borrowed runtime fast path for `DECRBY key delta`: the twin
+    /// of [`Self::execute_plain_incrby_borrowed`], applying
+    /// `store.incrby(key, -delta)` (upstream `decrbyCommand`). Engages ONLY for a
+    /// well-formed integer delta whose negation does not overflow; a non-integer
+    /// delta or `LLONG_MIN` delta returns None so the generic path emits the
+    /// identical "not an integer" / "decrement would overflow" error (and stats).
+    /// (frankenredis-q0qym)
+    pub fn execute_plain_decrby_borrowed(
+        &mut self,
+        key: &[u8],
+        delta_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_decrby_borrowed(key, delta_arg, now_ms) {
+            return None;
+        }
+        // Only fast-path a well-formed integer delta whose negation is in range;
+        // defer the not-an-integer error AND the LLONG_MIN "decrement would
+        // overflow" error (and their stats) to the generic path.
+        let neg_delta = parse_i64_arg(delta_arg).ok()?.checked_neg()?;
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("decrby");
+        self.session.last_argv_len_sum = b"DECRBY".len() + key.len() + delta_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let result = self.server.store.incrby(key, neg_delta, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match result {
+            Ok(value) => RespFrame::Integer(value),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_decrby_borrowed_metrics(
+            key, delta_arg, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_writes_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_decrby_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        delta_arg: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_decrby_owned_argv(key, delta_arg));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_decrby_owned_argv(key, delta_arg));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_with_kind("decrby", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_decrby_owned_argv(key, delta_arg));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'DECRBY' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -19457,6 +19736,114 @@ mod tests {
         assert!(rt.execute_plain_incrby_borrowed(b"n", b"2", 2).is_some());
         rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
         assert!(rt.execute_plain_incrby_borrowed(b"n", b"2", 4).is_none());
+    }
+
+    #[test]
+    fn plain_decr_borrowed_fast_path_matches_generic_create_decrement_wrongtype_notint() {
+        // (frankenredis-q0qym) DECR borrowed fast path == generic dispatch:
+        // creates at -1, decrements, persists, and surfaces the same WRONGTYPE /
+        // "not an integer" / overflow errors. DECR is incrby(key, -1).
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"n", b"43"]), 1);
+            rt.execute_frame(command(&[b"SET", b"nan", b"abc"]), 1);
+            rt.execute_frame(command(&[b"SET", b"min", b"-9223372036854775808"]), 1);
+            rt.execute_frame(command(&[b"RPUSH", b"l", b"x"]), 1);
+        }
+        for (label, key) in [
+            ("dec", b"n".as_slice()),
+            ("new", b"fresh"),
+            ("nan", b"nan"),
+            ("min", b"min"),
+            ("wt", b"l"),
+        ] {
+            let f = fast
+                .execute_plain_decr_borrowed(key, 2)
+                .expect("default DECR should take borrowed fast path");
+            let g = generic.execute_frame(command(&[b"DECR", key]), 2);
+            assert_eq!(f, g, "{label}");
+        }
+        let got = fast.execute_frame(command(&[b"GET", b"n"]), 6);
+        assert_eq!(got, generic.execute_frame(command(&[b"GET", b"n"]), 6));
+        assert_eq!(got, RespFrame::BulkString(Some(b"42".to_vec())));
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_writes_processed,
+            generic.server.store.stat_total_writes_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+        assert_eq!(
+            fast.session.last_command_name,
+            generic.session.last_command_name
+        );
+    }
+
+    #[test]
+    fn plain_decrby_borrowed_fast_path_matches_generic_and_defers_bad_int_and_llong_min() {
+        // (frankenredis-q0qym) DECRBY borrowed fast path == generic dispatch:
+        // decrements by N (incl negative = increment), same errors, and DEFERS
+        // (None) on a non-integer delta AND on a LLONG_MIN delta (whose negation
+        // overflows -> generic emits "decrement would overflow").
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"n", b"10"]), 1);
+            rt.execute_frame(command(&[b"RPUSH", b"l", b"x"]), 1);
+        }
+        for (k, d) in [
+            (b"n".as_slice(), b"3".as_slice()),
+            (b"n", b"-5"),
+            (b"fresh", b"4"),
+        ] {
+            let f = fast
+                .execute_plain_decrby_borrowed(k, d, 2)
+                .expect("well-formed DECRBY should take fast path");
+            assert_eq!(
+                f,
+                generic.execute_frame(command(&[b"DECRBY", k, d]), 2),
+                "k={k:?} d={d:?}"
+            );
+        }
+        // wrong-type -> same WRONGTYPE
+        let wt = fast.execute_plain_decrby_borrowed(b"l", b"1", 3).unwrap();
+        assert_eq!(
+            wt,
+            generic.execute_frame(command(&[b"DECRBY", b"l", b"1"]), 3)
+        );
+        assert!(matches!(wt, RespFrame::Error(_)));
+        // non-integer delta -> deferred (None)
+        assert!(fast.execute_plain_decrby_borrowed(b"n", b"x", 4).is_none());
+        // LLONG_MIN delta -> deferred (None); generic emits "decrement would overflow"
+        assert!(
+            fast.execute_plain_decrby_borrowed(b"n", b"-9223372036854775808", 5)
+                .is_none()
+        );
+        assert!(matches!(
+            generic.execute_frame(command(&[b"DECRBY", b"n", b"-9223372036854775808"]), 5),
+            RespFrame::Error(ref s) if s.contains("decrement would overflow")
+        ));
+        assert_eq!(
+            fast.execute_frame(command(&[b"GET", b"n"]), 6),
+            generic.execute_frame(command(&[b"GET", b"n"]), 6)
+        );
+    }
+
+    #[test]
+    fn plain_decr_decrby_borrowed_fast_path_disabled_in_non_default_states() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"n", b"1"]), 1);
+        assert!(rt.execute_plain_decr_borrowed(b"n", 2).is_some());
+        assert!(rt.execute_plain_decrby_borrowed(b"n", b"2", 2).is_some());
+        rt.execute_frame(command(&[b"MULTI"]), 3);
+        assert!(rt.execute_plain_decr_borrowed(b"n", 4).is_none());
+        assert!(rt.execute_plain_decrby_borrowed(b"n", b"2", 4).is_none());
     }
 
     #[test]

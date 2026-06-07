@@ -1693,6 +1693,22 @@ fn process_buffered_frames(
                                     consumed: parsed.consumed,
                                     response,
                                 })
+                            } else if let Some(key) = borrowed_plain_decr_args(&borrowed_args)
+                                && let Some(response) = runtime.execute_plain_decr_borrowed(key, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
+                            } else if let Some((key, delta)) =
+                                borrowed_plain_decrby_args(&borrowed_args)
+                                && let Some(response) =
+                                    runtime.execute_plain_decrby_borrowed(key, delta, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
                             } else if let Some((key, field)) =
                                 borrowed_plain_hget_args(&borrowed_args)
                                 && let Some(response) =
@@ -2004,6 +2020,20 @@ fn borrowed_plain_incr_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8
 fn borrowed_plain_incrby_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
     match borrowed_args {
         [command, key, delta] if command.eq_ignore_ascii_case(b"INCRBY") => Some((*key, *delta)),
+        _ => None,
+    }
+}
+
+fn borrowed_plain_decr_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
+    match borrowed_args {
+        [command, key] if command.eq_ignore_ascii_case(b"DECR") => Some(*key),
+        _ => None,
+    }
+}
+
+fn borrowed_plain_decrby_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
+    match borrowed_args {
+        [command, key, delta] if command.eq_ignore_ascii_case(b"DECRBY") => Some((*key, *delta)),
         _ => None,
     }
 }
