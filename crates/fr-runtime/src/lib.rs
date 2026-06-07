@@ -296,6 +296,10 @@ fn plain_scard_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"SCARD".to_vec(), key.to_vec()]
 }
 
+fn plain_lindex_owned_argv(key: &[u8], index: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"LINDEX".to_vec(), key.to_vec(), index.to_vec()]
+}
+
 fn plain_getrange_owned_argv(key: &[u8], start: &[u8], end: &[u8]) -> Vec<Vec<u8>> {
     vec![
         b"GETRANGE".to_vec(),
@@ -7295,6 +7299,153 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'SCARD' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    fn can_execute_plain_lindex_borrowed(
+        &mut self,
+        key: &[u8],
+        index_arg: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"LINDEX".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || index_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Conservative borrowed runtime fast path for `LINDEX key index`: mirrors
+    /// the generic handler EXACTLY (key_type probe — missing→nil, non-list→
+    /// WRONGTYPE — BEFORE the index is consulted, per frankenredis-lidxorder),
+    /// then `store.lindex`. Engages ONLY for a well-formed integer index; a
+    /// non-integer index returns None so the generic path emits the identical
+    /// "value is not an integer" error (and its stats). Returns None on any
+    /// disabling state. (frankenredis-h8gbc)
+    pub fn execute_plain_lindex_borrowed(
+        &mut self,
+        key: &[u8],
+        index_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_lindex_borrowed(key, index_arg, now_ms) {
+            return None;
+        }
+        // Only fast-path well-formed integer indices; defer the
+        // not-an-integer error (and its stats / type-check ordering) to generic.
+        let index = parse_i64_arg(index_arg).ok()?;
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("lindex");
+        self.session.last_argv_len_sum = b"LINDEX".len() + key.len() + index_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        // Mirror generic lindex order: key_type check before lindex.
+        let reply = match self.server.store.key_type(key, now_ms) {
+            None => RespFrame::BulkString(None),
+            Some("list") => match self.server.store.lindex(key, index, now_ms) {
+                Ok(value) => RespFrame::BulkString(value),
+                Err(err) => CommandError::Store(err).to_resp(),
+            },
+            Some(_) => CommandError::Store(fr_store::StoreError::WrongType).to_resp(),
+        };
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_lindex_borrowed_metrics(
+            key, index_arg, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_reads_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_lindex_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        index_arg: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_lindex_owned_argv(key, index_arg));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_lindex_owned_argv(key, index_arg));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_with_kind("lindex", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_lindex_owned_argv(key, index_arg));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'LINDEX' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -18545,6 +18696,82 @@ mod tests {
         assert!(rt.execute_plain_scard_borrowed(b"s", 2).is_some());
         rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
         assert!(rt.execute_plain_scard_borrowed(b"s", 4).is_none());
+    }
+
+    #[test]
+    fn plain_lindex_borrowed_fast_path_matches_generic_and_defers_bad_int() {
+        // (frankenredis-h8gbc) LINDEX borrowed fast path == generic dispatch:
+        // value at index (incl negative), nil for out-of-range / missing key,
+        // WRONGTYPE for a non-list, and DEFER (None) on a non-integer index so
+        // the generic path emits the not-an-integer error (with WRONGTYPE taking
+        // precedence on a non-list key, per lidxorder).
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"RPUSH", b"l", b"a", b"b", b"c"]), 1);
+            rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1); // wrong type
+        }
+
+        for idx in [b"0".as_slice(), b"2", b"-1", b"-3", b"5", b"-9"] {
+            let f = fast
+                .execute_plain_lindex_borrowed(b"l", idx, 2)
+                .expect("well-formed LINDEX should take fast path");
+            let g = generic.execute_frame(command(&[b"LINDEX", b"l", idx]), 2);
+            assert_eq!(f, g, "idx={idx:?}");
+        }
+
+        // missing key -> nil
+        let miss = fast
+            .execute_plain_lindex_borrowed(b"nokey", b"0", 3)
+            .expect("missing-key LINDEX should take fast path");
+        assert_eq!(
+            miss,
+            generic.execute_frame(command(&[b"LINDEX", b"nokey", b"0"]), 3)
+        );
+        assert_eq!(miss, RespFrame::BulkString(None));
+
+        // wrong-type key -> WRONGTYPE
+        let wt = fast
+            .execute_plain_lindex_borrowed(b"str", b"0", 4)
+            .expect("wrong-type LINDEX should take fast path");
+        assert_eq!(
+            wt,
+            generic.execute_frame(command(&[b"LINDEX", b"str", b"0"]), 4)
+        );
+        assert!(matches!(wt, RespFrame::Error(_)));
+
+        // non-integer index -> fast path defers (None), generic emits the error
+        assert!(fast.execute_plain_lindex_borrowed(b"l", b"x", 5).is_none());
+
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_reads_processed,
+            generic.server.store.stat_total_reads_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            fast.session.last_command_name,
+            generic.session.last_command_name
+        );
+    }
+
+    #[test]
+    fn plain_lindex_borrowed_fast_path_disabled_in_non_default_states() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"RPUSH", b"l", b"a"]), 1);
+        assert!(rt.execute_plain_lindex_borrowed(b"l", b"0", 2).is_some());
+        rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
+        assert!(rt.execute_plain_lindex_borrowed(b"l", b"0", 4).is_none());
     }
 
     #[test]
