@@ -23048,6 +23048,19 @@ fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() < 2_usize.saturating_add(numkeys) {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
+    // (frankenredis-zintercardwt) Upstream zinterCardCommand looks up + type-
+    // checks every input key (a non-zset/non-set key is WRONGTYPE; a SET is a
+    // valid zset-like operand) BEFORE parsing the optional LIMIT clause — so a
+    // wrong-type key beats a bad/negative LIMIT or a trailing syntax error. fr
+    // parsed LIMIT first, surfacing the LIMIT/syntax error instead. (SINTERCARD
+    // parses LIMIT first — a different upstream code path — so it is unchanged.)
+    // The peek is no-stat so it does not perturb keyspace hit/miss accounting.
+    for i in 0..numkeys {
+        match store.peek_value_type(&argv[2_usize.saturating_add(i)], now_ms) {
+            None | Some(ValueType::ZSet) | Some(ValueType::Set) => {}
+            Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
+        }
+    }
     let mut limit: u64 = 0;
     let mut idx = 2 + numkeys;
     while idx < argv.len() {
@@ -47005,6 +47018,86 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn zintercard_wrongtype_precedes_limit_and_syntax_validation() {
+        // (frankenredis-zintercardwt) Upstream zinterCardCommand type-checks
+        // every key (WRONGTYPE for non-zset/non-set) BEFORE parsing the optional
+        // LIMIT clause — so a wrong-type key beats a negative/bad LIMIT or a
+        // trailing syntax error. A SET is a valid zset-like operand. fr
+        // previously validated LIMIT first.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"str".to_vec(), b"x".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[b"RPUSH".to_vec(), b"lst".to_vec(), b"a".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[b"SADD".to_vec(), b"s".to_vec(), b"a".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        // wrong-type key beats LIMIT / trailing-syntax errors
+        for parts in [
+            vec!["ZINTERCARD", "1", "str", "LIMIT", "-1"],
+            vec!["ZINTERCARD", "1", "str", "BADTRAIL"],
+            vec!["ZINTERCARD", "2", "str", "z", "LIMIT", "abc"],
+            vec!["ZINTERCARD", "1", "lst", "LIMIT", "-1"],
+        ] {
+            assert_eq!(
+                dispatch_argv(&argv(&parts), &mut store, 0).expect_err("wrongtype"),
+                CommandError::Store(fr_store::StoreError::WrongType),
+                "{parts:?}"
+            );
+        }
+        // valid types (zset / set / missing) still validate LIMIT
+        assert_eq!(
+            dispatch_argv(
+                &argv(&["ZINTERCARD", "1", "z", "LIMIT", "-1"]),
+                &mut store,
+                0
+            )
+            .expect_err("limit"),
+            CommandError::Custom("ERR LIMIT can't be negative".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &argv(&["ZINTERCARD", "1", "s", "LIMIT", "-1"]),
+                &mut store,
+                0
+            )
+            .expect_err("limit on set operand"),
+            CommandError::Custom("ERR LIMIT can't be negative".to_string())
+        );
+        // a SET key is a valid operand (counts members)
+        assert_eq!(
+            dispatch_argv(&argv(&["ZINTERCARD", "1", "s"]), &mut store, 0).unwrap(),
+            RespFrame::Integer(1)
+        );
     }
 
     #[test]
