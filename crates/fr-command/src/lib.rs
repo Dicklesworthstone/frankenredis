@@ -2153,9 +2153,9 @@ impl CommandError {
                 fr_store::StoreError::InvalidHllValue => RespFrame::Error(
                     "WRONGTYPE Key is not a valid HyperLogLog string value.".to_string(),
                 ),
-                fr_store::StoreError::CorruptedHllValue => RespFrame::Error(
-                    "INVALIDOBJ Corrupted HLL object detected".to_string(),
-                ),
+                fr_store::StoreError::CorruptedHllValue => {
+                    RespFrame::Error("INVALIDOBJ Corrupted HLL object detected".to_string())
+                }
                 fr_store::StoreError::IndexOutOfRange => {
                     RespFrame::Error("ERR index out of range".to_string())
                 }
@@ -3588,7 +3588,26 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
         Exat(u64),
         KeepTtl,
     }
-    let mut expiry_mode = ExpiryMode::None;
+    // (frankenredis-setexorder) Upstream parseExtendedStringArgumentsOrReply
+    // SCANS options WITHOUT validating the expire VALUE: only different expire
+    // *kinds* conflict (the same kind may repeat, last value wins), and any
+    // syntax error in the scan (conflicting kinds, NX/XX conflict, missing
+    // value, unknown token) takes precedence over an invalid/overwritten expire
+    // value. The chosen value is validated ONCE, after the full scan. fr
+    // previously validated each EX/PX value inline, so `SET k v EX 0 PX 100`
+    // (conflict) and `SET k v EX 0 EX 10` (overwrite) wrongly surfaced the value
+    // error instead of upstream's syntax error / success.
+    #[derive(PartialEq)]
+    enum ExpiryKind {
+        None,
+        Px,
+        Ex,
+        Pxat,
+        Exat,
+        KeepTtl,
+    }
+    let mut expiry_kind = ExpiryKind::None;
+    let mut expiry_raw: &[u8] = b"";
     let mut nx = false;
     let mut xx = false;
     let mut get = false;
@@ -3598,65 +3617,46 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
         let option =
             std::str::from_utf8(option_arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if option.eq_ignore_ascii_case("PX") {
-            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Px(_)) {
+            if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Px) {
                 return Err(CommandError::SyntaxError);
             }
             let Some(ttl_arg) = options.next() else {
                 return Err(CommandError::SyntaxError);
             };
-            let ms = parse_set_expire_arg(ttl_arg)?;
-            // (frankenredis-expbase) upstream rejects relative
-            // ms values whose ms+basetime would overflow LLONG_MAX
-            // before fr would silently saturate.
-            validate_relative_expire_basetime(ms, now_ms, "set")?;
-            expiry_mode = ExpiryMode::Px(ms);
+            expiry_kind = ExpiryKind::Px;
+            expiry_raw = ttl_arg;
         } else if option.eq_ignore_ascii_case("EX") {
-            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Ex(_)) {
+            if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Ex) {
                 return Err(CommandError::SyntaxError);
             }
             let Some(seconds_arg) = options.next() else {
                 return Err(CommandError::SyntaxError);
             };
-            let seconds = parse_set_expire_arg(seconds_arg)?;
-            // Upstream t_string.c::getExpireMillisecondsOrReply
-            // rejects seconds-unit values whose ms-conversion would
-            // overflow LLONG_MAX. (br-frankenredis-setexrange)
-            if seconds > i64::MAX as u64 / 1000 {
-                return Err(CommandError::Custom(
-                    "ERR invalid expire time in 'set' command".to_string(),
-                ));
-            }
-            // (frankenredis-expbase) ms+basetime overflow check.
-            validate_relative_expire_basetime(seconds * 1000, now_ms, "set")?;
-            expiry_mode = ExpiryMode::Ex(seconds);
+            expiry_kind = ExpiryKind::Ex;
+            expiry_raw = seconds_arg;
         } else if option.eq_ignore_ascii_case("PXAT") {
-            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Pxat(_)) {
+            if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Pxat) {
                 return Err(CommandError::SyntaxError);
             }
             let Some(ts_arg) = options.next() else {
                 return Err(CommandError::SyntaxError);
             };
-            expiry_mode = ExpiryMode::Pxat(parse_set_expire_arg(ts_arg)?);
+            expiry_kind = ExpiryKind::Pxat;
+            expiry_raw = ts_arg;
         } else if option.eq_ignore_ascii_case("EXAT") {
-            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Exat(_)) {
+            if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Exat) {
                 return Err(CommandError::SyntaxError);
             }
             let Some(ts_arg) = options.next() else {
                 return Err(CommandError::SyntaxError);
             };
-            let seconds = parse_set_expire_arg(ts_arg)?;
-            // (br-frankenredis-setexrange) — EXAT is also seconds.
-            if seconds > i64::MAX as u64 / 1000 {
-                return Err(CommandError::Custom(
-                    "ERR invalid expire time in 'set' command".to_string(),
-                ));
-            }
-            expiry_mode = ExpiryMode::Exat(seconds);
+            expiry_kind = ExpiryKind::Exat;
+            expiry_raw = ts_arg;
         } else if option.eq_ignore_ascii_case("KEEPTTL") {
-            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::KeepTtl) {
+            if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::KeepTtl) {
                 return Err(CommandError::SyntaxError);
             }
-            expiry_mode = ExpiryMode::KeepTtl;
+            expiry_kind = ExpiryKind::KeepTtl;
         } else if option.eq_ignore_ascii_case("NX") {
             // (frankenredis-24276) Upstream
             // parseExtendedStringArgumentsOrReply (t_string.c lines
@@ -3681,6 +3681,43 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             return Err(CommandError::SyntaxError);
         }
     }
+
+    // Validate the final chosen expire value AFTER the full option scan (any
+    // syntax error already returned above), mirroring upstream's deferred
+    // getExpireMillisecondsOrReply. This precedes the NX/XX existence gate, like
+    // upstream's setGenericCommand. (frankenredis-setexorder)
+    let expiry_mode = match expiry_kind {
+        ExpiryKind::None => ExpiryMode::None,
+        ExpiryKind::KeepTtl => ExpiryMode::KeepTtl,
+        ExpiryKind::Px => {
+            let ms = parse_set_expire_arg(expiry_raw)?;
+            // (frankenredis-expbase) reject relative ms whose ms+basetime
+            // overflows LLONG_MAX rather than silently saturating.
+            validate_relative_expire_basetime(ms, now_ms, "set")?;
+            ExpiryMode::Px(ms)
+        }
+        ExpiryKind::Ex => {
+            let seconds = parse_set_expire_arg(expiry_raw)?;
+            // (br-frankenredis-setexrange) seconds whose ms-conversion overflows.
+            if seconds > i64::MAX as u64 / 1000 {
+                return Err(CommandError::Custom(
+                    "ERR invalid expire time in 'set' command".to_string(),
+                ));
+            }
+            validate_relative_expire_basetime(seconds * 1000, now_ms, "set")?;
+            ExpiryMode::Ex(seconds)
+        }
+        ExpiryKind::Pxat => ExpiryMode::Pxat(parse_set_expire_arg(expiry_raw)?),
+        ExpiryKind::Exat => {
+            let seconds = parse_set_expire_arg(expiry_raw)?;
+            if seconds > i64::MAX as u64 / 1000 {
+                return Err(CommandError::Custom(
+                    "ERR invalid expire time in 'set' command".to_string(),
+                ));
+            }
+            ExpiryMode::Exat(seconds)
+        }
+    };
 
     let old_value = if get {
         store.get(&argv[1], now_ms)?
@@ -28882,6 +28919,59 @@ mod tests {
         ];
         let err = dispatch_argv(&argv, &mut store, 0).expect_err("set should fail");
         assert!(matches!(err, CommandError::SyntaxError));
+    }
+
+    #[test]
+    fn set_expire_option_validation_is_deferred_to_after_the_scan() {
+        // (frankenredis-setexorder) Conflicting expire kinds are a syntax error
+        // that takes precedence over an invalid/overwritten expire value, and a
+        // repeated SAME kind is last-wins (only the final value is validated) —
+        // matching upstream parseExtendedStringArgumentsOrReply's deferred
+        // validation. fr previously validated each EX/PX value inline.
+        let v = |s: &[u8]| s.to_vec();
+        let run = |store: &mut Store, args: &[&[u8]]| {
+            dispatch_argv(&args.iter().map(|a| v(a)).collect::<Vec<_>>(), store, 1)
+        };
+
+        let mut store = Store::new();
+        // conflict (different kinds) beats the invalid EX 0 -> syntax error
+        assert!(matches!(
+            run(
+                &mut store,
+                &[b"SET", b"k", b"x", b"EX", b"0", b"PX", b"100"]
+            ),
+            Err(CommandError::SyntaxError)
+        ));
+        // conflict beats a non-integer EX value -> syntax error
+        assert!(matches!(
+            run(
+                &mut store,
+                &[b"SET", b"k", b"x", b"EX", b"abc", b"PX", b"100"]
+            ),
+            Err(CommandError::SyntaxError)
+        ));
+        // repeated SAME kind: last wins, only the final (valid) value validated
+        assert_eq!(
+            run(&mut store, &[b"SET", b"k", b"x", b"EX", b"0", b"EX", b"10"]),
+            Ok(RespFrame::SimpleString("OK".to_string()))
+        );
+        assert_eq!(
+            run(
+                &mut store,
+                &[b"SET", b"k", b"x", b"EX", b"10", b"EX", b"20"]
+            ),
+            Ok(RespFrame::SimpleString("OK".to_string()))
+        );
+        // a single invalid expire value (no conflict) still errors after the scan
+        assert!(matches!(
+            run(&mut store, &[b"SET", b"k", b"x", b"EX", b"0"]),
+            Err(CommandError::Custom(_))
+        ));
+        // different-kind conflict alone is still a syntax error
+        assert!(matches!(
+            run(&mut store, &[b"SET", b"k", b"x", b"KEEPTTL", b"EX", b"10"]),
+            Err(CommandError::SyntaxError)
+        ));
     }
 
     #[test]
