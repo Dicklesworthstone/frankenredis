@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780866453477,
+  "host": "127.0.0.1",
+  "port": 6466,
+  "workload": "get",
+  "clients": 16,
+  "requests": 1000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "fr:pass63:baseline-smoke",
+  "total_time_ms": 3,
+  "ops_per_sec": 270452.71621071943,
+  "bytes_sent": 55885,
+  "bytes_received": 9000,
+  "latency_us": {
+    "min": 57,
+    "p50": 287,
+    "p95": 598,
+    "p99": 760,
+    "p999": 761,
+    "max": 761,
+    "mean": 298.48800000000006,
+    "samples": 1000
+  }
+}

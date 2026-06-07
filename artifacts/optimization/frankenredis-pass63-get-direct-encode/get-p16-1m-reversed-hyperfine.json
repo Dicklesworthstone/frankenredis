@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "/tmp/codex-fr-pass63-candidate-target/release-perf/fr-bench --host 127.0.0.1 --port 6467 --clients 16 --requests 1000000 --pipeline 16 --workload get --key-prefix fr:pass63:candidate-reversed --json-out artifacts/optimization/frankenredis-pass63-get-direct-encode/candidate-get-p16-1m-reversed-last.json",
+      "mean": 1.2569869910999998,
+      "stddev": 0.03754780144384315,
+      "median": 1.2650016572,
+      "user": 0.5787523800000001,
+      "system": 1.1778879199999999,
+      "min": 1.2067900617,
+      "max": 1.3182730747,
+      "times": [
+        1.2548409347,
+        1.2751623797,
+        1.2211993577,
+        1.2856965947,
+        1.2784892917,
+        1.2105336637,
+        1.3182730747,
+        1.2853320137,
+        1.2335525387,
+        1.2067900617
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/tmp/codex-fr-pass63-baseline-target/release-perf/fr-bench --host 127.0.0.1 --port 6466 --clients 16 --requests 1000000 --pipeline 16 --workload get --key-prefix fr:pass63:baseline-reversed --json-out artifacts/optimization/frankenredis-pass63-get-direct-encode/baseline-get-p16-1m-reversed-last.json",
+      "mean": 1.2884160453,
+      "stddev": 0.06055250081137274,
+      "median": 1.2636949722,
+      "user": 0.5819092799999999,
+      "system": 1.1824141200000002,
+      "min": 1.2409575457,
+      "max": 1.4337414257,
+      "times": [
+        1.2956376967,
+        1.2409575457,
+        1.2496997357,
+        1.2755877157,
+        1.2518022287,
+        1.2411952366999999,
+        1.2466663497,
+        1.3230803707,
+        1.4337414257,
+        1.3257921476999999
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

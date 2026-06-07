@@ -1,0 +1,2 @@
+b79d023e586718789382bba51c903392bb6ac4aed9dfa1405cd97bc151fe87ef  artifacts/optimization/frankenredis-pass63-get-direct-encode/golden-baseline.resp
+b79d023e586718789382bba51c903392bb6ac4aed9dfa1405cd97bc151fe87ef  artifacts/optimization/frankenredis-pass63-get-direct-encode/golden-candidate.resp

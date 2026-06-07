@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780866515638,
+  "host": "127.0.0.1",
+  "port": 6466,
+  "workload": "get",
+  "clients": 16,
+  "requests": 1000000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "fr:pass63:baseline-reversed",
+  "total_time_ms": 1309,
+  "ops_per_sec": 763714.4235263353,
+  "bytes_sent": 58888998,
+  "bytes_received": 9000000,
+  "latency_us": {
+    "min": 34,
+    "p50": 310,
+    "p95": 465,
+    "p99": 695,
+    "p999": 1196,
+    "max": 3107,
+    "mean": 327.4653269999994,
+    "samples": 1000000
+  }
+}
