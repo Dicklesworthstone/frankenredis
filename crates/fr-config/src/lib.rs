@@ -62,6 +62,29 @@ pub struct CompatibilityGate {
 
 impl Default for CompatibilityGate {
     fn default() -> Self {
+        // Strict mode must "maximize observable compatibility" with "no
+        // behavior-altering repairs" (AGENTS Compatibility Doctrine), so the
+        // default gate imposes NO cap beyond what redis itself enforces:
+        //   * multibulk count up to INT_MAX (redis rejects only `ll > INT_MAX`)
+        //   * bulk length governed solely by proto-max-bulk-len, which
+        //     parser_config()'s `gate.max_bulk_len.min(proto_max_bulk_len)`
+        //     already applies — so usize::MAX here defers entirely to it.
+        // The tighter array/bulk safety caps are a HARDENED-mode guard, not a
+        // strict-mode behavior change — see `CompatibilityGate::hardened()`.
+        Self {
+            max_array_len: i32::MAX as usize,
+            max_bulk_len: usize::MAX,
+        }
+    }
+}
+
+impl CompatibilityGate {
+    /// Hardened-mode safety caps: bound the command multibulk count and bulk
+    /// length to defend against malformed/hostile oversized frames. These are
+    /// deliberate behavioral guards and therefore live in hardened mode, never
+    /// strict (AGENTS Security vs Compatibility doctrine).
+    #[must_use]
+    pub fn hardened() -> Self {
         Self {
             max_array_len: 1024,
             max_bulk_len: 8 * 1024 * 1024,
@@ -93,6 +116,7 @@ impl RuntimePolicy {
     pub fn hardened() -> Self {
         Self {
             mode: Mode::Hardened,
+            gate: CompatibilityGate::hardened(),
             hardened_allowlist: HARDENED_ALLOWLIST_DEFAULT.to_vec(),
             ..Self::default()
         }
@@ -966,7 +990,8 @@ pub fn evaluate_tls_hardened_deviation(
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigFileParseErrorReason, DecisionAction, DriftSeverity, HARDENED_ALLOWLIST_DEFAULT,
+        CompatibilityGate, ConfigFileParseErrorReason, DecisionAction, DriftSeverity,
+        HARDENED_ALLOWLIST_DEFAULT,
         HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass, TlsAuthClients, TlsCfgError,
         TlsConfig, TlsDirective, TlsListenerTransition, TlsProtocol, TlsRuntimeState,
         default_tls_protocols, evaluate_tls_hardened_deviation, parse_redis_config,
@@ -1880,5 +1905,23 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn strict_gate_is_redis_compatible_hardened_gate_caps() {
+        // Strict mode (the default policy) must not impose array/bulk caps
+        // tighter than redis: multibulk up to INT_MAX, bulk governed solely by
+        // proto-max-bulk-len (usize::MAX defers to it in parser_config).
+        let strict = CompatibilityGate::default();
+        assert_eq!(strict.max_array_len, i32::MAX as usize);
+        assert_eq!(strict.max_bulk_len, usize::MAX);
+        assert_eq!(RuntimePolicy::default().gate, strict);
+
+        // Hardened mode keeps the protective safety caps.
+        let hardened = CompatibilityGate::hardened();
+        assert_eq!(hardened.max_array_len, 1024);
+        assert_eq!(hardened.max_bulk_len, 8 * 1024 * 1024);
+        assert_eq!(RuntimePolicy::hardened().gate, hardened);
+        assert_eq!(RuntimePolicy::hardened().mode, Mode::Hardened);
     }
 }
