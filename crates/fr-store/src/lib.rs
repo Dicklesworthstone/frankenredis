@@ -5866,22 +5866,23 @@ impl Store {
         })
     }
 
-    fn random_key_index_insert(&mut self, db: usize, key: &Vec<u8>) {
+    fn random_key_index_insert(&mut self, db: usize, key: &[u8]) {
         if db >= self.database_count {
             return;
         }
         if db >= self.random_key_slots.len() {
             self.random_key_slots.resize_with(db + 1, Vec::new);
         }
-        if self.random_key_positions.contains_key(key.as_slice()) {
+        if self.random_key_positions.contains_key(key) {
             return;
         }
         let Some(keys) = self.random_key_slots.get_mut(db) else {
             return;
         };
         let slot = keys.len();
+        let key = key.to_vec();
         keys.push(key.clone());
-        self.random_key_positions.insert(key.clone(), (db, slot));
+        self.random_key_positions.insert(key, (db, slot));
     }
 
     fn random_key_index_remove(&mut self, key: &[u8]) {
