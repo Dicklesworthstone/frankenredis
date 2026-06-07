@@ -277,6 +277,13 @@ fn plain_mget_owned_argv(keys: &[&[u8]]) -> Vec<Vec<u8>> {
     argv
 }
 
+fn plain_exists_owned_argv(keys: &[&[u8]]) -> Vec<Vec<u8>> {
+    let mut argv = Vec::with_capacity(keys.len() + 1);
+    argv.push(b"EXISTS".to_vec());
+    argv.extend(keys.iter().map(|k| k.to_vec()));
+    argv
+}
+
 fn wrong_arity_error(command: &'static str) -> RespFrame {
     RespFrame::Error(format!(
         "ERR wrong number of arguments for '{}' command",
@@ -6188,6 +6195,120 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'MGET' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    fn can_execute_plain_exists_borrowed(&mut self, keys: &[&[u8]], now_ms: u64) -> bool {
+        // argv is [EXISTS, key, key, ...]; the gate bounds the whole multibulk.
+        if keys.is_empty()
+            || self.policy.gate.max_array_len < keys.len().saturating_add(1)
+            || self.policy.gate.max_bulk_len < b"EXISTS".len()
+            || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Conservative borrowed runtime fast path for `EXISTS key [key ...]`:
+    /// mirrors `execute_plain_get_borrowed` for the multi-key existence count
+    /// (all keys borrowed from the read buffer, generic argv materialization +
+    /// dispatch skipped). EXISTS counts duplicates and is a metadata query that
+    /// does NOT bump access time, so it uses `Store::exists_no_touch`
+    /// (frankenredis-fz457); it never errors. Returns None (fall back) on any
+    /// disabling state. (frankenredis-uz39v)
+    pub fn execute_plain_exists_borrowed(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_exists_borrowed(keys, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("exists");
+        self.session.last_argv_len_sum =
+            b"EXISTS".len() + keys.iter().map(|k| k.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let mut count = 0_i64;
+        for key in keys {
+            if self.server.store.exists_no_touch(key, now_ms) {
+                count = count.saturating_add(1);
+            }
+        }
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = RespFrame::Integer(count);
+
+        self.record_plain_exists_borrowed_metrics(keys, elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_reads_processed += 1;
+
+        Some(reply)
+    }
+
+    fn record_plain_exists_borrowed_metrics(
+        &mut self,
+        keys: &[&[u8]],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_exists_owned_argv(keys));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_exists_owned_argv(keys));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            // EXISTS never returns an error reply.
+            self.server.store.record_command_histogram_with_kind(
+                "exists",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_exists_owned_argv(keys));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'EXISTS' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -17156,6 +17277,72 @@ mod tests {
         assert!(rt.execute_plain_mget_borrowed(&keys, 2).is_some());
         rt.execute_frame(command(&[b"MULTI"]), 3);
         assert!(rt.execute_plain_mget_borrowed(&keys, 4).is_none());
+    }
+
+    #[test]
+    fn plain_exists_borrowed_fast_path_matches_generic_including_duplicates() {
+        // (frankenredis-uz39v) EXISTS borrowed fast path must match generic:
+        // counts duplicates, works on any type, and is a NO-TOUCH metadata query.
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"a", b"1"]), 1);
+            rt.execute_frame(command(&[b"LPUSH", b"l", b"x"]), 1); // non-string still EXISTS
+        }
+
+        // duplicates counted: EXISTS a a missing l -> 3
+        let keys: [&[u8]; 4] = [b"a", b"a", b"missing", b"l"];
+        let fast_reply = fast
+            .execute_plain_exists_borrowed(&keys, 2)
+            .expect("default EXISTS should take borrowed fast path");
+        let generic_reply =
+            generic.execute_frame(command(&[b"EXISTS", b"a", b"a", b"missing", b"l"]), 2);
+        assert_eq!(fast_reply, generic_reply);
+        assert_eq!(fast_reply, RespFrame::Integer(3));
+
+        let one = fast
+            .execute_plain_exists_borrowed(&[b"missing"], 3)
+            .expect("single-key EXISTS should take borrowed fast path");
+        assert_eq!(
+            one,
+            generic.execute_frame(command(&[b"EXISTS", b"missing"]), 3)
+        );
+        assert_eq!(one, RespFrame::Integer(0));
+
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_reads_processed,
+            generic.server.store.stat_total_reads_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            fast.session.last_command_name,
+            generic.session.last_command_name
+        );
+        assert_eq!(
+            fast.session.last_argv_len_sum,
+            generic.session.last_argv_len_sum
+        );
+    }
+
+    #[test]
+    fn plain_exists_borrowed_fast_path_disabled_in_non_default_states() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"a", b"1"]), 1);
+        let keys: [&[u8]; 1] = [b"a"];
+        assert!(rt.execute_plain_exists_borrowed(&keys, 2).is_some());
+        rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
+        assert!(rt.execute_plain_exists_borrowed(&keys, 4).is_none());
     }
 
     #[test]
