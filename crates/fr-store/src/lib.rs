@@ -10196,7 +10196,19 @@ impl Store {
             let res = if (opts.nx && old_score.is_some()) || (opts.xx && old_score.is_none()) {
                 Ok(None)
             } else {
-                let new_score = old_score.unwrap_or(0.0) + delta;
+                // (frankenredis-zincrnegzero) Upstream zaddGenericCommand in INCR
+                // mode sets a NEW member's score to the increment DIRECTLY (not
+                // `0 + incr`), so a `-0` increment yields a `-0` reply (while the
+                // STORED score is canonicalized to `+0` by insert_with_limits, so
+                // ZSCORE still returns `0`). `0.0 + delta` is the additive
+                // identity for every double EXCEPT `-0.0`, where IEEE gives
+                // `0.0 + (-0.0) = +0.0` — collapsing the sign and diverging from
+                // redis only in that one case. Compute old+delta for existing
+                // members; use delta verbatim for new members.
+                let new_score = match old_score {
+                    Some(old) => old + delta,
+                    None => delta,
+                };
 
                 if new_score.is_nan() {
                     Err(StoreError::IncrFloatNaN)
@@ -20618,7 +20630,9 @@ mod tests {
         // write → no count; DUMP is a read → counts hit on present / miss on
         // absent. Verified vs redis 7.2.4.
         let mut store = Store::new();
-        store.sadd(b"s", &[b"a".to_vec(), b"b".to_vec()], 0).unwrap();
+        store
+            .sadd(b"s", &[b"a".to_vec(), b"b".to_vec()], 0)
+            .unwrap();
         store.stat_keyspace_hits = 0;
         store.stat_keyspace_misses = 0;
 
@@ -20635,7 +20649,10 @@ mod tests {
         assert_eq!(store.stat_keyspace_misses, 0);
         store.dump_key(b"nope", 0); // read on absent: +1 miss
         assert_eq!(store.stat_keyspace_hits, 1);
-        assert_eq!(store.stat_keyspace_misses, 1, "DUMP absent must bump a miss");
+        assert_eq!(
+            store.stat_keyspace_misses, 1,
+            "DUMP absent must bump a miss"
+        );
     }
 
     #[test]
@@ -26851,6 +26868,32 @@ mod tests {
             .zincrby(b"z", b"m".to_vec(), f64::NEG_INFINITY, 0)
             .unwrap_err();
         assert_eq!(nan_err, StoreError::IncrFloatNaN);
+    }
+
+    #[test]
+    fn zincrby_new_member_preserves_negative_zero_in_reply_but_stores_positive_zero() {
+        // (frankenredis-zincrnegzero) redis ZADD INCR / ZINCRBY of `-0` onto a
+        // NEW member replies "-0" (the increment used verbatim) while ZSCORE
+        // returns "0" (stored score canonicalized). `0.0 + (-0.0) == +0.0` would
+        // have collapsed the reply sign.
+        let mut store = Store::new();
+        let new = store.zincrby(b"z", b"m".to_vec(), -0.0, 0).unwrap();
+        assert!(
+            new.is_sign_negative() && new == 0.0,
+            "new-member zincrby -0 must return -0.0, got {new}"
+        );
+        // stored score is canonicalized to +0.0
+        let stored = store.zscore(b"z", b"m", 0).unwrap().unwrap();
+        assert!(
+            stored.is_sign_positive() && stored == 0.0,
+            "stored score must be +0.0, got {stored}"
+        );
+        // existing member: old(+0) + (-0) == +0 (additive identity holds)
+        let again = store.zincrby(b"z", b"m".to_vec(), -0.0, 0).unwrap();
+        assert!(again.is_sign_positive() && again == 0.0);
+        // a normal increment is unaffected
+        let n = store.zincrby(b"z2", b"x".to_vec(), 3.5, 0).unwrap();
+        assert_eq!(n, 3.5);
     }
 
     #[test]
