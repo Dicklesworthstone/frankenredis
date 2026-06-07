@@ -9194,37 +9194,12 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         if argv.len() != 5 && argv.len() != 7 {
             return Err(setid_subcommand_syntax());
         }
-        // (frankenredis-b7jra) Upstream xgroupCommand resolves the key and the
-        // consumer group BEFORE parsing the id/ENTRIESREAD args, so a missing
-        // key or group reports its own error rather than "Invalid stream ID".
-        // Use the no-stat precheck (matches `lookupKeyWrite`: no keyspace-hit
-        // accounting) so the existence ordering is fixed without perturbing
-        // INFO keyspace stats.
-        match store.stream_group_precheck(&argv[2], &argv[3], now_ms) {
-            Ok(true) => {}
-            Ok(false) => return Ok(xgroup_nogroup_error(&argv[2], &argv[3])),
-            Err(StoreError::KeyNotFound) => return Ok(xgroup_key_required_error()),
-            Err(err) => return Err(CommandError::Store(err)),
-        }
-        // Id is parsed before ENTRIESREAD, matching upstream's argument order.
-        let last_delivered_id = if eq_ascii_command(&argv[4], b"$") {
-            store.xlast_id(&argv[2], now_ms)?.unwrap_or((0, 0))
-        } else {
-            // Upstream xgroupCommand SETID uses streamParseStrictIDOrReply
-            // (rejects `-`/`+`/`(N`); only `$` and a strict id are valid.
-            if eq_ascii_command(&argv[4], b"-")
-                || eq_ascii_command(&argv[4], b"+")
-                || argv[4].starts_with(b"(")
-            {
-                return Ok(RespFrame::Error(
-                    "ERR Invalid stream ID specified as stream command argument".to_string(),
-                ));
-            }
-            match parse_stream_range_bound(&argv[4], true) {
-                Ok(id) => id,
-                Err(reply) => return Ok(reply),
-            }
-        };
+        // (frankenredis-xgsetid) Upstream xgroupCommand parses the optional
+        // ENTRIESREAD argument in a loop at the TOP (t_stream.c:2589-2605),
+        // BEFORE the key lookup/type-check, the key/group existence checks, and
+        // the id parse. So a malformed ENTRIESREAD value (or a bad trailing
+        // token) surfaces its own error ahead of WRONGTYPE / "requires key to
+        // exist" / NOGROUP / "Invalid stream ID".
         if argv.len() == 7 && !eq_ascii_command(&argv[5], b"ENTRIESREAD") {
             return Err(setid_subcommand_syntax());
         }
@@ -9238,6 +9213,33 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             u64::try_from(parsed).ok()
         } else {
             None
+        };
+        // (frankenredis-b7jra) Resolve the key + consumer group before the id
+        // parse, so a missing key or group reports its own error rather than
+        // "Invalid stream ID". No-stat precheck (matches `lookupKeyWrite`: no
+        // keyspace-hit accounting) so the ordering is fixed without perturbing
+        // INFO keyspace stats.
+        match store.stream_group_precheck(&argv[2], &argv[3], now_ms) {
+            Ok(true) => {}
+            Ok(false) => return Ok(xgroup_nogroup_error(&argv[2], &argv[3])),
+            Err(StoreError::KeyNotFound) => return Ok(xgroup_key_required_error()),
+            Err(err) => return Err(CommandError::Store(err)),
+        }
+        // (frankenredis-xgsetid) Upstream SETID uses streamParseIDOrReply — the
+        // NON-strict parser (t_stream.c:2694) — so `-` (0-0) and `+` (the
+        // maximum id) are valid, as is `$` (the stream's last id). Only the
+        // `(N` interval syntax is rejected.
+        let last_delivered_id = if eq_ascii_command(&argv[4], b"$") {
+            store.xlast_id(&argv[2], now_ms)?.unwrap_or((0, 0))
+        } else if argv[4].starts_with(b"(") {
+            return Ok(RespFrame::Error(
+                "ERR Invalid stream ID specified as stream command argument".to_string(),
+            ));
+        } else {
+            match parse_stream_range_bound(&argv[4], true) {
+                Ok(id) => id,
+                Err(reply) => return Ok(reply),
+            }
         };
         return match store.xgroup_setid_with_entries_read(
             &argv[2],
@@ -40864,6 +40866,104 @@ mod tests {
             wrongtype,
             CommandError::Store(fr_store::StoreError::WrongType)
         ));
+    }
+
+    #[test]
+    fn xgroup_setid_parses_entriesread_before_existence_and_accepts_plus_minus() {
+        // (frankenredis-qdla6) Upstream xgroupCommand parses the optional
+        // ENTRIESREAD value (t_stream.c:2589-2605) BEFORE the key/group/id
+        // checks, and SETID's id uses the NON-strict streamParseIDOrReply so
+        // `-`/`+` are valid ids.
+        let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        let err_str = |r: Result<RespFrame, CommandError>| -> String {
+            match r {
+                Ok(RespFrame::Error(s)) => s,
+                Err(e) => match e.to_resp() {
+                    RespFrame::Error(s) => s,
+                    other => panic!("expected error, got {other:?}"),
+                },
+                other => panic!("expected error, got {other:?}"),
+            }
+        };
+        let mut store = Store::new();
+        dispatch_argv(&argv(&["SET", "str", "v"]), &mut store, 0).unwrap();
+        dispatch_argv(&argv(&["XADD", "st", "1-1", "f", "v"]), &mut store, 0).unwrap();
+        dispatch_argv(&argv(&["XADD", "st", "2-2", "f", "v"]), &mut store, 0).unwrap();
+        dispatch_argv(
+            &argv(&["XGROUP", "CREATE", "st", "grp", "0"]),
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        // A bad ENTRIESREAD value beats key-required / WRONGTYPE / NOGROUP / id.
+        let int_err = "ERR value is not an integer or out of range";
+        for c in [
+            &[
+                "XGROUP",
+                "SETID",
+                "none",
+                "grp",
+                "1-1",
+                "ENTRIESREAD",
+                "abc",
+            ][..],
+            &[
+                "XGROUP",
+                "SETID",
+                "str",
+                "nope",
+                "abc",
+                "ENTRIESREAD",
+                "abc",
+            ][..],
+            &["XGROUP", "SETID", "st", "nope", "0", "ENTRIESREAD", "abc"][..],
+            &["XGROUP", "SETID", "st", "grp", "+", "ENTRIESREAD", "abc"][..],
+        ] {
+            assert_eq!(
+                err_str(dispatch_argv(&argv(c), &mut store, 0)),
+                int_err,
+                "{c:?}"
+            );
+        }
+        // ENTRIESREAD < -1 -> dedicated wording, still before existence.
+        assert_eq!(
+            err_str(dispatch_argv(
+                &argv(&["XGROUP", "SETID", "none", "grp", "0", "ENTRIESREAD", "-9"]),
+                &mut store,
+                0
+            )),
+            "ERR value for ENTRIESREAD must be positive or -1"
+        );
+
+        // `+` and `-` are valid SETID ids -> OK.
+        for id in ["+", "-", "$", "5-5"] {
+            assert_eq!(
+                dispatch_argv(&argv(&["XGROUP", "SETID", "st", "grp", id]), &mut store, 0).unwrap(),
+                RespFrame::SimpleString("OK".to_string()),
+                "SETID id {id} must be accepted"
+            );
+        }
+        // `(N` interval syntax is still rejected.
+        assert_eq!(
+            err_str(dispatch_argv(
+                &argv(&["XGROUP", "SETID", "st", "grp", "(5"]),
+                &mut store,
+                0
+            )),
+            "ERR Invalid stream ID specified as stream command argument"
+        );
+        // CREATE (strict parser) still rejects `+`/`-`.
+        assert_eq!(
+            err_str(dispatch_argv(
+                &argv(&["XGROUP", "CREATE", "st", "g2", "+"]),
+                &mut store,
+                0
+            )),
+            "ERR Invalid stream ID specified as stream command argument"
+        );
     }
 
     #[test]
