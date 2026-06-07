@@ -5540,6 +5540,11 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     let mut withscores = false;
     let mut limit_offset: Option<usize> = None;
     let mut limit_count: Option<usize> = None;
+    // Raw LIMIT count, mirroring upstream's `long opt_limit = -1` default. The
+    // BYSCORE/BYLEX-pairing check is `opt_limit != -1`, so ONLY an exact -1 is
+    // the "no limit" sentinel — every other value (including other negatives)
+    // is a real count that triggers the shape error in rank mode. (frankenredis-zrlimneg)
+    let mut limit_count_raw: i64 = -1;
 
     let mut i = 4;
     while i < argv.len() {
@@ -5589,6 +5594,7 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             // empty result, and the dependency check below still wins
             // for the no-BYSCORE-no-BYLEX path. (frankenredis-zrnegoff)
             limit_offset = Some(parse_limit_offset_arg(&argv[i + 1])?);
+            limit_count_raw = parse_i64_arg(&argv[i + 2])?;
             limit_count = parse_limit_count_arg(&argv[i + 2])?;
             i += 3;
         } else {
@@ -5599,9 +5605,11 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     // Upstream t_zset.c::zrangeGenericCommand uses verbose syntax-error
     // wording for LIMIT-without-shape and WITHSCORES+BYLEX, matching
     // these exact strings. (br-frankenredis-zrangeshape)
-    // The check uses opt_limit != -1, so a sentinel `LIMIT offset -1`
-    // (limit_count=None) is allowed even in rank mode.
-    if limit_count.is_some() && !byscore && !bylex {
+    // The check is opt_limit != -1: a sentinel `LIMIT offset -1` is allowed
+    // even in rank mode, but `LIMIT offset -100` (or any non-(-1) count) is
+    // not — match on the RAW count, not limit_count (which clamps every
+    // negative to None). (frankenredis-zrlimneg)
+    if limit_count_raw != -1 && !byscore && !bylex {
         return Err(CommandError::Custom(
             "ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX"
                 .to_string(),
@@ -11103,6 +11111,9 @@ fn zrangestore_cmd(
     let mut rev = false;
     let mut limit_offset: Option<usize> = None;
     let mut limit_count: Option<usize> = None;
+    // See ZRANGE: upstream's shape check is `opt_limit != -1`, so only an exact
+    // -1 is the no-limit sentinel. (frankenredis-zrlimneg)
+    let mut limit_count_raw: i64 = -1;
 
     let mut i = 5;
     while i < argv.len() {
@@ -11141,6 +11152,7 @@ fn zrangestore_cmd(
             // LIMIT offset as a long and defers BYSCORE/BYLEX-pairing
             // validation to a post-loop check. (frankenredis-zrnegoff)
             limit_offset = Some(parse_limit_offset_arg(&argv[i + 1])?);
+            limit_count_raw = parse_i64_arg(&argv[i + 2])?;
             limit_count = parse_limit_count_arg(&argv[i + 2])?;
             i += 3;
         } else {
@@ -11158,9 +11170,10 @@ fn zrangestore_cmd(
     // set, not limit_offset. fr's ZRANGE check uses the same rule
     // (line ~4261). The previous `limit_offset.is_some()` guard
     // rejected `LIMIT 0 -1` (no-op) even in plain-rank mode, while
-    // ZRANGE accepts it. Switching to `limit_count.is_some()` makes
-    // ZRANGESTORE match both ZRANGE and vendored.
-    if limit_count.is_some() && !byscore && !bylex {
+    // ZRANGE accepts it. The raw count (not the negative-clamped limit_count)
+    // drives the `opt_limit != -1` test so a non-(-1) negative count errors in
+    // rank mode, matching ZRANGE and vendored. (frankenredis-zrlimneg)
+    if limit_count_raw != -1 && !byscore && !bylex {
         return Ok(RespFrame::Error(
             "ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX"
                 .to_string(),
@@ -47267,6 +47280,95 @@ mod tests {
         assert_eq!(
             got,
             "ERR min or max not valid string range item".to_string()
+        );
+    }
+
+    #[test]
+    fn zrange_limit_count_sentinel_is_only_minus_one() {
+        // Pins frankenredis-zrlimneg/xcaw5. Upstream zrangeGenericCommand's
+        // shape check is `opt_limit != -1`, so ONLY an exact -1 count is the
+        // no-limit sentinel — any other count (incl. other negatives) without
+        // BYSCORE/BYLEX triggers the verbose LIMIT shape error, and that error
+        // precedes the key type-check and the rank min/max parse.
+        let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        let err_of = |r: Result<RespFrame, CommandError>| -> String {
+            match r {
+                Ok(RespFrame::Error(s)) => s,
+                Err(e) => match e.to_resp() {
+                    RespFrame::Error(s) => s,
+                    other => panic!("expected error frame, got {other:?}"),
+                },
+                other => panic!("expected error, got {other:?}"),
+            }
+        };
+        let shape = "ERR syntax error, LIMIT is only supported in combination \
+                     with either BYSCORE or BYLEX";
+
+        let mut store = Store::new();
+        dispatch_argv(
+            &argv(&["ZADD", "z", "1", "a", "2", "b", "3", "c"]),
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(&argv(&["SET", "s", "v"]), &mut store, 0).unwrap();
+
+        // -1 sentinel in rank mode: NOT an error (normal rank result).
+        let ok = dispatch_argv(
+            &argv(&["ZRANGE", "z", "0", "-1", "LIMIT", "0", "-1"]),
+            &mut store,
+            0,
+        );
+        assert!(
+            matches!(ok, Ok(RespFrame::Array(Some(_)))),
+            "LIMIT count -1 is the no-limit sentinel and must be accepted in rank mode, got {ok:?}"
+        );
+
+        // A non-(-1) negative count in rank mode -> LIMIT shape error.
+        assert_eq!(
+            err_of(dispatch_argv(
+                &argv(&["ZRANGE", "z", "0", "-1", "LIMIT", "0", "-100"]),
+                &mut store,
+                0
+            )),
+            shape
+        );
+        // Positive count too.
+        assert_eq!(
+            err_of(dispatch_argv(
+                &argv(&["ZRANGE", "z", "0", "-1", "LIMIT", "0", "5"]),
+                &mut store,
+                0
+            )),
+            shape
+        );
+        // The LIMIT shape error precedes the key type-check (wrong-type key).
+        assert_eq!(
+            err_of(dispatch_argv(
+                &argv(&["ZRANGE", "s", "0", "-1", "LIMIT", "0", "-100"]),
+                &mut store,
+                0
+            )),
+            shape
+        );
+        // ZRANGESTORE shares the rule.
+        assert_eq!(
+            err_of(dispatch_argv(
+                &argv(&["ZRANGESTORE", "d", "z", "0", "-1", "LIMIT", "0", "-100"]),
+                &mut store,
+                0
+            )),
+            shape
+        );
+        assert_eq!(
+            err_of(dispatch_argv(
+                &argv(&["ZRANGESTORE", "d", "s", "0", "-1", "LIMIT", "0", "-100"]),
+                &mut store,
+                0
+            )),
+            shape
         );
     }
 
