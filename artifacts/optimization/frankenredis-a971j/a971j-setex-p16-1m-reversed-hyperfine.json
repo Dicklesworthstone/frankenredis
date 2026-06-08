@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /tmp/codex-fr-a971j-candidate-target/release-perf/frankenredis --port 26645 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix fra971j-cand-rev --json-out artifacts/optimization/frankenredis-a971j/candidate/last-setex-p16-1m-rev.json",
+      "mean": 4.44708180644,
+      "stddev": 0.270821255373569,
+      "median": 4.2939117626400005,
+      "user": 6.804165459999998,
+      "system": 4.26135384,
+      "min": 4.25734410164,
+      "max": 4.89573178964,
+      "times": [
+        4.89573178964,
+        4.25734410164,
+        4.2939117626400005,
+        4.51048113464,
+        4.277940243640001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /tmp/codex-fr-1cbca-closeout-target2/release-perf/frankenredis --port 26646 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix fra971j-base-rev --json-out artifacts/optimization/frankenredis-a971j/baseline/last-setex-p16-1m-rev.json",
+      "mean": 4.357572499240001,
+      "stddev": 0.10859512543402518,
+      "median": 4.363427278640001,
+      "user": 6.693328859999999,
+      "system": 4.23076524,
+      "min": 4.23197374164,
+      "max": 4.52001060264,
+      "times": [
+        4.52001060264,
+        4.29114358264,
+        4.381307290640001,
+        4.363427278640001,
+        4.23197374164
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
