@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-jdiiv-baseline-target/release-perf/frankenredis --bench-bin /tmp/codex-fr-jdiiv-baseline-target/release-perf/fr-bench --port 6403 --workload get --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:jdiiv:baseline",
+      "mean": 0.5199985910457143,
+      "stddev": 0.00820384108279063,
+      "median": 0.5222263137600001,
+      "user": 0.4688244457142856,
+      "system": 0.6631943942857143,
+      "min": 0.51090628676,
+      "max": 0.52925901976,
+      "times": [
+        0.51290734876,
+        0.52536630476,
+        0.51090628676,
+        0.5283545457600001,
+        0.52925901976,
+        0.5222263137600001,
+        0.51097031776
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

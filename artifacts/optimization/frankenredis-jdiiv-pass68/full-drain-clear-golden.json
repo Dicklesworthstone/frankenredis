@@ -1,0 +1,39 @@
+{
+  "baseline": {
+    "current_and_recorded_tracking": {
+      "tracking_clients": "3",
+      "tracking_total_prefixes": "4"
+    },
+    "current_tracking_only": {
+      "tracking_clients": "2",
+      "tracking_total_prefixes": "2"
+    },
+    "observer_on": "+OK\r\n",
+    "peer_tracking": {
+      "tracking_clients": "1",
+      "tracking_total_prefixes": "2"
+    },
+    "tracker_off": "+OK\r\n",
+    "tracker_on": "+OK\r\n"
+  },
+  "baseline_sha256": "d4a9346460558d9cf4137cee8d76445677fb9de87b74475f5008600e46c8f17e",
+  "candidate": {
+    "current_and_recorded_tracking": {
+      "tracking_clients": "3",
+      "tracking_total_prefixes": "4"
+    },
+    "current_tracking_only": {
+      "tracking_clients": "2",
+      "tracking_total_prefixes": "2"
+    },
+    "observer_on": "+OK\r\n",
+    "peer_tracking": {
+      "tracking_clients": "1",
+      "tracking_total_prefixes": "2"
+    },
+    "tracker_off": "+OK\r\n",
+    "tracker_on": "+OK\r\n"
+  },
+  "candidate_sha256": "d4a9346460558d9cf4137cee8d76445677fb9de87b74475f5008600e46c8f17e",
+  "parity": true
+}

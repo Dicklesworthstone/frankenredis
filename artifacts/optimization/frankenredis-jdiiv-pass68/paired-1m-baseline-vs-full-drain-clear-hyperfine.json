@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-jdiiv-baseline-target/release-perf/frankenredis --bench-bin /tmp/codex-fr-jdiiv-baseline-target/release-perf/fr-bench --port 6408 --workload get --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:jdiiv:baseline1m",
+      "mean": 1.5671042733799998,
+      "stddev": 0.08068071667568633,
+      "median": 1.54684566218,
+      "user": 1.4544701,
+      "system": 2.1105419000000003,
+      "min": 1.48029336118,
+      "max": 1.68443175818,
+      "times": [
+        1.48029336118,
+        1.68443175818,
+        1.60819549818,
+        1.51575508718,
+        1.54684566218
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-jdiiv-candidate-target/release-perf/frankenredis --bench-bin /tmp/codex-fr-jdiiv-candidate-target/release-perf/fr-bench --port 6409 --workload get --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:jdiiv:candidate1m",
+      "mean": 1.44139638118,
+      "stddev": 0.022957371043485674,
+      "median": 1.4399298641799998,
+      "user": 1.4139737000000001,
+      "system": 2.1066827000000004,
+      "min": 1.41747789718,
+      "max": 1.46986965018,
+      "times": [
+        1.46986965018,
+        1.41747789718,
+        1.45880512618,
+        1.4399298641799998,
+        1.42089936818
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
