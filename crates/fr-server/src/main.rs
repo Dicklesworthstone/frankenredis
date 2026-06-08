@@ -2194,8 +2194,27 @@ fn process_argv_frame(
     // `c->resp == 2`. RESP3 clients may freely interleave any
     // command with push frames, so the gate (and its runtime mirror
     // at lib.rs ~5426) must be skipped for them.
+    //
+    // (frankenredis-nnbig) Upstream processCommand performs command
+    // LOOKUP (unknown -> "unknown command") and the generic ARITY check
+    // (server.c:3787) BEFORE the pub/sub-context gate (server.c:4072), so a
+    // wrong-arity or unknown command issued while subscribed surfaces its own
+    // error rather than the "...allowed in this context" wording. The runtime
+    // mirror gate (lib.rs ~8861) already conditions on `command_arity_ok`; this
+    // fast-path gate must too — when the command is unknown or its argc fails
+    // the generic arity, skip the gate so the command reaches dispatch, which
+    // emits the matching unknown/arity error (no side effect: arity fails
+    // before execution). NOTE: the DEBUG/MODULE protected gate (server.c:3878)
+    // and container-subcommand arity (e.g. CONFIG GET) still precede the
+    // context gate upstream but resolve only inside the locked runtime — those
+    // remain a follow-up (frankenredis-7tpx0).
     if runtime.is_in_subscription_mode()
         && runtime.client_session().resp_protocol_version() != 3
+        && fr_command::check_command_arity(
+            argv.first().map(Vec::as_slice).unwrap_or(b""),
+            argv.len(),
+        )
+        .is_ok()
         && let Some(reject) = check_subscription_mode_gate(argv, true)
     {
         reject.encode_into(&mut conn.write_buf);
@@ -4189,7 +4208,8 @@ mod tests {
         ReplicaSyncState, StartupConfig, apply_pending_client_unblocks, check_blocked_clients,
         command_frame_can_move_to_argv, consume_complete_replication_prefix, drain_replica_stream,
         drive_replica_sync, encode_eof_marked_replication_snapshot, encode_replication_snapshot,
-        find_crlf, frame_matches_suppressed_replication_reply, is_quit_frame,
+        check_subscription_mode_gate, find_crlf, frame_matches_suppressed_replication_reply,
+        is_quit_frame,
         parse_blocking_deadline, parse_xread_block_deadline_argv, process_buffered_frames,
         read_frame_from_stream, read_replication_snapshot_from_stream, replica_handshake_frame,
         replica_handshake_read_timeout, replication_follow_up_bytes, resolve_xread_block_argv,
@@ -7729,5 +7749,47 @@ mod tests {
         let mut blocked_reply = vec![0_u8; RespFrame::Array(None).to_bytes().len()];
         std::io::Read::read_exact(&mut peer, &mut blocked_reply).unwrap();
         assert_eq!(blocked_reply, RespFrame::Array(None).to_bytes());
+    }
+
+    // (frankenredis-nnbig) The pub/sub-context gate must only fire when
+    // the command is known and its generic arity is OK. Upstream processCommand
+    // does command LOOKUP (unknown -> "unknown command") and the generic ARITY
+    // check (server.c:3787) BEFORE the pub/sub-context gate (server.c:4072), so a
+    // wrong-arity or unknown command issued while subscribed surfaces its own
+    // error, not "...allowed in this context". This pins the exact predicate the
+    // fast-path gate in process_argv_frame applies: arity-ok AND gate-rejects.
+    #[test]
+    fn subscribe_mode_gate_runs_arity_before_context_gate_nnbig() {
+        let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        // gate_fires == the exact condition used in process_argv_frame's RESP2
+        // subscription gate: known + arity-ok AND on the deny-list.
+        let gate_fires = |parts: &[&str]| -> bool {
+            let a = argv(parts);
+            fr_command::check_command_arity(a.first().map(Vec::as_slice).unwrap_or(b""), a.len())
+                .is_ok()
+                && check_subscription_mode_gate(&a, true).is_some()
+        };
+
+        // Wrong-arity / unknown -> gate SKIPPED, command reaches dispatch so its
+        // own unknown/arity error surfaces (matching upstream order).
+        assert!(!gate_fires(&["GET"]), "GET with no key is wrong-arity");
+        assert!(!gate_fires(&["SET", "k"]), "SET missing value is wrong-arity");
+        assert!(!gate_fires(&["GET", "k", "x"]), "GET with extra arg is wrong-arity");
+        assert!(!gate_fires(&["FOOBARNOTACMD", "x"]), "unknown command");
+        assert!(!gate_fires(&["DEBUG"]), "DEBUG with no subcommand is wrong-arity");
+
+        // Valid-arity deny-listed commands -> gate FIRES (subscribe-context error).
+        assert!(gate_fires(&["GET", "k"]));
+        assert!(gate_fires(&["SET", "k", "v"]));
+        assert!(gate_fires(&["INCR", "k"]));
+
+        // Allow-listed pub/sub commands -> gate never fires regardless of arity.
+        assert!(!gate_fires(&["SUBSCRIBE", "c"]));
+        assert!(!gate_fires(&["UNSUBSCRIBE"]));
+        assert!(!gate_fires(&["PING"]));
+        assert!(!gate_fires(&["RESET"]));
+        assert!(!gate_fires(&["QUIT"]));
     }
 }
