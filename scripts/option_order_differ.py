@@ -6,6 +6,7 @@ reply-shape bugs. fr=:18391 oracle=:18390.
 For sampling commands (HRANDFIELD/ZRANDMEMBER/SRANDMEMBER) only the error class
 and reply *length* are compared (element identity is randomized).
 """
+import argparse
 import socket, sys
 
 def conn(p):
@@ -36,7 +37,11 @@ def rd(s):
         return ("*", [rd(s) for _ in range(n)])
     return ("?", l)
 
-R = conn(18390); F = conn(18391)
+_ap = argparse.ArgumentParser()
+_ap.add_argument("--oracle", type=int, default=18390)
+_ap.add_argument("--fr", type=int, default=18391)
+_args = _ap.parse_args()
+R = conn(_args.oracle); F = conn(_args.fr)
 diffs = []
 
 def seed(s):

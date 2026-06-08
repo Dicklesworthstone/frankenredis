@@ -8,6 +8,7 @@ reset the key pool each iteration to keep the two servers in lock-step.
 Excludes the documented false-positive classes: sampling (random element
 identity), tiny-TTL timing races, dict/hash iteration order.
 """
+import argparse
 import socket, sys, random
 
 def conn(p):
@@ -39,7 +40,12 @@ def rd(s):
         return ("*", [rd(s) for _ in range(n)])
     return ("?", l)
 
-R = conn(18390); F = conn(18391)
+_ap = argparse.ArgumentParser()
+_ap.add_argument("--oracle", type=int, default=18390)
+_ap.add_argument("--fr", type=int, default=18391)
+_ap.add_argument("seeds", nargs="*", help="RNG seeds (default 1..6)")
+_args = _ap.parse_args()
+R = conn(_args.oracle); F = conn(_args.fr)
 
 KEYS = ["str", "lst", "set", "hash", "zs", "none"]
 INTISH = ["0", "-1", "1", "-100", "100", "abc", "", "9999999999999", "536870912",
@@ -111,7 +117,7 @@ def fuzz(seeds, per):
                     print(f"DIFF seed={sd} i={i}: {' '.join(args)}\n   O={a!r}\n   F={b!r}")
     return diffs
 
-seeds = [int(x) for x in (sys.argv[1:] or ["1","2","3","4","5","6"])]
+seeds = [int(x) for x in (_args.seeds or ["1","2","3","4","5","6"])]
 d = fuzz(seeds, 1500)
 print(f"\n==== TOTAL DIFFS: {len(d)} over {len(seeds)*1500} ops ====")
 sys.exit(1 if d else 0)
