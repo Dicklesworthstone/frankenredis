@@ -17163,6 +17163,30 @@ pub fn command_has_acl_subcommands(parent: &str) -> bool {
     command_acl_parent_has_subcommands(parent)
 }
 
+/// (frankenredis-k6ei4) The canonical lowercase command name upstream uses for
+/// `c->cmd->fullname`: `parent|sub` for a real container command
+/// (`CONFIG GET` -> `config|get`) and the bare command otherwise. DEBUG is NOT a
+/// container — its `SLEEP`/`JMAP`/`OBJECT`/… are plain arguments, not registered
+/// subcommands — so `DEBUG SLEEP` -> `debug`, matching redis's INFO commandstats /
+/// latencystats keys and the subscribe-context error wording. This is the single
+/// source of truth (delegating to [`command_acl_parent_has_subcommands`]);
+/// fr-runtime previously carried a divergent hardcoded list that wrongly
+/// namespaced DEBUG as `debug|sub`.
+#[must_use]
+pub fn canonical_command_fullname(argv: &[Vec<u8>]) -> String {
+    let parent =
+        String::from_utf8_lossy(argv.first().map(Vec::as_slice).unwrap_or(b"")).to_ascii_lowercase();
+    if command_acl_parent_has_subcommands(&parent)
+        && let Some(sub) = argv.get(1)
+    {
+        return format!(
+            "{parent}|{}",
+            String::from_utf8_lossy(sub).to_ascii_lowercase()
+        );
+    }
+    parent
+}
+
 fn command_acl_parent_has_subcommands(parent: &str) -> bool {
     parent.eq_ignore_ascii_case("acl")
         || parent.eq_ignore_ascii_case("client")
@@ -26864,7 +26888,7 @@ mod tests {
         CLIENT_TRACKING_PREFIX_REQUIRES_BCAST, CLIENT_TRACKING_REDIRECT_MISSING,
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
         SCRIPT_NOSCRIPT_ERROR, SUBCOMMAND_TABLE, StreamLagInfo, acl_command_selectors_for_argv,
-        check_command_arity, check_full_command_arity, classify_command,
+        canonical_command_fullname, check_command_arity, check_full_command_arity, classify_command,
         client_wrong_subcommand_arity,
         cluster_disabled_error, cluster_reset_with_keys_error, cluster_wrong_subcommand_arity,
         command_acl_categories, command_acl_key_access, command_has_acl_subcommands,
@@ -61624,6 +61648,27 @@ mod tests {
             assert_eq!(check_command_arity(&argv[0], argv.len()), Err("hget"));
             assert_eq!(command_key_indexes(argv), vec![1]);
         }
+    }
+
+    #[test]
+    fn canonical_command_fullname_excludes_debug_as_container_k6ei4() {
+        let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        // Real containers namespace as parent|sub (matches c->cmd->fullname).
+        assert_eq!(canonical_command_fullname(&argv(&["CONFIG", "GET"])), "config|get");
+        assert_eq!(canonical_command_fullname(&argv(&["CLIENT", "KILL", "x"])), "client|kill");
+        assert_eq!(canonical_command_fullname(&argv(&["OBJECT", "ENCODING", "k"])), "object|encoding");
+        // Case-insensitive, bare parent when no subcommand arg.
+        assert_eq!(canonical_command_fullname(&argv(&["Config"])), "config");
+        // DEBUG is NOT a container: its args are not registered subcommands, so
+        // upstream's fullname is the bare "debug" (drives INFO commandstats /
+        // latencystats keys + the subscribe-context error).
+        assert_eq!(canonical_command_fullname(&argv(&["DEBUG", "SLEEP", "0"])), "debug");
+        assert_eq!(canonical_command_fullname(&argv(&["DEBUG", "JMAP"])), "debug");
+        // Plain commands are unchanged.
+        assert_eq!(canonical_command_fullname(&argv(&["GET", "k"])), "get");
+        assert_eq!(canonical_command_fullname(&argv(&[])), "");
     }
 
     #[test]
