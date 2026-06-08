@@ -25937,6 +25937,12 @@ mod tests {
         );
 
         let previous = rt.swap_session(observer);
+        // (frankenredis-obohf) CLIENT LIST enumerates the server's
+        // `client_sessions` registry, which the real fr-server loop syncs after
+        // every command via record_client_session. A bare execute_frame test
+        // must replicate that sync, otherwise the just-subscribed session is
+        // absent from the registry and its sub/psub/ssub counts never surface.
+        rt.record_client_session(&previous);
         let client_list = rt.execute_frame(command(&[b"CLIENT", b"LIST"]), 4);
         let info = match client_list {
             RespFrame::BulkString(Some(info)) => String::from_utf8(info).expect("client list utf8"),
@@ -36994,6 +37000,14 @@ mod tests {
             ]))
         );
         let subscriber = rt.swap_session(previous);
+        // (frankenredis-obohf) ACL channel-revocation scans the server's
+        // `client_sessions` registry to decide which subscribed clients now
+        // violate the user's channel ACL. The real fr-server loop populates
+        // that registry via record_client_session after each command; this
+        // bare execute_frame test must do the same so the subscriber is
+        // visible to the revocation pass (otherwise pending_client_kills is
+        // empty regardless of the ACL change).
+        rt.record_client_session(&subscriber);
 
         rt.server.pending_client_kills.clear();
         assert_eq!(
