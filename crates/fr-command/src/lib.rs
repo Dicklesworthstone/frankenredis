@@ -17456,15 +17456,18 @@ fn command_table_row_is_visible(name: &str, store: &Store) -> bool {
 
 fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
     if argv.len() == 1 {
-        // COMMAND with no sub-command: return full command info for all commands.
-        // (frankenredis-99to6) Upstream server.c::commandCommand walks
-        // both the top-level commands dict AND each container's
-        // subcommand_dict, so the reply contains both groups.
+        // COMMAND with no sub-command: full command info for the top-level
+        // commands only. (frankenredis-d309r) Upstream
+        // server.c::commandCommand iterates `server.commands` (241 top-level
+        // entries); container subcommands are NOT listed at the top level — they
+        // are nested inside each parent's reply (the subcommands field, emitted
+        // by command_info_entry). So this must NOT chain SUBCOMMAND_TABLE, or the
+        // reply inflates to 370 and disagrees with COMMAND COUNT (241).
+        // COMMAND LIST (a flat name list) DOES include subcommands — see below.
         let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
         let entries: Vec<RespFrame> = COMMAND_TABLE
             .iter()
             .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
-            .chain(SUBCOMMAND_TABLE.iter())
             .map(|&(name, arity, flags, first_key, last_key, step)| {
                 let entry = command_info_entry(name, arity, flags, first_key, last_key, step);
                 if resp3 {
@@ -17571,12 +17574,13 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
     } else if sub.eq_ignore_ascii_case("INFO") {
         let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
         if argv.len() < 3 {
-            // (frankenredis-99to6) Bare COMMAND INFO mirrors the
-            // top-level + subcommand walk.
+            // (frankenredis-d309r) Bare COMMAND INFO mirrors COMMAND: only
+            // the 241 top-level entries (subcommands nested), NOT the flat
+            // parent+sub walk — matching vendored 7.2.4's `*241`. An explicit
+            // `COMMAND INFO client|kill` still resolves the subcommand below.
             let entries: Vec<RespFrame> = COMMAND_TABLE
                 .iter()
                 .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
-                .chain(SUBCOMMAND_TABLE.iter())
                 .map(|&(name, arity, flags, first_key, last_key, step)| {
                     let entry = command_info_entry(name, arity, flags, first_key, last_key, step);
                     if resp3 {
@@ -74024,6 +74028,47 @@ mod tests {
             "client|* should match the 18 client subcommands"
         );
         assert!(pattern_names.iter().all(|n| n.starts_with("client|")));
+    }
+
+    #[test]
+    fn command_and_command_info_list_top_level_only_d309r() {
+        // (frankenredis-d309r) Upstream COMMAND / bare COMMAND INFO iterate
+        // `server.commands` (top-level only); container subcommands are NESTED in
+        // each parent, never listed at the top level. fr previously chained
+        // SUBCOMMAND_TABLE here, inflating the reply to 370 (and disagreeing with
+        // COMMAND COUNT = 241). COMMAND LIST is the flat-name listing that DOES
+        // include subcommands — verified separately above.
+        let mut store = Store::new();
+        let expected = COMMAND_TABLE
+            .iter()
+            .filter(|&&(name, ..)| crate::command_table_row_is_visible(name, &store))
+            .count();
+        for argv in [
+            vec![b"COMMAND".to_vec()],
+            vec![b"COMMAND".to_vec(), b"INFO".to_vec()],
+        ] {
+            let out = dispatch_argv(&argv, &mut store, 0).expect("command");
+            let RespFrame::Array(Some(items)) = out else {
+                panic!("expected Array for {argv:?}");
+            };
+            assert_eq!(
+                items.len(),
+                expected,
+                "{argv:?} must list only the {expected} top-level commands"
+            );
+            // No top-level entry is a `parent|sub` row.
+            for it in &items {
+                if let RespFrame::Array(Some(fields)) = it
+                    && let Some(RespFrame::BulkString(Some(name))) = fields.first()
+                {
+                    assert!(
+                        !name.contains(&b'|'),
+                        "subcommand {:?} must not appear at top level",
+                        String::from_utf8_lossy(name)
+                    );
+                }
+            }
+        }
     }
 
     mod metamorphic {
