@@ -2575,6 +2575,20 @@ fn command_is_may_replicate_read(argv: &[Vec<u8>]) -> bool {
         .is_some_and(|cmd| eq_ascii_token(cmd, b"PFCOUNT"))
 }
 
+/// The exact CMD_MAY_REPLICATE set from vendored redis 7.2.4 commands.def:
+/// commands that are not necessarily plain writes but can still produce
+/// replication traffic. Upstream treats them like writes for CLIENT PAUSE WRITE
+/// (and a few other gates), so they must be deferred under a write-pause.
+/// (frankenredis)
+fn command_is_may_replicate(cmd: &[u8]) -> bool {
+    eq_ascii_token(cmd, b"EVAL")
+        || eq_ascii_token(cmd, b"EVALSHA")
+        || eq_ascii_token(cmd, b"FCALL")
+        || eq_ascii_token(cmd, b"PFCOUNT")
+        || eq_ascii_token(cmd, b"PUBLISH")
+        || eq_ascii_token(cmd, b"SPUBLISH")
+}
+
 /// Mirror upstream networking.c::addReplySubcommandSyntaxError for
 /// ACL subcommands whose handlers fall through (commands.def arity
 /// is variadic: -2). Uses the user-typed subcommand casing and an
@@ -11308,9 +11322,15 @@ impl Runtime {
         if self.server.client_pause_all {
             return true;
         }
-        // WRITE mode: only block write commands
-        argv.first()
-            .is_some_and(|cmd| fr_command::is_write_command(cmd))
+        // WRITE mode: block write commands AND may-replicate commands. Upstream
+        // server.c::processCommand gates a PAUSE_ACTION_CLIENT_WRITE on
+        // `is_may_replicate_command = cmd_flags & (CMD_WRITE | CMD_MAY_REPLICATE)`,
+        // so EVAL/EVALSHA/FCALL/PFCOUNT/PUBLISH/SPUBLISH (which can produce
+        // replication traffic without being plain writes) must be deferred too —
+        // not just `is_write_command`. (frankenredis)
+        argv.first().is_some_and(|cmd| {
+            fr_command::is_write_command(cmd) || command_is_may_replicate(cmd)
+        })
     }
 
     pub fn execute_bytes(&mut self, input: &[u8], now_ms: u64) -> Vec<u8> {
@@ -29040,6 +29060,53 @@ mod tests {
             recs2,
             "a PFCOUNT cache hit must not capture a record"
         );
+    }
+
+    // (frankenredis) CLIENT PAUSE WRITE must defer not only plain writes but the
+    // whole CMD_MAY_REPLICATE set (EVAL/EVALSHA/FCALL/PFCOUNT/PUBLISH/SPUBLISH),
+    // mirroring upstream server.c is_may_replicate_command. PAUSE ALL defers
+    // everything; pure reads pass through a WRITE pause.
+    #[test]
+    fn client_pause_write_defers_may_replicate_commands() {
+        let mut rt = Runtime::default_strict();
+        // WRITE-mode pause active well past now_ms=0.
+        rt.server.client_pause_deadline_ms = 10_000;
+        rt.server.client_pause_all = false;
+
+        for cmd in [
+            b"EVAL".as_ref(),
+            b"EVALSHA",
+            b"FCALL",
+            b"PFCOUNT",
+            b"PUBLISH",
+            b"SPUBLISH",
+            b"SET", // plain write
+        ] {
+            assert!(
+                rt.is_command_paused(&[cmd.to_vec()], 0),
+                "{} must be deferred under PAUSE WRITE",
+                String::from_utf8_lossy(cmd)
+            );
+        }
+
+        // Pure reads (and read-only script variants, which are CMD_READONLY, not
+        // CMD_MAY_REPLICATE) are NOT deferred under a write-pause.
+        for cmd in [b"GET".as_ref(), b"EVAL_RO", b"FCALL_RO", b"EXISTS"] {
+            assert!(
+                !rt.is_command_paused(&[cmd.to_vec()], 0),
+                "{} must pass through PAUSE WRITE",
+                String::from_utf8_lossy(cmd)
+            );
+        }
+
+        // PAUSE ALL defers everything, including pure reads.
+        rt.server.client_pause_all = true;
+        assert!(rt.is_command_paused(&[b"GET".to_vec()], 0));
+        assert!(rt.is_command_paused(&[b"PING".to_vec()], 0));
+
+        // Once the pause window lapses, nothing is deferred.
+        assert!(!rt.is_command_paused(&[b"SET".to_vec()], 20_000));
+        assert!(!rt.is_command_paused(&[b"EVAL".to_vec()], 20_000));
     }
 
     // (frankenredis-f82ny) Vendored Redis 7.2.4 keeps repl_backlog ==
