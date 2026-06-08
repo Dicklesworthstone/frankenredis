@@ -28575,6 +28575,68 @@ mod tests {
         );
     }
 
+    // (frankenredis) Partial-resync data-loss regression: a replica that
+    // reconnects with PSYNC <replid> <mid-offset> must receive the writes it
+    // missed while disconnected, even with AOF disabled. The existing
+    // `..._uses_live_backlog_window` test only PSYNCs at the *current* offset
+    // (replica already caught up, zero trailing bytes), so it never exercises
+    // the backlog REPLAY path. Here the master fills the backlog after the
+    // first replica registers (the f82ny latch), then we ask for the tail from
+    // the mid offset and assert the missed commands come back verbatim.
+    #[test]
+    fn replication_psync_continue_replays_missed_writes_without_aof() {
+        let mut rt = Runtime::default_strict();
+        // First replica connects -> backlog materializes (any_replica_ever latch).
+        rt.server.replication_runtime_state.ensure_replica(1);
+
+        // Phase A (replica connected): one write, remember the offset reached.
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"a", b"1"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let mid = rt.replication_primary_offset().0;
+
+        // Phase B (replica disconnected): writes it must replay on reconnect.
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"c", b"3"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"ctr"]), 0),
+            RespFrame::Integer(1)
+        );
+        let end = rt.replication_primary_offset().0;
+        assert!(end > mid, "phase-B writes must advance the replication offset");
+
+        // The +CONTINUE backlog served from `mid` is exactly the phase-B tail.
+        let backlog = rt.encoded_aof_stream_from_offset(mid);
+        assert!(
+            !backlog.is_empty(),
+            "partial-resync backlog from a mid offset must not be empty (no-AOF data loss)"
+        );
+        assert_eq!(
+            u64::try_from(backlog.len()).unwrap(),
+            end - mid,
+            "backlog byte length must equal the master_repl_offset delta"
+        );
+        let text = String::from_utf8_lossy(&backlog);
+        assert!(text.contains('c'), "backlog must replay 'SET c 3': {text:?}");
+        assert!(
+            text.contains("ctr"),
+            "backlog must replay 'INCR ctr': {text:?}"
+        );
+
+        // And the master must answer PSYNC at that offset with +CONTINUE.
+        let replid = rt.server.replication_runtime_state.backlog.replid.clone();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"PSYNC", replid.as_bytes(), mid.to_string().as_bytes()]),
+                1
+            ),
+            RespFrame::SimpleString("CONTINUE".to_string())
+        );
+    }
+
     #[test]
     fn replication_psync2_capability_advertises_continue_replid_like_redis() {
         let mut rt = Runtime::default_strict();
