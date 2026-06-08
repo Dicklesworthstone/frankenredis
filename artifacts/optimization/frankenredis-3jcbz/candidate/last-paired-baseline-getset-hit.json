@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr3jcbz-paired-baseline",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 2700000,
+    "bytes_sent": 19800000,
+    "commands": 300000,
+    "ops_per_sec": 151962.37848101722,
+    "pipeline_latency_us": {
+      "mean": 4965.605344747503,
+      "p50": 4167.684004642069,
+      "p95": 11140.463990159333,
+      "p99": 15097.679919563234,
+      "samples": 18750
+    },
+    "seconds": 1.9741728380322456
+  },
+  "mode": "getset-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 50000,
+    "bytes_sent": 630000,
+    "commands": 10000,
+    "seconds": 0.06822724197991192
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

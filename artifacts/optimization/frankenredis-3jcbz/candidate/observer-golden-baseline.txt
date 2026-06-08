@@ -1,0 +1,21 @@
+> PING
+< +PONG\r\n
+> CONFIG SET maxmemory 1048576
+< +OK\r\n
+> CLIENT TRACKING ON BCAST PREFIX fr3jcbz:
+< +OK\r\n
+> GET fr3jcbz:miss
+< $-1\r\n
+> INFO clients
+< connected_clients:1
+< tracking_clients:2
+> INFO stats
+< tracking_total_keys:0
+< tracking_total_items:0
+< tracking_total_prefixes:2
+> INFO memory
+< maxmemory:1048576
+< maxmemory_human:1.00M
+< maxmemory_policy:noeviction
+< mem_replication_backlog:0
+< mem_total_replication_buffers:0

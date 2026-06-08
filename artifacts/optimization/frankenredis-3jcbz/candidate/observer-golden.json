@@ -1,0 +1,58 @@
+{
+  "baseline_sha256": "56abe321f8890ba1ad588221669cc15c1037714116406f6f721db70758f14190",
+  "candidate_sha256": "56abe321f8890ba1ad588221669cc15c1037714116406f6f721db70758f14190",
+  "equal": true,
+  "commands": [
+    [
+      "PING"
+    ],
+    [
+      "CONFIG",
+      "SET",
+      "maxmemory",
+      "1048576"
+    ],
+    [
+      "CLIENT",
+      "TRACKING",
+      "ON",
+      "BCAST",
+      "PREFIX",
+      "fr3jcbz:"
+    ],
+    [
+      "GET",
+      "fr3jcbz:miss"
+    ],
+    [
+      "INFO",
+      "clients"
+    ],
+    [
+      "INFO",
+      "stats"
+    ],
+    [
+      "INFO",
+      "memory"
+    ]
+  ],
+  "normalized_fields": {
+    "INFO clients": [
+      "connected_clients",
+      "tracking_clients"
+    ],
+    "INFO stats": [
+      "tracking_total_keys",
+      "tracking_total_items",
+      "tracking_total_prefixes"
+    ],
+    "INFO memory": [
+      "maxmemory",
+      "maxmemory_human",
+      "maxmemory_policy",
+      "mem_replication_backlog",
+      "mem_total_replication_buffers"
+    ]
+  }
+}
