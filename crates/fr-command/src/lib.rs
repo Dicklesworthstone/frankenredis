@@ -22176,11 +22176,21 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
                 RespFrame::Integer(v),
             ]
         }
-        fn pair_double(k: &str, v: f64) -> [RespFrame; 2] {
-            [
-                RespFrame::BulkString(Some(k.as_bytes().to_vec())),
-                RespFrame::BulkString(Some(format!("{v}").into_bytes())),
-            ]
+        // (frankenredis-ta2i2) Upstream object.c::memoryCommand emits the
+        // percentage/ratio fields via addReplyDouble, which under RESP3 is the
+        // Double type (`,<value>\r\n`) — not a bulk string. fr previously always
+        // emitted a bulk string, so a RESP3 client parsing MEMORY STATS as a map
+        // got a string where it expects a double. Match upstream: Double under
+        // HELLO 3, bulk string under RESP2 (where addReplyDouble formats a bulk
+        // string). The integer counters keep using `pair`.
+        let resp3_stats = store.dispatch_client_ctx.resp_protocol_version == 3;
+        fn pair_double(k: &str, v: f64, resp3: bool) -> [RespFrame; 2] {
+            let value = if resp3 {
+                RespFrame::double_from_f64(v)
+            } else {
+                RespFrame::BulkString(Some(format!("{v}").into_bytes()))
+            };
+            [RespFrame::BulkString(Some(k.as_bytes().to_vec())), value]
         }
         let mut items = Vec::with_capacity(60);
         // (frankenredis-wkglo) Track overhead components as we emit them
@@ -22331,8 +22341,8 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             0.0
         };
         for kv in [
-            pair_double("dataset.percentage", dataset_percentage),
-            pair_double("peak.percentage", peak_percentage),
+            pair_double("dataset.percentage", dataset_percentage, resp3_stats),
+            pair_double("peak.percentage", peak_percentage, resp3_stats),
         ] {
             items.extend(kv);
         }
@@ -22344,13 +22354,13 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             items.extend(kv);
         }
         for kv in [
-            pair_double("allocator-fragmentation.ratio", 1.0),
+            pair_double("allocator-fragmentation.ratio", 1.0, resp3_stats),
             pair("allocator-fragmentation.bytes", 0),
-            pair_double("allocator-rss.ratio", 1.0),
+            pair_double("allocator-rss.ratio", 1.0, resp3_stats),
             pair("allocator-rss.bytes", 0),
-            pair_double("rss-overhead.ratio", 1.0),
+            pair_double("rss-overhead.ratio", 1.0, resp3_stats),
             pair("rss-overhead.bytes", 0),
-            pair_double("fragmentation", 1.0),
+            pair_double("fragmentation", 1.0, resp3_stats),
             pair("fragmentation.bytes", 0),
         ] {
             items.extend(kv);
@@ -45862,6 +45872,60 @@ mod tests {
             keys_first_3[2],
             &RespFrame::BulkString(Some(b"startup.allocated".to_vec()))
         );
+    }
+
+    #[test]
+    fn memory_stats_ratio_fields_are_resp3_doubles_resp2_bulkstrings_ta2i2() {
+        // (frankenredis-ta2i2) Upstream emits the percentage/ratio fields via
+        // addReplyDouble: a RESP3 Double (`,`) under HELLO 3, a bulk string under
+        // RESP2. Pin both protocols.
+        const RATIO_KEYS: &[&[u8]] = &[
+            b"dataset.percentage",
+            b"peak.percentage",
+            b"allocator-fragmentation.ratio",
+            b"allocator-rss.ratio",
+            b"rss-overhead.ratio",
+            b"fragmentation",
+        ];
+        // RESP3: every ratio field's value frame is a Double.
+        let mut store = Store::new();
+        store.dispatch_client_ctx.resp_protocol_version = 3;
+        let out = dispatch_argv(&[b"MEMORY".to_vec(), b"STATS".to_vec()], &mut store, 0)
+            .expect("memory stats");
+        let RespFrame::Map(Some(entries)) = out else {
+            panic!("RESP3 MEMORY STATS must be a Map, got {out:?}"); // ubs:ignore — AI triage
+        };
+        for key in RATIO_KEYS {
+            let (_, value) = entries
+                .iter()
+                .find(|(k, _)| matches!(k, RespFrame::BulkString(Some(b)) if b.as_slice() == *key))
+                .unwrap_or_else(|| panic!("RESP3 MEMORY STATS missing {:?}", String::from_utf8_lossy(key)));
+            assert!(
+                matches!(value, RespFrame::Double(_)),
+                "RESP3 {} must be a Double, got {value:?}",
+                String::from_utf8_lossy(key)
+            );
+        }
+        // RESP2: the same fields flatten to a bulk-string value.
+        let mut store2 = Store::new();
+        store2.dispatch_client_ctx.resp_protocol_version = 2;
+        let out2 = dispatch_argv(&[b"MEMORY".to_vec(), b"STATS".to_vec()], &mut store2, 0)
+            .expect("memory stats");
+        let RespFrame::Array(Some(items)) = out2 else {
+            panic!("RESP2 MEMORY STATS must be a flat Array, got {out2:?}"); // ubs:ignore — AI triage
+        };
+        for key in RATIO_KEYS {
+            let pos = items
+                .iter()
+                .position(|f| matches!(f, RespFrame::BulkString(Some(b)) if b.as_slice() == *key))
+                .unwrap_or_else(|| panic!("RESP2 MEMORY STATS missing {:?}", String::from_utf8_lossy(key)));
+            assert!(
+                matches!(items[pos + 1], RespFrame::BulkString(Some(_))),
+                "RESP2 {} must be a bulk string, got {:?}",
+                String::from_utf8_lossy(key),
+                items[pos + 1]
+            );
+        }
     }
 
     #[test]
