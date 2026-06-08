@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr6kecb-rev-baseline-setex",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 5000000,
+    "bytes_sent": 77000000,
+    "commands": 1000000,
+    "ops_per_sec": 152405.45372076685,
+    "pipeline_latency_us": {
+      "mean": 5082.973097380251,
+      "p50": 4312.620963901281,
+      "p95": 11323.582963086665,
+      "p99": 15251.845004968345,
+      "samples": 62500
+    },
+    "seconds": 6.56144498498179
+  },
+  "mode": "setex",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 0,
+    "bytes_sent": 0,
+    "commands": 0,
+    "seconds": 0.0
+  },
+  "requests": 1000000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

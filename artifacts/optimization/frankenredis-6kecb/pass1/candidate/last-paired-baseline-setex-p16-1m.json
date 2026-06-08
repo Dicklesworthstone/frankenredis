@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr6kecb-pair-base-setex",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 5000000,
+    "bytes_sent": 74000000,
+    "commands": 1000000,
+    "ops_per_sec": 153519.59833862446,
+    "pipeline_latency_us": {
+      "mean": 5057.121213102713,
+      "p50": 4311.137017793953,
+      "p95": 11182.495043613017,
+      "p99": 15297.190053388476,
+      "samples": 62500
+    },
+    "seconds": 6.513826318085194
+  },
+  "mode": "setex",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 0,
+    "bytes_sent": 0,
+    "commands": 0,
+    "seconds": 0.0
+  },
+  "requests": 1000000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr6kecb-pair-candidate-psetex",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 5000000,
+    "bytes_sent": 84000000,
+    "commands": 1000000,
+    "ops_per_sec": 152946.11799064308,
+    "pipeline_latency_us": {
+      "mean": 5075.614618610591,
+      "p50": 4289.375967346132,
+      "p95": 11283.907108008862,
+      "p99": 15326.575958169997,
+      "samples": 62500
+    },
+    "seconds": 6.538250287994742
+  },
+  "mode": "psetex",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 0,
+    "bytes_sent": 0,
+    "commands": 0,
+    "seconds": 0.0
+  },
+  "requests": 1000000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

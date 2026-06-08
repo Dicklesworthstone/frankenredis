@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /data/projects/.scratch/frankenredis-6kecb-orange/wt/target-6kecb-base-rch/release-perf/frankenredis --mode setex --port 27110 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:6kecb:stable:setex --json-out artifacts/optimization/frankenredis-6kecb/pass1/baseline/last-stable-setex-p16-1m.json",
+      "mean": 6.76094814798,
+      "stddev": 0.05444982609870911,
+      "median": 6.77975619888,
+      "user": 9.30784468,
+      "system": 5.8996124000000005,
+      "min": 6.63810602988,
+      "max": 6.8206002878800005,
+      "times": [
+        6.8206002878800005,
+        6.736711076880001,
+        6.77460221988,
+        6.797182616880001,
+        6.72141217688,
+        6.810672229880001,
+        6.63810602988,
+        6.736833558880001,
+        6.7849101778800005,
+        6.78845110488
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /data/projects/.scratch/frankenredis-6kecb-orange/wt/target-6kecb-base-rch/release-perf/frankenredis --mode psetex --port 27111 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:6kecb:stable:psetex --json-out artifacts/optimization/frankenredis-6kecb/pass1/baseline/last-stable-psetex-p16-1m.json",
+      "mean": 6.823467045780001,
+      "stddev": 0.10756868508692805,
+      "median": 6.80831701238,
+      "user": 9.33040198,
+      "system": 6.0032401,
+      "min": 6.692067782880001,
+      "max": 7.084982005880001,
+      "times": [
+        6.8787488878800005,
+        6.762384232880001,
+        6.814857651880001,
+        6.737174528880001,
+        6.692067782880001,
+        6.77138963688,
+        6.80177637288,
+        7.084982005880001,
+        6.843475739880001,
+        6.84781361788
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

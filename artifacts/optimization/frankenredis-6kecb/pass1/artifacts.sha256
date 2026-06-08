@@ -1,0 +1,8 @@
+ac25332ff11f5b1099536278156832f182e4b0dbc41da61523e8e7c00fe818dc  artifacts/optimization/frankenredis-6kecb/pass1/baseline/setex-psetex-p16-1m-hyperfine-stable.json
+fdf52422a090dfb597f43a88e3930313117aebf069cc2ed42023ce9fa70a3525  artifacts/optimization/frankenredis-6kecb/pass1/baseline/setex-p16-1m-server-only-perf-flat.txt
+912d51f7dd3f82af0969617be47a88183f58e09c677a0a09aef4c069bfca2b5e  artifacts/optimization/frankenredis-6kecb/pass1/baseline/setex-p16-1m-server-only-perf-children.txt
+cab1c48c1a46971ff3826ff307392502e1d8d99c4bb0c0274dcf41d815dadcf8  artifacts/optimization/frankenredis-6kecb/pass1/candidate/setex-psetex-golden-compare.json
+489e270396ff693469d7c45ae18ffd3e09f7e37c4bb2048f62c0144285251016  artifacts/optimization/frankenredis-6kecb/pass1/candidate/setex-p16-1m-paired-hyperfine.json
+0b21c291a0f5619095d49d46f2609dc6fcf3f5ac064e3e0802280a041c8b21c9  artifacts/optimization/frankenredis-6kecb/pass1/candidate/psetex-p16-1m-paired-hyperfine.json
+15582c52f04d31fc7546127c6d8051850ee6d57e772f45a364e2c6ba361aaa89  artifacts/optimization/frankenredis-6kecb/pass1/candidate/setex-p16-1m-reversed-hyperfine.json
+fab1fb0d0ca441b863b3a03282cc7c3951c90859568d205326c405194e3a0867  artifacts/optimization/frankenredis-6kecb/pass1/candidate/psetex-p16-1m-reversed-hyperfine.json
