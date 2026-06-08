@@ -3447,6 +3447,13 @@ impl Store {
                 fr_sentinel::health::record_disconnect(&mut master.link);
             }
         }
+        // (frankenredis-pkdgs) Evaluate subjective-down: a master unreachable
+        // longer than down-after-milliseconds gets the S_DOWN flag (rendered as
+        // "s_down" in SENTINEL MASTER flags), and a recovered one clears it.
+        // Without this fr showed only "master,disconnected" where redis-sentinel
+        // shows "s_down,master,disconnected".
+        let health = fr_sentinel::health::evaluate_instance_health(master, now_ms);
+        fr_sentinel::health::apply_health_result(master, &health, now_ms);
     }
 
     fn ordered_physical_keys_in_db(&self, db: usize) -> Vec<Vec<u8>> {
@@ -20971,6 +20978,41 @@ mod tests {
         assert_eq!(store.get(b"k", 100).unwrap(), Some(b"v".to_vec()));
         assert_eq!(store.del(&[b"k".to_vec()], 100), 1);
         assert_eq!(store.get(b"k", 100).unwrap(), None);
+    }
+
+    #[test]
+    fn sentinel_probe_result_marks_then_clears_s_down() {
+        // (frankenredis-pkdgs) A monitored master unreachable longer than
+        // down-after-milliseconds must transition to S_DOWN, and recover on the
+        // next successful probe — driven by the monitoring tick's health eval.
+        let mut store = Store::new();
+        store
+            .sentinel_state
+            .monitor("mymaster", "127.0.0.1", 6379, 2)
+            .unwrap();
+        store
+            .sentinel_state
+            .masters
+            .get_mut("mymaster")
+            .unwrap()
+            .down_after_period = 100;
+
+        // First failed probe arms the disconnect; not yet down.
+        store.apply_sentinel_probe_result("mymaster", 1000, None);
+        assert!(!store.sentinel_state.masters["mymaster"].is_s_down());
+        // A second failure past down-after-period flips S_DOWN.
+        store.apply_sentinel_probe_result("mymaster", 1500, None);
+        assert!(
+            store.sentinel_state.masters["mymaster"].is_s_down(),
+            "master should be S_DOWN after down-after-period elapsed while unreachable"
+        );
+        // A successful PING+INFO probe clears it.
+        let info = "# Server\r\nrun_id:abc\r\n# Replication\r\nrole:master\r\n";
+        store.apply_sentinel_probe_result("mymaster", 1600, Some(info));
+        assert!(
+            !store.sentinel_state.masters["mymaster"].is_s_down(),
+            "S_DOWN must clear once the master answers again"
+        );
     }
 
     #[test]
