@@ -16787,6 +16787,44 @@ pub fn check_command_arity(name: &[u8], argc: usize) -> Result<(), &'static str>
     Ok(())
 }
 
+/// Like [`check_command_arity`] but also enforces the arity of a resolved
+/// container *subcommand* (e.g. `CONFIG GET`, `OBJECT ENCODING`).
+///
+/// Upstream `server.c::processCommand` resolves the subcommand and checks its
+/// arity at the same point as the parent's (server.c:3787) — before the
+/// CMD_PROTECTED and pub/sub-context gates — so a *known* subcommand invoked
+/// with the wrong argc must surface its own "wrong number of arguments for
+/// 'parent|sub'" error rather than a later gate's wording (e.g. the subscribe-
+/// context message). Returns `Ok(())` when the parent arity and, when a known
+/// subcommand is present, the subcommand arity both pass; `Err(name)` with the
+/// failing canonical name otherwise. An *unknown* subcommand is deliberately
+/// NOT treated as an arity failure here — dispatch handles unknown-subcommand
+/// errors separately. (frankenredis-7tpx0)
+#[must_use = "callers gate on the arity result"]
+pub fn check_full_command_arity(argv: &[Vec<u8>]) -> Result<(), &'static str> {
+    let Some(name) = argv.first() else {
+        return Err("");
+    };
+    check_command_arity(name, argv.len())?;
+    if argv.len() >= 2 {
+        let parent = String::from_utf8_lossy(name).to_ascii_lowercase();
+        if command_acl_parent_has_subcommands(&parent) {
+            let sub = String::from_utf8_lossy(&argv[1]).to_ascii_lowercase();
+            let key = format!("{parent}|{sub}");
+            if let Some(&(cmd_name, arity, ..)) =
+                SUBCOMMAND_TABLE.iter().find(|entry| entry.0 == key.as_str())
+            {
+                let argc = argv.len() as i64;
+                let ok = if arity > 0 { argc == arity } else { argc >= -arity };
+                if !ok {
+                    return Err(cmd_name);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Return the flags string for a given command name.
 #[must_use]
 pub fn get_command_flags(name: &[u8]) -> Option<&'static str> {
@@ -26757,7 +26795,8 @@ mod tests {
         CLIENT_TRACKING_PREFIX_REQUIRES_BCAST, CLIENT_TRACKING_REDIRECT_MISSING,
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
         SCRIPT_NOSCRIPT_ERROR, SUBCOMMAND_TABLE, StreamLagInfo, acl_command_selectors_for_argv,
-        check_command_arity, classify_command, client_wrong_subcommand_arity,
+        check_command_arity, check_full_command_arity, classify_command,
+        client_wrong_subcommand_arity,
         cluster_disabled_error, cluster_reset_with_keys_error, cluster_wrong_subcommand_arity,
         command_acl_categories, command_acl_key_access, command_has_acl_subcommands,
         command_key_indexes, commands_in_acl_category, dispatch_argv, drain_pubsub_messages,
@@ -61389,6 +61428,48 @@ mod tests {
             assert_eq!(check_command_arity(&argv[0], argv.len()), Err("hget"));
             assert_eq!(command_key_indexes(argv), vec![1]);
         }
+    }
+
+    #[test]
+    fn check_full_command_arity_enforces_container_subcommand_arity_7tpx0() {
+        let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        // Parent arity is still enforced (delegates to check_command_arity).
+        assert!(check_full_command_arity(&argv(&["GET"])).is_err());
+        assert!(check_full_command_arity(&argv(&["GET", "k"])).is_ok());
+        assert_eq!(check_full_command_arity(&argv(&["CONFIG"])), Err("config"));
+
+        // Known container subcommand with the WRONG argc fails with the
+        // "parent|sub" canonical name (upstream resolves the subcommand's arity
+        // before the protected / pub-sub-context gates).
+        assert_eq!(
+            check_full_command_arity(&argv(&["CONFIG", "GET"])),
+            Err("config|get")
+        );
+        assert_eq!(
+            check_full_command_arity(&argv(&["OBJECT", "ENCODING"])),
+            Err("object|encoding")
+        );
+        // Case-insensitive parent + subcommand resolution.
+        assert_eq!(
+            check_full_command_arity(&argv(&["object", "encoding"])),
+            Err("object|encoding")
+        );
+
+        // Known container subcommand with VALID argc passes.
+        assert!(check_full_command_arity(&argv(&["CONFIG", "GET", "maxmemory"])).is_ok());
+        assert!(check_full_command_arity(&argv(&["OBJECT", "ENCODING", "k"])).is_ok());
+        assert!(check_full_command_arity(&argv(&["XINFO", "STREAM", "s"])).is_ok());
+
+        // Unknown subcommand is NOT an arity failure here — dispatch handles the
+        // unknown-subcommand error separately (parent arity governs).
+        assert!(check_full_command_arity(&argv(&["CONFIG", "BOGUSSUB"])).is_ok());
+
+        // Non-container parents never trigger a subcommand lookup, so trailing
+        // args are governed solely by the parent arity (e.g. PING is -1).
+        assert!(check_full_command_arity(&argv(&["PING", "a", "b"])).is_ok());
+        assert!(check_full_command_arity(&argv(&["GET", "k", "extra"])).is_err());
     }
 
     #[test]
