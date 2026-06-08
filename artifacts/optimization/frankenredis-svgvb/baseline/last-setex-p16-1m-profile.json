@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "frsvgvb-setex-profile",
+  "keyspace": 1000000,
+  "measured": {
+    "bytes_received": 5000000,
+    "bytes_sent": 72000000,
+    "commands": 1000000,
+    "ops_per_sec": 59614.65510797251,
+    "pipeline_latency_us": {
+      "mean": 13219.501654013993,
+      "p50": 6924.165994860232,
+      "p95": 37985.414965078235,
+      "p99": 92438.34507651627,
+      "samples": 62500
+    },
+    "seconds": 16.774398815003224
+  },
+  "mode": "setex",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 0,
+    "bytes_sent": 0,
+    "commands": 0,
+    "seconds": 0.0
+  },
+  "requests": 1000000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

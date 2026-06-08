@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /tmp/codex-fr-1cbca-closeout-target2/release-perf/frankenredis --mode psetex --port 26523 --json-out artifacts/optimization/frankenredis-svgvb/baseline/last-psetex-p16-300k-seq.json --requests 300000 --clients 50 --pipeline 16 --keyspace 300000 --datasize 3 --key-prefix frsvgvb-psetex-seqbase",
+      "mean": 3.0009134571000002,
+      "stddev": 0.27607253947350896,
+      "median": 2.9624749475,
+      "user": 4.07832718,
+      "system": 1.26964796,
+      "min": 2.712599726,
+      "max": 3.579642831,
+      "times": [
+        2.7511817310000004,
+        2.712599726,
+        2.827692594,
+        3.0674480990000004,
+        3.579642831,
+        3.3129834810000003,
+        2.872113868,
+        3.052836027,
+        2.774706079,
+        3.0579301350000003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

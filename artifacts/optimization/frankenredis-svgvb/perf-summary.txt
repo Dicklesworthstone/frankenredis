@@ -1,0 +1,36 @@
+frankenredis-svgvb SETEX/PSETEX borrowed fast-path gate profile
+timestamp_utc: 2026-06-08T09:05:33Z
+baseline_commit: 5be969172
+baseline_binary: /tmp/codex-fr-1cbca-closeout-target2/release-perf/frankenredis
+
+Sequential baseline, no concurrent benchmark runs:
+- SETEX P16/300k hyperfine: 2.48120804574 s +/- 0.02382461910 s
+- PSETEX P16/300k hyperfine: 3.00091345710 s +/- 0.27607253947 s
+
+Profile workload:
+- Command: SETEX, 1,000,000 requests, 50 clients, pipeline 16, keyspace 1,000,000, datasize 3.
+- Throughput: 59,614.65510797251 ops/sec.
+- Runtime: 16.774398815003224 s.
+- Pipeline latency: p50 6,924.165994860232 us, p95 37,985.414965078235 us, p99 92,438.34507651627 us.
+- Samples: 62,500 workload latency samples; perf reported 25,277 cycle samples and zero lost samples.
+
+Top flat profile evidence:
+- fr_store::estimate_entry_memory_usage_bytes: 9.90% flat; 7.45% under Store::record_ops_sec_sample.
+- Store::run_active_expire_cycle: 8.95% flat.
+- __memcmp_avx2_movbe: 8.94% flat; a large branch is under active expiry.
+- BTreeMap<Vec<u8>, SetValZST>::insert: 2.99% flat.
+- Take<Cloned<BTreeSet::Range<Vec<u8>>>>::next: 2.70% flat.
+- core::str::from_utf8: 2.21% flat; 1.43% under Store::record_ops_sec_sample.
+- Runtime::dispatch_with_client_context: 0.94% flat.
+- process_buffered_frames: 0.32% flat.
+- fr_protocol::parse_command_args_borrowed_into: 0.27% flat.
+- fr_command::setex: 0.17% flat.
+
+Decision:
+- This supplemental SETEX-only profile shows the borrowed-command ceiling is small and confirms that the hot work is memory-stat sampling plus volatile-key expiry indexing/traversal.
+- The full paired candidate rejection is recorded in `artifacts/optimization/frankenredis-svgvb/candidate/rejection-report.md`: golden transcript matched with SHA-256 `dc3d47345c58e9839e6aa57875e4b3473379bc218bcc240c5b45907f8cb00dd7`, candidate P16/300k was only `1.08x +/- 0.23`, and reversed P16/1M favored baseline `1.03x +/- 0.05`.
+- Rejected under the Score>=2.0 keep gate; no production source hunk is retained.
+
+Next deeper primitive:
+- Attack a profile-backed expiry/stat primitive: incremental cached memory accounting for ops/sec sampling, or a TTL index/active-expire layout that avoids BTree Vec-key clones/range traversal for high-throughput volatile writes.
+- Do not retry borrowed SETEX/PSETEX unless a fresh profile makes argv/dispatch/materialization a top self/children hotspot.
