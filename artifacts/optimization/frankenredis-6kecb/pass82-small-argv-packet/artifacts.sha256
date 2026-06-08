@@ -1,0 +1,10 @@
+f679d157e83af13205631888bc6d4ee2adc9da13f706e9a00ebc0ad2a6e29f2e  artifacts/optimization/frankenredis-6kecb/pass82-small-argv-packet/PROOF.md
+330d349f72f6f2e2d347e30544bcc4518103a074b0b5d4830b157b4e9d507fea  artifacts/optimization/frankenredis-6kecb/pass82-small-argv-packet/binaries.sha256
+66eb1b9bfe58cbb00ac35069ffae3e2171022adc88c6dd08aff4ddd91c63c82c  artifacts/optimization/frankenredis-6kecb/pass82-small-argv-packet/candidate-source.diff
+9118b58af555942140c72705fffcf7549551d65d78f60310039d41c04e034d2a  artifacts/optimization/frankenredis-6kecb/pass82-small-argv-packet/golden-compare.json
+66815bf948ffd7fa11650b27ef7b0fdf57e5e4583e1e24f5613d0ff631807ccc  artifacts/optimization/frankenredis-6kecb/pass82-small-argv-packet/paired-setex-psetex-p16-1m-hyperfine.json
+59ed903ae1ce0238e123ac97686ba3bc59f829e662c5b6e0d9138109afb52345  artifacts/optimization/frankenredis-6kecb/pass82-small-argv-packet/reversed-setex-psetex-p16-1m-hyperfine.json
+94eb9256b12cc7b2432e1a45bd483c0f046430b6bcaa0b0f6df162a5d6001d6c  artifacts/optimization/frankenredis-6kecb/pass82-small-argv-packet/baseline/last-paired-setex-psetex-p16-1m.json
+24a5638543725cd9ff991e095fc4a2265921fee97a42b25ad2b778a02342aaf7  artifacts/optimization/frankenredis-6kecb/pass82-small-argv-packet/baseline/last-reversed-setex-psetex-p16-1m.json
+f676ea874a5e6d1c47b3c53604f9f78d57cfe55b7f4fc2a790adc1579e56d8a7  artifacts/optimization/frankenredis-6kecb/pass82-small-argv-packet/candidate/last-paired-setex-psetex-p16-1m.json
+4f5754c5e4997b968177acf2c91db4df7675283f748eacc999b2f75ae9ba9a91  artifacts/optimization/frankenredis-6kecb/pass82-small-argv-packet/candidate/last-reversed-setex-psetex-p16-1m.json
