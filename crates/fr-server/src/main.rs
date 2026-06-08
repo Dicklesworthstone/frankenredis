@@ -33,7 +33,9 @@ use fr_eventloop::{
 };
 use fr_protocol::{BorrowedCommandArgsKind, ParserConfig, RespFrame, RespParseError};
 use fr_repl::ReplOffset;
-use fr_runtime::{ClientSession, ClientUnblockMode, PlainKeyedValuesCmd, Runtime};
+use fr_runtime::{
+    ClientSession, ClientUnblockMode, PlainKeyedPopCmd, PlainKeyedValuesCmd, Runtime,
+};
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
 
@@ -1876,6 +1878,15 @@ fn process_buffered_frames(
                                     consumed: parsed.consumed,
                                     response,
                                 })
+                            } else if let Some((cmd, key)) =
+                                borrowed_plain_keyed_pop_args(&borrowed_args)
+                                && let Some(response) =
+                                    runtime.execute_plain_keyed_pop_borrowed(cmd, key, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
                             } else if let Some((key, field)) =
                                 borrowed_plain_hget_args(&borrowed_args)
                                 && let Some(response) =
@@ -2270,6 +2281,27 @@ fn borrowed_plain_zadd_args<'a>(
         return None;
     }
     Some((*key, pairs))
+}
+
+/// `LPOP | RPOP | SPOP key` borrowed-arg matcher for the no-count pop fast path.
+/// The COUNT form (`CMD key count`) falls back to the generic handler, which
+/// owns the array-reply + count-validation semantics. (frankenredis-ev067)
+fn borrowed_plain_keyed_pop_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(PlainKeyedPopCmd, &'a [u8])> {
+    let [command, key] = borrowed_args else {
+        return None;
+    };
+    let cmd = if command.eq_ignore_ascii_case(b"LPOP") {
+        PlainKeyedPopCmd::Lpop
+    } else if command.eq_ignore_ascii_case(b"RPOP") {
+        PlainKeyedPopCmd::Rpop
+    } else if command.eq_ignore_ascii_case(b"SPOP") {
+        PlainKeyedPopCmd::Spop
+    } else {
+        return None;
+    };
+    Some((cmd, *key))
 }
 
 fn borrowed_plain_decrby_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
