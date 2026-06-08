@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr6kecb-pass3-base-setex",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 5000000,
+    "bytes_sent": 75000000,
+    "commands": 1000000,
+    "ops_per_sec": 150485.5471184941,
+    "pipeline_latency_us": {
+      "mean": 5147.701086370274,
+      "p50": 4360.5410028249025,
+      "p95": 11486.992938444018,
+      "p99": 15516.877989284694,
+      "samples": 62500
+    },
+    "seconds": 6.645156422979198
+  },
+  "mode": "setex",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 0,
+    "bytes_sent": 0,
+    "commands": 0,
+    "seconds": 0.0
+  },
+  "requests": 1000000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}
