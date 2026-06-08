@@ -1407,12 +1407,28 @@ fn accept_connections(
         // Check maxclients gate via fr-eventloop before accepting.
         if let Err(e) = validate_accept_path(clients.len(), runtime.server.max_clients, true) {
             // Drain ALL pending connections from the backlog.
-            while let Ok((stream, _)) = listener.accept() {
+            while let Ok((mut stream, _)) = listener.accept() {
                 eprintln!(
                     "warn: rejecting new connection: {} ({})",
                     e.reason_code(),
                     clients.len()
                 );
+                // (frankenredis) Match upstream networking.c::acceptCommonHandler:
+                // reply "-ERR max number of clients reached" before closing so the
+                // client learns why, instead of seeing a bare TCP reset. The socket
+                // is mio-nonblocking; drain any request bytes the client already
+                // sent so the subsequent close is a clean FIN that delivers the
+                // reply rather than an RST that can discard it. Best-effort
+                // throughout, exactly like upstream's connWrite-and-free.
+                let mut scratch = [0u8; 256];
+                while let Ok(n) = stream.read(&mut scratch) {
+                    if n == 0 {
+                        break;
+                    }
+                }
+                let _ = stream.write_all(b"-ERR max number of clients reached\r\n");
+                let _ = stream.flush();
+                let _ = stream.shutdown(std::net::Shutdown::Write);
                 runtime.track_rejected_connection();
                 drop(stream);
             }
@@ -6776,6 +6792,69 @@ mod tests {
                     ])),
                 ]))])),
             ]))])))
+        );
+    }
+
+    // (frankenredis) Over-limit connections must receive the upstream
+    // "-ERR max number of clients reached" reply before the socket closes,
+    // matching networking.c::acceptCommonHandler — not a bare TCP reset.
+    #[test]
+    fn accept_over_maxclients_replies_error_before_close() {
+        use mio::{Poll, Token};
+        use std::collections::HashMap;
+        use std::io::Read as _;
+        use std::time::Duration;
+
+        let mut runtime = Runtime::default_strict();
+        runtime.server.max_clients = 1;
+
+        let mut poll = Poll::new().unwrap();
+        let listener =
+            mio::net::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let mut clients: HashMap<Token, crate::ClientConnection> = HashMap::new();
+        let mut client_id_to_token: HashMap<u64, Token> = HashMap::new();
+        let mut next_handle = crate::MAX_LISTENERS;
+
+        // Occupy the single allowed client slot so the next accept is over-limit.
+        let _filler_client = StdTcpStream::connect(addr).unwrap();
+        std::thread::sleep(Duration::from_millis(40));
+        let (filler_srv, _) = listener.accept().unwrap();
+        let sess = runtime.new_session();
+        let cid = sess.client_id;
+        clients.insert(
+            Token(100),
+            crate::ClientConnection::new(filler_srv, sess, 1_000),
+        );
+        client_id_to_token.insert(cid, Token(100));
+        assert_eq!(clients.len(), 1);
+
+        // The over-limit client connects and sends a request the server never reads.
+        let mut over_client = StdTcpStream::connect(addr).unwrap();
+        over_client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let _ = over_client.write_all(b"*1\r\n$4\r\nPING\r\n");
+        std::thread::sleep(Duration::from_millis(40));
+
+        crate::accept_connections(
+            &listener,
+            &mut poll,
+            &mut clients,
+            &mut client_id_to_token,
+            &mut next_handle,
+            &mut runtime,
+        );
+
+        // The over-limit connection was rejected (not admitted) and got the reply.
+        assert_eq!(clients.len(), 1, "over-limit connection must not be admitted");
+        let mut buf = [0u8; 64];
+        let n = over_client.read(&mut buf).unwrap();
+        assert_eq!(
+            &buf[..n],
+            b"-ERR max number of clients reached\r\n",
+            "client must receive the upstream error before close"
         );
     }
 
