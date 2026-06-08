@@ -9468,6 +9468,15 @@ impl Runtime {
 
         // Feed MONITOR clients before returning
         self.feed_monitors(argv, now_ms, self.session.selected_db);
+        // (frankenredis-ax9ox) For EVAL/EVALSHA, mirror the script's inner
+        // redis.call commands (with the `lua` address) AFTER the EVAL line, as
+        // upstream does.
+        if argv
+            .first()
+            .is_some_and(|cmd| Self::command_uses_script_propagation(cmd))
+        {
+            self.feed_script_monitor_commands(now_ms, self.session.selected_db);
+        }
 
         // Check if this was a MONITOR command — flag the client
         if argv
@@ -10352,10 +10361,33 @@ impl Runtime {
 
     /// Feed a command to all monitor clients, formatted as Redis does.
     pub fn feed_monitors(&mut self, argv: &[Vec<u8>], now_ms: u64, db: usize) {
-        use std::io::Write as _;
         if self.server.monitor_clients.is_empty() {
             return;
         }
+        // (frankenredis-ax9ox) Upstream feeds the real client peer address in
+        // the `[db addr]` prefix; fr had hardcoded `127.0.0.1:0` for every
+        // client. The session tracks the actual peer (CLIENT INFO already
+        // reports it); print it here, falling back to `127.0.0.1:0` only when
+        // there is no socket peer (e.g. the replication-replay session, which
+        // is the 3s0ra residual).
+        let addr = match self.session.peer_addr {
+            Some(addr) => std::borrow::Cow::Owned(addr.to_string()),
+            None => std::borrow::Cow::Borrowed("127.0.0.1:0"),
+        };
+        self.feed_monitors_with_addr(argv, now_ms, db, &addr);
+    }
+
+    /// (frankenredis-ax9ox) Feed MONITOR with the special `lua` address that
+    /// upstream uses for commands invoked from inside a script (`[db lua]`).
+    pub fn feed_monitors_lua(&mut self, argv: &[Vec<u8>], now_ms: u64, db: usize) {
+        if self.server.monitor_clients.is_empty() {
+            return;
+        }
+        self.feed_monitors_with_addr(argv, now_ms, db, "lua");
+    }
+
+    fn feed_monitors_with_addr(&mut self, argv: &[Vec<u8>], now_ms: u64, db: usize, addr: &str) {
+        use std::io::Write as _;
         let secs = now_ms / 1000;
         let usecs = (now_ms % 1000) * 1000;
         // Build directly into a Vec<u8>. The buffer is consumed as
@@ -10363,20 +10395,7 @@ impl Runtime {
         // forced char-validation on every printable push and a
         // wasteful into_bytes re-walk. (frankenredis-588j1)
         let mut line: Vec<u8> = Vec::with_capacity(64);
-        // (frankenredis-ax9ox) Upstream feeds the real client peer address in
-        // the `[db addr]` prefix; fr had hardcoded `127.0.0.1:0` for every
-        // client. The session tracks the actual peer (CLIENT INFO already
-        // reports it); print it here, falling back to `127.0.0.1:0` only when
-        // there is no socket peer (e.g. the replication-replay session, which
-        // is the 3s0ra residual).
-        match self.session.peer_addr {
-            Some(addr) => {
-                let _ = write!(line, "+{secs}.{usecs:06} [{db} {addr}]");
-            }
-            None => {
-                let _ = write!(line, "+{secs}.{usecs:06} [{db} 127.0.0.1:0]");
-            }
-        }
+        let _ = write!(line, "+{secs}.{usecs:06} [{db} {addr}]");
         for arg in argv {
             line.push(b' ');
             line.push(b'"');
@@ -10409,6 +10428,24 @@ impl Runtime {
         line.extend_from_slice(b"\r\n");
         for &client_id in &self.server.monitor_clients {
             self.server.monitor_output.push((client_id, line.clone()));
+        }
+    }
+
+    /// (frankenredis-ax9ox) After mirroring an EVAL/EVALSHA command itself,
+    /// mirror the `redis.call` commands the script ran, each with the `lua`
+    /// address (upstream shows `[db lua] "cmd" ...`), gated by the same
+    /// admin/skip_monitor exclusion as normal commands.
+    fn feed_script_monitor_commands(&mut self, now_ms: u64, db: usize) {
+        if self.server.monitor_clients.is_empty() {
+            // Still drain so records never leak into a later command.
+            let _ = self.server.store.take_script_monitor_records();
+            return;
+        }
+        let records = self.server.store.take_script_monitor_records();
+        for argv in records {
+            if command_should_feed_monitors(&argv) {
+                self.feed_monitors_lua(&argv, now_ms, db);
+            }
         }
     }
 
@@ -10684,6 +10721,9 @@ impl Runtime {
         } else {
             -1
         };
+        // (frankenredis-ax9ox) Mirror whether MONITOR is active so nested
+        // script (redis.call) execution can gate recording inner commands.
+        let monitors_active = !self.server.monitor_clients.is_empty();
         let acl_generation = self.server.auth_state.dispatch_permissions_generation();
         let current_user = session.current_user_name();
         if self.dispatch_acl_snapshot_generation != acl_generation
@@ -10740,6 +10780,7 @@ impl Runtime {
         ctx.multi_count = multi_count;
         ctx.watch_count = session.transaction_state.watched_keys.len();
         ctx.is_pubsub = is_pubsub;
+        ctx.monitors_active = monitors_active;
         ctx.client_tracking.clone_from(&session.client_tracking);
         ctx.client_reply.clone_from(&session.client_reply);
         ctx.client_no_evict = session.client_no_evict;
@@ -25962,6 +26003,47 @@ mod tests {
                 b"\"EXEC\"\r\n".to_vec(),
             ],
             "MULTI, queued SET/INCR, then EXEC must all be mirrored in order"
+        );
+    }
+
+    #[test]
+    fn monitor_mirrors_script_redis_call_with_lua_addr_ax9ox() {
+        // (frankenredis-ax9ox residual c) Upstream mirrors each redis.call a
+        // script runs with the special `lua` address, after the EVAL line.
+        let mut rt = Runtime::default_strict();
+        rt.session.client_id = 53;
+        assert_eq!(
+            rt.execute_frame(command(&[b"MONITOR"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.drain_monitor_output();
+
+        let _ = rt.execute_frame(
+            command(&[
+                b"EVAL",
+                b"redis.call('set', KEYS[1], '1'); return redis.call('get', KEYS[1])",
+                b"1",
+                b"lk",
+            ]),
+            2,
+        );
+        // Keep `[db addr] payload` (strip the leading timestamp).
+        let lines: Vec<Vec<u8>> = rt
+            .drain_monitor_output()
+            .into_iter()
+            .map(|(_, line)| {
+                let pos = line.iter().position(|&b| b == b'[').unwrap();
+                line[pos..].to_vec()
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                b"[0 127.0.0.1:0] \"EVAL\" \"redis.call('set', KEYS[1], '1'); return redis.call('get', KEYS[1])\" \"1\" \"lk\"\r\n".to_vec(),
+                b"[0 lua] \"set\" \"lk\" \"1\"\r\n".to_vec(),
+                b"[0 lua] \"get\" \"lk\"\r\n".to_vec(),
+            ],
+            "EVAL line then its redis.call set/get mirrored with the lua address"
         );
     }
 

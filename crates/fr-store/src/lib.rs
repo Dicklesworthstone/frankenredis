@@ -2621,6 +2621,11 @@ pub struct DispatchClientContext {
     /// nested script calls leave this false so dispatch_argv still enforces ACL.
     pub acl_checked_by_runtime: bool,
     pub acl_permissions: Option<DispatchAclPermissions>,
+    /// (frankenredis-ax9ox) True when MONITOR clients are attached, mirrored by
+    /// the runtime per dispatch. Lets nested script (`redis.call`) execution
+    /// cheaply gate recording each inner command for the MONITOR `lua` feed —
+    /// no per-call clone when nobody is monitoring.
+    pub monitors_active: bool,
 }
 
 impl Default for DispatchClientContext {
@@ -2653,6 +2658,7 @@ impl Default for DispatchClientContext {
             client_no_touch: false,
             acl_checked_by_runtime: false,
             acl_permissions: None,
+            monitors_active: false,
         }
     }
 }
@@ -2896,6 +2902,11 @@ pub struct Store {
     pub script_propagation_mode: u8,
     /// Commands emitted by the active Lua script together with their propagation masks.
     pub script_propagation_records: Vec<ScriptPropagationRecord>,
+    /// (frankenredis-ax9ox) Original argv of each `redis.call` the active script
+    /// ran, for the MONITOR `lua`-addressed feed. Only populated when MONITOR
+    /// clients are attached (gated by dispatch_client_ctx.monitors_active);
+    /// drained + fed by the runtime after the EVAL command itself is mirrored.
+    pub script_monitor_records: Vec<Vec<Vec<u8>>>,
 
     /// Number of keys currently tracked in the expires set.
     pub expires_count: usize,
@@ -3282,6 +3293,7 @@ impl Default for Store {
             lua_error_line: 1,
             script_propagation_mode: SCRIPT_PROPAGATE_ALL,
             script_propagation_records: Vec::new(),
+            script_monitor_records: Vec::new(),
             expires_count: 0,
             cached_memory_usage_bytes: std::cell::Cell::new(0),
             cached_memory_usage_dirty: std::cell::Cell::new(0),
@@ -3591,6 +3603,22 @@ impl Store {
                 argv: argv.to_vec(),
                 targets: self.script_propagation_mode,
             });
+    }
+
+    /// (frankenredis-ax9ox) Record a `redis.call` argv for the MONITOR `lua`
+    /// feed, but only when MONITOR clients are attached — so script-heavy
+    /// workloads pay nothing when nobody is monitoring.
+    pub fn record_script_monitor(&mut self, argv: &[Vec<u8>]) {
+        if self.dispatch_client_ctx.monitors_active {
+            self.script_monitor_records.push(argv.to_vec());
+        }
+    }
+
+    /// (frankenredis-ax9ox) Drain the script's recorded `redis.call` argvs for
+    /// the runtime to mirror to MONITOR with the `lua` address.
+    #[must_use]
+    pub fn take_script_monitor_records(&mut self) -> Vec<Vec<Vec<u8>>> {
+        std::mem::take(&mut self.script_monitor_records)
     }
 
     pub fn observe_memory_sample(&mut self, used_memory_rss: usize) {

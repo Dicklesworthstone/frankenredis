@@ -8218,6 +8218,12 @@ impl<'a> LuaState<'a> {
 
         match command_result {
             Ok(frame) => {
+                // (frankenredis-ax9ox) Mirror this inner command to MONITOR with
+                // the `lua` address, like upstream call(). Recorded here (the
+                // post-exec point, matching redis) and drained by the runtime
+                // after the EVAL command's own monitor line; no-op when no
+                // MONITOR clients are attached.
+                self.store.record_script_monitor(&argv);
                 let dirty_after = self.store.dirty;
                 if dirty_after > dirty_before || command_may_propagate_from_script(&argv) {
                     // (frankenredis-x1225) Record the DETERMINISTIC effect form so

@@ -26,9 +26,9 @@ mirrored, in upstream order (MULTI, then the queued commands as EXEC runs them,
 then EXEC), with admin commands (SAVE / DEBUG / CONFIG / ...) still excluded.
 Every mirrored line is compared, including the transaction-control lines.
 
-EXCLUDED (frankenredis-ax9ox residual — still open): script-invoked redis.call
-commands are not mirrored at all (redis shows them with the `lua` address) ->
-not exercised here.
+ASSERTED (frankenredis-ax9ox residual c, landed): a script's `redis.call`
+commands are mirrored after the EVAL line, each with the special `lua` address
+(`[db lua] "cmd" ...`) — checked by lua_addr_check on both servers.
 """
 import argparse
 import os
@@ -200,6 +200,23 @@ def addr_fidelity(port, mon):
     return want, extract_addr(ln)
 
 
+def lua_addr_check(port, mon):
+    """Run EVAL with an inner redis.call; return the addr of the inner command's
+    mirrored line. Upstream mirrors script-invoked commands with the special
+    `lua` address (frankenredis-ax9ox residual c) — fr used to not mirror them
+    at all. The first line is the EVAL itself; the second is the inner SET.
+    """
+    mon.drain()
+    sender = Conn(port)
+    try:
+        sender.cmd("EVAL", "redis.call('set', KEYS[1], '1')", "1", "luak")
+        _eval_line = mon.read_line(timeout=0.8)
+        inner_line = mon.read_line(timeout=0.8)
+    finally:
+        sender.close()
+    return extract_addr(inner_line)
+
+
 def launch(cmdline, port):
     proc = subprocess.Popen(cmdline, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, start_new_session=True)
@@ -332,6 +349,15 @@ def main():
             if got == "127.0.0.1:0":
                 failures.append(
                     f"addr-fidelity[{name}]: addr is the 127.0.0.1:0 placeholder")
+
+        # lua-feed (ax9ox residual c): a script's redis.call commands must be
+        # mirrored with the special `lua` address on BOTH servers.
+        for name, port, mon in (("fr", FR_PORT, fmon), ("redis", REDIS_PORT, rmon)):
+            got = lua_addr_check(port, mon)
+            if got != "lua":
+                failures.append(
+                    f"lua-feed[{name}]: inner redis.call addr {got!r}, want 'lua' "
+                    f"(script-invoked command not mirrored with the lua address)")
     finally:
         for p in reversed(procs):
             p.terminate()
@@ -346,9 +372,9 @@ def main():
             print(f"  - {fl}")
         sys.exit(1)
     print(f"OK: MONITOR command-mirror byte-exact vs redis 7.2.4 "
-          f"({len(CASES)} cases + addr-fidelity; real peer addr, control-char "
-          f"escaping [ax9ox] and SELECT/MULTI/EXEC/queued mirroring [e8f9q] all "
-          f"asserted; lua-feed still excluded [ax9ox residual])")
+          f"({len(CASES)} cases + addr-fidelity + lua-feed; real peer addr, "
+          f"control-char escaping, SELECT/MULTI/EXEC/queued mirroring [e8f9q], "
+          f"and script redis.call lua-address feed [ax9ox] all asserted)")
     sys.exit(0)
 
 
