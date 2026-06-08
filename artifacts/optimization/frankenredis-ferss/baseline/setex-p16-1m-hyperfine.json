@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /tmp/codex-fr-ferss-baseline-target/release-perf/frankenredis --port 19976 --requests 1000000 --clients 50 --pipeline 16 --keyspace 1000000 --datasize 3 --mix alternate --key-prefix fr:ferss:base --json-out artifacts/optimization/frankenredis-ferss/baseline/last-setex-p16-1m.json",
+      "mean": 4.659212181940001,
+      "stddev": 0.07378131515083751,
+      "median": 4.6298301651400005,
+      "user": 6.920400519999999,
+      "system": 4.80560234,
+      "min": 4.60430728814,
+      "max": 4.78749230114,
+      "times": [
+        4.62183069214,
+        4.60430728814,
+        4.65260046314,
+        4.6298301651400005,
+        4.78749230114
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "baseline_bytes": 992,
+  "baseline_sha256": "dc3d47345c58e9839e6aa57875e4b3473379bc218bcc240c5b45907f8cb00dd7",
+  "candidate_bytes": 992,
+  "candidate_sha256": "dc3d47345c58e9839e6aa57875e4b3473379bc218bcc240c5b45907f8cb00dd7",
+  "equal": true,
+  "schema": "frankenredis_svgvb_setex_golden_v1"
+}
