@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:26512
+workload: set
+clients: 50  requests: 100000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 1755 ms  throughput: 56967.80 ops/sec
+latency(us): min=460 p50=12735 p95=25295 p99=30303 p999=40479 max=47039 mean=13827.85
+bytes: sent=6138978 received=500000 key_prefix=fr1cbca-closeout-set

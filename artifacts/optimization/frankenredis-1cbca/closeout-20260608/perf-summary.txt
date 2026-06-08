@@ -1,0 +1,31 @@
+frankenredis-1cbca closeout perf summary
+
+Source: fb9a8f245
+Build: rch release-perf fr-server + fr-bench
+Perf command:
+  perf record -F 499 -g -o baseline-get-p16-1m.perf.data -- python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-1cbca-closeout-target2/release-perf/frankenredis --bench-bin /tmp/codex-fr-1cbca-closeout-target2/release-perf/fr-bench --port 26513 --workload get --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr1cbca-closeout-profile --json-out last-baseline-get-p16-1m-profile.json
+
+Run:
+  throughput: 710915.00 ops/sec
+  p50: 1057 us
+  p95: 1495 us
+  p99: 1827 us
+  samples: 14596
+  lost samples: 0
+
+Children profile highlights:
+  ClientConnection::try_flush: 22.68%
+  __send: 22.47%
+
+Flat profile highlights:
+  Runtime::refresh_store_runtime_info_context: 5.26%
+  Value::string_owned: 4.99%
+  _mi_page_malloc_zero: 3.90%
+  parse_command_args_borrowed_into: 1.06%
+
+SET P16 syscall check:
+  requests: 100000
+  pipeline: 16
+  sendto calls: 6250
+  expected coalesced sends: 100000 / 16 = 6250
+  conclusion: current server is already sending one coalesced buffer per pipeline window, not one syscall per reply.

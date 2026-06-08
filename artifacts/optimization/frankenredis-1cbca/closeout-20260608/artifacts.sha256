@@ -1,0 +1,8 @@
+8bb4111bfff9ec49d793ee0a5672a2acb3586fe705d04bc0f6269bf46d177e48  /tmp/codex-fr-1cbca-closeout-target2/release-perf/frankenredis
+dd38e2551c28502d027a7594d8ee4dd1834bf5a2d2288e892c08c504a38ef81b  /tmp/codex-fr-1cbca-closeout-target2/release-perf/fr-bench
+c127a18921f1e1332be1eb8fedef549cc9886dbfafcf4ef6aa1cc79a8daeab18  artifacts/optimization/frankenredis-1cbca/closeout-20260608/baseline-get-p16-300k-hyperfine.json
+0b58a28fb233fbe93aae2212f324feb598dffed2ff348ca4fb7d582f2a3adc16  artifacts/optimization/frankenredis-1cbca/closeout-20260608/last-baseline-get-p16-1m-profile.json
+2beb2bf52343f8c7165a7bdc66486d58610091702731af403d714aa0cf89c07d  artifacts/optimization/frankenredis-1cbca/closeout-20260608/baseline-set-p16-100k-server-strace.txt
+c764e005ccba31757550a4e105bd038985b265fa5640c3133bcdc8237055cba2  artifacts/optimization/frankenredis-1cbca/closeout-20260608/golden-request.resp
+6a4fff4d2af35aef8a0d06970dffb1e4f12afc4b0f5fe0880be4fc727ed26acd  artifacts/optimization/frankenredis-1cbca/closeout-20260608/golden-output.resp
+4c1ae2c216afe55f07784a81f7588e5904de0e75911903d199e1df4abb4eb7b7  artifacts/optimization/frankenredis-1cbca/closeout-20260608/perf-summary.txt

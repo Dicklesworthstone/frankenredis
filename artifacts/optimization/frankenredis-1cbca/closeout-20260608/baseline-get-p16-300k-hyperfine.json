@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-1cbca-closeout-target2/release-perf/frankenredis --bench-bin /tmp/codex-fr-1cbca-closeout-target2/release-perf/fr-bench --port 26510 --workload get --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr1cbca-closeout-get --json-out artifacts/optimization/frankenredis-1cbca/closeout-20260608/last-baseline-get-p16-300k.json",
+      "mean": 0.5291667418200001,
+      "stddev": 0.02096776027586524,
+      "median": 0.52614110522,
+      "user": 0.49907591999999995,
+      "system": 0.6982745799999999,
+      "min": 0.50422289222,
+      "max": 0.56799768122,
+      "times": [
+        0.5501939032200001,
+        0.5459513062200001,
+        0.53775660122,
+        0.56799768122,
+        0.52455836722,
+        0.51036960722,
+        0.50794812022,
+        0.5149450962200001,
+        0.50422289222,
+        0.5277238432200001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780908211502,
+  "host": "127.0.0.1",
+  "port": 26512,
+  "workload": "set",
+  "clients": 50,
+  "requests": 100000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "fr1cbca-closeout-set",
+  "total_time_ms": 1755,
+  "ops_per_sec": 56967.798775711526,
+  "bytes_sent": 6138978,
+  "bytes_received": 500000,
+  "latency_us": {
+    "min": 460,
+    "p50": 12735,
+    "p95": 25295,
+    "p99": 30303,
+    "p999": 40479,
+    "max": 47039,
+    "mean": 13827.849079999995,
+    "samples": 100000
+  }
+}
