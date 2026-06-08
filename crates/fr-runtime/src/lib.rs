@@ -274,6 +274,10 @@ fn plain_decr_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"DECR".to_vec(), key.to_vec()]
 }
 
+fn plain_append_owned_argv(key: &[u8], value: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"APPEND".to_vec(), key.to_vec(), value.to_vec()]
+}
+
 fn plain_decrby_owned_argv(key: &[u8], delta: &[u8]) -> Vec<Vec<u8>> {
     vec![b"DECRBY".to_vec(), key.to_vec(), delta.to_vec()]
 }
@@ -6314,6 +6318,156 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'DECRBY' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    fn can_execute_plain_append_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"APPEND".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || value.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// Conservative borrowed runtime fast path for `APPEND key value`: mirrors
+    /// the generic `append` handler — a no-stat string-length read (WRONGTYPE on
+    /// a non-string key) + the checkStringLength proto-max-bulk-len guard +
+    /// `store.append`, returning the new length. APPEND is classified as a
+    /// write, so it counts one write regardless of outcome. Returns None (fall
+    /// back) on any disabling state. (frankenredis-q0qym)
+    pub fn execute_plain_append_borrowed(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_append_borrowed(key, value, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("append");
+        self.session.last_argv_len_sum = b"APPEND".len() + key.len() + value.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        // Mirror the generic `append` handler exactly: no-stat length read (which
+        // surfaces WRONGTYPE for a non-string key), then the checkStringLength
+        // guard, then the append. (frankenredis-ga4j1 string-length cap = 512MiB)
+        let reply = match self.server.store.string_len_no_stats(key, now_ms) {
+            Ok(current_len) => {
+                if current_len.saturating_add(value.len()) > 536_870_912 {
+                    RespFrame::Error(
+                        "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
+                    )
+                } else {
+                    match self.server.store.append(key, value, now_ms) {
+                        Ok(new_len) => {
+                            RespFrame::Integer(i64::try_from(new_len).unwrap_or(i64::MAX))
+                        }
+                        Err(err) => CommandError::Store(err).to_resp(),
+                    }
+                }
+            }
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_append_borrowed_metrics(
+            key, value, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_writes_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_append_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_append_owned_argv(key, value));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_append_owned_argv(key, value));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_with_kind("append", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_append_owned_argv(key, value));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'APPEND' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -19844,6 +19998,82 @@ mod tests {
         rt.execute_frame(command(&[b"MULTI"]), 3);
         assert!(rt.execute_plain_decr_borrowed(b"n", 4).is_none());
         assert!(rt.execute_plain_decrby_borrowed(b"n", b"2", 4).is_none());
+    }
+
+    #[test]
+    fn plain_append_borrowed_fast_path_matches_generic_create_grow_wrongtype() {
+        // (frankenredis-q0qym) APPEND borrowed fast path == generic dispatch:
+        // creates on a missing key, grows an existing string (returning the new
+        // length), and surfaces the same WRONGTYPE error on a non-string key.
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"s", b"Hello"]), 1);
+            rt.execute_frame(command(&[b"RPUSH", b"l", b"x"]), 1); // wrong type
+        }
+        // grow existing -> "Hello" + " World" = 11
+        let grow = fast
+            .execute_plain_append_borrowed(b"s", b" World", 2)
+            .expect("default APPEND should take borrowed fast path");
+        assert_eq!(
+            grow,
+            generic.execute_frame(command(&[b"APPEND", b"s", b" World"]), 2)
+        );
+        assert_eq!(grow, RespFrame::Integer(11));
+        // create on missing key -> len of value
+        let created = fast
+            .execute_plain_append_borrowed(b"fresh", b"abc", 3)
+            .expect("new-key APPEND should take borrowed fast path");
+        assert_eq!(
+            created,
+            generic.execute_frame(command(&[b"APPEND", b"fresh", b"abc"]), 3)
+        );
+        assert_eq!(created, RespFrame::Integer(3));
+        // append empty value to existing -> unchanged length
+        let noop = fast.execute_plain_append_borrowed(b"s", b"", 4).unwrap();
+        assert_eq!(
+            noop,
+            generic.execute_frame(command(&[b"APPEND", b"s", b""]), 4)
+        );
+        // wrong type -> WRONGTYPE
+        let wt = fast.execute_plain_append_borrowed(b"l", b"x", 5).unwrap();
+        assert_eq!(
+            wt,
+            generic.execute_frame(command(&[b"APPEND", b"l", b"x"]), 5)
+        );
+        assert!(matches!(wt, RespFrame::Error(_)));
+
+        // stored values + write/error/command stats match the generic path.
+        assert_eq!(
+            fast.execute_frame(command(&[b"GET", b"s"]), 6),
+            generic.execute_frame(command(&[b"GET", b"s"]), 6)
+        );
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_writes_processed,
+            generic.server.store.stat_total_writes_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+        assert_eq!(
+            fast.session.last_command_name,
+            generic.session.last_command_name
+        );
+    }
+
+    #[test]
+    fn plain_append_borrowed_fast_path_disabled_in_non_default_states() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"s", b"v"]), 1);
+        assert!(rt.execute_plain_append_borrowed(b"s", b"x", 2).is_some());
+        // a configured replica link / subscribe disables the write fast path
+        rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
+        assert!(rt.execute_plain_append_borrowed(b"s", b"x", 4).is_none());
     }
 
     #[test]

@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-q0qym-append/run_append_bench_once.py --server-bin /tmp/codex-fr-q0qym-baseline-target/release-perf/frankenredis --port 16451 --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:q0qym:paired",
+      "mean": 2.68091741942,
+      "stddev": 0.13635273769507414,
+      "median": 2.6618009014200004,
+      "user": 1.3565137200000001,
+      "system": 0.87482394,
+      "min": 2.36472997042,
+      "max": 2.86322951142,
+      "times": [
+        2.79771404942,
+        2.66205409342,
+        2.65930296542,
+        2.73530281042,
+        2.65115333642,
+        2.66154770942,
+        2.36472997042,
+        2.86322951142,
+        2.62320927942,
+        2.79093046842
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-q0qym-append/run_append_bench_once.py --server-bin /tmp/codex-fr-q0qym-candidate-target/release-perf/frankenredis --port 16451 --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:q0qym:paired",
+      "mean": 2.0451157464199996,
+      "stddev": 0.0930748284180931,
+      "median": 2.03248437142,
+      "user": 0.8820772199999999,
+      "system": 0.8087143400000001,
+      "min": 1.8783584864200003,
+      "max": 2.1907768294200003,
+      "times": [
+        2.05403916742,
+        1.8783584864200003,
+        2.14080314442,
+        2.1907768294200003,
+        2.00359464142,
+        1.99742441742,
+        1.97682439642,
+        2.14436763842,
+        2.01158870342,
+        2.05338003942
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

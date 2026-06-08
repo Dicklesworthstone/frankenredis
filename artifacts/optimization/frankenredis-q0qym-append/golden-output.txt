@@ -1,0 +1,5 @@
+oracle    sha256 = d38be4e317ec2f452852b91575d1a7fb906f7a4357af9a80d9ac1451595aeb71  (436 bytes)
+candidate sha256 = d38be4e317ec2f452852b91575d1a7fb906f7a4357af9a80d9ac1451595aeb71
+baseline  sha256 = d38be4e317ec2f452852b91575d1a7fb906f7a4357af9a80d9ac1451595aeb71
+ISOMORPHISM (candidate==baseline): True
+PARITY      (candidate==oracle):   True

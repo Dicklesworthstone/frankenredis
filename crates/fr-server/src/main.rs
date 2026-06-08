@@ -1709,6 +1709,15 @@ fn process_buffered_frames(
                                     consumed: parsed.consumed,
                                     response,
                                 })
+                            } else if let Some((key, value)) =
+                                borrowed_plain_append_args(&borrowed_args)
+                                && let Some(response) =
+                                    runtime.execute_plain_append_borrowed(key, value, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
                             } else if let Some((key, field)) =
                                 borrowed_plain_hget_args(&borrowed_args)
                                 && let Some(response) =
@@ -2027,6 +2036,13 @@ fn borrowed_plain_incrby_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a 
 fn borrowed_plain_decr_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
     match borrowed_args {
         [command, key] if command.eq_ignore_ascii_case(b"DECR") => Some(*key),
+        _ => None,
+    }
+}
+
+fn borrowed_plain_append_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
+    match borrowed_args {
+        [command, key, value] if command.eq_ignore_ascii_case(b"APPEND") => Some((*key, *value)),
         _ => None,
     }
 }

@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-q0qym-append/run_append_bench_once.py --server-bin /tmp/codex-fr-q0qym-baseline-target/release-perf/frankenredis --port 16451 --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:q0qym:base",
+      "mean": 2.65244423678,
+      "stddev": 0.09823296596907849,
+      "median": 2.64761587098,
+      "user": 1.34748754,
+      "system": 0.8622603799999998,
+      "min": 2.5187953634799998,
+      "max": 2.79806429248,
+      "times": [
+        2.58172810648,
+        2.61233624348,
+        2.53830810748,
+        2.5187953634799998,
+        2.58275757448,
+        2.7414754934800003,
+        2.79806429248,
+        2.7104013354800003,
+        2.75768035248,
+        2.6828954984799998
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
