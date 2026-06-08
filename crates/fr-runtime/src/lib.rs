@@ -10294,21 +10294,45 @@ impl Runtime {
         // forced char-validation on every printable push and a
         // wasteful into_bytes re-walk. (frankenredis-588j1)
         let mut line: Vec<u8> = Vec::with_capacity(64);
-        let _ = write!(line, "+{secs}.{usecs:06} [{db} 127.0.0.1:0]");
+        // (frankenredis-ax9ox) Upstream feeds the real client peer address in
+        // the `[db addr]` prefix; fr had hardcoded `127.0.0.1:0` for every
+        // client. The session tracks the actual peer (CLIENT INFO already
+        // reports it); print it here, falling back to `127.0.0.1:0` only when
+        // there is no socket peer (e.g. the replication-replay session, which
+        // is the 3s0ra residual).
+        match self.session.peer_addr {
+            Some(addr) => {
+                let _ = write!(line, "+{secs}.{usecs:06} [{db} {addr}]");
+            }
+            None => {
+                let _ = write!(line, "+{secs}.{usecs:06} [{db} 127.0.0.1:0]");
+            }
+        }
         for arg in argv {
             line.push(b' ');
             line.push(b'"');
             for &b in arg.iter() {
-                if b == b'"' || b == b'\\' {
-                    line.push(b'\\');
-                    line.push(b);
-                } else if !(32..=126).contains(&b) {
-                    // (frankenredis-v1twi) write! into the running
-                    // buffer skips the per-byte format!() heap alloc
-                    // for non-printable bytes.
-                    let _ = write!(line, "\\x{b:02x}");
-                } else {
-                    line.push(b);
+                // (frankenredis-ax9ox) Match upstream sds.c::sdscatrepr: `"` and
+                // `\` are backslash-escaped, the C named escapes \n \r \t \a \b
+                // get their two-char form, other printables pass through, and
+                // anything else becomes \xNN. fr previously emitted \xNN for the
+                // named-escape bytes too (e.g. \x0a instead of \n).
+                match b {
+                    b'"' | b'\\' => {
+                        line.push(b'\\');
+                        line.push(b);
+                    }
+                    b'\n' => line.extend_from_slice(b"\\n"),
+                    b'\r' => line.extend_from_slice(b"\\r"),
+                    b'\t' => line.extend_from_slice(b"\\t"),
+                    0x07 => line.extend_from_slice(b"\\a"),
+                    0x08 => line.extend_from_slice(b"\\b"),
+                    0x20..=0x7e => line.push(b),
+                    // (frankenredis-v1twi) write! into the running buffer skips
+                    // the per-byte format!() heap alloc for non-printable bytes.
+                    _ => {
+                        let _ = write!(line, "\\x{b:02x}");
+                    }
                 }
             }
             line.push(b'"');
@@ -25600,6 +25624,66 @@ mod tests {
             vec![(
                 7,
                 b"+0.003000 [2 127.0.0.1:0] \"SET\" \"beta\" \"2\"\r\n".to_vec(),
+            )]
+        );
+    }
+
+    #[test]
+    fn monitor_prints_real_peer_addr_ax9ox() {
+        // (frankenredis-ax9ox) When the session has a real socket peer, the
+        // MONITOR `[db addr]` prefix must show it, not the `127.0.0.1:0`
+        // placeholder fr used to hardcode for every client.
+        let mut rt = Runtime::default_strict();
+        rt.session.client_id = 13;
+        rt.session.peer_addr = Some(
+            "127.0.0.1:51468"
+                .parse::<std::net::SocketAddr>()
+                .expect("parse addr"),
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"MONITOR"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.drain_monitor_output();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"alpha", b"1"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.drain_monitor_output(),
+            vec![(
+                13,
+                b"+0.004000 [0 127.0.0.1:51468] \"SET\" \"alpha\" \"1\"\r\n".to_vec(),
+            )]
+        );
+    }
+
+    #[test]
+    fn monitor_escapes_control_chars_like_sdscatrepr_ax9ox() {
+        // (frankenredis-ax9ox) Upstream sds.c::sdscatrepr emits the C named
+        // escapes for \n \r \t \a \b and \xNN for other non-printables; fr had
+        // emitted \xNN for the named bytes too.
+        let mut rt = Runtime::default_strict();
+        rt.session.client_id = 21;
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"MONITOR"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.drain_monitor_output();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"ek", b"a\nb\tc\r\x07\x08d\xfe"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.drain_monitor_output(),
+            vec![(
+                21,
+                b"+0.005000 [0 127.0.0.1:0] \"SET\" \"ek\" \"a\\nb\\tc\\r\\a\\bd\\xfe\"\r\n"
+                    .to_vec(),
             )]
         );
     }

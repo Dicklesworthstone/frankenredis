@@ -11,17 +11,18 @@ and that no other differ covers as a distinct surface:
 Each test runs a command sequence from a fresh sender connection while a
 persistent MONITOR connection on each server captures the mirrored lines;
 the timestamp and the client-address field are normalised away and the
-remaining `[db] "CMD" "arg"...` payload is compared.
+remaining `[db] "CMD" "arg"...` payload is compared. A dedicated addr-fidelity
+check separately asserts the `[db addr]` prefix carries the sender's real
+local port (the addr cannot be compared fr-vs-redis directly: each sender
+opens its own ephemeral port to each server).
 
-EXCLUDED (frankenredis-ax9ox — all three live in fr-runtime feed_monitors and
-are blocked on that file's reservation; flip these to asserts when ax9ox lands):
-  1. client address: fr prints `127.0.0.1:0` for every client instead of the
-     real peer addr (and `lua` for script-invoked commands) -> addr normalised
-     out here.
-  2. control-char arg escaping: redis sdscatrepr emits NAMED escapes
-     (\\n \\r \\t \\a \\b); fr emits \\xNN -> only printable args are tested.
-  3. script-invoked redis.call commands are not mirrored at all (redis shows
-     them with the `lua` address) -> not exercised here.
+ASSERTED (frankenredis-ax9ox, landed): the real client peer address in the
+`[db addr]` prefix (not `127.0.0.1:0`), and control-char argument escaping with
+the C named escapes (\\n \\r \\t \\a \\b) per sds.c::sdscatrepr.
+
+EXCLUDED (frankenredis-ax9ox residual — still blocked): script-invoked
+redis.call commands are not mirrored at all (redis shows them with the `lua`
+address) -> not exercised here.
 
 EXCLUDED (frankenredis-e8f9q — also fr-runtime feed_monitors, blocked): fr feeds
 monitors AFTER execution, so SELECT / MULTI / EXEC and every command queued
@@ -170,6 +171,38 @@ def normalize(line):
         return ("?", line.strip())
 
 
+def extract_addr(line):
+    """`<ts> [<db> <addr>] ...` -> '<addr>' (the client-address field)."""
+    if line is None:
+        return None
+    try:
+        head = line.split("]", 1)[0]
+        inner = head.split("[", 1)[1]
+        return inner.split(" ", 1)[1]
+    except (IndexError, ValueError):
+        return None
+
+
+def addr_fidelity(port, mon):
+    """Run PING from a fresh sender; return (sender_local_addr, monitor_addr).
+
+    The monitor `[db addr]` prefix must report the sender's real local port
+    (frankenredis-ax9ox), not the old `127.0.0.1:0` placeholder. This is checked
+    per-server rather than fr-vs-redis because each sender opens its own
+    ephemeral port to each server, so the two addresses legitimately differ.
+    """
+    mon.drain()
+    sender = Conn(port)
+    local = sender.s.getsockname()
+    want = f"{local[0]}:{local[1]}"
+    try:
+        sender.cmd("PING")
+        ln = mon.read_line(timeout=0.8)
+    finally:
+        sender.close()
+    return want, extract_addr(ln)
+
+
 def launch(cmdline, port):
     proc = subprocess.Popen(cmdline, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, start_new_session=True)
@@ -187,7 +220,7 @@ def launch(cmdline, port):
 
 # Each case: a label and a list of command argv tuples run in order on a fresh
 # sender connection. The mirrored line for EACH argv is compared (normalised).
-# Printable args only — control-char escaping is ax9ox-excluded.
+# Args may be bytes to exercise control-char escaping (ax9ox, now asserted).
 CASES = [
     ("simple-set", [("SET", "foo", "bar")]),
     ("get", [("GET", "foo")]),
@@ -197,6 +230,11 @@ CASES = [
     ("space-arg", [("SET", "qk", "with space")]),
     ("empty-arg", [("SET", "qk", "")]),
     ("binary-printable", [("SET", "qk", "~!@#$%^&*()_+={}|;:<>,.?/")]),
+    # control-char escaping (ax9ox): named escapes for \n \r \t \a \b, \xNN else
+    ("ctrl-named", [("SET", "ek", b"a\nb\tc\rd\x07e\x08f")]),
+    ("ctrl-mixed", [("SET", "ek", b"x\ny\tz\x07\x08\xfe\x00\x1f\x7f")]),
+    ("ctrl-highbytes", [("SET", "ek", b"\x00\x01\x1f\x7f\x80\xff")]),
+    ("ctrl-quote-and-nl", [("SET", "ek", b'q"\\\n\t')]),
     ("lpush-multi", [("LPUSH", "l", "x", "y", "z")]),
     ("hset", [("HSET", "h", "f1", "v1", "f2", "v2")]),
     ("incr", [("INCR", "ctr")]),
@@ -272,6 +310,18 @@ def main():
             f = run_case(FR_PORT, fmon, label, seq)
             if r != f:
                 failures.append(f"{label}:\n      redis={r}\n      fr   ={f}")
+
+        # addr-fidelity (ax9ox): the [db addr] prefix must carry the sender's
+        # real local port on BOTH servers, never the 127.0.0.1:0 placeholder.
+        for name, port, mon in (("fr", FR_PORT, fmon), ("redis", REDIS_PORT, rmon)):
+            want, got = addr_fidelity(port, mon)
+            if got != want:
+                failures.append(
+                    f"addr-fidelity[{name}]: monitor addr {got!r}, "
+                    f"want sender's real addr {want!r}")
+            if got == "127.0.0.1:0":
+                failures.append(
+                    f"addr-fidelity[{name}]: addr is the 127.0.0.1:0 placeholder")
     finally:
         for p in reversed(procs):
             p.terminate()
@@ -286,8 +336,9 @@ def main():
             print(f"  - {fl}")
         sys.exit(1)
     print(f"OK: MONITOR command-mirror byte-exact vs redis 7.2.4 "
-          f"({len(CASES)} cases; addr/escaping/lua-feed ax9ox-excluded, "
-          f"SELECT/MULTI/EXEC mirroring e8f9q-excluded)")
+          f"({len(CASES)} cases + addr-fidelity; real peer addr & control-char "
+          f"escaping asserted [ax9ox], lua-feed + SELECT/MULTI/EXEC mirroring "
+          f"still excluded [ax9ox residual, e8f9q])")
     sys.exit(0)
 
 
