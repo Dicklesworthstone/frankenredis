@@ -4640,7 +4640,11 @@ fn looks_like_decimal_underflow_to_zero(text: &str, val: f64) -> bool {
     mantissa.bytes().any(|b| b.is_ascii_digit() && b != b'0')
 }
 
-fn parse_score_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
+/// Parse a ZADD/ZINCRBY score argument with upstream `string2d` semantics
+/// (rejects ERANGE decimal underflow-to-zero). Exposed so the fr-runtime
+/// borrowed ZADD fast path validates scores identically to this generic
+/// handler. (frankenredis-ev067)
+pub fn parse_score_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
     let val = parse_f64_arg(arg)?;
     // ZADD/ZINCRBY callsites use upstream's `string2d` path, which
     // rejects ERANGE underflow (1e-1000 → 0 → "value is not a valid

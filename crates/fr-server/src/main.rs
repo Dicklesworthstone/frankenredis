@@ -1867,6 +1867,15 @@ fn process_buffered_frames(
                                     consumed: parsed.consumed,
                                     response,
                                 })
+                            } else if let Some((key, pairs)) =
+                                borrowed_plain_zadd_args(&borrowed_args)
+                                && let Some(response) =
+                                    runtime.execute_plain_zadd_borrowed(key, pairs, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
                             } else if let Some((key, field)) =
                                 borrowed_plain_hget_args(&borrowed_args)
                                 && let Some(response) =
@@ -2229,6 +2238,35 @@ fn borrowed_plain_hset_args<'a>(
         return None;
     };
     if !command.eq_ignore_ascii_case(b"HSET") || pairs.is_empty() || pairs.len() % 2 != 0 {
+        return None;
+    }
+    Some((*key, pairs))
+}
+
+/// `ZADD key score member [score member ...]` borrowed-arg matcher for the PLAIN
+/// flagless form only: the first tail token must not be an NX/XX/GT/LT/CH/INCR
+/// flag (upstream stops flag parsing at the first non-flag token, so a non-flag
+/// at that position means no leading flags), and the tail must be a non-empty
+/// even-length score/member sequence. Anything else (flags, odd/empty tail)
+/// falls back to the generic handler, which owns flag + arity semantics. Score
+/// validity is checked in the runtime fast path. (frankenredis-ev067)
+fn borrowed_plain_zadd_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(&'a [u8], &'a [&'a [u8]])> {
+    let [command, key, pairs @ ..] = borrowed_args else {
+        return None;
+    };
+    if !command.eq_ignore_ascii_case(b"ZADD") || pairs.is_empty() || pairs.len() % 2 != 0 {
+        return None;
+    }
+    let first = pairs[0];
+    let is_flag = first.eq_ignore_ascii_case(b"NX")
+        || first.eq_ignore_ascii_case(b"XX")
+        || first.eq_ignore_ascii_case(b"GT")
+        || first.eq_ignore_ascii_case(b"LT")
+        || first.eq_ignore_ascii_case(b"CH")
+        || first.eq_ignore_ascii_case(b"INCR");
+    if is_flag {
         return None;
     }
     Some((*key, pairs))
