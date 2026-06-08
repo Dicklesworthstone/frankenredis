@@ -20,18 +20,15 @@ ASSERTED (frankenredis-ax9ox, landed): the real client peer address in the
 `[db addr]` prefix (not `127.0.0.1:0`), and control-char argument escaping with
 the C named escapes (\\n \\r \\t \\a \\b) per sds.c::sdscatrepr.
 
-EXCLUDED (frankenredis-ax9ox residual — still blocked): script-invoked
-redis.call commands are not mirrored at all (redis shows them with the `lua`
-address) -> not exercised here.
+ASSERTED (frankenredis-e8f9q, landed): SELECT / SWAPDB / WATCH / UNWATCH /
+MULTI / EXEC / DISCARD and every command queued inside a MULTI block are now
+mirrored, in upstream order (MULTI, then the queued commands as EXEC runs them,
+then EXEC), with admin commands (SAVE / DEBUG / CONFIG / ...) still excluded.
+Every mirrored line is compared, including the transaction-control lines.
 
-EXCLUDED (frankenredis-e8f9q — also fr-runtime feed_monitors, blocked): fr feeds
-monitors AFTER execution, so SELECT / MULTI / EXEC and every command queued
-inside a MULTI block are never mirrored (redis feeds at receive time and shows
-them all). Lines whose command is SELECT/MULTI/EXEC/DISCARD are filtered from
-both sides before comparison, and the all-queued MULTI/EXEC case is omitted; the
-db-context cases still assert that the command AFTER a SELECT carries the right
-`[db ...]` number (fr tracks the db correctly even though it drops the SELECT
-mirror line). Un-exclude and re-run when e8f9q lands.
+EXCLUDED (frankenredis-ax9ox residual — still open): script-invoked redis.call
+commands are not mirrored at all (redis shows them with the `lua` address) ->
+not exercised here.
 """
 import argparse
 import os
@@ -246,6 +243,23 @@ CASES = [
     ("mixed-case-cmd", [("SeT", "mc", "v")]),
     ("select-db", [("SELECT", "5"), ("SET", "dbk", "v")]),
     ("getset-2db", [("SELECT", "9"), ("GET", "dbk"), ("SELECT", "0")]),
+    # transaction mirroring (e8f9q): MULTI, queued cmds (during EXEC), EXEC
+    ("multi-exec", [("MULTI",), ("SET", "tx", "1"), ("INCR", "tx"), ("EXEC",)]),
+    ("multi-discard", [("MULTI",), ("SET", "dx", "1"), ("DISCARD",)]),
+    ("watch-unwatch", [("WATCH", "wk"), ("UNWATCH",)]),
+    ("swapdb", [("SWAPDB", "0", "1"), ("SWAPDB", "1", "0")]),
+    # container subcommand admin resolution (e8f9q): CONFIG GET / SLOWLOG GET /
+    # DEBUG are admin -> hidden; ACL WHOAMI / CLIENT ID / COMMAND COUNT /
+    # PUBSUB CHANNELS / OBJECT HELP are not -> shown. fr must resolve the
+    # `<parent>|<sub>` flags, not the (flag-less) container, to match redis.
+    ("config-get-hidden", [("CONFIG", "GET", "maxmemory")]),
+    ("slowlog-get-hidden", [("SLOWLOG", "GET")]),
+    ("debug-hidden", [("DEBUG", "SET-ACTIVE-EXPIRE", "1")]),
+    ("acl-whoami-shown", [("ACL", "WHOAMI")]),
+    ("client-id-shown", [("CLIENT", "ID")]),
+    ("command-count-shown", [("COMMAND", "COUNT")]),
+    ("pubsub-channels-shown", [("PUBSUB", "CHANNELS")]),
+    ("object-help-shown", [("OBJECT", "HELP")]),
     ("zadd", [("ZADD", "z", "1", "m", "2", "n")]),
     ("setex", [("SETEX", "sx", "50", "v")]),
     ("append", [("APPEND", "ap", "more")]),
@@ -264,20 +278,16 @@ def run_case(sender_port, mon, label, seq):
             sender.cmd(*argv)
     finally:
         sender.close()
-    # Read every mirrored line that arrives within the window. Lines whose
-    # command is SELECT/MULTI/EXEC/DISCARD are dropped (frankenredis-e8f9q:
-    # fr does not mirror them); the remaining commands still carry the correct
-    # `[db ...]` prefix that a preceding SELECT established.
+    # Read every mirrored line that arrives within the window. SELECT / MULTI /
+    # EXEC and queued transaction commands are now mirrored (frankenredis-e8f9q),
+    # so every line is compared — including the db-prefix a preceding SELECT
+    # established.
     lines = []
     while True:
         ln = mon.read_line(timeout=0.6)
         if ln is None:
             break
-        norm = normalize(ln)
-        cmd = norm[1].split('"')[1].upper() if '"' in norm[1] else ""
-        if cmd in ("SELECT", "MULTI", "EXEC", "DISCARD"):
-            continue
-        lines.append(norm)
+        lines.append(normalize(ln))
     return lines
 
 
@@ -336,9 +346,9 @@ def main():
             print(f"  - {fl}")
         sys.exit(1)
     print(f"OK: MONITOR command-mirror byte-exact vs redis 7.2.4 "
-          f"({len(CASES)} cases + addr-fidelity; real peer addr & control-char "
-          f"escaping asserted [ax9ox], lua-feed + SELECT/MULTI/EXEC mirroring "
-          f"still excluded [ax9ox residual, e8f9q])")
+          f"({len(CASES)} cases + addr-fidelity; real peer addr, control-char "
+          f"escaping [ax9ox] and SELECT/MULTI/EXEC/queued mirroring [e8f9q] all "
+          f"asserted; lua-feed still excluded [ax9ox residual])")
     sys.exit(0)
 
 

@@ -2409,9 +2409,12 @@ fn classify_runtime_special_command_linear(cmd: &[u8]) -> Option<RuntimeSpecialC
 /// Used on the replication-replay path so a replica's MONITOR echoes the SELECT
 /// (and PUBLISH / MULTI / EXEC) commands the primary streams, while the
 /// replication-internal REPLCONF (admin) stays hidden. (frankenredis-3s0ra)
-fn command_should_feed_monitors(cmd: &[u8]) -> bool {
-    let lower = cmd.to_ascii_lowercase();
-    match fr_command::get_command_flags(&lower) {
+fn command_should_feed_monitors(argv: &[Vec<u8>]) -> bool {
+    // Resolve the effective flags including container subcommands, matching how
+    // upstream call() tests the dispatched (sub)command's CMD_ADMIN /
+    // CMD_SKIP_MONITOR — e.g. CONFIG GET (admin) is hidden while ACL WHOAMI is
+    // shown, though both parents carry no flags. (frankenredis-e8f9q)
+    match fr_command::effective_command_flags(argv) {
         Some(flags) => !flags
             .split_whitespace()
             .any(|f| f == "admin" || f == "skip_monitor"),
@@ -9293,20 +9296,19 @@ impl Runtime {
                     self.server.record_latency_sample(argv, elapsed_us, now_ms);
                     self.server
                         .record_command_histogram(argv, elapsed_us, &reply);
-                    // Upstream call() feeds MONITOR for every executed command
-                    // except CMD_ADMIN / CMD_SKIP_MONITOR ones. This special-
-                    // command early-return path skipped the feed, so a replica
-                    // replaying its primary's stream never echoed the SELECT
-                    // commands the primary injects on a db change (redis shows
-                    // them in the replica's MONITOR). Scope the feed to the
-                    // replication-replay path: those streams carry only
-                    // replicable, monitorable commands (SELECT / writes /
-                    // MULTI / EXEC / PUBLISH), and REPLCONF (admin) is filtered
-                    // out, while a normal client's special-command MONITOR
-                    // behaviour is left exactly as-is. (frankenredis-3s0ra)
-                    if self.server.applying_master_stream
-                        && command_should_feed_monitors(&argv[0])
-                    {
+                    // Upstream call() feeds MONITOR at the end of every executed
+                    // command except CMD_ADMIN / CMD_SKIP_MONITOR ones. This
+                    // special-command early-return path used to feed only under
+                    // replication replay (3s0ra), so a NORMAL client's SELECT /
+                    // SWAPDB / MULTI / EXEC / DISCARD / WATCH / UNWATCH / pub-sub
+                    // commands never appeared in MONITOR (redis shows them all).
+                    // Feed for every client now, keeping the CMD_ADMIN /
+                    // CMD_SKIP_MONITOR gate so SAVE / BGSAVE / DEBUG / CONFIG /
+                    // SLOWLOG / FAILOVER / REPLCONF (admin) stay hidden — exactly
+                    // upstream's exclusion set. The db shown is the post-command
+                    // selected_db, matching redis (SELECT mirrors its new db).
+                    // (frankenredis-e8f9q, frankenredis-3s0ra)
+                    if command_should_feed_monitors(argv) {
                         self.feed_monitors(argv, now_ms, self.session.selected_db);
                     }
                 }
@@ -18020,6 +18022,17 @@ replica_announced:1\r\n",
             self.server
                 .record_command_histogram_outcome(argv, elapsed_us, failed);
 
+            // (frankenredis-e8f9q) Upstream execCommand call()s each queued
+            // command, so MONITOR mirrors them between the MULTI and EXEC lines
+            // (a queued command run via this loop never reaches the normal
+            // post-dispatch feed). Feed here, after execution, gated like
+            // upstream by CMD_ADMIN / CMD_SKIP_MONITOR so a queued CONFIG / DEBUG
+            // stays hidden. DISCARDed queues never reach this loop, so a
+            // discarded command is correctly never mirrored.
+            if command_should_feed_monitors(argv) {
+                self.feed_monitors(argv, now_ms, self.session.selected_db);
+            }
+
             // (frankenredis-wzs7l) Emit any lazy-expiry deletions this queued
             // command triggered, inside the transaction and before the command's
             // own record. Each lazy eviction bumped `dirty`, so the command is
@@ -25722,12 +25735,64 @@ mod tests {
         );
         rt.server.applying_master_stream = false;
 
-        // A normal client's SELECT keeps its prior behaviour (not fed via the
-        // special-command path) — this fix changes only the replica stream.
+        // A normal client's SELECT is now also mirrored (frankenredis-e8f9q):
+        // upstream feeds MONITOR for every non-admin command, special ones
+        // included, with the post-switch db in the prefix.
         let _ = rt.execute_frame(command(&[b"SELECT", b"2"]), 4);
-        assert!(
-            rt.drain_monitor_output().is_empty(),
-            "normal-client special-command MONITOR behaviour must be unchanged"
+        assert_eq!(
+            rt.drain_monitor_output(),
+            vec![(9, b"+0.004000 [2 127.0.0.1:0] \"SELECT\" \"2\"\r\n".to_vec())],
+            "normal-client SELECT must now be mirrored to MONITOR (e8f9q)"
+        );
+    }
+
+    #[test]
+    fn monitor_mirrors_multi_exec_and_queued_commands_e8f9q() {
+        // (frankenredis-e8f9q) Upstream mirrors MULTI, each queued command (run
+        // during EXEC), and EXEC, in that order. fr previously mirrored none of
+        // them (special-command + queued paths skipped the feed).
+        let mut rt = Runtime::default_strict();
+        rt.session.client_id = 31;
+        assert_eq!(
+            rt.execute_frame(command(&[b"MONITOR"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.drain_monitor_output();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"tx", b"1"]), 3),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"tx"]), 4),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        let _ = rt.execute_frame(command(&[b"EXEC"]), 5);
+
+        // Order: MULTI (recv), then the queued SET + INCR (during EXEC), then
+        // EXEC itself. The QUEUED commands are NOT fed at queue time.
+        let cmds: Vec<Vec<u8>> = rt
+            .drain_monitor_output()
+            .into_iter()
+            .map(|(_, line)| {
+                // keep just the `"CMD" ...` payload after the `] `
+                let pos = line.windows(2).position(|w| w == b"] ").unwrap();
+                line[pos + 2..].to_vec()
+            })
+            .collect();
+        assert_eq!(
+            cmds,
+            vec![
+                b"\"MULTI\"\r\n".to_vec(),
+                b"\"SET\" \"tx\" \"1\"\r\n".to_vec(),
+                b"\"INCR\" \"tx\"\r\n".to_vec(),
+                b"\"EXEC\"\r\n".to_vec(),
+            ],
+            "MULTI, queued SET/INCR, then EXEC must all be mirrored in order"
         );
     }
 

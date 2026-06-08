@@ -16841,6 +16841,31 @@ pub fn get_command_flags(name: &[u8]) -> Option<&'static str> {
     command_table_index(name).map(|idx| COMMAND_TABLE[idx].2)
 }
 
+/// Effective command flags for a full argv, descending into the
+/// `<parent>|<sub>` SUBCOMMAND_TABLE entry for container commands. Upstream
+/// dispatches `CONFIG GET` to the config|get subcommand before testing
+/// CMD_ADMIN / CMD_SKIP_MONITOR, so the container's own (flag-less) entry is
+/// the wrong source for e.g. MONITOR visibility: `CONFIG GET` is admin (hidden)
+/// while `ACL WHOAMI` is not (shown), even though both parents carry no flags.
+/// Falls back to the top-level [`get_command_flags`] when there is no matching
+/// subcommand row. (frankenredis-e8f9q)
+pub fn effective_command_flags(argv: &[Vec<u8>]) -> Option<&'static str> {
+    let cmd = argv.first()?;
+    if let Some(sub) = argv.get(1) {
+        let mut key = Vec::with_capacity(cmd.len() + 1 + sub.len());
+        key.extend(cmd.iter().map(u8::to_ascii_lowercase));
+        key.push(b'|');
+        key.extend(sub.iter().map(u8::to_ascii_lowercase));
+        if let Some(entry) = SUBCOMMAND_TABLE
+            .iter()
+            .find(|entry| entry.0.as_bytes() == key.as_slice())
+        {
+            return Some(entry.2);
+        }
+    }
+    get_command_flags(cmd)
+}
+
 fn command_writes_or_may_replicate_in_readonly_script(argv: &[Vec<u8>]) -> bool {
     let Some(raw_cmd) = argv.first() else {
         return false;
