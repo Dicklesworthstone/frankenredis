@@ -9045,10 +9045,30 @@ impl Runtime {
             return reply;
         }
 
-        let command_arity_ok = set_command_arity_ok(argv).unwrap_or_else(|| {
-            argv.first()
-                .is_some_and(|command| fr_command::check_command_arity(command, argv.len()).is_ok())
-        });
+        // (frankenredis-7tpx0) Full arity = parent arity AND, for container
+        // commands, the resolved subcommand's arity (e.g. CONFIG GET / OBJECT
+        // ENCODING). Upstream checks the resolved subcommand's arity
+        // (server.c:3787) before the CMD_PROTECTED and pub/sub-context gates, so
+        // a known subcommand with the wrong argc reaches dispatch for its own
+        // "wrong number of arguments for 'parent|sub'" error rather than a later
+        // gate's wording.
+        let command_arity_ok = set_command_arity_ok(argv)
+            .unwrap_or_else(|| fr_command::check_full_command_arity(argv).is_ok());
+        // (frankenredis-7tpx0) Upstream runs the CMD_PROTECTED gate
+        // (server.c:3878 — DEBUG/MODULE enable check) BEFORE the pub/sub-context
+        // gate. DEBUG is protected (enable-debug-command defaults to "no"), so a
+        // subscribed client running DEBUG must get the protected/arity error, not
+        // the context error. MODULE is NOT protected by default, so it correctly
+        // falls through to the context gate. This hoists the DEBUG gate ahead of
+        // the context gate only for the subscribe case (the fr-server fast gate
+        // defers DEBUG here for the same reason).
+        if self.is_in_subscription_mode()
+            && matches!(special_command, Some(RuntimeSpecialCommand::Debug))
+            && let Some(reply) = self.handle_debug_command_gate(argv)
+        {
+            self.apply_existing_client_reply_suppression_to_undispatched_reply();
+            return reply;
+        }
         // Upstream server.c::processCommand:4067-4082 only enforces the
         // pubsub-mode allow-list when c->resp == 2. RESP3 subscribers can
         // freely interleave pubsub messages with any other command, since
@@ -9069,9 +9089,16 @@ impl Runtime {
         // standard +PONG simple-string reply since RESP3 supports
         // interleaved replies. (br-frankenredis-subpubping,
         // frankenredis-idok8)
+        // (frankenredis-7tpx0) Upstream networking.c::pingCommand rejects argc>2
+        // with "wrong number of arguments for 'ping'" (PING's table arity is -1,
+        // so the generic arity check passes argc=3 and the command-specific guard
+        // fires inside pingCommand). The subscribe-mode 2-element form must honor
+        // that bound: only argc<=2 takes the ["pong", msg] shape; argc>2 falls
+        // through to normal dispatch, which emits the arity error.
         if command_arity_ok
             && resp2
             && self.is_in_subscription_mode()
+            && argv.len() <= 2
             && argv
                 .first()
                 .is_some_and(|command| eq_ascii_token(command, b"PING"))
@@ -22503,17 +22530,18 @@ mod tests {
         // container subcommand expands to "parent|sub". Pre-fix, fr
         // namespaced only PUBSUB; CLIENT/CONFIG/etc. surfaced the
         // bare parent name and broke parity for monitoring tools.
+        //
+        // (frankenredis-7tpx0) Every case must use a VALID-arity,
+        // non-protected container subcommand so it actually reaches the
+        // pub/sub-context gate. DEBUG is intentionally absent: it is
+        // CMD_PROTECTED (server.c:3878) so a subscribed DEBUG gets the
+        // protected error before the context gate (covered by
+        // subscribe_mode_protected_and_subcommand_arity_precede_context_gate_7tpx0).
         let cases: &[(&[&[u8]], &str)] = &[
             (&[b"CLIENT", b"INFO"], "client|info"),
             (&[b"CLIENT", b"LIST"], "client|list"),
             (&[b"CLIENT", b"KILL", b"ID", b"1"], "client|kill"),
             (&[b"CONFIG", b"GET", b"maxmemory"], "config|get"),
-            // (frankenredis-k6ei4) DEBUG has no *registered* subcommands
-            // upstream (debugCommand dispatches them inline), so
-            // c->cmd->fullname is the bare "debug" — verified against
-            // redis 7.2.4 with enable-debug-command yes:
-            //   "Can't execute 'debug': ...", not 'debug|object'.
-            (&[b"DEBUG", b"OBJECT", b"k"], "debug"),
             (&[b"OBJECT", b"ENCODING", b"k"], "object|encoding"),
             (&[b"MEMORY", b"USAGE", b"k"], "memory|usage"),
             (&[b"SLOWLOG", b"GET"], "slowlog|get"),
@@ -22540,6 +22568,62 @@ mod tests {
                 argv,
             );
         }
+    }
+
+    #[test]
+    fn subscribe_mode_protected_and_subcommand_arity_precede_context_gate_7tpx0() {
+        // (frankenredis-7tpx0) Upstream processCommand order is
+        // arity(incl. subcommand) -> CMD_PROTECTED -> ... -> pub/sub-context
+        // gate, so while subscribed:
+        //   * a known container subcommand with the WRONG argc surfaces its own
+        //     arity error, not the context wording (CONFIG GET / OBJECT ENCODING);
+        //   * DEBUG (protected, enable-debug-command="no") surfaces the protected
+        //     error, not the context wording;
+        //   * PING with argc>2 surfaces "wrong number of arguments for 'ping'"
+        //     (PING's table arity is -1, so the bound is command-specific);
+        //   * valid-arity disallowed commands STILL get the context error.
+        let arity = |name: &str| format!("ERR wrong number of arguments for '{name}' command");
+        let context = |name: &str| {
+            format!(
+                "ERR Can't execute '{name}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
+            )
+        };
+        let cases: &[(&[&[u8]], String)] = &[
+            // wrong subcommand arity -> own arity error (gate skipped)
+            (&[b"CONFIG", b"GET"], arity("config|get")),
+            (&[b"OBJECT", b"ENCODING"], arity("object|encoding")),
+            // PING argc>2 -> command-specific arity error
+            (&[b"PING", b"a", b"b"], arity("ping")),
+            // DEBUG (protected) -> protected error, never the context error
+            (
+                &[b"DEBUG", b"SLEEP", b"0"],
+                "ERR DEBUG command not allowed. If the enable-debug-command \
+                 option is set to \"local\", you can run it from a local \
+                 connection, otherwise you need to set this option in the \
+                 configuration file, and then restart the server."
+                    .to_string(),
+            ),
+            // valid-arity disallowed command -> still the context error
+            (&[b"CONFIG", b"GET", b"maxmemory"], context("config|get")),
+            (&[b"OBJECT", b"ENCODING", b"k"], context("object|encoding")),
+            (&[b"GET", b"k"], context("get")),
+        ];
+        for (argv, expected) in cases {
+            let mut rt = Runtime::default_strict();
+            let _ = rt.execute_frame(command(&[b"SUBSCRIBE", b"alpha"]), 0);
+            let reply = rt.execute_frame(command(argv), 1);
+            assert_eq!(reply, RespFrame::Error(expected.clone()), "argv={argv:?}");
+        }
+        // PING / PING msg keep the subscribe-mode 2-element shape.
+        let mut rt = Runtime::default_strict();
+        let _ = rt.execute_frame(command(&[b"SUBSCRIBE", b"alpha"]), 0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"PING", b"hi"]), 1),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"pong".to_vec())),
+                RespFrame::BulkString(Some(b"hi".to_vec())),
+            ])),
+        );
     }
 
     #[test]

@@ -2204,17 +2204,23 @@ fn process_argv_frame(
     // fast-path gate must too — when the command is unknown or its argc fails
     // the generic arity, skip the gate so the command reaches dispatch, which
     // emits the matching unknown/arity error (no side effect: arity fails
-    // before execution). NOTE: the DEBUG/MODULE protected gate (server.c:3878)
-    // and container-subcommand arity (e.g. CONFIG GET) still precede the
-    // context gate upstream but resolve only inside the locked runtime — those
-    // remain a follow-up (frankenredis-7tpx0).
+    // before execution).
+    //
+    // (frankenredis-7tpx0) Two refinements so this fast gate stays a strict
+    // subset of the runtime gate:
+    //   * Full arity (`check_full_command_arity`) so a known container
+    //     subcommand with the wrong argc (e.g. `CONFIG GET`, `OBJECT ENCODING`)
+    //     skips the gate and reaches dispatch for its own arity error.
+    //   * DEBUG is deferred to the runtime: it is CMD_PROTECTED (server.c:3878),
+    //     so a subscribed DEBUG must get the protected/arity error from
+    //     handle_debug_command_gate (which runs before the runtime context
+    //     gate), not the context wording this fast gate would emit.
     if runtime.is_in_subscription_mode()
         && runtime.client_session().resp_protocol_version() != 3
-        && fr_command::check_command_arity(
-            argv.first().map(Vec::as_slice).unwrap_or(b""),
-            argv.len(),
-        )
-        .is_ok()
+        && !argv
+            .first()
+            .is_some_and(|command| command.eq_ignore_ascii_case(b"DEBUG"))
+        && fr_command::check_full_command_arity(argv).is_ok()
         && let Some(reject) = check_subscription_mode_gate(argv, true)
     {
         reject.encode_into(&mut conn.write_buf);
