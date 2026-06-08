@@ -939,14 +939,16 @@ pub fn parse_command_frame(
     }
     let (line, mut cursor) = read_line(input, 1)?;
     let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
-    if len == -1 {
+    // (frankenredis-6dpyk) Upstream networking.c::processMultibulkBuffer consumes
+    // ANY multibulk count <= 0 as a no-op (no command, no reply), not just the
+    // canonical *-1 null array — `*-2`/`*-3` must NOT error. Surface every
+    // negative count as the null-array frame the server already treats as a
+    // no-op; `*0` (len == 0) still falls through to the empty-array path below.
+    if len < 0 {
         return Ok(ParseResult {
             frame: RespFrame::Array(None),
             consumed: cursor,
         });
-    }
-    if len < -1 {
-        return Err(RespParseError::InvalidMultibulkLength);
     }
     let count = usize::try_from(len).map_err(|_| RespParseError::InvalidMultibulkLength)?;
     if count > config.max_array_len {
@@ -1036,14 +1038,14 @@ fn parse_command_args_borrowed_into_inner<'a>(
     }
     let (line, mut cursor) = read_line(input, 1)?;
     let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
-    if len == -1 {
+    // (frankenredis-6dpyk) Any multibulk count <= 0 is a no-op upstream — `*-2`
+    // must not error. Mirror parse_command_frame: every negative count becomes
+    // the null-array no-op; `*0` falls through to the empty-args path.
+    if len < 0 {
         return Ok(BorrowedCommandArgsParseResult {
             kind: BorrowedCommandArgsKind::NullArray,
             consumed: cursor,
         });
-    }
-    if len < -1 {
-        return Err(RespParseError::InvalidMultibulkLength);
     }
     let count = usize::try_from(len).map_err(|_| RespParseError::InvalidMultibulkLength)?;
     if count > config.max_array_len {
@@ -1677,7 +1679,6 @@ mod tests {
             &b"*1\r\n#t\r\n"[..],
             &b"*1\r\n*0\r\n"[..],
             &b"*2\r\n$3\r\nGET\r\n$-1\r\n"[..],
-            &b"*-2\r\n"[..],
             &b"*x\r\n"[..],
             &b"*1\r\n$3\r\nfo"[..],
             &b"*1\r\n$01\r\nx\r\n"[..],
@@ -1701,6 +1702,15 @@ mod tests {
             );
             assert!(args.is_empty(), "allow_resp3 left stale args for {input:?}");
         }
+        // (frankenredis-6dpyk) A negative multibulk count <= 0 (e.g. *-2) is a
+        // no-op upstream, NOT an error — both command parsers must agree it is
+        // the null-array form, not surface InvalidMultibulkLength.
+        assert!(matches!(
+            parse_command_frame(b"*-2\r\n", &cfg).unwrap().frame,
+            RespFrame::Array(None)
+        ));
+        assert!(parse_command_args_borrowed_into(b"*-2\r\n", &cfg, &mut args).is_ok());
+        assert!(parse_command_frame(b"*-9\r\n", &cfg).unwrap().frame == RespFrame::Array(None));
     }
 
     #[test]
