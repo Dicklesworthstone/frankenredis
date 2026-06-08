@@ -22,7 +22,7 @@ Profile basis:
 Build:
 
 ```text
-rch exec -- env CARGO_TARGET_DIR=/tmp/codex-fr-ferss-baseline-target cargo build --profile release-perf -p fr-server -p fr-bench
+rch exec -- env CARGO_TARGET_DIR=/data/projects/frankenredis/target-cod-ferss-baseline-rch cargo build --profile release-perf -p fr-server -p fr-bench
 ```
 
 RCH used local fallback because no worker was admissible.
@@ -30,7 +30,7 @@ RCH used local fallback because no worker was admissible.
 Standalone baseline hyperfine:
 
 ```text
-4.659 s +/- 0.074 s
+4.5454567429 s +/- 0.0783406468 s
 ```
 
 ## Behavior Proof
@@ -66,16 +66,19 @@ Isomorphism:
 Validation while candidate was applied:
 
 ```text
-rch exec -- env CARGO_TARGET_DIR=/tmp/codex-fr-ferss-test-key-target cargo test -p fr-command command_key_indexes -- --nocapture
-rch exec -- env CARGO_TARGET_DIR=/tmp/codex-fr-ferss-test-index-target cargo test -p fr-command command_table_index_matches_linear_scan -- --nocapture
-rch exec -- env CARGO_TARGET_DIR=/tmp/codex-fr-ferss-candidate-target cargo build --profile release-perf -p fr-server -p fr-bench
+rch exec -- env CARGO_TARGET_DIR=/data/projects/.scratch/frankenredis-ferss-candidate-f97b7897c-20260608T1350/target-cod-ferss-candidate-rch cargo build --profile release-perf -p fr-server -p fr-bench
+rch exec -- cargo check -p fr-command --all-targets
+rch exec -- cargo test -p fr-command command_key_indexes -- --nocapture
 ```
 
-`command_key_indexes` ran remotely on `vmi1153651`; the index-equivalence test
-and release build used local fallback. `cargo fmt -p fr-command --check` was
-not clean because the shared tree already contained unrelated formatting drift
-in `fr-command` / `lua_eval`; the candidate hunk was manually formatted and the
-unrelated drift was left untouched.
+Candidate source and binary were isolated in a detached scratch worktree at
+`f97b7897c`, with only the `fr-command` hunk applied. The candidate release
+build used RCH local fallback; `cargo check -p fr-command --all-targets` passed
+on `vmi1167313`; the focused `command_key_indexes` test subset passed via RCH
+local fallback. `cargo fmt -p fr-command --check` was not clean because the
+shared tree already contained unrelated formatting drift in `fr-command` /
+`lua_eval`; the candidate hunk was manually formatted and the unrelated drift
+was left untouched.
 
 Subagent audit pass: `Aristotle` independently checked the invariants and found
 no behavior difference for the final-fallback replacement shape.
@@ -84,9 +87,15 @@ no behavior difference for the final-fallback replacement shape.
 
 Paired hyperfine:
 
-- baseline: `4.846 s +/- 0.089 s`
-- candidate: `4.847 s +/- 0.081 s`
-- summary: baseline `1.00x +/- 0.02` faster than candidate
+- baseline: `4.5643100625 s +/- 0.0355956222 s`
+- candidate: `4.6220507328 s +/- 0.0424682809 s`
+- summary: baseline `1.01x +/- 0.01` faster than candidate
+
+Reversed-order hyperfine:
+
+- candidate: `4.6922354507 s +/- 0.0707127332 s`
+- baseline: `4.6464875006 s +/- 0.1031725512 s`
+- summary: baseline `1.01x +/- 0.03` faster than candidate
 
 Score:
 

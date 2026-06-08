@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /data/projects/.scratch/frankenredis-ferss-candidate-f97b7897c-20260608T1350/target-cod-ferss-candidate-rch/release-perf/frankenredis --port 26703 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix frfersscandrev --json-out artifacts/optimization/frankenredis-ferss/candidate/last-reversed-setex-p16-1m.json",
+      "mean": 4.692235450734286,
+      "stddev": 0.0707127332487638,
+      "median": 4.70028865202,
+      "user": 6.871876417142857,
+      "system": 5.890210231428571,
+      "min": 4.616613060020001,
+      "max": 4.82529784702,
+      "times": [
+        4.66851634102,
+        4.711835901020001,
+        4.61863925502,
+        4.70028865202,
+        4.616613060020001,
+        4.70445709902,
+        4.82529784702
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /data/projects/frankenredis/target-cod-ferss-baseline-rch/release-perf/frankenredis --port 26704 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix frferssbaserev --json-out artifacts/optimization/frankenredis-ferss/baseline/last-reversed-setex-p16-1m.json",
+      "mean": 4.6464875005914275,
+      "stddev": 0.1031725511511404,
+      "median": 4.62321224902,
+      "user": 6.962826417142857,
+      "system": 5.770369517142856,
+      "min": 4.53043525002,
+      "max": 4.86007649802,
+      "times": [
+        4.86007649802,
+        4.59864686802,
+        4.62321224902,
+        4.67074681402,
+        4.61498911302,
+        4.53043525002,
+        4.62730571202
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
