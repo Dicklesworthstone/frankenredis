@@ -6,7 +6,7 @@ huge/non-int/conflicting/wrong-type). Reply-diff after each command; mutating
 state is reseeded each iteration. Reads element-identity-stable replies only
 (no random-sample commands here). DUMP payloads are captured live then mutated.
 """
-import socket, sys, random
+import socket, sys, random, re
 
 def conn(p):
     s = socket.create_connection(("127.0.0.1", p)); s.settimeout(3); return s
@@ -100,6 +100,35 @@ GENS = [
     lambda g: ["LPOS", k(g), "1", "RANK", v(g), "COUNT", v(g)] + (["MAXLEN", v(g)] if g.random()<.5 else []),
 ]
 
+_ID_RE = re.compile(rb'^\d+-\d+$')
+
+def is_false_positive(args, a, b):
+    """Known UNSPECIFIED-order / time-based-id divergences that are NOT bugs —
+    excluding them lets this fuzzer surface real divergences without noise.
+
+    1. SORT / SORT_RO `BY weight_*` — those weight keys are never created here,
+       so all weights compare equal and the element order is UNSPECIFIED.
+       redis's pqsort produces a build-specific permutation (notably a scramble
+       for sorted-set inputs) that fr's stable sort can't reproduce without
+       porting pqsort — the same WONTFIX class as KEYS / SRANDMEMBER /
+       hashtable iteration order. With `LIMIT`, slicing that unspecified order
+       even yields different element *subsets*, so any array reply under a
+       `BY` clause is excluded. (Real `BY`-weight ordering would need the
+       weight keys to exist, which this grammar does not test; STORE replies
+       are an integer count and stay compared.)
+    2. XADD with the auto-id `*` that succeeded: the returned `<ms>-<seq>` id
+       is time-based and differs between the two servers by design.
+    """
+    cmd0 = args[0].upper()
+    if cmd0 in ("SORT", "SORT_RO") and "BY" in args:
+        if a[0] == "*" and b[0] == "*":
+            return True
+    if cmd0 == "XADD" and "*" in args:
+        if (a[0] == "$" and b[0] == "$" and a[1] and b[1]
+                and _ID_RE.match(a[1]) and _ID_RE.match(b[1])):
+            return True
+    return False
+
 def fuzz(seeds, per):
     diffs = []
     for sd in seeds:
@@ -111,7 +140,7 @@ def fuzz(seeds, per):
             except Exception as e: a = ("EXC", str(e))
             try: b = cmd(F, *args)
             except Exception as e: b = ("EXC", str(e))
-            if a != b:
+            if a != b and not is_false_positive(args, a, b):
                 diffs.append((sd, i, args, a, b))
                 if len(diffs) <= 50:
                     print(f"DIFF seed={sd} i={i}: {' '.join(args)}\n   O={a!r}\n   F={b!r}")
