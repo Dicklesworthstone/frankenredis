@@ -107,6 +107,9 @@ pub const NOTIFY_EVICTED: u32 = 1 << 9; // e
 pub const NOTIFY_STREAM: u32 = 1 << 10; // t
 pub const NOTIFY_KEY_MISS: u32 = 1 << 11; // m
 pub const NOTIFY_NEW: u32 = 1 << 12; // n
+pub const NOTIFY_MODULE: u32 = 1 << 13; // d (module key-type notification)
+// Upstream server.h: the `A` alias covers every class EXCEPT key-miss (m)
+// and new-key (n) — and DOES include the module class (d). (frankenredis-nkednfix)
 pub const NOTIFY_ALL: u32 = NOTIFY_GENERIC
     | NOTIFY_STRING
     | NOTIFY_LIST
@@ -115,7 +118,8 @@ pub const NOTIFY_ALL: u32 = NOTIFY_GENERIC
     | NOTIFY_ZSET
     | NOTIFY_EXPIRED
     | NOTIFY_EVICTED
-    | NOTIFY_STREAM;
+    | NOTIFY_STREAM
+    | NOTIFY_MODULE;
 
 /// Parse a notify-keyspace-events configuration string into flags.
 /// Returns None if the string contains invalid characters.
@@ -138,24 +142,27 @@ pub fn keyspace_events_parse(classes: &str) -> Option<u32> {
             't' => flags |= NOTIFY_STREAM,
             'm' => flags |= NOTIFY_KEY_MISS,
             'n' => flags |= NOTIFY_NEW,
+            'd' => flags |= NOTIFY_MODULE,
             _ => return None,
         }
     }
-    // Redis requires at least K or E to be set for notifications to fire.
-    // If event types are specified but neither K nor E is set, disable all.
-    if flags != 0 && (flags & (NOTIFY_KEYSPACE | NOTIFY_KEYEVENT)) == 0 {
-        flags = 0;
-    }
+    // Upstream keeps the class flags in the config regardless of K/E: the
+    // K/E requirement only gates whether an event actually *fires*
+    // (notify_keyspace_event checks NOTIFY_KEYSPACE / NOTIFY_KEYEVENT at
+    // emit time), so e.g. `CONFIG SET notify-keyspace-events g` round-trips
+    // back as `g`. fr previously zeroed everything when K/E were absent,
+    // dropping the class flags from CONFIG GET. (frankenredis-nkednfix)
     Some(flags)
 }
 
 /// Convert notification flags back to a configuration string.
 ///
 /// Mirrors upstream `notify.c::keyspaceEventsFlagsToString`: canonical
-/// order is A | g $ l s h z x e t n | K E m, where the `n` (NOTIFY_NEW)
-/// bit only appears when `A` is NOT set (upstream lists `n` inside the
-/// per-class else branch). This matters for CONFIG GET parity:
-/// `CONFIG SET notify-keyspace-events KEA` must echo back `AKE`,
+/// order is A | g $ l s h z x e t d n | K E m, where the per-class chars
+/// (incl. `d` NOTIFY_MODULE and `n` NOTIFY_NEW) only appear when `A` is
+/// NOT set (upstream lists them inside the per-class else branch), while
+/// `m` (NOTIFY_KEY_MISS) is emitted after K/E. This matters for CONFIG GET
+/// parity: `CONFIG SET notify-keyspace-events KEA` must echo back `AKE`,
 /// not `KEA`. (br-frankenredis-xmev)
 #[must_use]
 pub fn keyspace_events_to_string(flags: u32) -> String {
@@ -189,6 +196,9 @@ pub fn keyspace_events_to_string(flags: u32) -> String {
         }
         if flags & NOTIFY_STREAM != 0 {
             s.push('t');
+        }
+        if flags & NOTIFY_MODULE != 0 {
+            s.push('d');
         }
         if flags & NOTIFY_NEW != 0 {
             s.push('n');
@@ -35744,6 +35754,43 @@ mod tests {
             let flags = keyspace_events_parse("Kgn").expect("valid notify-keyspace-events");
             assert_eq!(keyspace_events_to_string(flags), "gnK");
         }
+
+        #[test]
+        fn keyspace_events_module_flag_and_keless_classes_match_upstream_nkednfix() {
+            // 'd' (NOTIFY_MODULE) is a valid event class in redis 7.2.4 — fr
+            // used to reject it ("Invalid event class character") even though
+            // its own error string lists 'd'.
+            let d = keyspace_events_parse("KEd").expect("'d' must be a valid class");
+            assert_eq!(keyspace_events_to_string(d), "dKE");
+            // 'A' covers the module class, so it round-trips as 'A'.
+            assert_eq!(
+                keyspace_events_to_string(keyspace_events_parse("A").expect("A")),
+                "A"
+            );
+            // The all-classes-but-no-d string is NOT 'A' (d is part of A).
+            assert_eq!(
+                keyspace_events_to_string(
+                    keyspace_events_parse("g$lshzxet").expect("classes")
+                ),
+                "g$lshzxet"
+            );
+            // Canonical class order places 'd' before 'n' (upstream order).
+            assert_eq!(
+                keyspace_events_to_string(keyspace_events_parse("gnd").expect("gnd")),
+                "gdn"
+            );
+            // Class flags WITHOUT K/E are preserved in the config (upstream
+            // gates firing at emit time, not at parse), where fr used to drop
+            // them to "".
+            for (input, want) in
+                [("g", "g"), ("n", "n"), ("m", "m"), ("t", "t"), ("d", "d")]
+            {
+                let flags = keyspace_events_parse(input)
+                    .unwrap_or_else(|| panic!("'{input}' must parse"));
+                assert_ne!(flags, 0, "'{input}' must not collapse to 0");
+                assert_eq!(keyspace_events_to_string(flags), want);
+            }
+        }
     }
 
     // ── Metamorphic property tests ──────────────────────────────────────────
@@ -35843,6 +35890,7 @@ mod tests {
                 Just('t'),
                 Just('m'),
                 Just('n'),
+                Just('d'),
             ]
         }
 
@@ -35860,6 +35908,7 @@ mod tests {
                 Just('t'),
                 Just('m'),
                 Just('n'),
+                Just('d'),
             ]
         }
 
@@ -36741,14 +36790,25 @@ mod tests {
             }
 
             #[test]
-            fn mr_keyspace_events_k_or_e_free_classes_collapse_to_zero(
+            fn mr_keyspace_events_k_or_e_free_classes_are_preserved(
                 classes in prop::collection::vec(event_only_keyspace_char(), 1..24)
             ) {
+                // Upstream keeps the per-class flags in the config regardless
+                // of K/E — the K/E requirement only gates whether an event
+                // *fires* (notify_keyspace_event checks K/E at emit time), so a
+                // K/E-free class string parses to a NON-ZERO mask. fr used to
+                // collapse it to 0, dropping the flags from CONFIG GET.
+                // (frankenredis-nkednfix)
                 let input: String = classes.iter().copied().collect();
-                let reversed: String = classes.iter().rev().copied().collect();
-
-                prop_assert_eq!(keyspace_events_parse(&input), Some(0));
-                prop_assert_eq!(keyspace_events_parse(&reversed), Some(0));
+                let flags = keyspace_events_parse(&input).expect("class chars must parse");
+                prop_assert_ne!(flags, 0);
+                // Canonical form converges (the A-shorthand drops 'n' once, as
+                // upstream does — assert stability, not exact preservation).
+                let canonical = keyspace_events_to_string(flags);
+                let recanonical = keyspace_events_to_string(
+                    keyspace_events_parse(&canonical).expect("canonical parses"),
+                );
+                prop_assert_eq!(recanonical, canonical);
             }
 
             #[test]
