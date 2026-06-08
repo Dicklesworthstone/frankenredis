@@ -3454,6 +3454,15 @@ impl Store {
         // shows "s_down,master,disconnected".
         let health = fr_sentinel::health::evaluate_instance_health(master, now_ms);
         fr_sentinel::health::apply_health_result(master, &health, now_ms);
+        // (frankenredis-pkdgs) Then objective-down: O_DOWN when S_DOWN AND the
+        // count of sentinels reporting it down (this one always votes, +1 from
+        // is_s_down) meets the configured quorum. With a single sentinel and
+        // quorum=1 the self-vote alone flips O_DOWN; higher quorums stay S_DOWN
+        // until peer votes arrive (sentinel-to-sentinel gossip not yet wired, so
+        // no external votes here). Matches redis-sentinel's
+        // 's_down,o_down,master,disconnected'.
+        let odown = fr_sentinel::consensus::evaluate_o_down(master, &[], now_ms);
+        fr_sentinel::consensus::apply_o_down_result(master, &odown, now_ms);
     }
 
     fn ordered_physical_keys_in_db(&self, db: usize) -> Vec<Vec<u8>> {
@@ -20981,14 +20990,15 @@ mod tests {
     }
 
     #[test]
-    fn sentinel_probe_result_marks_then_clears_s_down() {
+    fn sentinel_probe_result_marks_then_clears_s_down_and_o_down() {
         // (frankenredis-pkdgs) A monitored master unreachable longer than
-        // down-after-milliseconds must transition to S_DOWN, and recover on the
-        // next successful probe — driven by the monitoring tick's health eval.
+        // down-after-milliseconds must transition to S_DOWN — and, with quorum=1,
+        // the sentinel's own vote meets quorum so it also becomes O_DOWN — both
+        // clearing on the next successful probe. Driven by the monitoring tick.
         let mut store = Store::new();
         store
             .sentinel_state
-            .monitor("mymaster", "127.0.0.1", 6379, 2)
+            .monitor("mymaster", "127.0.0.1", 6379, 1)
             .unwrap();
         store
             .sentinel_state
@@ -21000,18 +21010,28 @@ mod tests {
         // First failed probe arms the disconnect; not yet down.
         store.apply_sentinel_probe_result("mymaster", 1000, None);
         assert!(!store.sentinel_state.masters["mymaster"].is_s_down());
-        // A second failure past down-after-period flips S_DOWN.
+        assert!(!store.sentinel_state.masters["mymaster"].is_o_down());
+        // A second failure past down-after-period flips S_DOWN, and with quorum=1
+        // the self-vote flips O_DOWN too.
         store.apply_sentinel_probe_result("mymaster", 1500, None);
         assert!(
             store.sentinel_state.masters["mymaster"].is_s_down(),
             "master should be S_DOWN after down-after-period elapsed while unreachable"
         );
-        // A successful PING+INFO probe clears it.
+        assert!(
+            store.sentinel_state.masters["mymaster"].is_o_down(),
+            "quorum=1: the self S_DOWN vote alone must flip O_DOWN"
+        );
+        // A successful PING+INFO probe clears both.
         let info = "# Server\r\nrun_id:abc\r\n# Replication\r\nrole:master\r\n";
         store.apply_sentinel_probe_result("mymaster", 1600, Some(info));
         assert!(
             !store.sentinel_state.masters["mymaster"].is_s_down(),
             "S_DOWN must clear once the master answers again"
+        );
+        assert!(
+            !store.sentinel_state.masters["mymaster"].is_o_down(),
+            "O_DOWN must clear once the master answers again"
         );
     }
 
