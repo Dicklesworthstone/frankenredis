@@ -13957,10 +13957,17 @@ fn module_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError
 
 fn sentinel_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     let args = argv.iter().skip(1).map(Vec::as_slice).collect::<Vec<_>>();
-    Ok(fr_sentinel::commands::dispatch_sentinel_command(
-        &mut store.sentinel_state,
-        &args,
-    ))
+    let reply = fr_sentinel::commands::dispatch_sentinel_command(&mut store.sentinel_state, &args);
+    // SENTINEL MASTER(S)/SLAVES/SENTINELS build per-instance info as RESP3
+    // maps. Upstream's addReplyMapLen emits a flat 2N array on a RESP2
+    // connection, so downconvert the map(s) when the client isn't RESP3 —
+    // otherwise a RESP2 client receives an unparseable `%` frame.
+    // (frankenredis-sentmap)
+    if store.dispatch_client_ctx.resp_protocol_version == 3 {
+        Ok(reply)
+    } else {
+        Ok(lua_eval::downconvert_lua_reply_to_resp2(reply))
+    }
 }
 
 fn bytes_to_lossy_string(bytes: &[u8]) -> String {
@@ -44728,7 +44735,7 @@ mod tests {
         assert_eq!(
             reply,
             RespFrame::Error(
-                "ERR wrong number of arguments for 'sentinel master' command".to_string()
+                "ERR wrong number of arguments for 'sentinel|master' command".to_string()
             )
         );
     }
@@ -44763,7 +44770,7 @@ mod tests {
         assert_eq!(
             reply,
             RespFrame::Error(
-                "ERR wrong number of arguments for 'sentinel failover' command".to_string()
+                "ERR wrong number of arguments for 'sentinel|failover' command".to_string()
             )
         );
     }
@@ -44781,7 +44788,7 @@ mod tests {
         assert_eq!(
             reply,
             RespFrame::Error(
-                "ERR wrong number of arguments for 'sentinel help' command".to_string()
+                "ERR wrong number of arguments for 'sentinel|help' command".to_string()
             )
         );
     }
@@ -44799,7 +44806,7 @@ mod tests {
         assert_eq!(
             reply,
             RespFrame::Error(
-                "ERR wrong number of arguments for 'sentinel masters' command".to_string()
+                "ERR wrong number of arguments for 'sentinel|masters' command".to_string()
             )
         );
     }

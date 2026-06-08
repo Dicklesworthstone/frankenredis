@@ -11778,7 +11778,10 @@ pub fn eval_script(
 /// RESP2 equivalents (Map → flat 2N Array). Applied to Lua reply
 /// frames before they leave eval_script when the calling client is on
 /// RESP2. (frankenredis-luaresp2map)
-fn downconvert_lua_reply_to_resp2(frame: RespFrame) -> RespFrame {
+///
+/// General RESP3→RESP2 downconverter — also reused for SENTINEL replies,
+/// which upstream builds with `addReplyMapLen` (a flat array in RESP2).
+pub(crate) fn downconvert_lua_reply_to_resp2(frame: RespFrame) -> RespFrame {
     match frame {
         RespFrame::Map(Some(entries)) => {
             let mut flat = Vec::with_capacity(entries.len() * 2);

@@ -71,15 +71,21 @@ pub fn dispatch_sentinel_command(state: &mut SentinelState, args: &[&[u8]]) -> R
     }
 }
 
-fn wrong_arity(command: &'static str) -> RespFrame {
+fn wrong_arity(command: &str) -> RespFrame {
+    // Upstream reports the canonical `parent|sub` fullname (e.g.
+    // `sentinel|master`), not a space-separated form. (frankenredis-sentmap)
+    let fullname = command.replacen(' ', "|", 1);
     RespFrame::Error(format!(
-        "ERR wrong number of arguments for '{command}' command"
+        "ERR wrong number of arguments for '{fullname}' command"
     ))
 }
 
 fn subcommand_syntax_error(subcommand: &str) -> RespFrame {
+    // An unknown subcommand is rejected by upstream's commandCheckExistence
+    // with the short form (server.c), matching CLIENT/CONFIG/etc. — NOT the
+    // longer "or wrong number of arguments" wording. (frankenredis-sentmap)
     RespFrame::Error(format!(
-        "ERR unknown subcommand or wrong number of arguments for '{subcommand}'. Try SENTINEL HELP."
+        "ERR unknown subcommand '{subcommand}'. Try SENTINEL HELP."
     ))
 }
 
@@ -371,7 +377,7 @@ fn cmd_remove(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
 
 fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     if args.len() < 3 {
-        return RespFrame::Error("ERR wrong number of arguments for 'sentinel set' command".into());
+        return RespFrame::Error("ERR wrong number of arguments for 'sentinel|set' command".into());
     }
     let name = String::from_utf8_lossy(args[0]);
     let deny_scripts_reconfig = state.deny_scripts_reconfig;
@@ -2465,7 +2471,7 @@ mod tests {
         let result = dispatch_sentinel_command(&mut state, &[b"MYID", b"extra"]);
         assert_eq!(
             result,
-            RespFrame::Error("ERR wrong number of arguments for 'sentinel myid' command".into())
+            RespFrame::Error("ERR wrong number of arguments for 'sentinel|myid' command".into())
         );
     }
 
@@ -2475,7 +2481,7 @@ mod tests {
         let result = dispatch_sentinel_command(&mut state, &[b"help", b"extra"]);
         assert_eq!(
             result,
-            RespFrame::Error("ERR wrong number of arguments for 'sentinel help' command".into())
+            RespFrame::Error("ERR wrong number of arguments for 'sentinel|help' command".into())
         );
     }
 
@@ -2487,14 +2493,14 @@ mod tests {
         assert_eq!(
             replicas,
             RespFrame::Error(
-                "ERR wrong number of arguments for 'sentinel replicas' command".into()
+                "ERR wrong number of arguments for 'sentinel|replicas' command".into()
             )
         );
 
         let slaves = dispatch_sentinel_command(&mut state, &[b"SLAVES"]);
         assert_eq!(
             slaves,
-            RespFrame::Error("ERR wrong number of arguments for 'sentinel slaves' command".into())
+            RespFrame::Error("ERR wrong number of arguments for 'sentinel|slaves' command".into())
         );
     }
 
@@ -4267,7 +4273,7 @@ mod tests {
         assert_eq!(
             result,
             RespFrame::Error(
-                "ERR wrong number of arguments for 'sentinel simulate-failure' command".into()
+                "ERR wrong number of arguments for 'sentinel|simulate-failure' command".into()
             )
         );
         assert!(
@@ -4483,7 +4489,7 @@ mod tests {
         assert_eq!(
             result,
             RespFrame::Error(
-                "ERR unknown subcommand or wrong number of arguments for 'notACommand'. Try SENTINEL HELP.".into()
+                "ERR unknown subcommand 'notACommand'. Try SENTINEL HELP.".into()
             )
         );
     }
@@ -4545,7 +4551,7 @@ mod tests {
         assert_eq!(
             result,
             RespFrame::Error(
-                "ERR wrong number of arguments for 'sentinel info-cache' command".into()
+                "ERR wrong number of arguments for 'sentinel|info-cache' command".into()
             )
         );
     }
