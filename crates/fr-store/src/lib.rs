@@ -14244,7 +14244,14 @@ impl Store {
         } else {
             0
         };
-        let mut result: HashMap<Vec<u8>, f64> = match self.entries.get_mut(keys[min_idx]) {
+        // (frankenredis-zinterhash) The intersection accumulator is keyed by raw
+        // member bytes and probed/rebuilt once per input set; the default SipHash
+        // is ~4x slower than foldhash for these short byte keys and showed up as a
+        // ~1.25x ZINTERSTORE/ZINTERCARD gap vs redis (whose dict uses a fast hash).
+        // Its iteration order is never observed (the result zset is built from it
+        // and ordered independently), so a fast hasher is safe.
+        let mut result: HashMap<Vec<u8>, f64, foldhash::quality::RandomState> =
+            match self.entries.get_mut(keys[min_idx]) {
             Some(entry) => {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample_min);
@@ -14264,7 +14271,7 @@ impl Store {
                 entry.touch(now_ms);
                 res
             }
-            None => HashMap::new(),
+            None => HashMap::default(),
         };
 
         for (i, &key) in keys.iter().enumerate() {
