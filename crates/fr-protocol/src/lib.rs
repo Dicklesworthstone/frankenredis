@@ -23,6 +23,11 @@ pub enum RespFrame {
     /// RESP3 Big Number (`(value\r\n`). Used by the Lua `{big_number=...}`
     /// reply hint; downconverts to a bulk string under RESP2. (frankenredis-h2uga)
     BigNumber(String),
+    /// RESP3 Boolean (`#t\r\n` / `#f\r\n`). Upstream `addReplyBool` emits this
+    /// under HELLO 3 and downgrades to the integer `:1` / `:0` for a RESP2
+    /// client. Produced by the Lua boolean return path under `redis.setresp(3)`
+    /// and by `DEBUG PROTOCOL true|false`. (frankenredis-0gz4g)
+    Bool(bool),
 }
 
 /// Sanitize bytes destined for an inline RESP frame body (`SimpleString`
@@ -146,6 +151,9 @@ impl RespFrame {
                 1usize.checked_add(s.len())?.checked_add(2)
             }
             Self::Integer(n) => 1usize.checked_add(decimal_i64_len(*n))?.checked_add(2),
+            // `#t\r\n` / `#f\r\n` and the RESP2 `:1\r\n` / `:0\r\n` downgrade
+            // are all 4 bytes.
+            Self::Bool(_) => Some(4),
             Self::BulkString(None) => Some(5),
             Self::BulkString(Some(bytes)) => 1usize
                 .checked_add(decimal_usize_len(bytes.len()))?
@@ -267,6 +275,9 @@ impl RespFrame {
                 out.extend_from_slice(b"(");
                 out.extend_from_slice(s.as_bytes());
                 out.extend_from_slice(b"\r\n");
+            }
+            Self::Bool(b) => {
+                out.extend_from_slice(if *b { b"#t\r\n" } else { b"#f\r\n" });
             }
             Self::Set(None) => out.extend_from_slice(b"~-1\r\n"),
             Self::Set(Some(frames)) => {

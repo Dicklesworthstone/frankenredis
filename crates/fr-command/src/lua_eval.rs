@@ -9280,6 +9280,9 @@ fn resp_to_lua(frame: &RespFrame, resp3: bool) -> LuaValue {
         }
     };
     match frame {
+        // RESP3 Boolean → Lua boolean (upstream redisProtocolToLuaType_Bool).
+        // (frankenredis-0gz4g)
+        RespFrame::Bool(b) => LuaValue::Bool(*b),
         RespFrame::SimpleString(s) => {
             let t = LuaTable::new();
             t.set(
@@ -9378,9 +9381,16 @@ fn resp_to_lua(frame: &RespFrame, resp3: bool) -> LuaValue {
     }
 }
 
-pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
+pub fn lua_to_resp(val: &LuaValue, resp3: bool) -> RespFrame {
     match val {
         LuaValue::Nil => RespFrame::BulkString(None),
+        // (frankenredis-0gz4g) Upstream luaReplyToRedisReply uses addReplyBool
+        // for a Lua boolean once the script is on RESP3 (redis.setresp(3)) — a
+        // RESP3 `#t`/`#f` that downgrades to `:1`/`:0` for a RESP2 client. In the
+        // default RESP2 script the historical mapping holds: true -> :1, false ->
+        // nil. The RespFrame::Bool RESP2 downgrade happens in
+        // downconvert_lua_reply_to_resp2.
+        LuaValue::Bool(b) if resp3 => RespFrame::Bool(*b),
         LuaValue::Bool(true) => RespFrame::Integer(1),
         LuaValue::Bool(false) => RespFrame::BulkString(None),
         LuaValue::Number(n) => {
@@ -9444,7 +9454,7 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
                 let pairs = inner
                     .hash_pairs()
                     .into_iter()
-                    .map(|(k, v)| (lua_to_resp(&k), lua_to_resp(&v)))
+                    .map(|(k, v)| (lua_to_resp(&k, resp3), lua_to_resp(&v, resp3)))
                     .collect();
                 return RespFrame::Map(Some(pairs));
             }
@@ -9477,7 +9487,7 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
                 }
                 // Other-hash keys (numeric non-array, boolean, …).
                 for (k, _) in &inner_borrow.other_hash {
-                    items.push(lua_to_resp(k));
+                    items.push(lua_to_resp(k, resp3));
                 }
                 return RespFrame::Array(Some(items));
             }
@@ -9534,7 +9544,7 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
                 if matches!(item, LuaValue::Nil) {
                     break;
                 }
-                items.push(lua_to_resp(&item));
+                items.push(lua_to_resp(&item, resp3));
             }
             RespFrame::Array(Some(items))
         }
@@ -11714,7 +11724,7 @@ pub fn eval_script(
             return Err(err);
         }
     };
-    let frame = lua_to_resp(&result);
+    let frame = lua_to_resp(&result, state.resp_version == 3);
     // Drop state explicitly to release the mutable borrow of store before
     // accessing store.dispatch_client_ctx below.
     drop(state);
@@ -11769,6 +11779,9 @@ fn downconvert_lua_reply_to_resp2(frame: RespFrame) -> RespFrame {
         // RESP2 has no Big Number type; upstream emits the digits as a bulk
         // string. (frankenredis-h2uga)
         RespFrame::BigNumber(s) => RespFrame::BulkString(Some(s.into_bytes())),
+        // RESP2 has no Boolean type; upstream addReplyBool downgrades to the
+        // integer `:1` / `:0`. (frankenredis-0gz4g)
+        RespFrame::Bool(b) => RespFrame::Integer(i64::from(b)),
         other => other,
     }
 }
@@ -11874,6 +11887,38 @@ mod tests {
         assert_eq!(
             run(&mut store, b"return type(redis.call('get','nokey'))"),
             bulk("boolean")
+        );
+    }
+
+    #[test]
+    fn lua_boolean_return_uses_resp3_under_setresp3_0gz4g() {
+        // (frankenredis-0gz4g) Upstream luaReplyToRedisReply uses addReplyBool
+        // for a Lua boolean once the script is on RESP3: a `#t`/`#f` Bool frame
+        // for a RESP3 caller, downgraded to `:1`/`:0` for RESP2. Without
+        // setresp(3) the historical mapping holds (true->:1, false->nil).
+        let eval = |resp: i64, src: &[u8]| {
+            let mut store = Store::new();
+            store.dispatch_client_ctx.resp_protocol_version = resp;
+            eval_script(src, &[], &[], &mut store, 0).unwrap()
+        };
+        // RESP3 caller + setresp(3): real Bool frame.
+        assert_eq!(eval(3, b"redis.setresp(3); return true"), RespFrame::Bool(true));
+        assert_eq!(eval(3, b"redis.setresp(3); return false"), RespFrame::Bool(false));
+        // RESP2 caller + setresp(3): Bool downgrades to :1 / :0.
+        assert_eq!(eval(2, b"redis.setresp(3); return true"), RespFrame::Integer(1));
+        assert_eq!(eval(2, b"redis.setresp(3); return false"), RespFrame::Integer(0));
+        // Default (no setresp): true -> :1, false -> nil, on both protocols.
+        assert_eq!(eval(2, b"return true"), RespFrame::Integer(1));
+        assert_eq!(eval(2, b"return false"), RespFrame::BulkString(None));
+        assert_eq!(eval(3, b"return false"), RespFrame::BulkString(None));
+        // Nested booleans convert recursively under setresp(3).
+        assert_eq!(
+            eval(3, b"redis.setresp(3); return {true, false, 1}"),
+            RespFrame::Array(Some(vec![
+                RespFrame::Bool(true),
+                RespFrame::Bool(false),
+                RespFrame::Integer(1),
+            ]))
         );
     }
 
