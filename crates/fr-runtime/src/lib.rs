@@ -14648,6 +14648,29 @@ impl Runtime {
                         }
                     }
                 }
+                if canonical == "oom-score-adj-values" {
+                    // (frankenredis-wdn01) Mirror upstream config.c::
+                    // setConfigOOMScoreAdjValuesOption: exactly CONFIG_OOM_COUNT
+                    // (3) space-separated integers, each fully parseable and in
+                    // [-2000, 2000]. fr previously stored any string unchecked.
+                    let s = String::from_utf8_lossy(value_bytes);
+                    let parts: Vec<&str> = s.split_whitespace().collect();
+                    if parts.len() != 3 {
+                        return config_set_failed(
+                            "oom-score-adj-values",
+                            "wrong number of arguments",
+                        );
+                    }
+                    if !parts
+                        .iter()
+                        .all(|p| p.parse::<i64>().is_ok_and(|v| (-2000..=2000).contains(&v)))
+                    {
+                        return config_set_failed(
+                            "oom-score-adj-values",
+                            "Invalid oom-score-adj-values, elements must be between -2000 and 2000.",
+                        );
+                    }
+                }
                 let value = String::from_utf8_lossy(value_bytes).to_string();
                 static_override_updates.push((canonical.to_string(), value));
                 continue;
@@ -31950,6 +31973,57 @@ mod tests {
                 rt.execute_frame(command(&[b"CONFIG", b"SET", b"save", ok.as_bytes()]), 0,),
                 ok_reply,
                 "save '{ok}' must be accepted",
+            );
+        }
+    }
+
+    /// (frankenredis-wdn01) Mirror upstream config.c::
+    /// setConfigOOMScoreAdjValuesOption: exactly 3 space-separated integers,
+    /// each in [-2000, 2000]. fr previously stored any string unchecked.
+    #[test]
+    fn config_set_oom_score_adj_values_validates_count_and_range_wdn01() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let arity_err = RespFrame::Error(
+            "ERR CONFIG SET failed (possibly related to argument 'oom-score-adj-values') - wrong number of arguments"
+                .to_string(),
+        );
+        let range_err = RespFrame::Error(
+            "ERR CONFIG SET failed (possibly related to argument 'oom-score-adj-values') - Invalid oom-score-adj-values, elements must be between -2000 and 2000."
+                .to_string(),
+        );
+
+        // Wrong number of arguments (must be exactly 3).
+        for bad in ["", "1 2", "1 2 3 4", "1"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"oom-score-adj-values", bad.as_bytes()]),
+                    0,
+                ),
+                arity_err,
+                "oom-score-adj-values '{bad}' must be a count error",
+            );
+        }
+        // Right count but bad/out-of-range elements.
+        for bad in ["a b c", "1 2 2001", "0 0 -2001", "1 2 x"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"oom-score-adj-values", bad.as_bytes()]),
+                    0,
+                ),
+                range_err,
+                "oom-score-adj-values '{bad}' must be a range error",
+            );
+        }
+        // Accepted: 3 in-range integers (incl. bounds).
+        for good in ["1 2 3", "0 200 800", "-2000 0 2000"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"oom-score-adj-values", good.as_bytes()]),
+                    0,
+                ),
+                ok,
+                "oom-score-adj-values '{good}' must be accepted",
             );
         }
     }
