@@ -13227,8 +13227,9 @@ impl Runtime {
                     Ok(s) if s.eq_ignore_ascii_case("yes") => true,
                     Ok(s) if s.eq_ignore_ascii_case("no") => false,
                     _ => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'latency-tracking'".to_string(),
+                        return config_set_failed(
+                            "latency-tracking",
+                            "argument must be 'yes' or 'no'",
                         );
                     }
                 };
@@ -13283,12 +13284,17 @@ impl Runtime {
                 let parsed = match parse_i64_arg(&pair[1]) {
                     Ok(value) if value >= 0 => value as u64,
                     Ok(_) => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'latency-monitor-threshold'"
-                                .to_string(),
+                        return config_set_failed(
+                            "latency-monitor-threshold",
+                            "argument must be between 0 and 9223372036854775807 inclusive",
                         );
                     }
-                    Err(err) => return err.to_resp(),
+                    Err(_) => {
+                        return config_set_failed(
+                            "latency-monitor-threshold",
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
                 };
                 next_latency_monitor_threshold = Some(parsed);
                 static_override_updates
@@ -13468,9 +13474,13 @@ impl Runtime {
                     Ok(s) if s.eq_ignore_ascii_case("yes") => true,
                     Ok(s) if s.eq_ignore_ascii_case("no") => false,
                     _ => {
-                        return RespFrame::Error(format!(
-                            "ERR Invalid argument for CONFIG SET '{parameter}'"
-                        ));
+                        // (frankenredis-vqmkt) Upstream wraps the bool-parse
+                        // failure via config_set_failed with the canonical
+                        // "argument must be 'yes' or 'no'" detail.
+                        return config_set_failed(
+                            &parameter.to_ascii_lowercase(),
+                            "argument must be 'yes' or 'no'",
+                        );
                     }
                 };
                 next_replica_serve_stale_data = Some(parsed);
@@ -13491,9 +13501,13 @@ impl Runtime {
                     Ok(s) if s.eq_ignore_ascii_case("yes") => true,
                     Ok(s) if s.eq_ignore_ascii_case("no") => false,
                     _ => {
-                        return RespFrame::Error(format!(
-                            "ERR Invalid argument for CONFIG SET '{parameter}'"
-                        ));
+                        // (frankenredis-vqmkt) Upstream wraps the bool-parse
+                        // failure via config_set_failed with the canonical
+                        // "argument must be 'yes' or 'no'" detail.
+                        return config_set_failed(
+                            &parameter.to_ascii_lowercase(),
+                            "argument must be 'yes' or 'no'",
+                        );
                     }
                 };
                 next_replica_read_only = Some(parsed);
@@ -13545,8 +13559,9 @@ impl Runtime {
                     Ok(s) if s.eq_ignore_ascii_case("yes") => true,
                     Ok(s) if s.eq_ignore_ascii_case("no") => false,
                     _ => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'repl-diskless-sync'".to_string(),
+                        return config_set_failed(
+                            "repl-diskless-sync",
+                            "argument must be 'yes' or 'no'",
                         );
                     }
                 };
@@ -13699,8 +13714,9 @@ impl Runtime {
                     Ok(s) if s.eq_ignore_ascii_case("yes") => true,
                     Ok(s) if s.eq_ignore_ascii_case("no") => false,
                     _ => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'cluster-allow-pubsubshard-when-down'".to_string(),
+                        return config_set_failed(
+                            "cluster-allow-pubsubshard-when-down",
+                            "argument must be 'yes' or 'no'",
                         );
                     }
                 };
@@ -13978,12 +13994,17 @@ impl Runtime {
                 let parsed = match parse_i64_arg(&pair[1]) {
                     Ok(value) if value >= 0 => value as u64,
                     Ok(_) => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'busy-reply-threshold'"
-                                .to_string(),
+                        return config_set_failed(
+                            &parameter.to_ascii_lowercase(),
+                            "argument must be between 0 and 9223372036854775807 inclusive",
                         );
                     }
-                    Err(err) => return err.to_resp(),
+                    Err(_) => {
+                        return config_set_failed(
+                            &parameter.to_ascii_lowercase(),
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
                 };
                 next_command_time_budget = Some(parsed);
                 continue;
@@ -14500,7 +14521,12 @@ impl Runtime {
                 // (br-frankenredis-cfgmemvalue)
                 if matches!(
                     canonical,
-                    "activerehashing"
+                    // (frankenredis-vqmkt) these bool configs previously fell
+                    // through to the unvalidated store fallback, accepting any
+                    // value; upstream requires 'yes'/'no'.
+                    "activedefrag"
+                        | "jemalloc-bg-thread"
+                        | "activerehashing"
                         | "aof-load-truncated"
                         | "aof-rewrite-incremental-fsync"
                         | "aof-timestamp-enabled"
@@ -32134,6 +32160,64 @@ mod tests {
 
     /// (frankenredis-0fuq4) CONFIG SET error wording for two params that used the
     /// non-standard "Invalid argument for CONFIG SET" generic message instead of
+    /// (frankenredis-vqmkt) CONFIG SET bool params that fell through unvalidated
+    /// (activedefrag, jemalloc-bg-thread) or rejected with the wrong generic
+    /// message (latency-tracking, replica/slave-read-only, repl-diskless-sync,
+    /// cluster-allow-pubsubshard-when-down, ...), plus two int params whose
+    /// parse/range errors used the wrong wording.
+    #[test]
+    fn config_set_bool_and_int_wording_parity_vqmkt() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let yn = |p: &str| {
+            RespFrame::Error(format!(
+                "ERR CONFIG SET failed (possibly related to argument '{p}') - argument must be 'yes' or 'no'"
+            ))
+        };
+        // Bool params: bogus rejected with the canonical yes/no message; yes ok.
+        for p in [
+            "activedefrag",
+            "jemalloc-bg-thread",
+            "latency-tracking",
+            "replica-read-only",
+            "slave-read-only",
+            "replica-serve-stale-data",
+            "slave-serve-stale-data",
+            "repl-diskless-sync",
+            "cluster-allow-pubsubshard-when-down",
+        ] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", p.as_bytes(), b"__bogus__"]), 0),
+                yn(p),
+                "bool '{p}' must reject non-yes/no with the canonical message",
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", p.as_bytes(), b"yes"]), 0),
+                ok,
+                "bool '{p}' must accept yes",
+            );
+        }
+        // Int params: parse error vs out-of-range, both via config_set_failed.
+        for p in ["latency-monitor-threshold", "busy-reply-threshold", "lua-time-limit"] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", p.as_bytes(), b"__bogus__"]), 0),
+                RespFrame::Error(format!(
+                    "ERR CONFIG SET failed (possibly related to argument '{p}') - argument couldn't be parsed into an integer"
+                )),
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", p.as_bytes(), b"-1"]), 0),
+                RespFrame::Error(format!(
+                    "ERR CONFIG SET failed (possibly related to argument '{p}') - argument must be between 0 and 9223372036854775807 inclusive"
+                )),
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", p.as_bytes(), b"100"]), 0),
+                ok,
+            );
+        }
+    }
+
     /// upstream's config_set_failed wrapper + specific detail.
     #[test]
     fn config_set_error_wording_latency_percentiles_and_repl_diskless_delay_0fuq4() {
