@@ -10388,7 +10388,13 @@ impl Store {
     }
 
     /// Create or overwrite a sorted set from member-score pairs.
-    pub fn zstore_from_pairs(&mut self, key: Vec<u8>, pairs: Vec<(Vec<u8>, f64)>, now_ms: u64) {
+    pub fn zstore_from_pairs(
+        &mut self,
+        key: Vec<u8>,
+        pairs: Vec<(Vec<u8>, f64)>,
+        force_skiplist: bool,
+        now_ms: u64,
+    ) {
         let mut zs = SortedSet::new();
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
@@ -10397,10 +10403,19 @@ impl Store {
         }
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
-        self.internal_entries_insert(
-            key,
-            Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
-        );
+        let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms);
+        // (frankenredis-t8rma) Upstream ZRANGESTORE pre-creates the destination
+        // via zsetTypeCreate(length, 0). For BYSCORE / BYLEX the result count is
+        // unknown so upstream passes length = -1, which as size_t is SIZE_MAX and
+        // always exceeds zset_max_listpack_entries — so the destination is created
+        // (and stays) skiplist-encoded regardless of how few members actually
+        // match. Rank mode passes the exact count, so its encoding derives
+        // naturally (handled by the live OBJECT ENCODING derivation). Mirror the
+        // forced-skiplist sizing here so OBJECT ENCODING matches byte-for-byte.
+        if force_skiplist {
+            entry.force_zset_skiplist_encoding = true;
+        }
+        self.internal_entries_insert(key, entry);
         // (frankenredis-bhd3u) Writing the destination set is a keyspace
         // mutation — bump dirty so ZRANGESTORE is persisted to RDB/AOF,
         // replicated, and surfaces keyspace notifications (all gate on the
@@ -24675,9 +24690,22 @@ mod tests {
         // notifications (all gate on the dirty counter changing).
         let mut store = Store::new();
         let before = store.dirty;
-        store.zstore_from_pairs(b"d".to_vec(), vec![(b"a".to_vec(), 1.0)], 0);
+        store.zstore_from_pairs(b"d".to_vec(), vec![(b"a".to_vec(), 1.0)], false, 0);
         assert_eq!(store.dirty, before + 1);
         assert!(store.key_is_present(b"d"));
+    }
+
+    #[test]
+    fn zstore_from_pairs_force_skiplist_marks_encoding() {
+        // (frankenredis-t8rma) Upstream ZRANGESTORE BYSCORE/BYLEX pre-creates the
+        // destination via zsetTypeCreate(-1, 0), which is always skiplist; a tiny
+        // result must therefore report OBJECT ENCODING skiplist, while rank-mode
+        // (force_skiplist = false) derives listpack naturally.
+        let mut store = Store::new();
+        store.zstore_from_pairs(b"byscore".to_vec(), vec![(b"a".to_vec(), 1.0)], true, 0);
+        assert_eq!(store.object_encoding(b"byscore", 0), Some("skiplist"));
+        store.zstore_from_pairs(b"byrank".to_vec(), vec![(b"a".to_vec(), 1.0)], false, 0);
+        assert_eq!(store.object_encoding(b"byrank", 0), Some("listpack"));
     }
 
     #[test]

@@ -11325,7 +11325,10 @@ fn zrangestore_cmd(
         // Delete dst if it exists
         store.del(std::slice::from_ref(dst), now_ms);
     } else {
-        store.zstore_from_pairs(dst.clone(), pairs, now_ms);
+        // (frankenredis-t8rma) BYSCORE / BYLEX destinations are always created
+        // skiplist-encoded upstream (zsetTypeCreate(-1, 0)); rank mode sizes by
+        // the exact count and derives its encoding naturally.
+        store.zstore_from_pairs(dst.clone(), pairs, byscore || bylex, now_ms);
     }
     Ok(RespFrame::Integer(count))
 }
@@ -66846,7 +66849,7 @@ mod tests {
                         if pairs.is_empty() {
                             refs.del(std::slice::from_ref(&dst_key), 0);
                         } else {
-                            refs.zstore_from_pairs(dst_key, pairs, 0);
+                            refs.zstore_from_pairs(dst_key, pairs, true, 0);
                         }
 
                         let ctx = format!("rev={rev} a3={a3} a4={a4} off={offset} cnt={count}");
