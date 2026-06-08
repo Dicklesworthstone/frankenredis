@@ -1,0 +1,548 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 818  of event 'cycles:P'
+# Event count (approx.): 5617544511
+#
+# Overhead  Symbol                                                                                                                       IPC   [IPC Coverage]
+# ........  ...........................................................................................................................  ....................
+#
+     9.93%  [.] <fr_store::Value>::string_owned                                                                                          -      -            
+            |          
+            |--2.41%--__memcmp_avx2_movbe
+            |          |          
+            |           --0.62%--0xfec5000002d2820f
+            |          
+            |--1.04%--<fr_store::CommandHistogramTracker>::record_canonical_with_kind
+            |          
+             --0.97%--<fr_runtime::Runtime>::refresh_store_runtime_info_context
+
+     8.92%  [.] __memmove_avx_unaligned_erms                                                                                             -      -            
+            |          
+            |--2.90%--<fr_runtime::Runtime>::refresh_store_runtime_info_context
+            |          
+            |--1.23%--0x7064d3a18986
+            |          clock_gettime@@GLIBC_2.17
+            |          <std::sys::pal::unix::time::Timespec>::now
+            |          |          
+            |           --0.93%--<fr_runtime::Runtime>::execute_plain_get_borrowed
+            |          
+            |--0.73%--_mi_page_malloc_zero
+            |          |          
+            |           --0.58%--0x3932240a0d544547
+            |          
+             --0.70%--frankenredis::process_buffered_frames
+
+     7.41%  [.] <fr_runtime::Runtime>::refresh_store_runtime_info_context                                                                -      -            
+            |          
+            |--2.37%--<fr_store::Store>::drop_if_expired
+            |          
+            |--0.98%--0x7064d3a18986
+            |          clock_gettime@@GLIBC_2.17
+            |          <std::sys::pal::unix::time::Timespec>::now
+            |          |          
+            |           --0.59%--<fr_runtime::ServerState>::run_active_expire_cycle
+            |          
+            |--0.76%--<fr_runtime::Runtime>::refresh_store_runtime_info_context
+            |          
+             --0.62%--__memcmp_avx2_movbe
+
+     4.36%  [.] 0x0000000000000983                                                                                                       -      -            
+            |          
+            |--1.54%--<fr_store::Store>::drop_if_expired
+            |          
+             --1.20%--__memcmp_avx2_movbe
+
+     1.96%  [.] <fr_store::Store>::get                                                                                                   -      -            
+            |          
+            |--1.00%--<fr_store::Store>::drop_if_expired
+            |          
+             --0.80%--__memcmp_avx2_movbe
+
+     1.87%  [.] fr_protocol::parse_command_args_borrowed_into                                                                            -      -            
+     1.81%  [k] 0xffffffff84c001bd                                                                                                       -      -            
+     1.36%  [k] 0xffffffff84d0410b                                                                                                       -      -            
+            |          
+             --0.68%--0xffffffff84c001c4
+                       __syscall_cancel
+                       |          
+                        --0.53%--__send
+                                  <frankenredis::ClientConnection>::try_flush
+                                  0x300000001000000
+
+     1.12%  [k] 0xffffffff84d04109                                                                                                       -      -            
+     1.00%  [.] <fr_runtime::Runtime>::execute_plain_get_borrowed                                                                        -      -            
+     0.98%  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u64>                                            -      -            
+     0.94%  [k] 0xffffffff84f87bc0                                                                                                       -      -            
+     0.87%  [.] __memcmp_avx2_movbe                                                                                                      -      -            
+     0.82%  [.] <fr_runtime::Runtime>::drain_pending_pubsub                                                                              -      -            
+     0.80%  [k] 0xffffffff84d04104                                                                                                       -      -            
+     0.77%  [.] <fr_runtime::Runtime>::plain_borrowed_default_key_read_allows                                                            -      -            
+     0.72%  [.] <fr_runtime::Runtime>::is_pubsub_client                                                                                  -      -            
+            |          
+             --0.72%--0x7064d3a18986
+                       clock_gettime@@GLIBC_2.17
+                       <std::sys::pal::unix::time::Timespec>::now
+                       <fr_runtime::Runtime>::execute_plain_get_borrowed
+
+     0.69%  [.] <fr_runtime::ServerState>::run_active_expire_cycle                                                                       -      -            
+     0.61%  [.] frankenredis::drain_pending_pubsub_to_connection                                                                         -      -            
+     0.61%  [.] __memset_avx2_unaligned_erms                                                                                             -      -            
+     0.61%  [k] 0xffffffff85835fc8                                                                                                       -      -            
+     0.59%  [.] <fr_store::CommandHistogramTracker>::record_with_kind                                                                    -      -            
+     0.57%  [.] 0x0000000000000a10                                                                                                       -      -            
+            |
+            ---0
+
+     0.56%  [k] 0xffffffff850792bd                                                                                                       -      -            
+            |
+            ---0xffffffff862206af
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x300000001000000
+
+     0.56%  [k] 0xffffffff8602eb12                                                                                                       -      -            
+            |
+            ---0xffffffff8604ab81
+               0xffffffff8604cf4d
+               0xffffffff86009f06
+               0xffffffff8600a176
+               0xffffffff8600a275
+               0xffffffff8600a886
+               0xffffffff85f2df9d
+               0xffffffff85f2e026
+               0xffffffff85f2e2b0
+               0xffffffff85f2e985
+               0xffffffff85f2f11b
+               0xffffffff8502171f
+               0xffffffff8623b890
+               0xffffffff850210af
+               0xffffffff85021b1a
+               0xffffffff85f2b96f
+               0xffffffff8600dd5f
+               0xffffffff86010bf8
+               0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x300000001000000
+
+     0.55%  [k] 0xffffffff8620ac00                                                                                                       -      -            
+            |
+            ---0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x300000001000000
+
+     0.54%  [.] __syscall_cancel                                                                                                         -      -            
+     0.54%  [k] 0xffffffff8603abbb                                                                                                       -      -            
+            |
+            ---0xffffffff862252e9
+               0xffffffff84f88cf0
+               0xffffffff850c03ab
+               0xffffffff8506c87b
+               0xffffffff85079290
+               0xffffffff85079ada
+               0xffffffff850b8f37
+               0xffffffff850b6871
+               0xffffffff850bfde0
+               0xffffffff85ef4062
+               0xffffffff86035e4f
+               0xffffffff86036e97
+               0xffffffff8604ab81
+               0xffffffff8604cf4d
+               0xffffffff86009f06
+               0xffffffff8600a176
+               0xffffffff8600a275
+               0xffffffff8600a886
+               0xffffffff85f2df9d
+               0xffffffff85f2e026
+               0xffffffff85f2e2b0
+               0xffffffff85f2e985
+               0xffffffff85f2f11b
+               0xffffffff8502171f
+               0xffffffff8623b890
+               0xffffffff850210af
+               0xffffffff85021b1a
+               0xffffffff85f2b96f
+               0xffffffff8600dd5f
+               0xffffffff86010bf8
+               0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x300000001000000
+
+     0.51%  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write                                     -      -            
+     0.49%  [k] 0xffffffff86001802                                                                                                       -      -            
+     0.48%  [k] 0xffffffffc0f920fa                                                                                                       -      -            
+     0.46%  [.] <fr_runtime::Runtime>::pubsub_sub_count                                                                                  -      -            
+     0.46%  [k] 0xffffffff84c0012b                                                                                                       -      -            
+     0.46%  [.] fr_protocol::push_usize                                                                                                  -      -            
+     0.46%  [.] frankenredis::process_buffered_frames                                                                                    -      -            
+     0.46%  [k] 0xffffffff85ef4072                                                                                                       -      -            
+     0.46%  [k] 0xffffffff85ffba18                                                                                                       -      -            
+     0.46%  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&mio::token::Token>                              -      -            
+     0.46%  [.] <hashbrown::map::HashMap<u64, alloc::vec::Vec<fr_store::PubSubMessage>, std::hash::random::RandomState>>::remove::<u64>  -      -            
+     0.45%  [k] 0xffffffff8604ce72                                                                                                       -      -            
+     0.44%  [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>                          -      -            
+     0.43%  [.] <fr_store::Store>::drop_if_expired                                                                                       -      -            
+     0.38%  [.] <fr_protocol::RespFrame>::encode_into                                                                                    -      -            
+     0.34%  [.] <fr_runtime::Runtime>::refresh_client_memory_aggregates                                                                  -      -            
+     0.33%  [.] <std::sys::pal::unix::time::Timespec>::now                                                                               -      -            
+     0.32%  [k] 0xffffffff8506c8cc                                                                                                       -      -            
+     0.32%  [.] frankenredis::main                                                                                                       -      -            
+     0.32%  [k] 0xffffffff85efbbd6                                                                                                       -      -            
+     0.31%  [k] 0xffffffff850b8f3e                                                                                                       -      -            
+     0.31%  [k] 0xffffffff85f60719                                                                                                       -      -            
+     0.31%  [k] 0xffffffff85ffba24                                                                                                       -      -            
+     0.31%  [k] 0xffffffffc08175a5                                                                                                       -      -            
+     0.31%  [k] 0xffffffff85f2e2da                                                                                                       -      -            
+     0.31%  [.] <alloc::raw_vec::RawVecInner>::finish_grow                                                                               -      -            
+     0.30%  [k] 0xffffffff86034b0f                                                                                                       -      -            
+     0.30%  [k] 0xffffffff8519660e                                                                                                       -      -            
+     0.30%  [k] 0xffffffff84f233a4                                                                                                       -      -            
+     0.30%  [.] <fr_runtime::ClientSession as core::clone::Clone>::clone                                                                 -      -            
+     0.30%  [k] 0xffffffffc08551a0                                                                                                       -      -            
+     0.30%  [k] 0xffffffff856a2147                                                                                                       -      -            
+     0.30%  [k] 0xffffffffc0fddc92                                                                                                       -      -            
+     0.30%  [k] 0xffffffffc0f928be                                                                                                       -      -            
+     0.30%  [.] <fr_store::CommandHistogramTracker>::record_canonical_with_kind                                                          -      -            
+     0.30%  [k] 0xffffffff85f0cb66                                                                                                       -      -            
+     0.29%  [k] 0xffffffff8508e768                                                                                                       -      -            
+     0.27%  [.] mi_free                                                                                                                  -      -            
+     0.27%  [k] 0xffffffff8508aa07                                                                                                       -      -            
+     0.25%  [k] 0xffffffff8604caf5                                                                                                       -      -            
+     0.25%  [k] 0xffffffff86017b16                                                                                                       -      -            
+     0.23%  [k] 0xffffffff8513d025                                                                                                       -      -            
+     0.22%  [k] 0xffffffff8519e50d                                                                                                       -      -            
+     0.21%  [k] 0xffffffff850bfde0                                                                                                       -      -            
+     0.21%  [k] 0xffffffff8507e5cc                                                                                                       -      -            
+     0.20%  [k] 0xffffffff85ef6b01                                                                                                       -      -            
+     0.20%  [k] 0xffffffff86025861                                                                                                       -      -            
+     0.20%  [k] 0xffffffff8603f67b                                                                                                       -      -            
+     0.20%  [k] 0xffffffff86022f37                                                                                                       -      -            
+     0.20%  [k] 0xffffffff85ef4076                                                                                                       -      -            
+     0.19%  [k] 0xffffffffc0fea738                                                                                                       -      -            
+     0.18%  [k] 0xffffffff85ef6dee                                                                                                       -      -            
+     0.18%  [k] 0xffffffff85021f51                                                                                                       -      -            
+     0.18%  [k] 0xffffffff85138afb                                                                                                       -      -            
+     0.18%  [k] 0xffffffff86009f1d                                                                                                       -      -            
+     0.18%  [k] 0xffffffffc0f9202d                                                                                                       -      -            
+     0.17%  [k] 0xffffffff850b8f26                                                                                                       -      -            
+     0.17%  [k] 0xffffffff850cd87a                                                                                                       -      -            
+     0.17%  [k] 0xffffffff85ef6e0b                                                                                                       -      -            
+     0.17%  [k] 0xffffffff85072c68                                                                                                       -      -            
+     0.17%  [k] 0xffffffff85f2ef60                                                                                                       -      -            
+     0.16%  [k] 0xffffffff850b8f29                                                                                                       -      -            
+     0.16%  [k] 0xffffffffc0fbaaf1                                                                                                       -      -            
+     0.16%  [k] 0xffffffff86022c76                                                                                                       -      -            
+     0.16%  [k] 0xffffffff8602f079                                                                                                       -      -            
+     0.16%  [k] 0xffffffff8623a3b0                                                                                                       -      -            
+     0.16%  [k] 0xffffffffc0fdd23f                                                                                                       -      -            
+     0.16%  [k] 0xffffffff860118cf                                                                                                       -      -            
+     0.16%  [k] 0xffffffff85137697                                                                                                       -      -            
+     0.16%  [k] 0xffffffff85f2ad16                                                                                                       -      -            
+     0.16%  [k] 0xffffffff84f87bc3                                                                                                       -      -            
+     0.16%  [k] 0xffffffffc0f92249                                                                                                       -      -            
+     0.16%  [k] 0xffffffffc0fbe405                                                                                                       -      -            
+     0.16%  [k] 0xffffffff85ef7e8b                                                                                                       -      -            
+     0.16%  [k] 0xffffffff85ef3fa5                                                                                                       -      -            
+     0.16%  [k] 0xffffffff85f2bc4b                                                                                                       -      -            
+     0.16%  [k] 0xffffffff85835fd1                                                                                                       -      -            
+     0.16%  [k] 0xffffffff851a2a23                                                                                                       -      -            
+     0.15%  [.] core::str::converts::from_utf8                                                                                           -      -            
+     0.15%  [k] 0xffffffff85f2e027                                                                                                       -      -            
+     0.15%  [k] 0xffffffffc0fddcc5                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8508e9a5                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86220511                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86039f50                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86023da8                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85137763                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8519f42d                                                                                                       -      -            
+     0.15%  [.] <fr_runtime::ClientSession as core::default::Default>::default                                                           -      -            
+     0.15%  [k] 0xffffffff853ec907                                                                                                       -      -            
+     0.15%  [k] 0xffffffffc08174c5                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8546fc25                                                                                                       -      -            
+     0.15%  [k] 0xffffffff84fef5b5                                                                                                       -      -            
+     0.15%  [k] 0xffffffff854b7d80                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86001805                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8600a80a                                                                                                       -      -            
+     0.15%  [k] 0xffffffffc0f92651                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8602fb27                                                                                                       -      -            
+     0.15%  [k] 0xffffffff860415cf                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85838ed6                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86034b07                                                                                                       -      -            
+     0.15%  [k] 0xffffffff860274d0                                                                                                       -      -            
+     0.15%  [.] 0x0000000000000a00                                                                                                       -      -            
+     0.15%  [k] 0xffffffffc0f9223c                                                                                                       -      -            
+     0.15%  [k] 0xffffffff860344a4                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86022b90                                                                                                       -      -            
+     0.15%  [k] 0xffffffff850bc63f                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86027636                                                                                                       -      -            
+     0.15%  [k] 0xffffffff854fe4fa                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86020386                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8602ef55                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85f2e229                                                                                                       -      -            
+     0.15%  [.] clock_gettime@@GLIBC_2.17                                                                                                -      -            
+     0.15%  [k] 0xffffffff851629e5                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85f2ad81                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8601124b                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85f2b3bc                                                                                                       -      -            
+     0.15%  [.] <hashbrown::map::HashMap<mio::token::Token, (), std::hash::random::RandomState>>::remove::<mio::token::Token>            -      -            
+     0.15%  [k] 0xffffffff85eefdf9                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85eefc98                                                                                                       -      -            
+     0.15%  [k] 0xffffffff854598bd                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85eefe05                                                                                                       -      -            
+     0.15%  [k] 0xffffffffc0f926b0                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85124bfb                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8508e765                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85729275                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86045dc5                                                                                                       -      -            
+     0.15%  [k] 0xffffffff850cd8a1                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85ffba1b                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8519f426                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8603da01                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8546fe20                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8603a6d1                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85f2b67f                                                                                                       -      -            
+     0.15%  [.] <alloc::collections::btree::map::BTreeMap<u64, fr_runtime::ClientSession>>::insert                                       -      -            
+     0.15%  [k] 0xffffffff85f2b61f                                                                                                       -      -            
+     0.15%  [k] 0xffffffff860017e9                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85072bd2                                                                                                       -      -            
+     0.15%  [k] 0xffffffff850791f1                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8623a456                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8513769b                                                                                                       -      -            
+     0.15%  [k] 0xffffffffc08551a9                                                                                                       -      -            
+     0.15%  [k] 0xffffffffc0817783                                                                                                       -      -            
+     0.15%  [k] 0xffffffff860114b7                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86220541                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8603f812                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85f607a3                                                                                                       -      -            
+     0.15%  [k] 0xffffffff851a0563                                                                                                       -      -            
+     0.15%  [k] 0xffffffff860112b7                                                                                                       -      -            
+     0.15%  [k] 0xffffffff862206af                                                                                                       -      -            
+     0.15%  [k] 0xffffffff854b7d85                                                                                                       -      -            
+     0.15%  [k] 0xffffffffc0fd77c7                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8600a158                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8510f1dd                                                                                                       -      -            
+     0.15%  [k] 0xffffffff854fe516                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85f2e220                                                                                                       -      -            
+     0.15%  [k] 0xffffffff850a718a                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8623a4cd                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8621f910                                                                                                       -      -            
+     0.15%  [k] 0xffffffffc0fd47c8                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86036e97                                                                                                       -      -            
+     0.15%  [k] 0xffffffff850cd8b5                                                                                                       -      -            
+     0.15%  [.] <std::sys::pal::unix::time::Timespec>::sub_timespec                                                                      -      -            
+     0.15%  [k] 0xffffffff84fef5b7                                                                                                       -      -            
+     0.15%  [k] 0xffffffffc0fde2ed                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85f02a15                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8604cf73                                                                                                       -      -            
+     0.15%  [k] 0xffffffff850b8f25                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85f2e2b0                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8506c8ea                                                                                                       -      -            
+     0.15%  [k] 0xffffffff853ec8ea                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85078cd3                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8519f515                                                                                                       -      -            
+     0.15%  [.] 0x000000000000096c                                                                                                       -      -            
+     0.15%  [.] mi_malloc_aligned                                                                                                        -      -            
+     0.15%  [k] 0xffffffff8601149b                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85eec255                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8603fbc0                                                                                                       -      -            
+     0.15%  [k] 0xffffffff850c03b5                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85f2f11b                                                                                                       -      -            
+     0.15%  [k] 0xffffffffc0fdbed0                                                                                                       -      -            
+     0.15%  [.] 0x00000000000009c6                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85f2e332                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85137755                                                                                                       -      -            
+     0.15%  [k] 0xffffffff853f12bd                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8602f7fb                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8603da0d                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85452fef                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85ffb9e4                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8623b8a6                                                                                                       -      -            
+     0.15%  [k] 0xffffffff853f14e7                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85eefaba                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85eefc89                                                                                                       -      -            
+     0.15%  [k] 0xffffffff84fdedcb                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8600a78e                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85133c48                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86017d57                                                                                                       -      -            
+     0.15%  [k] 0xffffffff850bc4cd                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86034185                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8602f79a                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8600a176                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86023707                                                                                                       -      -            
+     0.15%  [k] 0xffffffff850716c6                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85f0cbc8                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86022cc9                                                                                                       -      -            
+     0.15%  [k] 0xffffffff860365f8                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86024b28                                                                                                       -      -            
+     0.15%  [k] 0xffffffff860017e5                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8572a5f0                                                                                                       -      -            
+     0.15%  [.] core::ptr::drop_in_place::<fr_protocol::RespFrame>                                                                       -      -            
+     0.15%  [k] 0xffffffff85f2b5f7                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8515379f                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8546fd9f                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85196611                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86011bdd                                                                                                       -      -            
+     0.15%  [k] 0xffffffff84fc6538                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86025bfd                                                                                                       -      -            
+     0.15%  [k] 0xffffffff850a77e1                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8604ab3d                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86020462                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85eefdf4                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8623a36f                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8603f7f7                                                                                                       -      -            
+     0.15%  [k] 0xffffffff850812a3                                                                                                       -      -            
+     0.15%  [k] 0xffffffffc0f92136                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85712c89                                                                                                       -      -            
+     0.15%  [k] 0xffffffff84c00002                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85088534                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86011247                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8603a3f1                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8603aa25                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8510f1f0                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85133c85                                                                                                       -      -            
+     0.15%  [k] 0xffffffff85078cf8                                                                                                       -      -            
+     0.15%  [.] _mi_page_malloc_zero                                                                                                     -      -            
+     0.15%  [k] 0xffffffff8602ea65                                                                                                       -      -            
+     0.15%  [k] 0xffffffff8602eb0b                                                                                                       -      -            
+     0.15%  [k] 0xffffffffc0f92477                                                                                                       -      -            
+     0.15%  [k] 0xffffffffc0fb2185                                                                                                       -      -            
+     0.15%  [k] 0xffffffff860239c5                                                                                                       -      -            
+     0.15%  [k] 0xffffffff86009519                                                                                                       -      -            
+     0.15%  [k] 0xffffffff862095c4                                                                                                       -      -            
+     0.14%  [k] 0xffffffff86220524                                                                                                       -      -            
+     0.14%  [.] <std::hash::random::DefaultHasher as core::hash::Hasher>::write                                                          -      -            
+     0.14%  [k] 0xffffffffc0fd72cc                                                                                                       -      -            
+     0.14%  [k] 0xffffffff86229e6b                                                                                                       -      -            
+     0.14%  [k] 0xffffffff85079298                                                                                                       -      -            
+     0.14%  [k] 0xffffffff851318c5                                                                                                       -      -            
+     0.13%  [k] 0xffffffff8603d39a                                                                                                       -      -            
+     0.13%  [k] 0xffffffffc0fdcfc3                                                                                                       -      -            
+     0.13%  [k] 0xffffffff8623b9a0                                                                                                       -      -            
+     0.12%  [k] 0xffffffffc0816146                                                                                                       -      -            
+     0.09%  [k] 0xffffffffc0f92010                                                                                                       -      -            
+     0.08%  [k] 0xffffffff85104b3a                                                                                                       -      -            
+     0.07%  [.] __libc_recv                                                                                                              -      -            
+     0.07%  [k] 0xffffffff85efbc80                                                                                                       -      -            
+     0.07%  [k] 0xffffffff85f02a63                                                                                                       -      -            
+     0.06%  [k] 0xffffffff86020448                                                                                                       -      -            
+     0.05%  [k] 0xffffffff851a2b6f                                                                                                       -      -            
+     0.05%  [k] 0xffffffff8519f458                                                                                                       -      -            
+     0.00%  [k] 0xffffffff84c01248                                                                                                       -      -            
+     0.00%  [k] 0xffffffff8513745c                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85f2b67c                                                                                                       -      -            
+     0.00%  [k] 0xffffffff850b8f40                                                                                                       -      -            
+     0.00%  [k] 0xffffffff851a2b24                                                                                                       -      -            
+     0.00%  [k] 0xffffffff851629dc                                                                                                       -      -            
+     0.00%  [k] 0xffffffffc0fb0810                                                                                                       -      -            
+     0.00%  [k] 0xffffffff8602b0c6                                                                                                       -      -            
+     0.00%  [k] 0xffffffffc0fb087e                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85f2b70b                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85712c20                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85835fd6                                                                                                       -      -            
+     0.00%  [k] 0xffffffff8603948a                                                                                                       -      -            
+     0.00%  [k] 0xffffffffc0fd6cc8                                                                                                       -      -            
+     0.00%  [k] 0xffffffff8604124c                                                                                                       -      -            
+     0.00%  [k] 0xffffffff8546fb28                                                                                                       -      -            
+     0.00%  [k] 0xffffffff84f8c9d1                                                                                                       -      -            
+     0.00%  [k] 0xffffffff8621c6a9                                                                                                       -      -            
+     0.00%  [k] 0xffffffff84f23412                                                                                                       -      -            
+     0.00%  [k] 0xffffffff851965e6                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85313cac                                                                                                       -      -            
+     0.00%  [k] 0xffffffff8623a4d2                                                                                                       -      -            
+     0.00%  [k] 0xffffffff84f8cadd                                                                                                       -      -            
+     0.00%  [k] 0xffffffff8603da12                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85123feb                                                                                                       -      -            
+     0.00%  [k] 0xffffffff8530d2c3                                                                                                       -      -            
+     0.00%  [.] <frankenredis::ClientConnection>::try_flush                                                                              -      -            
+     0.00%  [k] 0xffffffff85326547                                                                                                       -      -            
+     0.00%  [k] 0xffffffff853263ad                                                                                                       -      -            
+     0.00%  [k] 0xffffffff84c01192                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85162289                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85088037                                                                                                       -      -            
+     0.00%  [k] 0xffffffff8508a436                                                                                                       -      -            
+     0.00%  [k] 0xffffffff862289ac                                                                                                       -      -            
+     0.00%  [k] 0xffffffff850680e2                                                                                                       -      -            
+     0.00%  [k] 0xffffffff8530d2bc                                                                                                       -      -            
+     0.00%  [k] 0xffffffff8506f92c                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85081005                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85314676                                                                                                       -      -            
+     0.00%  [k] 0xffffffff862251d0                                                                                                       -      -            
+     0.00%  [k] 0xffffffff8530d2cc                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85300b65                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85300b80                                                                                                       -      -            
+     0.00%  [k] 0xffffffff8530d285                                                                                                       -      -            
+     0.00%  [k] 0xffffffff84fdedcd                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85300b66                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85300b69                                                                                                       -      -            
+     0.00%  [k] 0xffffffff850c2910                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85300b60                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85300b6b                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85300b75                                                                                                       -      -            
+     0.00%  [k] 0xffffffff8530d2db                                                                                                       -      -            
+     0.00%  [k] 0xffffffff862251cb                                                                                                       -      -            
+     0.00%  [k] 0xffffffff850c2906                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85104b41                                                                                                       -      -            
+     0.00%  [k] 0xffffffff8530d280                                                                                                       -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

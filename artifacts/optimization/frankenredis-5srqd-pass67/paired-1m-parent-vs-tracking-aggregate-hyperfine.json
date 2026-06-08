@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-5srqd-parent-target/release-perf/frankenredis --bench-bin /tmp/codex-fr-5srqd-parent-target/release-perf/fr-bench --port 6401 --workload get --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:5srqd:parent1m",
+      "mean": 1.4107134513200001,
+      "stddev": 0.023301800301803424,
+      "median": 1.4042307393200002,
+      "user": 1.38512988,
+      "system": 2.08626508,
+      "min": 1.3859508473200002,
+      "max": 1.4409943303200001,
+      "times": [
+        1.39388545932,
+        1.3859508473200002,
+        1.4409943303200001,
+        1.4285058803200001,
+        1.4042307393200002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-5srqd-candidate-target/release-perf/frankenredis --bench-bin /tmp/codex-fr-5srqd-candidate-target/release-perf/fr-bench --port 6402 --workload get --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:5srqd:candidate1m",
+      "mean": 1.39002115432,
+      "stddev": 0.029089269655585052,
+      "median": 1.38705431732,
+      "user": 1.35513148,
+      "system": 2.1055116799999998,
+      "min": 1.3499479783200001,
+      "max": 1.42954522832,
+      "times": [
+        1.3499479783200001,
+        1.4018227173200002,
+        1.42954522832,
+        1.38705431732,
+        1.38173553032
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

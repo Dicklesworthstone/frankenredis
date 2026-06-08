@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-5srqd-candidate-target/release-perf/frankenredis --bench-bin /tmp/codex-fr-5srqd-candidate-target/release-perf/fr-bench --port 6400 --workload get --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:5srqd:candidate",
+      "mean": 0.5021175716257144,
+      "stddev": 0.01666298708577799,
+      "median": 0.5005184903400001,
+      "user": 0.4456936371428571,
+      "system": 0.6760997971428572,
+      "min": 0.47197795934000003,
+      "max": 0.5190714803400001,
+      "times": [
+        0.5176857843400001,
+        0.49273168834000003,
+        0.5190714803400001,
+        0.5134926013400001,
+        0.5005184903400001,
+        0.47197795934000003,
+        0.49934499734
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
