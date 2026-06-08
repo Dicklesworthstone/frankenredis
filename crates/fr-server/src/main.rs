@@ -1858,6 +1858,15 @@ fn process_buffered_frames(
                                     consumed: parsed.consumed,
                                     response,
                                 })
+                            } else if let Some((key, pairs)) =
+                                borrowed_plain_hset_args(&borrowed_args)
+                                && let Some(response) =
+                                    runtime.execute_plain_hset_borrowed(key, pairs, ts)
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
                             } else if let Some((key, field)) =
                                 borrowed_plain_hget_args(&borrowed_args)
                                 && let Some(response) =
@@ -2208,6 +2217,21 @@ fn borrowed_plain_keyed_values_args<'a>(
         return None;
     };
     Some((cmd, *key, values))
+}
+
+/// `HSET key field value [field value ...]` borrowed-arg matcher: requires a
+/// non-empty even-length field/value tail (odd/empty falls back to the generic
+/// WrongArity path). (frankenredis-ev067)
+fn borrowed_plain_hset_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(&'a [u8], &'a [&'a [u8]])> {
+    let [command, key, pairs @ ..] = borrowed_args else {
+        return None;
+    };
+    if !command.eq_ignore_ascii_case(b"HSET") || pairs.is_empty() || pairs.len() % 2 != 0 {
+        return None;
+    }
+    Some((*key, pairs))
 }
 
 fn borrowed_plain_decrby_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
