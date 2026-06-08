@@ -71,25 +71,34 @@ fn fuzz_inline_parser_corpus_never_panics() {
     );
 }
 
-/// Confirm the RESP-prefix-byte seeds are routed away from inline
-/// parsing by `should_try_inline_parsing`. Catches a future refactor
-/// that adds a new RESP3 prefix to the parser without updating the
-/// inline gate, which would silently route the bytes through the
-/// inline-quoted-string code path.
+/// Confirm only the multibulk prefix `*` is routed to the RESP parser;
+/// every other first byte — including the RESP2 reply prefixes `$`/`+`
+/// (and the RESP3 type prefixes) — is treated as an inline command,
+/// exactly like upstream `processInputBuffer`. Catches a regression that
+/// re-adds RESP prefixes to an inline-gate denylist, which would route
+/// `>`/`~`/`%`/... through the RESP parser and DROP the client connection
+/// with "unsupported RESP3 type prefix" instead of replying "unknown
+/// command '<token>'". (frankenredis-c6vt7)
 #[test]
-fn fuzz_inline_parser_rejects_resp_prefix_seeds() {
+fn fuzz_inline_parser_routes_only_star_to_resp() {
     let dir = corpus_dir();
-    for name in ["resp_prefix_dollar", "resp_prefix_star", "resp_prefix_plus"] {
+    // `*` (multibulk) is the sole prefix that stays on the RESP parser path.
+    let star = fs::read(dir.join("resp_prefix_star"))
+        .unwrap_or_else(|err| panic!("missing seed resp_prefix_star: {err}"));
+    let star_payload = &star[..star.len() - 1]; // strip variant tag
+    assert!(
+        !star_payload.is_empty() && !should_try_inline_parsing(star_payload[0]),
+        "`*` multibulk prefix must stay on the RESP parser path"
+    );
+    // RESP2 reply prefixes a client never legitimately sends as a command
+    // are treated as inline (→ "unknown command '<token>'"), matching redis.
+    for name in ["resp_prefix_dollar", "resp_prefix_plus"] {
         let bytes =
             fs::read(dir.join(name)).unwrap_or_else(|err| panic!("missing seed {name}: {err}"));
         let payload = &bytes[..bytes.len() - 1]; // strip variant tag
         assert!(
-            !payload.is_empty(),
-            "RESP-prefix seed {name} unexpectedly empty"
-        );
-        assert!(
-            !should_try_inline_parsing(payload[0]),
-            "RESP-prefix seed {name} (first byte 0x{:02x}) should be rejected by should_try_inline_parsing",
+            !payload.is_empty() && should_try_inline_parsing(payload[0]),
+            "RESP-prefix seed {name} (first byte 0x{:02x}) must be treated as inline like redis",
             payload[0]
         );
     }

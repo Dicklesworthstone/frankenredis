@@ -14,26 +14,18 @@ pub enum InlineParseResult {
 }
 
 /// Check if the first byte suggests inline command parsing should be attempted.
-/// Returns false for bytes that are RESP protocol prefixes.
+///
+/// Upstream `networking.c::processInputBuffer` treats ANY first byte that is
+/// not `*` (the multibulk prefix) as the start of an inline command — including
+/// the RESP2 reply prefixes (`+ - : $`) and RESP3 type prefixes
+/// (`~ % # , _ ( = | > !`), none of which a client ever legitimately sends as
+/// a command. So e.g. `>3\r\nfoo\r\n` yields `unknown command '>3'` then
+/// `unknown command 'foo'`, with the connection kept open — NOT a protocol
+/// error that drops the connection. Only `*` stays on the RESP multibulk
+/// parser path. (frankenredis-c6vt7)
 #[must_use]
 pub fn should_try_inline_parsing(first_byte: u8) -> bool {
-    !matches!(
-        first_byte,
-        b'+' | b'-'
-            | b':'
-            | b'$'
-            | b'*'
-            | b'~'
-            | b'%'
-            | b'#'
-            | b','
-            | b'_'
-            | b'('
-            | b'='
-            | b'|'
-            | b'>'
-            | b'!'
-    )
+    first_byte != b'*'
 }
 
 /// Try to parse an inline command (non-RESP). Inline commands are

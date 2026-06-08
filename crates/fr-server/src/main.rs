@@ -6633,10 +6633,17 @@ mod tests {
 
     #[test]
     fn inline_parser_gate_recognizes_all_resp_prefixes() {
-        for prefix in *b"+-:$*~%#,_(=|>!" {
+        // Upstream: only '*' (multibulk) stays on the RESP parser path; every
+        // other first byte — including the RESP2 reply and RESP3 type prefixes
+        // — is the start of an inline command. (frankenredis-c6vt7)
+        assert!(
+            !should_try_inline_parsing(b'*'),
+            "'*' must stay on the RESP multibulk parser path"
+        );
+        for prefix in *b"+-:$~%#,_(=|>!" {
             assert!(
-                !should_try_inline_parsing(prefix),
-                "prefix {prefix:?} should stay on RESP parser path"
+                should_try_inline_parsing(prefix),
+                "non-'*' prefix {prefix:?} must be treated as inline like redis"
             );
         }
 
