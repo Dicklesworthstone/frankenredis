@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /tmp/codex-fr-euhzt-clean-candidate-target/release-perf/frankenredis --port 26688 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix freuhztcleancandrev --json-out artifacts/optimization/frankenredis-euhzt/candidate/last-clean-reversed-setex-p16-1m.json",
+      "mean": 4.45260887298,
+      "stddev": 0.03913377486717279,
+      "median": 4.44072270998,
+      "user": 6.842023594285714,
+      "system": 5.475594142857142,
+      "min": 4.40622486698,
+      "max": 4.5136929189799995,
+      "times": [
+        4.43298027998,
+        4.49815700698,
+        4.45032474698,
+        4.5136929189799995,
+        4.42615958098,
+        4.40622486698,
+        4.44072270998
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /tmp/codex-fr-pass75-profile-target/release-perf/frankenredis --port 26689 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix freuhztcleanbaserev --json-out artifacts/optimization/frankenredis-euhzt/baseline/last-clean-reversed-setex-p16-1m.json",
+      "mean": 4.474080486694286,
+      "stddev": 0.04869541051478532,
+      "median": 4.49814491298,
+      "user": 6.922958308571429,
+      "system": 5.480094142857142,
+      "min": 4.3892289479799995,
+      "max": 4.522629933979999,
+      "times": [
+        4.45799350298,
+        4.50457270198,
+        4.522629933979999,
+        4.49814491298,
+        4.434913809979999,
+        4.51107959698,
+        4.3892289479799995
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

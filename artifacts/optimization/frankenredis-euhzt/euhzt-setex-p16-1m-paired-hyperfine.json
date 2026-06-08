@@ -1,0 +1,68 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /tmp/codex-fr-pass75-profile-target/release-perf/frankenredis --port 26682 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix freuhztbasepair --json-out artifacts/optimization/frankenredis-euhzt/baseline/last-paired-setex-p16-1m.json",
+      "mean": 4.472994399715556,
+      "stddev": 0.09636591312031549,
+      "median": 4.44264875116,
+      "user": 6.818401682222222,
+      "system": 5.50884344,
+      "min": 4.39355108016,
+      "max": 4.68973165516,
+      "times": [
+        4.47248506316,
+        4.68973165516,
+        4.56665351716,
+        4.44264875116,
+        4.45170747616,
+        4.39355108016,
+        4.42128278816,
+        4.41676983416,
+        4.40211943216
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /tmp/codex-fr-euhzt-candidate-target/release-perf/frankenredis --port 26683 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix freuhztcandpair --json-out artifacts/optimization/frankenredis-euhzt/candidate/last-paired-setex-p16-1m.json",
+      "mean": 5.111956528937778,
+      "stddev": 0.7491008327113159,
+      "median": 4.60306408616,
+      "user": 6.743701126666668,
+      "system": 5.634667995555556,
+      "min": 4.51022546116,
+      "max": 6.32314219416,
+      "times": [
+        4.51022546116,
+        5.22037244316,
+        6.32314219416,
+        6.31883119616,
+        5.32475333216,
+        4.60306408616,
+        4.52120113516,
+        4.59114768316,
+        4.59487122916
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

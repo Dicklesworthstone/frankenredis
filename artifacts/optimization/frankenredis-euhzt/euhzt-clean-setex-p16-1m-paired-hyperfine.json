@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /tmp/codex-fr-pass75-profile-target/release-perf/frankenredis --port 26686 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix freuhztcleanbasepair --json-out artifacts/optimization/frankenredis-euhzt/baseline/last-clean-paired-setex-p16-1m.json",
+      "mean": 4.497266700697142,
+      "stddev": 0.024424085726084878,
+      "median": 4.4984547588399995,
+      "user": 6.966103522857142,
+      "system": 5.5025195628571435,
+      "min": 4.4537006548399996,
+      "max": 4.5274573478399995,
+      "times": [
+        4.51731769584,
+        4.50968357084,
+        4.4984547588399995,
+        4.48532951584,
+        4.488923360839999,
+        4.4537006548399996,
+        4.5274573478399995
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /tmp/codex-fr-euhzt-clean-candidate-target/release-perf/frankenredis --port 26687 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix freuhztcleancandpair --json-out artifacts/optimization/frankenredis-euhzt/candidate/last-clean-paired-setex-p16-1m.json",
+      "mean": 4.474245584268571,
+      "stddev": 0.02755186351499071,
+      "median": 4.47520253984,
+      "user": 6.791914237142857,
+      "system": 5.580725848571428,
+      "min": 4.42488263184,
+      "max": 4.51003251684,
+      "times": [
+        4.49451135084,
+        4.42488263184,
+        4.46815269584,
+        4.48738409984,
+        4.51003251684,
+        4.47520253984,
+        4.459553254839999
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
