@@ -13209,15 +13209,27 @@ impl Runtime {
                 };
                 let mut ps = Vec::new();
                 for part in val_str.split_whitespace() {
-                    let p = match part.parse::<f64>() {
-                        Ok(v) if (0.0..=100.0).contains(&v) => v,
-                        _ => {
-                            return RespFrame::Error(
-                                "ERR Invalid argument for CONFIG SET 'latency-tracking-info-percentiles'".to_string(),
+                    // (frankenredis-0fuq4) Mirror upstream config.c: a token that
+                    // doesn't parse as a double is an "Invalid ... parameters"
+                    // error, while an in-range-type but out-of-[0,100] value is
+                    // the "should sit between [0.0,100.0]" error — both wrapped by
+                    // config_set_failed, not the generic "Invalid argument".
+                    let v = match part.parse::<f64>() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            return config_set_failed(
+                                "latency-tracking-info-percentiles",
+                                "Invalid latency-tracking-info-percentiles parameters",
                             );
                         }
                     };
-                    ps.push(p);
+                    if !(0.0..=100.0).contains(&v) {
+                        return config_set_failed(
+                            "latency-tracking-info-percentiles",
+                            "latency-tracking-info-percentiles parameters should sit between [0.0,100.0]",
+                        );
+                    }
+                    ps.push(v);
                 }
                 next_latency_percentiles = Some(ps);
                 static_override_updates.push((
@@ -13509,15 +13521,25 @@ impl Runtime {
                 continue;
             }
             if parameter.eq_ignore_ascii_case("repl-diskless-sync-delay") {
+                // (frankenredis-0fuq4) Upstream INTEGER_CONFIG range is
+                // [0, INT_MAX]; out-of-range (incl. values above INT_MAX, which
+                // fr previously accepted via a bare `>= 0` check) surfaces the
+                // table-level bound message via config_set_failed, not the
+                // non-standard "Invalid argument" wording.
                 let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) if value >= 0 => value as u64,
+                    Ok(value) if (0..=2_147_483_647).contains(&value) => value as u64,
                     Ok(_) => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'repl-diskless-sync-delay'"
-                                .to_string(),
+                        return config_set_failed(
+                            "repl-diskless-sync-delay",
+                            "argument must be between 0 and 2147483647 inclusive",
                         );
                     }
-                    Err(err) => return err.to_resp(),
+                    Err(_) => {
+                        return config_set_failed(
+                            "repl-diskless-sync-delay",
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
                 };
                 next_repl_diskless_sync_delay = Some(parsed);
                 static_override_updates
@@ -32024,6 +32046,88 @@ mod tests {
                 ),
                 ok,
                 "oom-score-adj-values '{good}' must be accepted",
+            );
+        }
+    }
+
+    /// (frankenredis-0fuq4) CONFIG SET error wording for two params that used the
+    /// non-standard "Invalid argument for CONFIG SET" generic message instead of
+    /// upstream's config_set_failed wrapper + specific detail.
+    #[test]
+    fn config_set_error_wording_latency_percentiles_and_repl_diskless_delay_0fuq4() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let err = |field: &str, detail: &str| {
+            RespFrame::Error(format!(
+                "ERR CONFIG SET failed (possibly related to argument '{field}') - {detail}"
+            ))
+        };
+
+        // latency-tracking-info-percentiles: parse-fail vs range-fail.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"latency-tracking-info-percentiles", b"abc"]),
+                0,
+            ),
+            err(
+                "latency-tracking-info-percentiles",
+                "Invalid latency-tracking-info-percentiles parameters"
+            ),
+        );
+        for bad in ["50 101", "-1"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[
+                        b"CONFIG",
+                        b"SET",
+                        b"latency-tracking-info-percentiles",
+                        bad.as_bytes()
+                    ]),
+                    0,
+                ),
+                err(
+                    "latency-tracking-info-percentiles",
+                    "latency-tracking-info-percentiles parameters should sit between [0.0,100.0]"
+                ),
+            );
+        }
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"latency-tracking-info-percentiles", b"0 50 100"]),
+                0,
+            ),
+            ok,
+        );
+
+        // repl-diskless-sync-delay: [0, INT_MAX], with parse/range messages.
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"repl-diskless-sync-delay", b"abc"]), 0),
+            err(
+                "repl-diskless-sync-delay",
+                "argument couldn't be parsed into an integer"
+            ),
+        );
+        for bad in ["-1", "2147483648", "9999999999"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"repl-diskless-sync-delay", bad.as_bytes()]),
+                    0,
+                ),
+                err(
+                    "repl-diskless-sync-delay",
+                    "argument must be between 0 and 2147483647 inclusive"
+                ),
+                "repl-diskless-sync-delay '{bad}' must be a range error",
+            );
+        }
+        for good in ["0", "5", "2147483647"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"repl-diskless-sync-delay", good.as_bytes()]),
+                    0,
+                ),
+                ok,
+                "repl-diskless-sync-delay '{good}' must be accepted",
             );
         }
     }
