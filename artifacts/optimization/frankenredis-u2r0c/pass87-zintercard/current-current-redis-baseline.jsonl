@@ -1,0 +1,2 @@
+{"baseline_vs_redis": 0.6807116079240975, "candidate_vs_baseline": 0.9745936279001928, "candidate_vs_redis": 0.6634171955205197, "case": "zintercard2", "reply_equal": true, "us_per_op": {"baseline": 1304.8568287922535, "candidate": 1338.872727501439, "redis": 888.2311900379136}}
+{"rows": [{"baseline_vs_redis": 0.6807116079240975, "candidate_vs_baseline": 0.9745936279001928, "candidate_vs_redis": 0.6634171955205197, "case": "zintercard2", "reply_equal": true, "us_per_op": {"baseline": 1304.8568287922535, "candidate": 1338.872727501439, "redis": 888.2311900379136}}]}

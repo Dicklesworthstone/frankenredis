@@ -1,0 +1,90 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 2K of event 'cycles:P'
+# Event count (approx.): 14111087649
+#
+# Overhead  Symbol                                                                                                                                                                                                                  Shared Object     IPC   [IPC Coverage]
+# ........  ......................................................................................................................................................................................................................  ................  ....................
+#
+    19.23%  [.] __memcmp_avx2_movbe                                                                                                                                                                                                 libc.so.6         -      -
+            |
+            |--8.53%--<fr_store::SortedSet>::get_score
+            |          |
+            |           --8.29%--0xffffffffff3b4422
+            |
+            |--3.17%--__memcmp_avx2_movbe
+            |          |
+            |          |--1.35%--0xffffffffff3b4422
+            |          |
+            |           --0.51%--0x746c7561666564
+            |
+            |--2.87%--<fr_store::Store>::zget_score_or_set_member
+            |          |
+            |           --1.32%--0x617a
+            |
+            |--2.03%--<fr_store::Store>::drop_if_expired
+            |
+            |--1.32%--<foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+            |
+            |--0.72%--mi_free
+            |
+             --0.59%--fr_command::zintercard
+
+    13.40%  [.] <fr_store::Store>::zget_score_or_set_member                                                                                                                                                                         frankenredis      -      -
+            |
+            |--4.75%--<fr_store::SortedSet>::get_score
+            |          |
+            |           --4.63%--0xffffffffff3b4422
+            |
+            |--2.53%--__memcmp_avx2_movbe
+            |          |
+            |          |--0.56%--0xffffffffff3b4422
+            |          |
+            |           --0.56%--0x617a
+            |
+            |--2.20%--<foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+            |          |
+            |           --0.50%--0x617a
+            |
+            |--2.13%--<fr_store::Store>::zget_score_or_set_member
+            |          |
+            |           --0.96%--0x617a
+            |
+            |--0.99%--<fr_store::Store>::drop_if_expired
+            |
+             --0.55%--fr_command::zintercard
+
+    13.30%  [.] <fr_store::Store>::drop_if_expired                                                                                                                                                                                  frankenredis      -      -
+            |
+            |--4.80%--<fr_store::SortedSet>::get_score
+            |          |
+            |           --4.70%--0xffffffffff3b4422
+            |
+            |--2.64%--<fr_store::Store>::zget_score_or_set_member
+            |          |
+            |          |--1.06%--0x617a
+            |          |
+            |           --0.62%--0x746c7561666564
+            |
+            |--2.63%--__memcmp_avx2_movbe
+            |          |
+            |          |--0.82%--0xffffffffff3b4422
+            |          |
+            |           --0.76%--0x617a
+            |
+            |--1.80%--<foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+            |
+             --0.90%--<fr_store::Store>::drop_if_expired
+
+    12.83%  [.] <fr_store::Store>::zget_members_with_scores                                                                                                                                                                         frankenredis      -      -
+            |
+            |--3.71%--<fr_store::Store>::zget_members_with_scores
+            |          |
+            |           --1.90%--0x4
+            |
+            |--2.66%--mi_malloc_aligned
+            |
+            |--2.18%--__memmove_avx_unaligned_erms
