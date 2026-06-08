@@ -3405,6 +3405,50 @@ impl Store {
         Self::default()
     }
 
+    /// (frankenredis-pkdgs) Advance the sentinel clock at the start of a
+    /// monitoring tick (tilt detection + `previous_time`, which every SENTINEL
+    /// MASTER/SLAVES render uses as "now" for its `*-ms-ago` delta fields — left
+    /// at 0 it pins last-ok-ping-reply / info-refresh to 0).
+    pub fn sentinel_begin_tick(&mut self, now_ms: u64) {
+        self.sentinel_state.check_tilt(now_ms);
+    }
+
+    /// (frankenredis-pkdgs) The monitored masters' (name, ip, port) for the
+    /// fr-server Sentinel monitoring tick to PING/INFO. Snapshotted so the
+    /// blocking probes hold no borrow of the sentinel state.
+    #[must_use]
+    pub fn sentinel_monitor_targets(&self) -> Vec<(String, String, u16)> {
+        self.sentinel_state
+            .masters
+            .iter()
+            .map(|(name, m)| (name.clone(), m.addr.ip.clone(), m.addr.port))
+            .collect()
+    }
+
+    /// (frankenredis-pkdgs) Fold one master's probe outcome into the sentinel
+    /// state: `Some(info)` = the master answered PING + INFO (refresh link
+    /// liveness, runid/role via INFO, and discovered replicas); `None` = the
+    /// probe failed (mark the link disconnected). Delegates to the already
+    /// unit-tested fr-sentinel health/discovery primitives.
+    pub fn apply_sentinel_probe_result(&mut self, name: &str, now_ms: u64, info: Option<&str>) {
+        let Some(master) = self.sentinel_state.masters.get_mut(name) else {
+            return;
+        };
+        fr_sentinel::health::record_ping_sent(&mut master.link, now_ms);
+        match info {
+            Some(info) => {
+                fr_sentinel::health::record_pong(&mut master.link, now_ms);
+                fr_sentinel::health::record_reconnect(&mut master.link, now_ms);
+                fr_sentinel::health::record_info_response(master, info, now_ms);
+                let replicas = fr_sentinel::discovery::parse_replica_info_from_master(info);
+                fr_sentinel::discovery::discover_replicas_from_info(master, &replicas, now_ms);
+            }
+            None => {
+                fr_sentinel::health::record_disconnect(&mut master.link);
+            }
+        }
+    }
+
     fn ordered_physical_keys_in_db(&self, db: usize) -> Vec<Vec<u8>> {
         if db == 0 {
             return self

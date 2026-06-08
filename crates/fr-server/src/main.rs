@@ -997,6 +997,9 @@ fn main() -> ExitCode {
     let mut next_handle: usize = 1;
     let tick_budget = TickBudget::default();
     let mut last_ops_sample_ms: u64 = now_ms();
+    // (frankenredis-pkdgs) Last wall-clock ms a sentinel-mode INFO/PING probe of
+    // the monitored masters ran. 0 = never, so the first tick probes immediately.
+    let mut last_sentinel_probe_ms: u64 = 0;
 
     loop {
         // Use fr-eventloop's tick planner to determine poll timeout.
@@ -1148,6 +1151,12 @@ fn main() -> ExitCode {
                 }
             }
         }
+
+        // (frankenredis-pkdgs) In Sentinel mode, actively PING + INFO the
+        // monitored masters so their runid / flags / ping & info-refresh times
+        // fill in (otherwise SENTINEL MASTER reports an empty,
+        // "master,disconnected" instance forever).
+        run_sentinel_monitoring_tick(&mut runtime, ts, &mut last_sentinel_probe_ms);
 
         // Deliver pending replication writes to connected replicas.
         propagate_writes_to_replicas(&mut clients, &mut runtime, &mut poll, &mut write_tokens);
@@ -2368,6 +2377,78 @@ fn handle_parse_error(
 }
 
 use fr_server::{InlineParseResult, should_try_inline_parsing, try_parse_inline};
+
+/// (frankenredis-pkdgs) How often a Sentinel actively PINGs + INFOs each
+/// monitored master. Upstream pings every `down-after/2` (<=1s) and INFOs every
+/// 10s; a unified 1s probe keeps the observable instance fields (runid, flags,
+/// ping/info-refresh times, discovered replicas) fresh without two schedules.
+const SENTINEL_PROBE_INTERVAL_MS: u64 = 1000;
+
+/// (frankenredis-pkdgs) Blocking PING + INFO of one monitored master. Returns
+/// the INFO payload on success; any connect / IO / protocol failure is an `Err`
+/// the caller folds into a link disconnect. Short timeouts stop a dead master
+/// from stalling the event loop.
+fn probe_sentinel_master(
+    ip: &str,
+    port: u16,
+    parser_config: &ParserConfig,
+    query_buffer_limit: usize,
+) -> io::Result<String> {
+    let addr: std::net::SocketAddr = format!("{ip}:{port}")
+        .parse()
+        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "bad master addr"))?;
+    let mut stream = StdTcpStream::connect_timeout(&addr, Duration::from_millis(200))?;
+    let _ = stream.set_nodelay(true);
+    stream.set_read_timeout(Some(Duration::from_millis(300)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(300)))?;
+    let mut read_buf = Vec::new();
+
+    stream.write_all(&replica_handshake_frame(&[b"PING"]).to_bytes())?;
+    let pong =
+        read_frame_from_stream(&mut stream, &mut read_buf, parser_config, query_buffer_limit)?;
+    if !matches!(&pong, RespFrame::SimpleString(s) if s.eq_ignore_ascii_case("PONG")) {
+        return Err(io::Error::new(ErrorKind::InvalidData, "master did not PONG"));
+    }
+
+    stream.write_all(&replica_handshake_frame(&[b"INFO"]).to_bytes())?;
+    let info =
+        read_frame_from_stream(&mut stream, &mut read_buf, parser_config, query_buffer_limit)?;
+    match info {
+        RespFrame::BulkString(Some(bytes)) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        _ => Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "master INFO not a bulk string",
+        )),
+    }
+}
+
+/// (frankenredis-pkdgs) Once per `SENTINEL_PROBE_INTERVAL_MS`, PING + INFO every
+/// monitored master and fold the result into the sentinel state (runid, role,
+/// link liveness, discovered replicas) via the fr-store/fr-sentinel primitives.
+/// Without this, a sentinel registers a master but never contacts it, so
+/// SENTINEL MASTER reports an empty "master,disconnected" instance forever.
+fn run_sentinel_monitoring_tick(runtime: &mut Runtime, now_ms: u64, last_probe_ms: &mut u64) {
+    if !runtime.sentinel_mode() {
+        return;
+    }
+    if now_ms.saturating_sub(*last_probe_ms) < SENTINEL_PROBE_INTERVAL_MS {
+        return;
+    }
+    *last_probe_ms = now_ms;
+    // Advance the sentinel clock so SENTINEL MASTER/SLAVES render their
+    // "ms-ago" delta fields against a real now (else they pin to 0).
+    runtime.sentinel_begin_tick(now_ms);
+
+    let parser_config = runtime.parser_config();
+    let query_buffer_limit = runtime.server.query_buffer_limit;
+    // Snapshot (name, ip, port) so the blocking probes hold no borrow of the
+    // sentinel state across the network IO.
+    let targets = runtime.sentinel_monitor_targets();
+    for (name, ip, port) in targets {
+        let info = probe_sentinel_master(&ip, port, &parser_config, query_buffer_limit).ok();
+        runtime.apply_sentinel_probe_result(&name, now_ms, info.as_deref());
+    }
+}
 
 fn replica_handshake_frame(args: &[&[u8]]) -> RespFrame {
     RespFrame::Array(Some(

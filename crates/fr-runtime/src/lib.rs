@@ -3952,6 +3952,27 @@ impl Runtime {
         self.server.store.sentinel_mode
     }
 
+    /// (frankenredis-pkdgs) Advance the sentinel clock (tilt + previous_time)
+    /// at the start of a monitoring tick.
+    pub fn sentinel_begin_tick(&mut self, now_ms: u64) {
+        self.server.store.sentinel_begin_tick(now_ms);
+    }
+
+    /// (frankenredis-pkdgs) Monitored masters' (name, ip, port) for the
+    /// fr-server Sentinel monitoring tick.
+    #[must_use]
+    pub fn sentinel_monitor_targets(&self) -> Vec<(String, String, u16)> {
+        self.server.store.sentinel_monitor_targets()
+    }
+
+    /// (frankenredis-pkdgs) Fold one monitored master's PING/INFO probe outcome
+    /// into the sentinel state (`None` = probe failed -> mark disconnected).
+    pub fn apply_sentinel_probe_result(&mut self, name: &str, now_ms: u64, info: Option<&str>) {
+        self.server
+            .store
+            .apply_sentinel_probe_result(name, now_ms, info);
+    }
+
     /// Load and replay AOF records from the configured path, restoring store state.
     ///
     /// Each AOF record is dispatched through the command router as if it were
