@@ -1815,6 +1815,44 @@ impl Value {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ZSetAlgebraInput<'a> {
+    SortedSet(&'a SortedSet),
+    Set(&'a SetValue),
+}
+
+impl<'a> ZSetAlgebraInput<'a> {
+    fn from_value(value: &'a Value) -> Option<Self> {
+        match value {
+            Value::SortedSet(zs) => Some(Self::SortedSet(zs.as_ref())),
+            Value::Set(s) => Some(Self::Set(s.as_ref())),
+            _ => None,
+        }
+    }
+
+    fn score(self, member: &[u8]) -> Option<f64> {
+        match self {
+            Self::SortedSet(zs) => zs.get_score(member),
+            Self::Set(s) => s.contains(member).then_some(1.0),
+        }
+    }
+
+    fn for_each(self, mut f: impl FnMut(&[u8], f64)) {
+        match self {
+            Self::SortedSet(zs) => {
+                for (member, score) in zs.iter() {
+                    f(member, score);
+                }
+            }
+            Self::Set(s) => {
+                for member in s.iter() {
+                    f(member.as_ref(), 1.0);
+                }
+            }
+        }
+    }
+}
+
 fn canonical_string_value(value: Vec<u8>) -> Value {
     match parse_i64(value.as_slice()) {
         Ok(integer) => Value::Integer(integer),
@@ -3469,7 +3507,8 @@ impl Store {
         if !fr_sentinel::discovery::should_publish_hello(master, now_ms) {
             return None;
         }
-        let msg = fr_sentinel::discovery::create_hello_message(&self.sentinel_state, master).encode();
+        let msg =
+            fr_sentinel::discovery::create_hello_message(&self.sentinel_state, master).encode();
         if let Some(m) = self.sentinel_state.masters.get_mut(name) {
             m.last_pub_time = now_ms;
         }
@@ -14244,55 +14283,21 @@ impl Store {
         } else {
             0
         };
-        // (frankenredis-zinterhash) The intersection accumulator is keyed by raw
-        // member bytes and probed/rebuilt once per input set; the default SipHash
-        // is ~4x slower than foldhash for these short byte keys and showed up as a
-        // ~1.25x ZINTERSTORE/ZINTERCARD gap vs redis (whose dict uses a fast hash).
-        // Its iteration order is never observed (the result zset is built from it
-        // and ordered independently), so a fast hasher is safe.
-        let mut result: HashMap<Vec<u8>, f64, foldhash::quality::RandomState> =
-            match self.entries.get_mut(keys[min_idx]) {
+        match self.entries.get_mut(keys[min_idx]) {
             Some(entry) => {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample_min);
                 }
-                let w = weights.get(min_idx).copied().unwrap_or(1.0);
-                let res = match &entry.value {
-                    Value::SortedSet(zs) => zs
-                        .iter()
-                        .map(|(m, s)| (m.to_vec(), normalize_weighted_score(s, w)))
-                        .collect(),
-                    Value::Set(s) => s
-                        .iter()
-                        .map(|m| (m.into_owned(), normalize_weighted_score(1.0, w)))
-                        .collect(),
-                    _ => return Err(StoreError::WrongType),
-                };
+                if ZSetAlgebraInput::from_value(&entry.value).is_none() {
+                    return Err(StoreError::WrongType);
+                }
                 entry.touch(now_ms);
-                res
             }
-            None => HashMap::default(),
-        };
+            None => return Err(StoreError::WrongType),
+        }
 
         for (i, &key) in keys.iter().enumerate() {
             if i == min_idx {
-                continue;
-            }
-            let weight = weights.get(i).copied().unwrap_or(1.0);
-            if result.is_empty() {
-                let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-                    self.next_rand()
-                } else {
-                    0
-                };
-                if let Some(entry) = self.entries.get_mut(key)
-                    && matches!(entry.value, Value::SortedSet(_) | Value::Set(_))
-                {
-                    if lfu_tracking_enabled {
-                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                    }
-                    entry.touch(now_ms);
-                }
                 continue;
             }
             let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
@@ -14305,52 +14310,59 @@ impl Store {
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
-                    match &entry.value {
-                        Value::SortedSet(zs) => {
-                            result.retain(|member, score| {
-                                if let Some(other_score) = zs.get_score(member) {
-                                    *score =
-                                        aggregate_scores(*score, other_score * weight, aggregate);
-                                    true
-                                } else {
-                                    false
-                                }
-                            });
-                            entry.touch(now_ms);
-                        }
-                        Value::Set(s) => {
-                            result.retain(|member, score| {
-                                if s.contains(member) {
-                                    *score = aggregate_scores(*score, 1.0 * weight, aggregate);
-                                    true
-                                } else {
-                                    false
-                                }
-                            });
-                            entry.touch(now_ms);
-                        }
-                        _ => return Err(StoreError::WrongType),
+                    if ZSetAlgebraInput::from_value(&entry.value).is_none() {
+                        return Err(StoreError::WrongType);
                     }
+                    entry.touch(now_ms);
                 }
-                None => {
-                    result.clear();
-                }
+                None => return Err(StoreError::WrongType),
             }
         }
 
-        let count = result.len();
+        let (result, count) = {
+            let inputs: Vec<ZSetAlgebraInput<'_>> = keys
+                .iter()
+                .map(|key| {
+                    self.entries
+                        .get(*key)
+                        .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
+                        .ok_or(StoreError::WrongType)
+                })
+                .collect::<Result<_, _>>()?;
+
+            let mut result = SortedSet::new();
+            let min_weight = weights.get(min_idx).copied().unwrap_or(1.0);
+            inputs[min_idx].for_each(|member, score| {
+                let mut aggregate_score = normalize_weighted_score(score, min_weight);
+                for (i, input) in inputs.iter().copied().enumerate() {
+                    if i == min_idx {
+                        continue;
+                    }
+                    let Some(other_score) = input.score(member) else {
+                        return;
+                    };
+                    let weight = weights.get(i).copied().unwrap_or(1.0);
+                    aggregate_score =
+                        aggregate_scores(aggregate_score, other_score * weight, aggregate);
+                }
+                result.insert_with_limits(
+                    member.to_vec(),
+                    aggregate_score,
+                    zset_max_entries,
+                    zset_max_value,
+                );
+            });
+            let count = result.len();
+            (result, count)
+        };
         let deleted = self.internal_entries_remove(dest).is_some();
         self.stream_groups.remove(dest);
         self.stream_last_ids.remove(dest);
 
         if count > 0 {
-            let mut zs = SortedSet::new();
-            for (m, s) in result {
-                zs.insert_with_limits(m, s, zset_max_entries, zset_max_value);
-            }
             self.internal_entries_insert(
                 dest.to_vec(),
-                Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
+                Entry::new(Value::SortedSet(Box::new(result)), None, now_ms),
             );
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
@@ -24843,6 +24855,34 @@ mod tests {
             .zinterstore(b"i", &[b"c", b"d"], &[inf, 1.0], b"SUM", 0)
             .expect("zinterstore");
         assert_eq!(store.zscore(b"i", b"m", 0).expect("zscore"), Some(5.0));
+    }
+
+    #[test]
+    fn zinterstore_streaming_preserves_dest_source_and_duplicate_inputs() {
+        let mut store = Store::new();
+        store
+            .zadd(
+                b"z",
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"b".to_vec()),
+                    (3.0, b"c".to_vec()),
+                ],
+                0,
+            )
+            .expect("zadd z");
+        store
+            .zadd(b"other", &[(10.0, b"a".to_vec()), (20.0, b"c".to_vec())], 0)
+            .expect("zadd other");
+
+        let count = store
+            .zinterstore(b"z", &[b"z", b"other", b"z"], &[2.0, 3.0, 5.0], b"SUM", 0)
+            .expect("zinterstore");
+
+        assert_eq!(count, 2);
+        assert_eq!(store.zscore(b"z", b"a", 0).expect("zscore a"), Some(37.0));
+        assert_eq!(store.zscore(b"z", b"c", 0).expect("zscore c"), Some(81.0));
+        assert_eq!(store.zscore(b"z", b"b", 0).expect("zscore b"), None);
     }
 
     #[test]

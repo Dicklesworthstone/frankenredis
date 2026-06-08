@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-jjg2q/pass84-stream-zinterstore/zset_algebra_bench.py --port 17120 --case zinter2 --iters 800",
+      "mean": 2.5150908154371434,
+      "stddev": 0.013434244488250771,
+      "median": 2.51923991058,
+      "user": 0.0798618,
+      "system": 0.032892125714285715,
+      "min": 2.4942166505800003,
+      "max": 2.5298771065800003,
+      "times": [
+        2.51923991058,
+        2.5050206205800003,
+        2.4942166505800003,
+        2.5063603755800004,
+        2.5298771065800003,
+        2.5285103055800002,
+        2.52241073858
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-jjg2q/pass84-stream-zinterstore/zset_algebra_bench.py --port 17122 --case zinter2 --iters 800",
+      "mean": 1.6203861730085714,
+      "stddev": 0.01619139354023706,
+      "median": 1.61323638858,
+      "user": 0.0845958,
+      "system": 0.030398554285714283,
+      "min": 1.60666646358,
+      "max": 1.64987868858,
+      "times": [
+        1.60827916958,
+        1.60666646358,
+        1.64987868858,
+        1.61238508658,
+        1.61323638858,
+        1.63580493358,
+        1.61645248058
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
