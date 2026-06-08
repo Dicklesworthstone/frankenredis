@@ -9283,6 +9283,10 @@ fn resp_to_lua(frame: &RespFrame, resp3: bool) -> LuaValue {
         // RESP3 Boolean → Lua boolean (upstream redisProtocolToLuaType_Bool).
         // (frankenredis-0gz4g)
         RespFrame::Bool(b) => LuaValue::Bool(*b),
+        // RESP3 Attribute → its metadata pairs as a table, mirroring the Map
+        // conversion. No 7.2 command returns an attribute reply through
+        // redis.call, so this is a defensive arm. (frankenredis-01weh)
+        RespFrame::Attribute(pairs) => resp_to_lua(&RespFrame::Map(Some(pairs.clone())), resp3),
         RespFrame::SimpleString(s) => {
             let t = LuaTable::new();
             t.set(

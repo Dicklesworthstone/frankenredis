@@ -24246,13 +24246,27 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                     RespFrame::Integer(0),
                 ]))
             }),
-            // RESP3 wraps the reply in an attribute frame (`|…`); fr has no
-            // RespFrame::Attribute yet, so RESP3 still emits the bare reply —
-            // tracked as a follow-up (frankenredis-01weh). RESP2 (the
-            // bare reply) is already correct.
-            "attrib" => Ok(RespFrame::BulkString(Some(
-                b"Some real reply following the attribute".to_vec(),
-            ))),
+            // RESP3 prefixes the real reply with an attribute frame
+            // (`|1` key-popularity -> [key:123, 90]); RESP2 sees only the bare
+            // reply. (frankenredis-01weh)
+            "attrib" => {
+                let reply =
+                    RespFrame::BulkString(Some(b"Some real reply following the attribute".to_vec()));
+                Ok(if resp3 {
+                    RespFrame::Sequence(vec![
+                        RespFrame::Attribute(vec![(
+                            RespFrame::BulkString(Some(b"key-popularity".to_vec())),
+                            RespFrame::Array(Some(vec![
+                                RespFrame::BulkString(Some(b"key:123".to_vec())),
+                                RespFrame::Integer(90),
+                            ])),
+                        )]),
+                        reply,
+                    ])
+                } else {
+                    reply
+                })
+            }
             // RESP3 emits a bulk reply followed by an out-of-band Push frame;
             // RESP2 has no push representation, so upstream hard-errors.
             "push" => Ok(if resp3 {
@@ -51437,6 +51451,20 @@ mod tests {
                     RespFrame::BulkString(Some(b"server-cpu-usage".to_vec())),
                     RespFrame::Integer(42),
                 ]),
+            ])
+        );
+        // attrib: an Attribute frame prefixing the bare reply. (01weh)
+        assert_eq!(
+            proto(&mut store, "attrib"),
+            RespFrame::Sequence(vec![
+                RespFrame::Attribute(vec![(
+                    RespFrame::BulkString(Some(b"key-popularity".to_vec())),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"key:123".to_vec())),
+                        RespFrame::Integer(90),
+                    ])),
+                )]),
+                RespFrame::BulkString(Some(b"Some real reply following the attribute".to_vec())),
             ])
         );
         // Untyped scalars are protocol-agnostic.

@@ -28,6 +28,12 @@ pub enum RespFrame {
     /// client. Produced by the Lua boolean return path under `redis.setresp(3)`
     /// and by `DEBUG PROTOCOL true|false`. (frankenredis-0gz4g)
     Bool(bool),
+    /// RESP3 Attribute (`|count\r\n` followed by key/value pairs). An attribute
+    /// is metadata that PREFIXES the real reply on the wire — emit it as the
+    /// first element of a `Sequence` whose remaining element(s) are the reply
+    /// it annotates. RESP3-only (no RESP2 wire form). Used by
+    /// `DEBUG PROTOCOL attrib`. (frankenredis-01weh)
+    Attribute(Vec<(RespFrame, RespFrame)>),
 }
 
 /// Sanitize bytes destined for an inline RESP frame body (`SimpleString`
@@ -154,6 +160,8 @@ impl RespFrame {
             // `#t\r\n` / `#f\r\n` and the RESP2 `:1\r\n` / `:0\r\n` downgrade
             // are all 4 bytes.
             Self::Bool(_) => Some(4),
+            // `|count\r\n` header only; pairs add their own hints.
+            Self::Attribute(_) => None,
             Self::BulkString(None) => Some(5),
             Self::BulkString(Some(bytes)) => 1usize
                 .checked_add(decimal_usize_len(bytes.len()))?
@@ -279,6 +287,15 @@ impl RespFrame {
             Self::Bool(b) => {
                 out.extend_from_slice(if *b { b"#t\r\n" } else { b"#f\r\n" });
             }
+            Self::Attribute(entries) => {
+                out.extend_from_slice(b"|");
+                push_usize(out, entries.len());
+                out.extend_from_slice(b"\r\n");
+                for (key, value) in entries {
+                    key.encode_into(out);
+                    value.encode_into(out);
+                }
+            }
             Self::Set(None) => out.extend_from_slice(b"~-1\r\n"),
             Self::Set(Some(frames)) => {
                 out.extend_from_slice(b"~");
@@ -325,6 +342,15 @@ impl RespFrame {
             }
             Self::Map(Some(entries)) => {
                 out.extend_from_slice(b"%");
+                push_usize(out, entries.len());
+                out.extend_from_slice(b"\r\n");
+                for (key, value) in entries {
+                    key.encode_into_resp3(out);
+                    value.encode_into_resp3(out);
+                }
+            }
+            Self::Attribute(entries) => {
+                out.extend_from_slice(b"|");
                 push_usize(out, entries.len());
                 out.extend_from_slice(b"\r\n");
                 for (key, value) in entries {
@@ -2296,6 +2322,37 @@ mod tests {
             frame.encode_into(&mut a);
             assert_eq!(r3(&frame), a, "non-null frame must encode identically");
         }
+    }
+
+    #[test]
+    fn attribute_and_bool_frames_encode_resp3_wire_forms_01weh() {
+        // (frankenredis-0gz4g / 01weh) RESP3 Bool encodes `#t`/`#f`; the RESP3
+        // Attribute encodes `|count\r\n` followed by its pairs (same body shape
+        // as a Map but the `|` prefix). Both encode identically via encode_into
+        // and encode_into_resp3.
+        let r2 = |f: &RespFrame| {
+            let mut o = Vec::new();
+            f.encode_into(&mut o);
+            o
+        };
+        let r3 = |f: &RespFrame| {
+            let mut o = Vec::new();
+            f.encode_into_resp3(&mut o);
+            o
+        };
+        assert_eq!(r2(&RespFrame::Bool(true)), b"#t\r\n");
+        assert_eq!(r3(&RespFrame::Bool(false)), b"#f\r\n");
+        // DEBUG PROTOCOL attrib's attribute block.
+        let attr = RespFrame::Attribute(vec![(
+            RespFrame::BulkString(Some(b"key-popularity".to_vec())),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"key:123".to_vec())),
+                RespFrame::Integer(90),
+            ])),
+        )]);
+        let expected = b"|1\r\n$14\r\nkey-popularity\r\n*2\r\n$7\r\nkey:123\r\n:90\r\n".to_vec();
+        assert_eq!(r2(&attr), expected);
+        assert_eq!(r3(&attr), expected);
     }
 
     #[test]
