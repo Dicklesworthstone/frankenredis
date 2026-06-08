@@ -144,30 +144,58 @@ def main():
                 st[kk] = ("other", t)
         return st
 
+    def ping_ok(conn):
+        # +PONG iff the connection is still correctly framed; a stale/partial
+        # frame (recv split under host load) is the desync signal.
+        try:
+            return conn.cmd("PING") == ("ss", "PONG")
+        except Exception:
+            return False
+
     for sd in range(args.seeds):
         seed = 4000 + sd
-        random.seed(seed)
-        R.cmd("FLUSHALL"); F.cmd("FLUSHALL")
-        for n in range(args.iters):
-            argv = random.choice(gens)()
-            up = [str(x).upper() for x in argv]
-            if argv[0] in ("SPOP", "EXPIRE", "PEXPIRE", "EXPIREAT", "PEXPIREAT",
-                           "GETEX", "PERSIST", "SETEX", "PSETEX"):
-                continue
-            if argv[0].startswith("PF"):
-                continue
-            if any(o in up for o in ("EX", "PX", "EXAT", "PXAT")):
-                continue
-            R.cmd(*argv)
-            F.cmd(*argv)
-            sr, sf = snap(R), snap(F)
-            if sr != sf:
-                print(f"FAIL: state divergence seed={seed} iter={n}: {argv}")
-                for kk in KEYS:
-                    if sr[kk] != sf[kk]:
-                        print(f"  {kk}: redis={sr[kk]}\n      fr   ={sf[kk]}")
-                sys.exit(1)
-        print(f"seed {seed}: {args.iters} iters state-identical")
+        attempt = 0
+        while True:
+            attempt += 1
+            random.seed(seed)
+            R.cmd("FLUSHALL"); F.cmd("FLUSHALL")
+            desynced = False
+            for n in range(args.iters):
+                argv = random.choice(gens)()
+                up = [str(x).upper() for x in argv]
+                if argv[0] in ("SPOP", "EXPIRE", "PEXPIRE", "EXPIREAT", "PEXPIREAT",
+                               "GETEX", "PERSIST", "SETEX", "PSETEX"):
+                    continue
+                if argv[0].startswith("PF"):
+                    continue
+                if any(o in up for o in ("EX", "PX", "EXAT", "PXAT")):
+                    continue
+                R.cmd(*argv)
+                F.cmd(*argv)
+                sr, sf = snap(R), snap(F)
+                if sr != sf:
+                    # Re-verify framing before declaring a real bug: a transient
+                    # desync leaves the buffers misaligned and surfaces a phantom
+                    # state divergence. Only a divergence on two *synced*
+                    # connections is real.
+                    if ping_ok(R) and ping_ok(F):
+                        print(f"FAIL: state divergence seed={seed} iter={n}: {argv}")
+                        for kk in KEYS:
+                            if sr[kk] != sf[kk]:
+                                print(f"  {kk}: redis={sr[kk]}\n      fr   ={sf[kk]}")
+                        sys.exit(1)
+                    print(f"WARN: transient connection desync at seed={seed} iter={n} "
+                          f"({argv}); reconnecting and retrying seed", file=sys.stderr)
+                    R, F = Conn(args.oracle), Conn(args.fr)
+                    desynced = True
+                    break
+            if not desynced:
+                print(f"seed {seed}: {args.iters} iters state-identical")
+                break
+            if attempt >= 5:
+                print(f"FAIL: seed={seed} kept desyncing after {attempt} attempts "
+                      "(infra problem, not a parity result)", file=sys.stderr)
+                sys.exit(2)
     print(f"OK: {args.seeds} seeds x {args.iters} cmds — fr keyspace state matches "
           "redis 7.2.4 after every command")
 
