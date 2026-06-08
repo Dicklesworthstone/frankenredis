@@ -2937,6 +2937,15 @@ pub struct ServerState {
     /// (no event loop), where CONFIG SET port validates + stores without any
     /// socket side-effect. (frankenredis-zyx9q)
     bind_addr: String,
+    /// Current listen bind address list (mirrors redis server.bindaddr[]). Set
+    /// by the standalone server at startup and updated by CONFIG SET bind; used
+    /// by the CONFIG SET port/bind handlers to test-bind every address.
+    /// (frankenredis-jd75g)
+    bind_addrs: Vec<String>,
+    /// Pending CONFIG SET bind change for the standalone server event loop to
+    /// rebind the listening sockets to (the new full address list).
+    /// (frankenredis-jd75g)
+    pending_bind_change: Option<Vec<String>>,
 }
 
 impl Default for ServerState {
@@ -3038,6 +3047,8 @@ impl Default for ServerState {
             replica_reconfigure_requested: false,
             pending_port_change: None,
             bind_addr: String::new(),
+            bind_addrs: Vec::new(),
+            pending_bind_change: None,
         }
     }
 }
@@ -3954,7 +3965,10 @@ impl Runtime {
     /// empty (no event loop) and CONFIG SET port then only validates + stores.
     /// (frankenredis-zyx9q)
     pub fn set_bind_addr(&mut self, addr: String) {
-        self.server.bind_addr = addr;
+        self.server.bind_addr = addr.clone();
+        // (frankenredis-jd75g) The standalone server binds a single address at
+        // startup; seed the bind list so CONFIG SET port/bind can test-bind it.
+        self.server.bind_addrs = if addr.is_empty() { Vec::new() } else { vec![addr] };
     }
 
     /// Take a pending CONFIG SET port change for the standalone event loop to
@@ -3962,6 +3976,12 @@ impl Runtime {
     /// (frankenredis-zyx9q)
     pub fn take_pending_port_change(&mut self) -> Option<u16> {
         self.server.pending_port_change.take()
+    }
+
+    /// Take a pending CONFIG SET bind change (the new full address list) for the
+    /// standalone event loop to rebind the listening sockets to. (frankenredis-jd75g)
+    pub fn take_pending_bind_change(&mut self) -> Option<Vec<String>> {
+        self.server.pending_bind_change.take()
     }
 
     #[must_use]
@@ -14192,19 +14212,72 @@ impl Runtime {
                     Ok(value) => value as u16,
                     Err(resp) => return resp,
                 };
-                if !self.server.bind_addr.is_empty() {
-                    let bind_addr = self.server.bind_addr.clone();
-                    if std::net::TcpListener::bind((bind_addr.as_str(), parsed)).is_err() {
-                        return config_set_failed(
-                            "port",
-                            "Unable to listen on this port. Check server logs.",
-                        );
+                if !self.server.bind_addr.is_empty() && parsed != self.server_port() {
+                    // Test-bind EVERY current bind address at the NEW port
+                    // (frankenredis-jd75g: the list may hold >1 after CONFIG SET
+                    // bind), reproducing changeListener's all-or-nothing bind.
+                    // Skipped when the port is unchanged (a no-op rebind would
+                    // self-conflict with the server's own held sockets).
+                    for addr in &self.server.bind_addrs {
+                        if std::net::TcpListener::bind((addr.as_str(), parsed)).is_err() {
+                            return config_set_failed(
+                                "port",
+                                "Unable to listen on this port. Check server logs.",
+                            );
+                        }
                     }
-                    // Test-bind dropped here; the event loop performs the real
-                    // mio rebind (bind-new-before-drop-old) on its next pass.
+                    // Test-binds dropped here; the event loop performs the real
+                    // mio rebind (close-old-then-bind-new with rollback).
                     self.server.pending_port_change = Some(parsed);
                 }
                 self.set_server_port(parsed);
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("bind") {
+                // (frankenredis-jd75g) Upstream config.c declares bind as a
+                // MODIFIABLE_CONFIG | MULTI_ARG_CONFIG special config: the value
+                // is split on whitespace into up to CONFIG_BINDADDR_MAX (16)
+                // addresses (setConfigBindOption), then applyBind rebinds every
+                // listener — returning "Failed to bind to specified addresses."
+                // if any can't be bound, and keeping the old listeners. A single
+                // empty value means "bind nothing" (zero addresses). Existing
+                // client connections survive; only the listeners move.
+                let value = match std::str::from_utf8(&pair[1]) {
+                    Ok(v) => v,
+                    Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+                };
+                let addrs: Vec<String> =
+                    value.split_whitespace().map(|s| s.to_string()).collect();
+                if addrs.len() > 16 {
+                    return config_set_failed("bind", "Too many bind addresses specified.");
+                }
+                if !self.server.bind_addr.is_empty() {
+                    // Standalone server: test-bind each ADDED address at the
+                    // current port to reproduce applyBind's all-or-nothing error
+                    // path before signalling the event-loop rebind. Addresses
+                    // already in the live set are skipped — the server itself
+                    // currently holds them, so a test-bind would spuriously fail
+                    // with EADDRINUSE (the real rebind closes them first).
+                    let port = self.server_port();
+                    for addr in &addrs {
+                        if self.server.bind_addrs.iter().any(|cur| cur == addr) {
+                            continue;
+                        }
+                        if std::net::TcpListener::bind((addr.as_str(), port)).is_err() {
+                            return config_set_failed(
+                                "bind",
+                                "Failed to bind to specified addresses.",
+                            );
+                        }
+                    }
+                    self.server.pending_bind_change = Some(addrs.clone());
+                }
+                // bind_addr stays as the startup standalone-mode sentinel; the
+                // live address list lives in bind_addrs. CONFIG GET bind echoes
+                // the space-joined list (matching getConfigBindOption).
+                let joined = addrs.join(" ");
+                self.server.bind_addrs = addrs;
+                static_override_updates.push(("bind".to_string(), joined));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("appendfilename")
@@ -14213,7 +14286,6 @@ impl Runtime {
                 || parameter.eq_ignore_ascii_case("aof_rewrite_cpulist")
                 || parameter.eq_ignore_ascii_case("bgsave_cpulist")
                 || parameter.eq_ignore_ascii_case("bio_cpulist")
-                || parameter.eq_ignore_ascii_case("bind")
                 || parameter.eq_ignore_ascii_case("cluster-config-file")
                 || parameter.eq_ignore_ascii_case("cluster-enabled")
                 || parameter.eq_ignore_ascii_case("cluster-port")
@@ -32373,6 +32445,58 @@ mod tests {
                 ok,
             );
         }
+    }
+
+    /// (frankenredis-jd75g) CONFIG SET bind is MODIFIABLE_CONFIG | MULTI_ARG in
+    /// redis 7.2.4, not immutable: the value is split on whitespace into up to
+    /// CONFIG_BINDADDR_MAX (16) addresses, echoed space-joined by CONFIG GET. In
+    /// library/test contexts (empty bind_addr) it validates the count + stores
+    /// the list with no socket side-effect; the standalone server rebinds.
+    #[test]
+    fn config_set_bind_is_modifiable_multi_arg_jd75g() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        // Single + multi address accepted; CONFIG GET echoes the space-joined list.
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"bind", b"127.0.0.1 ::1"]), 0),
+            ok,
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"bind"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"bind".to_vec())),
+                RespFrame::BulkString(Some(b"127.0.0.1 ::1".to_vec())),
+            ])),
+        );
+        // Whitespace is normalized to single spaces (matches getConfigBindOption).
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"bind", b"  127.0.0.1   ::1  "]), 0),
+            ok,
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"bind"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"bind".to_vec())),
+                RespFrame::BulkString(Some(b"127.0.0.1 ::1".to_vec())),
+            ])),
+        );
+        // More than CONFIG_BINDADDR_MAX (16) addresses is rejected.
+        let seventeen = vec![b"127.0.0.1".as_slice(); 17].join(&b' ');
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"bind", &seventeen]), 0),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'bind') - Too many bind addresses specified."
+                    .to_string()
+            ),
+        );
+        // Exactly 16 is allowed.
+        let sixteen = vec![b"127.0.0.1".as_slice(); 16].join(&b' ');
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"bind", &sixteen]), 0),
+            ok,
+        );
+        // No pending rebind is queued when there is no event loop (bind_addr empty).
+        assert_eq!(rt.take_pending_bind_change(), None);
     }
 
     /// (frankenredis-zyx9q) CONFIG SET port is MODIFIABLE_CONFIG in redis

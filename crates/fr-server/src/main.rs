@@ -41,8 +41,11 @@ use mio::{Events, Interest, Poll, Token};
 const DEFAULT_PORT: u16 = 6379;
 const DEFAULT_MODE: &str = "strict";
 
-/// Token for the TCP listener socket.
-const LISTENER: Token = Token(0); // ubs:ignore
+/// (frankenredis-jd75g) Tokens `0..MAX_LISTENERS` are reserved for listening
+/// sockets (one per bind address, mirroring redis CONFIG_BINDADDR_MAX); client
+/// connection handles start at `MAX_LISTENERS`. Lets CONFIG SET bind rebind a
+/// multi-address listener set without colliding with client tokens.
+const MAX_LISTENERS: usize = 16;
 
 const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
 const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
@@ -956,21 +959,6 @@ fn main() -> ExitCode {
         }
     }
 
-    let addr: SocketAddr = match format!("{bind_addr}:{port}").parse() {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("error: invalid bind address '{bind_addr}:{port}': {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let mut listener = match TcpListener::bind(addr) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("error: failed to bind to {addr}: {e}");
-            return ExitCode::from(1);
-        }
-    };
-
     let mut poll = match Poll::new() {
         Ok(p) => p,
         Err(e) => {
@@ -979,13 +967,20 @@ fn main() -> ExitCode {
         }
     };
 
-    if let Err(e) = poll
-        .registry()
-        .register(&mut listener, LISTENER, Interest::READABLE)
-    {
-        eprintln!("error: failed to register listener: {e}");
-        return ExitCode::from(1);
-    }
+    // (frankenredis-jd75g) Bind one listener per configured address. Startup
+    // binds the single configured bind address; CONFIG SET bind can later grow
+    // this to a set of up to MAX_LISTENERS. cur_binds / cur_listen_port track
+    // the live set so a CONFIG SET port or bind change can recompute it.
+    let mut cur_binds: Vec<String> = vec![bind_addr.clone()];
+    let mut cur_listen_port: u16 = port;
+    let mut listeners: Vec<TcpListener> =
+        match bind_and_register(&poll, &cur_binds, cur_listen_port) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(1);
+            }
+        };
 
     eprintln!(
         "FrankenRedis v{} ready (mode={mode_str}, port={port})",
@@ -1002,7 +997,9 @@ fn main() -> ExitCode {
     let mut paused_tokens: HashSet<Token> = HashSet::new();
     let mut deferred_tokens: HashSet<Token> = HashSet::new();
     let mut replica_sync = ReplicaSyncState::new();
-    let mut next_handle: usize = 1;
+    // (frankenredis-jd75g) Client handles start above the reserved listener
+    // token range (0..MAX_LISTENERS).
+    let mut next_handle: usize = MAX_LISTENERS;
     let tick_budget = TickBudget::default();
     let mut last_ops_sample_ms: u64 = now_ms();
     // (frankenredis-pkdgs) Last wall-clock ms a sentinel-mode INFO/PING probe of
@@ -1043,9 +1040,11 @@ fn main() -> ExitCode {
 
         for event in events.iter() {
             match event.token() {
-                LISTENER => {
+                // (frankenredis-jd75g) Tokens 0..listeners.len() are listening
+                // sockets; accept from the one that signalled readiness.
+                listener_tok if listener_tok.0 < listeners.len() => {
                     accept_connections(
-                        &listener,
+                        &listeners[listener_tok.0],
                         &mut poll,
                         &mut clients,
                         &mut client_id_to_token,
@@ -1265,38 +1264,34 @@ fn main() -> ExitCode {
             }
         }
 
-        // (frankenredis-zyx9q) Apply a pending CONFIG SET port change by
-        // rebinding the listening socket. Bind + register the NEW listener
-        // first and only swap it in (and drop the old) on success, so a rare
-        // TOCTOU bind failure after the runtime's test-bind leaves the old
-        // listener intact and the server reachable. Existing client connections
-        // live on separate tokens and are untouched — only the listener moves,
-        // matching upstream config.c::updatePort.
+        // (frankenredis-zyx9q / jd75g) Apply a pending CONFIG SET port or bind
+        // change by rebinding the whole listener set. The runtime has already
+        // test-bound the new addresses (so this should succeed); rebind_listeners
+        // binds + registers the NEW set first and only swaps it in on success,
+        // leaving the old set reachable on any rare TOCTOU failure. Existing
+        // client connections (tokens >= MAX_LISTENERS) are untouched.
         if let Some(new_port) = runtime.take_pending_port_change() {
-            match format!("{bind_addr}:{new_port}").parse::<SocketAddr>() {
-                Ok(new_addr) => match TcpListener::bind(new_addr) {
-                    Ok(mut new_listener) => {
-                        if let Err(e) =
-                            poll.registry()
-                                .register(&mut new_listener, LISTENER, Interest::READABLE)
-                        {
-                            eprintln!(
-                                "warn: CONFIG SET port: failed to register listener on {new_addr}: {e}"
-                            );
-                        } else {
-                            let _ = poll.registry().deregister(&mut listener);
-                            listener = new_listener;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("warn: CONFIG SET port: failed to bind {new_addr}: {e}");
-                    }
-                },
-                Err(e) => {
-                    eprintln!(
-                        "warn: CONFIG SET port: invalid address '{bind_addr}:{new_port}': {e}"
-                    );
-                }
+            if rebind_listeners(
+                &mut poll,
+                &mut listeners,
+                &cur_binds,
+                cur_listen_port,
+                &cur_binds.clone(),
+                new_port,
+            ) {
+                cur_listen_port = new_port;
+            }
+        }
+        if let Some(new_binds) = runtime.take_pending_bind_change() {
+            if rebind_listeners(
+                &mut poll,
+                &mut listeners,
+                &cur_binds,
+                cur_listen_port,
+                &new_binds,
+                cur_listen_port,
+            ) {
+                cur_binds = new_binds;
             }
         }
 
@@ -1321,6 +1316,79 @@ fn main() -> ExitCode {
             }
             eprintln!("info: shutdown requested, exiting gracefully");
             return ExitCode::SUCCESS;
+        }
+    }
+}
+
+/// (frankenredis-jd75g) Bind one TCP listener per address in `addrs` at `port`
+/// and register each with the poll under its listener token (`Token(0..N)`),
+/// mirroring redis's multi-address bind. Binds all first, then registers all,
+/// so a mid-way failure cleans up fully and never disturbs the caller's
+/// existing listeners. An empty `addrs` yields zero listeners (server listens
+/// on nothing — matching redis `bind ""`).
+fn bind_and_register(poll: &Poll, addrs: &[String], port: u16) -> Result<Vec<TcpListener>, String> {
+    if addrs.len() > MAX_LISTENERS {
+        return Err(format!(
+            "too many bind addresses ({} > {MAX_LISTENERS})",
+            addrs.len()
+        ));
+    }
+    let mut listeners: Vec<TcpListener> = Vec::with_capacity(addrs.len());
+    for a in addrs {
+        let sa: SocketAddr = format!("{a}:{port}")
+            .parse()
+            .map_err(|e| format!("invalid bind address '{a}:{port}': {e}"))?;
+        let listener = TcpListener::bind(sa).map_err(|e| format!("failed to bind to {sa}: {e}"))?;
+        listeners.push(listener);
+    }
+    for (i, listener) in listeners.iter_mut().enumerate() {
+        if let Err(e) = poll
+            .registry()
+            .register(listener, Token(i), Interest::READABLE)
+        {
+            for prev in listeners.iter_mut().take(i) {
+                let _ = poll.registry().deregister(prev);
+            }
+            return Err(format!("failed to register listener {i}: {e}"));
+        }
+    }
+    Ok(listeners)
+}
+
+/// (frankenredis-jd75g) Apply a CONFIG SET port/bind change by rebinding the
+/// whole listener set to `new_binds` x `new_port`, mirroring redis
+/// changeListener: deregister + close the OLD listeners first (so a retained
+/// address:port can be re-bound — the server can't hold two sockets on its own
+/// address), then bind + register the NEW set. On failure the OLD set is
+/// rebound (rollback) so the server stays reachable. The runtime test-binds any
+/// genuinely-new addresses beforehand, so this normally succeeds; the no-listener
+/// window is a single event-loop iteration (sub-millisecond, no awaits). Existing
+/// client connections (tokens >= MAX_LISTENERS) are untouched. Returns true iff
+/// the new set is now live.
+fn rebind_listeners(
+    poll: &mut Poll,
+    listeners: &mut Vec<TcpListener>,
+    old_binds: &[String],
+    old_port: u16,
+    new_binds: &[String],
+    new_port: u16,
+) -> bool {
+    for old in listeners.iter_mut() {
+        let _ = poll.registry().deregister(old);
+    }
+    listeners.clear(); // drop closes the old sockets, freeing their addresses
+    match bind_and_register(poll, new_binds, new_port) {
+        Ok(new_listeners) => {
+            *listeners = new_listeners;
+            true
+        }
+        Err(e) => {
+            eprintln!("warn: CONFIG SET port/bind: rebind failed ({e}); restoring previous listeners");
+            match bind_and_register(poll, old_binds, old_port) {
+                Ok(restored) => *listeners = restored,
+                Err(e2) => eprintln!("error: failed to restore previous listeners: {e2}"),
+            }
+            false
         }
     }
 }
@@ -1353,9 +1421,10 @@ fn accept_connections(
             Ok((mut stream, peer_addr)) => {
                 let conn_handle = Token(*next_handle);
                 *next_handle = next_handle.wrapping_add(1);
-                // Avoid colliding with LISTENER token (0).
-                if *next_handle == 0 {
-                    *next_handle = 1;
+                // Avoid colliding with the reserved listener token range
+                // (0..MAX_LISTENERS). (frankenredis-jd75g)
+                if *next_handle < MAX_LISTENERS {
+                    *next_handle = MAX_LISTENERS;
                 }
 
                 if let Err(e) = stream.set_nodelay(true) {
