@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /tmp/codex-fr-wooin-baseline-target/release-perf/frankenredis --port 19984 --requests 1000000 --clients 50 --pipeline 16 --keyspace 1000000 --datasize 3 --mix alternate --key-prefix fr:wooin:paired-base --json-out artifacts/optimization/frankenredis-wooin/baseline/last-paired-setex-p16-1m.json",
+      "mean": 4.7614001335400005,
+      "stddev": 0.07191982312982163,
+      "median": 4.77154329254,
+      "user": 7.096456859999999,
+      "system": 5.007974139999999,
+      "min": 4.64591492954,
+      "max": 4.83553010254,
+      "times": [
+        4.64591492954,
+        4.80218333054,
+        4.75182901254,
+        4.77154329254,
+        4.83553010254
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /tmp/codex-fr-wooin-candidate-target/release-perf/frankenredis --port 19985 --requests 1000000 --clients 50 --pipeline 16 --keyspace 1000000 --datasize 3 --mix alternate --key-prefix fr:wooin:paired-cand --json-out artifacts/optimization/frankenredis-wooin/candidate/last-paired-setex-p16-1m.json",
+      "mean": 4.910629181140001,
+      "stddev": 0.2414928371838538,
+      "median": 4.8070115835400005,
+      "user": 7.202359660000001,
+      "system": 5.13697674,
+      "min": 4.74462594654,
+      "max": 5.33627395554,
+      "times": [
+        4.86122028654,
+        4.8070115835400005,
+        4.80401413354,
+        4.74462594654,
+        5.33627395554
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

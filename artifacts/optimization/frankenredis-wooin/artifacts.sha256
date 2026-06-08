@@ -1,0 +1,5 @@
+b9e9687a1e475ed85163f1d6491a077b234222688048f140ac2b25f01838d42a  artifacts/optimization/frankenredis-wooin/PROOF.md
+9118b58af555942140c72705fffcf7549551d65d78f60310039d41c04e034d2a  artifacts/optimization/frankenredis-wooin/candidate/resp-golden-compare.json
+7316439da5b8192f2df67b42a91bd55fba5e029472517702dcf13bdfbd7f1edd  artifacts/optimization/frankenredis-wooin/candidate/setex-p16-1m-paired-hyperfine.json
+bfe4c790be84bde2996b33845c117abd032da8bed2cf5e97fd39a6f61165335a  artifacts/optimization/frankenredis-wooin/baseline/last-paired-setex-p16-1m.json
+38b6b4ff64662da61787c29500714b50a4b413be429fb229588474954f652512  artifacts/optimization/frankenredis-wooin/candidate/last-paired-setex-p16-1m.json
