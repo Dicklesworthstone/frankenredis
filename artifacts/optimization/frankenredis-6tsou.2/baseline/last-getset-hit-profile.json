@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr6tsou2-profile-getset",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 2700000,
+    "bytes_sent": 19800000,
+    "commands": 300000,
+    "ops_per_sec": 103622.63785314249,
+    "pipeline_latency_us": {
+      "mean": 6813.003024725865,
+      "p50": 6156.202056445181,
+      "p95": 16363.01598045975,
+      "p99": 23170.341039076447,
+      "samples": 18750
+    },
+    "seconds": 2.8951202769530937
+  },
+  "mode": "getset-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 50000,
+    "bytes_sent": 630000,
+    "commands": 10000,
+    "seconds": 0.08009874098934233
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}
