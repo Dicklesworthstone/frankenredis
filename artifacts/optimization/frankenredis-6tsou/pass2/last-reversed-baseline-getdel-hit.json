@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr:6tsou:pass2:rev:base",
+  "keyspace": 300000,
+  "measured": {
+    "bytes_received": 2700000,
+    "bytes_sent": 17100000,
+    "commands": 300000,
+    "ops_per_sec": 157825.88537537563,
+    "pipeline_latency_us": {
+      "mean": 4792.779261836162,
+      "p50": 4124.884027987719,
+      "p95": 10301.853995770216,
+      "p99": 13856.458012014627,
+      "samples": 18750
+    },
+    "seconds": 1.9008288740878925
+  },
+  "mode": "getdel-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 1500000,
+    "bytes_sent": 18900000,
+    "commands": 300000,
+    "seconds": 3.0333050220506266
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

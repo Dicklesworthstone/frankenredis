@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr:6tsou:pass2:rev:candidate",
+  "keyspace": 300000,
+  "measured": {
+    "bytes_received": 2700000,
+    "bytes_sent": 18600000,
+    "commands": 300000,
+    "ops_per_sec": 163997.17898801368,
+    "pipeline_latency_us": {
+      "mean": 4674.972819189231,
+      "p50": 3993.5250533744693,
+      "p95": 10443.182894960046,
+      "p99": 14405.468013137579,
+      "samples": 18750
+    },
+    "seconds": 1.8292997590033337
+  },
+  "mode": "getdel-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 1500000,
+    "bytes_sent": 20400000,
+    "commands": 300000,
+    "seconds": 2.931834810995497
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

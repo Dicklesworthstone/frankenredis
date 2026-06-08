@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr:6tsou:pass2:getdel:profile",
+  "keyspace": 300000,
+  "measured": {
+    "bytes_received": 2700000,
+    "bytes_sent": 18900000,
+    "commands": 300000,
+    "ops_per_sec": 97855.84962029298,
+    "pipeline_latency_us": {
+      "mean": 7914.894465139756,
+      "p50": 6940.918974578381,
+      "p95": 16948.585980571806,
+      "p99": 23267.486016266048,
+      "samples": 18750
+    },
+    "seconds": 3.0657339460449293
+  },
+  "mode": "getdel-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 1500000,
+    "bytes_sent": 20700000,
+    "commands": 300000,
+    "seconds": 2.806795289972797
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

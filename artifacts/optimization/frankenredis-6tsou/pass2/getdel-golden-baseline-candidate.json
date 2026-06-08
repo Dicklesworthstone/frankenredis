@@ -1,0 +1,60 @@
+{
+  "cases": [
+    [
+      "FLUSHALL"
+    ],
+    [
+      "SET",
+      "a",
+      "alpha"
+    ],
+    [
+      "SET",
+      "b",
+      "bravo"
+    ],
+    [
+      "GETDEL",
+      "a"
+    ],
+    [
+      "GET",
+      "a"
+    ],
+    [
+      "GET",
+      "b"
+    ],
+    [
+      "GETDEL",
+      "missing"
+    ],
+    [
+      "RPUSH",
+      "list",
+      "x"
+    ],
+    [
+      "GETDEL",
+      "list"
+    ],
+    [
+      "GET",
+      "list"
+    ]
+  ],
+  "schema": "frankenredis_6tsou_getdel_golden_v1",
+  "sha256": "88522d7770f2995f05572dc89f71a662c9d1ce7084b2af2f2559e5023dc29b5d",
+  "transcript": [
+    "+OK\r\n",
+    "+OK\r\n",
+    "+OK\r\n",
+    "$5\r\nalpha\r\n",
+    "$-1\r\n",
+    "$5\r\nbravo\r\n",
+    "$-1\r\n",
+    ":1\r\n",
+    "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n",
+    "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+  ]
+}

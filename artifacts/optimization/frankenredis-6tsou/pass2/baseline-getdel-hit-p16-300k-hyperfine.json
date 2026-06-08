@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /tmp/codex-fr-6tsou-pass2-base-target/release-perf/frankenredis --mode getdel-hit --port 16630 --json-out artifacts/optimization/frankenredis-6tsou/pass2/last-baseline-getdel-hit.json --requests 300000 --clients 50 --pipeline 16 --keyspace 300000 --datasize 3 --key-prefix fr:6tsou:pass2:getdel:base",
+      "mean": 6.15047995392,
+      "stddev": 0.23912184538679557,
+      "median": 6.21322919452,
+      "user": 5.05481318,
+      "system": 2.4237573000000006,
+      "min": 5.70518622302,
+      "max": 6.51266835802,
+      "times": [
+        6.17968136702,
+        6.33813374102,
+        6.30030453902,
+        6.51266835802,
+        5.96773963402,
+        6.30209351102,
+        6.24677702202,
+        5.70518622302,
+        5.98524587902,
+        5.96696926502
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

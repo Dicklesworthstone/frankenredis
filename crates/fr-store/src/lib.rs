@@ -4569,6 +4569,7 @@ impl Store {
         self.stream_groups.remove(key);
         self.stream_last_ids.remove(key);
         self.dirty = self.dirty.saturating_add(1);
+        self.adjust_cached_memory_usage_after_remove(key, &entry);
         match entry.value {
             Value::String(v) => Ok(Some(v.into_vec())),
             Value::Integer(value) => Ok(Some(value.to_string().into_bytes())),
@@ -14871,6 +14872,25 @@ impl Store {
         self.cached_memory_usage_bytes.set(usage);
         self.cached_memory_usage_dirty.set(mutations);
         usage
+    }
+
+    fn adjust_cached_memory_usage_after_remove(&self, key: &[u8], entry: &Entry) {
+        let cached_bytes = self.cached_memory_usage_bytes.get();
+        if cached_bytes == 0 {
+            return;
+        }
+        let cached_dirty = self.cached_memory_usage_dirty.get();
+        let mutations = self
+            .dirty
+            .saturating_add(self.stat_evicted_keys)
+            .saturating_add(self.stat_expired_keys);
+        if cached_dirty.saturating_add(1) != mutations {
+            return;
+        }
+        let removed_bytes = estimate_entry_memory_usage_bytes(key, entry);
+        self.cached_memory_usage_bytes
+            .set(cached_bytes.saturating_sub(removed_bytes));
+        self.cached_memory_usage_dirty.set(mutations);
     }
 
     fn sampled_eviction_candidate_keys(
@@ -29448,6 +29468,28 @@ mod tests {
         let v = store.getdel(b"k", 0).unwrap();
         assert_eq!(v, Some(b"v".to_vec()));
         assert_eq!(store.get(b"k", 0).unwrap(), None);
+    }
+
+    #[test]
+    fn getdel_keeps_exact_memory_cache_incremental_after_remove() {
+        let mut store = Store::new();
+        store.set(b"a".to_vec(), b"alpha".to_vec(), None, 0);
+        store.set(b"b".to_vec(), b"bravo".to_vec(), None, 0);
+
+        let before = store.estimate_memory_usage_bytes();
+        let cached_dirty_before = store.cached_memory_usage_dirty.get();
+        let removed = store.memory_usage_for_key(b"a", 0).unwrap();
+        let remaining = store.memory_usage_for_key(b"b", 0).unwrap();
+        assert_eq!(before, removed.saturating_add(remaining));
+
+        assert_eq!(store.getdel(b"a", 1).unwrap(), Some(b"alpha".to_vec()));
+
+        assert_eq!(store.cached_memory_usage_bytes.get(), remaining);
+        assert_eq!(
+            store.cached_memory_usage_dirty.get(),
+            cached_dirty_before.saturating_add(1)
+        );
+        assert_eq!(store.estimate_memory_usage_bytes(), remaining);
     }
 
     /// (frankenredis listpack DUMP LZF parity) Upstream rdbSaveObject persists a
