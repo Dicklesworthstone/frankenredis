@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /data/projects/.scratch/frankenredis-6kecb-pass84-candidate-target/release-perf/frankenredis --port 27432 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix fr:6kecb:p84:rev:cand --json-out artifacts/optimization/frankenredis-6kecb/pass84-setex-metadata/candidate/last-reversed-setex-psetex-p16-1m.json",
+      "mean": 4.59594142588,
+      "stddev": 0.03699489760001452,
+      "median": 4.59922859888,
+      "user": 6.744322459999999,
+      "system": 5.6584641514285705,
+      "min": 4.53980678188,
+      "max": 4.63627857888,
+      "times": [
+        4.59922859888,
+        4.55379011388,
+        4.53980678188,
+        4.63627857888,
+        4.59875144688,
+        4.63398789488,
+        4.60974656588
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /data/projects/.scratch/frankenredis-6kecb-pass84-baseline-target/release-perf/frankenredis --port 27433 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix fr:6kecb:p84:rev:base --json-out artifacts/optimization/frankenredis-6kecb/pass84-setex-metadata/baseline/last-reversed-setex-psetex-p16-1m.json",
+      "mean": 4.607915604022857,
+      "stddev": 0.03911053704857246,
+      "median": 4.61934978888,
+      "user": 6.765619317142857,
+      "system": 5.693308865714285,
+      "min": 4.54145847888,
+      "max": 4.65960868888,
+      "times": [
+        4.57225065088,
+        4.62782293088,
+        4.62480383388,
+        4.54145847888,
+        4.61934978888,
+        4.61011485588,
+        4.65960868888
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

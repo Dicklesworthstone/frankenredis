@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /data/projects/.scratch/frankenredis-6kecb-pass84-baseline-target/release-perf/frankenredis --port 27410 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix fr:6kecb:p84:base --json-out artifacts/optimization/frankenredis-6kecb/pass84-setex-metadata/baseline/last-setex-psetex-p16-1m.json",
+      "mean": 4.731630541671429,
+      "stddev": 0.2602077052083319,
+      "median": 4.5744992370999995,
+      "user": 6.915146051428571,
+      "system": 6.114185268571428,
+      "min": 4.511850423099999,
+      "max": 5.2072495971,
+      "times": [
+        4.5294806731,
+        5.2072495971,
+        4.8905583330999995,
+        4.511850423099999,
+        4.8442076311,
+        4.5744992370999995,
+        4.5635678970999995
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
