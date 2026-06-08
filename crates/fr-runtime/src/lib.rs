@@ -160,6 +160,21 @@ fn acl_rule_is_identity(rule: &[u8]) -> bool {
         || s.starts_with('#')
 }
 
+/// Re-label an ACL rule error so its reported modifier is the whole original
+/// selector argument (e.g. `(+get) (+set)`), not the single inner token that
+/// failed — mirroring upstream, which always reports the full `(...)` arg.
+/// The inner error's reason is preserved verbatim. (frankenredis-aclsel)
+fn relabel_acl_selector_error(err: &str, original_arg: &str, applied_rule: &[u8]) -> String {
+    let applied = String::from_utf8_lossy(applied_rule);
+    let expected = format!("ERR Error in ACL SETUSER modifier '{applied}': ");
+    match err.strip_prefix(&expected) {
+        Some(reason) => {
+            format!("ERR Error in ACL SETUSER modifier '{original_arg}': {reason}")
+        }
+        None => err.to_string(),
+    }
+}
+
 /// Parse a `%`-prefixed ACL key selector modifier into
 /// `(pattern_bytes, read, write)`.
 ///
@@ -1961,7 +1976,13 @@ impl AuthState {
                     }
                 }
                 if !closed {
-                    return Err("ERR Unmatched parenthesis in selector specification.".to_string());
+                    // Upstream acl.c reports the text from the unmatched '('
+                    // onward: "Unmatched parenthesis in acl selector starting
+                    // at '<text>'." (frankenredis-aclsel)
+                    return Err(format!(
+                        "ERR Unmatched parenthesis in acl selector starting at '{}'.",
+                        String::from_utf8_lossy(&acc)
+                    ));
                 }
                 out.push(acc);
             } else {
@@ -1985,16 +2006,25 @@ impl AuthState {
     ) -> Result<(), String> {
         let inner = token[1..token.len() - 1].trim();
         let inner_rules: Vec<&[u8]> = inner.split_whitespace().map(str::as_bytes).collect();
+        let mut selector = AclUser::new_restricted(acl_pubsub_default);
+        // Upstream acl.c::ACLSetSelector applies the inner rules left-to-right
+        // and fails on the FIRST invalid one, always reporting the ORIGINAL
+        // `(...)` arg as the modifier. Identity rules (on/off/passwords/reset/…)
+        // and nested selectors (`(`-leading tokens) are not permitted inside a
+        // selector and surface as a plain "Syntax error". (frankenredis-aclsel)
         for rule in &inner_rules {
-            if acl_rule_is_identity(rule) {
-                let bad = String::from_utf8_lossy(rule);
+            if rule.first() == Some(&b'(') || acl_rule_is_identity(rule) {
                 return Err(format!(
-                    "ERR Error in ACL SETUSER modifier '{bad}': Syntax error"
+                    "ERR Error in ACL SETUSER modifier '{token}': Syntax error"
                 ));
             }
+            Self::apply_acl_rules_to_user(
+                &mut selector,
+                std::slice::from_ref(rule),
+                acl_pubsub_default,
+            )
+            .map_err(|e| relabel_acl_selector_error(&e, token, rule))?;
         }
-        let mut selector = AclUser::new_restricted(acl_pubsub_default);
-        Self::apply_acl_rules_to_user(&mut selector, &inner_rules, acl_pubsub_default)?;
         user.selectors.push(selector);
         Ok(())
     }
@@ -34482,6 +34512,60 @@ mod tests {
             2,
         );
         assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn acl_setuser_selector_errors_match_upstream_aclsel() {
+        // (frankenredis-aclsel) Upstream acl.c selector parsing edge cases.
+        let mut rt = Runtime::default_strict();
+        let err = |rt: &mut Runtime, rule: &[u8]| -> String {
+            match rt.execute_frame(command(&[b"ACL", b"SETUSER", b"u", b"reset", rule]), 0) {
+                RespFrame::Error(e) => e,
+                other => panic!("expected error for {:?}, got {other:?}", String::from_utf8_lossy(rule)),
+            }
+        };
+        // Unmatched parenthesis reports the text from the '(' onward.
+        assert_eq!(
+            err(&mut rt, b"(+get"),
+            "ERR Unmatched parenthesis in acl selector starting at '(+get'."
+        );
+        assert_eq!(
+            err(&mut rt, b"("),
+            "ERR Unmatched parenthesis in acl selector starting at '('."
+        );
+        // Identity rules inside a selector report the ORIGINAL arg, not the
+        // inner token.
+        assert_eq!(
+            err(&mut rt, b"(on)"),
+            "ERR Error in ACL SETUSER modifier '(on)': Syntax error"
+        );
+        assert_eq!(
+            err(&mut rt, b"(>pass)"),
+            "ERR Error in ACL SETUSER modifier '(>pass)': Syntax error"
+        );
+        // Nested selectors are rejected (no recursion).
+        assert_eq!(
+            err(&mut rt, b"((+get))"),
+            "ERR Error in ACL SETUSER modifier '((+get))': Syntax error"
+        );
+        assert_eq!(
+            err(&mut rt, b"(~k1 (+get))"),
+            "ERR Error in ACL SETUSER modifier '(~k1 (+get))': Syntax error"
+        );
+        // Two parenthesised groups in one arg: the first inner token fails as an
+        // unknown command, reported against the whole original arg.
+        assert_eq!(
+            err(&mut rt, b"(+get) (+set)"),
+            "ERR Error in ACL SETUSER modifier '(+get) (+set)': Unknown command or category name in ACL"
+        );
+        // A valid selector still applies cleanly.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", b"u", b"reset", b"(+@read ~k*)"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
     }
 
     #[test]
