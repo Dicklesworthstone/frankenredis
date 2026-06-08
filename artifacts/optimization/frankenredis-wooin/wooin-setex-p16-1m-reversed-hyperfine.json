@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /data/projects/frankenredis/target-cod-wooin-candidate-rch/release-perf/frankenredis --port 26812 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix frwooincandrev --json-out artifacts/optimization/frankenredis-wooin/candidate/last-reversed-setex-p16-1m.json",
+      "mean": 4.572880785394285,
+      "stddev": 0.03690837225489876,
+      "median": 4.5810156516800005,
+      "user": 6.7767953685714275,
+      "system": 5.691168728571428,
+      "min": 4.5178102006800005,
+      "max": 4.60895770668,
+      "times": [
+        4.5178102006800005,
+        4.5932029096800004,
+        4.57721609168,
+        4.60895770668,
+        4.52569565668,
+        4.5810156516800005,
+        4.60626728068
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /data/projects/frankenredis/target-cod-wooin-baseline-rch/release-perf/frankenredis --port 26813 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix frwooinbaserev --json-out artifacts/optimization/frankenredis-wooin/baseline/last-reversed-setex-p16-1m.json",
+      "mean": 4.561343114822857,
+      "stddev": 0.06319433262671649,
+      "median": 4.55901403068,
+      "user": 6.933939797142856,
+      "system": 5.593766871428571,
+      "min": 4.45471948368,
+      "max": 4.64867841668,
+      "times": [
+        4.62364250568,
+        4.53196967468,
+        4.5643982996800005,
+        4.55901403068,
+        4.54697939268,
+        4.64867841668,
+        4.45471948368
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

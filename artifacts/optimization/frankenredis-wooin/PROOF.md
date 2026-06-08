@@ -3,105 +3,139 @@
 ## Target
 
 - Bead: `frankenredis-wooin`
-- Profile basis: the SETEX/PSETEX P16/1M profile still showed repeated command metadata work:
-  `RandomState::hash_one::<&[u8]>` 8.46% flat, `command_table_index` 1.74% flat /
-  3.21% children, `command_key_indexes` 1.19% flat / 2.26% children, and
-  `acl_command_selectors_for_argv` 0.48% flat / 2.02% children.
-- Prior guardrail: `frankenredis-ferss` already rejected the final
-  `command_key_indexes` fallback lookup replacement at about 1.00x, so this pass did
-  not retry that micro-lever.
+- Final pass source basis: production source equivalent to `ecbe6dfa4`; current
+  HEAD `650bd5609` only added the earlier artifact closeout for this bead.
+- Profile-backed workload: alternating `SETEX` / `PSETEX`, 1,000,000 requests,
+  50 clients, pipeline 16, keyspace 10,000, value size 3 bytes.
+- Baseline build:
+  `rch exec -- env CARGO_TARGET_DIR=/data/projects/frankenredis/target-cod-wooin-baseline-rch cargo build --profile release-perf -p fr-server -p fr-bench`
+- Baseline server:
+  `/data/projects/frankenredis/target-cod-wooin-baseline-rch/release-perf/frankenredis`
+- Baseline hyperfine artifact:
+  `baseline/setex-p16-1m-hyperfine.json`
+- Baseline result: `4.744888082168571s +/- 0.09383303794878903s`.
 
-## Lever tested
+## Fresh Profile
 
-Top-level runtime ACL fast path for the fully permissive root user:
+Fresh `perf record` on the baseline workload captured 23,671 samples with
+`Total Lost Samples: 0`.
 
-- add an `AclUser` predicate for `+@all ~* &*` with no explicit command/category denies;
-- return `None` from `Runtime::acl_permission_error` before allocating/lowercasing ACL
-  selectors when that predicate is true;
-- fall back to the existing ACL selector/key/channel logic for any restrictive state.
+Report artifacts:
 
-The candidate source hunk and its candidate-only tests were removed after benchmark rejection.
-No production source change from this lever is retained.
+- `baseline/setex-p16-1m-perf-flat.txt`
+- `baseline/setex-p16-1m-perf-children.txt`
+- `baseline/last-setex-p16-1m-profile.json`
 
-## Behavior proof while candidate was applied
+Relevant rows:
 
-Focused crate-scoped tests:
+- `<std::hash::random::RandomState as BuildHasher>::hash_one::<&[u8]>`:
+  2.13% flat / 2.16% children.
+- `Runtime::execute_frame_internal`: 0.67% flat / 0.92% children.
+- `fr_command::command_key_indexes`: 0.57% flat / 0.58% children.
+- `Runtime::dispatch_with_client_context`: 0.56% flat.
+- `fr_command::command_table_index`: 0.54% flat / 0.60% children.
+- `core::str::from_utf8`: 0.35% flat.
+- `foldhash::quality::RandomState::hash_one::<&[u8]>`: 0.27% flat.
+- `acl_command_selectors_for_argv`: 0.23% flat / 0.28% children.
+- `check_full_command_arity`: 0.23% flat / 0.25% children.
 
-- `rch exec -- env CARGO_TARGET_DIR=/tmp/codex-fr-wooin-test-target cargo test -p fr-runtime all_access_acl_ -- --nocapture`
-  - 2 passed.
-- `rch exec -- env CARGO_TARGET_DIR=/tmp/codex-fr-wooin-test-target cargo test -p fr-runtime acl_per_command_deny_specific_commands -- --nocapture`
-  - passed.
-- `rch exec -- env CARGO_TARGET_DIR=/tmp/codex-fr-wooin-test-target cargo test -p fr-runtime acl_selectors_parse_render_and_enforce_additively -- --nocapture`
-  - passed on `vmi1167313`.
+Profiling notes: `perf report` emitted `addr2line` sentinel noise and
+kernel-symbol restriction warnings, but the user-space reports above were
+generated and the sample loss counter was zero.
+
+## Lever Tested
+
+Alien-graveyard primitive: a fast internal hasher / Swiss-table-adjacent map
+route for a non-DoS internal hot map.
+
+Candidate hunk:
+
+- Add `foldhash = "0.1"` to `fr-runtime`.
+- Type `ServerState.client_tracking_observed_keys` as
+  `HashMap<Vec<u8>, HashSet<u64>, foldhash::quality::RandomState>`.
+- Initialize the map with `foldhash::quality::RandomState::default()`.
+- Leave pub/sub maps, command metadata tables, external key bytes, and all
+  command semantics unchanged.
+
+The candidate source hunk was removed after benchmark rejection. No production
+source change from this lever is retained.
+
+## Behavior Proof While Candidate Was Applied
+
+Validation:
+
+- `cargo fmt -p fr-runtime --check` reported unrelated shared-tree formatting
+  drift in runtime test blocks. The candidate alias was manually formatted and
+  the peer drift was left untouched.
+- `rch exec -- env CARGO_TARGET_DIR=/data/projects/frankenredis/target-cod-wooin-check-rch cargo check -p fr-runtime --all-targets`
+  passed on `vmi1153651`.
+- `rch exec -- env CARGO_TARGET_DIR=/data/projects/frankenredis/target-cod-wooin-candidate-rch cargo build --profile release-perf -p fr-server -p fr-bench`
+  completed using RCH local fallback.
 
 Golden RESP transcript:
 
 - Comparator: `artifacts/optimization/frankenredis-svgvb/setex_golden_compare.py`
-- Baseline server: `/tmp/codex-fr-wooin-baseline-target/release-perf/frankenredis`, port 19982.
-- Candidate server: `/tmp/codex-fr-wooin-candidate-target/release-perf/frankenredis`, port 19983.
-- Artifact: `candidate/resp-golden-compare.json`
-- Baseline SHA-256: `dc3d47345c58e9839e6aa57875e4b3473379bc218bcc240c5b45907f8cb00dd7`
-- Candidate SHA-256: `dc3d47345c58e9839e6aa57875e4b3473379bc218bcc240c5b45907f8cb00dd7`
+- Baseline server:
+  `/data/projects/frankenredis/target-cod-wooin-baseline-rch/release-perf/frankenredis`,
+  port 26805.
+- Candidate server:
+  `/data/projects/frankenredis/target-cod-wooin-candidate-rch/release-perf/frankenredis`,
+  port 26806.
+- Artifact: `golden-compare.json`
+- Baseline SHA-256:
+  `dc3d47345c58e9839e6aa57875e4b3473379bc218bcc240c5b45907f8cb00dd7`
+- Candidate SHA-256:
+  `dc3d47345c58e9839e6aa57875e4b3473379bc218bcc240c5b45907f8cb00dd7`
 - Bytes: 992 baseline, 992 candidate.
 
 Isomorphism:
 
-- Ordering/tie-breaking: unchanged; the candidate only skipped ACL metadata work when the
-  root permission set already grants every command, key, and channel.
-- Error precedence: unchanged for unknown and wrong-arity commands under the all-access user;
-  both previously reached dispatch after the ACL gate, and the focused tests pinned that.
-- Restrictive ACL behavior: unchanged; explicit command denies and selector/key fallback tests
-  exercised the original path.
-- Floating-point/RNG: not touched by the lever.
-- Propagation bytes and TTL behavior: golden SETEX/PSETEX transcript matched exactly.
-
-Formatting note:
-
-- `cargo fmt -p fr-runtime --check` currently reports pre-existing formatting drift in
-  unrelated MONITOR/CONFIG/ACL test blocks; the rejected candidate hunk itself was removed.
+- Ordering/tie-breaking: unchanged. The observed-key map is a lookup/removal
+  index for client tracking invalidation, not an externally iterated reply
+  source. Invalidation owner IDs remain sorted before output, and BCAST key
+  order follows command key order.
+- Duplicate and key-order semantics: unchanged. Command key extraction,
+  duplicate first-occurrence behavior, pub/sub channel handling, and
+  propagation rewrite code were untouched.
+- Hash collision semantics: unchanged at the Rust `HashMap` API level for this
+  internal map. Only the hasher implementation changed while the candidate was
+  applied.
+- Floating-point behavior: untouched.
+- RNG behavior: untouched.
+- RESP output, TTL behavior, and propagation-visible replies: pinned by the
+  matching golden transcript.
 
 ## Benchmark
 
-Baseline build:
+Paired hyperfine artifact:
+`wooin-setex-p16-1m-paired-hyperfine.json`.
 
-```text
-rch exec -- env CARGO_TARGET_DIR=/tmp/codex-fr-wooin-baseline-target cargo build --profile release-perf -p fr-server -p fr-bench
-```
+- Baseline: `4.606549966265713s +/- 0.03327005247669873s`.
+- Candidate: `4.638218255408573s +/- 0.16860288559408193s`.
+- Hyperfine summary: baseline ran `1.01x +/- 0.04` faster than candidate.
 
-Candidate build:
+Reversed-order hyperfine artifact:
+`wooin-setex-p16-1m-reversed-hyperfine.json`.
 
-```text
-rch exec -- env CARGO_TARGET_DIR=/tmp/codex-fr-wooin-candidate-target cargo build --profile release-perf -p fr-server -p fr-bench
-```
-
-Paired hyperfine artifact: `candidate/setex-p16-1m-paired-hyperfine.json`
-
-Workload:
-
-- alternating `SETEX` / `PSETEX`
-- 1,000,000 requests
-- 50 clients
-- pipeline 16
-- keyspace 1,000,000
-- value size 3 bytes
-- 5 measured runs per side
-
-Results:
-
-- Baseline: `4.7614001335400005 s +/- 0.07191982312982163`
-- Candidate: `4.910629181140001 s +/- 0.2414928371838538`
-- Hyperfine summary: baseline ran `1.03x +/- 0.05` faster than candidate.
+- Candidate: `4.572880785394285s +/- 0.03690837225489876s`.
+- Baseline: `4.561343114822857s +/- 0.06319433262671649s`.
+- Hyperfine summary: baseline ran `1.00x +/- 0.02` faster than candidate.
 
 ## Decision
 
 Reject under the Score>=2.0 gate.
 
-- Impact: negative on the paired benchmark.
-- Confidence: high enough to reject because the candidate was slower on the same workload and
-  the prior campaign already recorded similar ACL fast-path reversals under longer 1M confirmation.
-- Effort: low, but Score is 0 because the measured effect is not a win.
+- Impact: not a win; both paired and reversed comparisons favor baseline within
+  noise.
+- Confidence: high enough to reject because both orders failed on the same
+  workload and golden behavior was byte-identical.
+- Effort: low, but Score is 0 because the measured effect is not positive.
 
-Next route: stop ACL/metadata micro-skips and attack a structurally different primitive from the
-same profile family: a zero-copy RESP frame or arena/slab command packet that avoids repeated
-owned `Vec<Vec<u8>>` materialization and metadata hashing as a class, target ratio at least 1.20x
-on SETEX/PSETEX P16/1M before keeping.
+No source hunk is retained.
+
+Next route: stop the client-tracking hash micro-family and attack a materially
+different zero-copy or batched command packet. The next target is to remove
+owned command argument materialization and repeated command metadata hashing as
+a class, threading a proof-carrying packet through key extraction, ACL selector
+lookup, arity/classification, dispatch, and propagation rewrite. Target ratio:
+at least 1.20x on SETEX/PSETEX P16/1M before keeping.

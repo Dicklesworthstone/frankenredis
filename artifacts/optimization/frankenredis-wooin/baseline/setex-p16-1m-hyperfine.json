@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /data/projects/frankenredis/target-cod-wooin-baseline-rch/release-perf/frankenredis --port 26800 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix frwooinbase --json-out artifacts/optimization/frankenredis-wooin/baseline/last-setex-p16-1m.json",
+      "mean": 4.744888082168571,
+      "stddev": 0.09383303794878903,
+      "median": 4.72757710074,
+      "user": 6.975460417142856,
+      "system": 6.079502668571428,
+      "min": 4.66049638674,
+      "max": 4.91521998474,
+      "times": [
+        4.66294635674,
+        4.66049638674,
+        4.72757710074,
+        4.91521998474,
+        4.82652694174,
+        4.72915928874,
+        4.69229051574
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
