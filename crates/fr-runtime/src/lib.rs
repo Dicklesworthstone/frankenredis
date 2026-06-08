@@ -305,6 +305,50 @@ fn plain_hget_owned_argv(key: &[u8], field: &[u8]) -> Vec<Vec<u8>> {
     vec![b"HGET".to_vec(), key.to_vec(), field.to_vec()]
 }
 
+/// The fixed-single-key, variadic-value WRITE commands that share one borrowed
+/// runtime fast path (`CMD key value [value ...]` -> Integer): SADD, LPUSH,
+/// RPUSH. (frankenredis-ev067)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PlainKeyedValuesCmd {
+    Sadd,
+    Lpush,
+    Rpush,
+}
+
+impl PlainKeyedValuesCmd {
+    /// Upstream-casing token used for slowlog/threat argv reconstruction and the
+    /// `last_argv_len_sum` accounting (which counts the wire bytes of the verb).
+    fn name_upper(self) -> &'static str {
+        match self {
+            PlainKeyedValuesCmd::Sadd => "SADD",
+            PlainKeyedValuesCmd::Lpush => "LPUSH",
+            PlainKeyedValuesCmd::Rpush => "RPUSH",
+        }
+    }
+
+    /// Lowercase name used for `last_command_name` and the per-command latency
+    /// histogram bucket — matching what the generic dispatch records.
+    fn name_lower(self) -> &'static str {
+        match self {
+            PlainKeyedValuesCmd::Sadd => "sadd",
+            PlainKeyedValuesCmd::Lpush => "lpush",
+            PlainKeyedValuesCmd::Rpush => "rpush",
+        }
+    }
+}
+
+fn plain_keyed_values_owned_argv(
+    cmd: PlainKeyedValuesCmd,
+    key: &[u8],
+    values: &[&[u8]],
+) -> Vec<Vec<u8>> {
+    let mut argv = Vec::with_capacity(values.len() + 2);
+    argv.push(cmd.name_upper().as_bytes().to_vec());
+    argv.push(key.to_vec());
+    argv.extend(values.iter().map(|v| v.to_vec()));
+    argv
+}
+
 fn plain_mget_owned_argv(keys: &[&[u8]]) -> Vec<Vec<u8>> {
     let mut argv = Vec::with_capacity(keys.len() + 1);
     argv.push(b"MGET".to_vec());
@@ -6603,6 +6647,175 @@ impl Runtime {
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
                 output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    /// Conservative borrowed runtime fast path for the fixed-single-key variadic
+    /// WRITE commands SADD / LPUSH / RPUSH (`CMD key value [value ...]`). Mirrors
+    /// the generic handlers exactly — the store method's Integer reply, WRONGTYPE
+    /// on a key holding the wrong type — while skipping argv materialization, the
+    /// generic command dispatch (classify + command_table_index +
+    /// dispatch_with_client_context), and the post-`Ok` keyspace/tracking/AOF
+    /// bookkeeping block, all of which `plain_borrowed_default_key_write_allows`
+    /// guarantees is no-op in plain mode (db0 master, no aof/replica/notify/
+    /// tracking/monitor/blocked-client/transaction/script). These commands are
+    /// classified as writes, so each counts one write regardless of outcome.
+    /// Returns None (fall back to generic) on any disabling state.
+    /// (frankenredis-ev067 — the SADD/LPUSH/RPUSH analog of
+    /// [`Self::execute_plain_append_borrowed`].) KEEP IN SYNC with the q0qym
+    /// borrowed-write gate.
+    pub fn execute_plain_keyed_values_write_borrowed(
+        &mut self,
+        cmd: PlainKeyedValuesCmd,
+        key: &[u8],
+        values: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < cmd.name_upper().len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || values.iter().any(|v| v.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_argv_len_sum =
+            cmd.name_upper().len() + key.len() + values.iter().map(|v| v.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        // Materialize the values once (the store methods take owned members, the
+        // same allocation the generic argv path performs); the command-name and
+        // key argv Vecs the generic path builds are still skipped.
+        let owned: Vec<Vec<u8>> = values.iter().map(|v| v.to_vec()).collect();
+        let start = Instant::now();
+        let store_result = match cmd {
+            PlainKeyedValuesCmd::Sadd => self
+                .server
+                .store
+                .sadd(key, &owned, now_ms)
+                .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+            PlainKeyedValuesCmd::Lpush => self
+                .server
+                .store
+                .lpush(key, &owned, now_ms)
+                .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+            PlainKeyedValuesCmd::Rpush => self
+                .server
+                .store
+                .rpush(key, &owned, now_ms)
+                .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+        };
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match store_result {
+            Ok(n) => RespFrame::Integer(n),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_keyed_values_borrowed_metrics(
+            cmd, key, values, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_writes_processed += 1;
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_keyed_values_borrowed_metrics(
+        &mut self,
+        cmd: PlainKeyedValuesCmd,
+        key: &[u8],
+        values: &[&[u8]],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_keyed_values_owned_argv(cmd, key, values));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_keyed_values_owned_argv(cmd, key, values));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server.store.record_command_histogram_with_kind(
+                cmd.name_lower(),
+                elapsed_us,
+                kind,
+            );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_keyed_values_owned_argv(cmd, key, values));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command '{}' took {}us, exceeding budget {}ms",
+                    cmd.name_upper(),
+                    elapsed_us,
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
             });
         }
     }

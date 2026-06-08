@@ -33,7 +33,7 @@ use fr_eventloop::{
 };
 use fr_protocol::{BorrowedCommandArgsKind, ParserConfig, RespFrame, RespParseError};
 use fr_repl::ReplOffset;
-use fr_runtime::{ClientSession, ClientUnblockMode, Runtime};
+use fr_runtime::{ClientSession, ClientUnblockMode, PlainKeyedValuesCmd, Runtime};
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
 
@@ -1847,6 +1847,17 @@ fn process_buffered_frames(
                                     consumed: parsed.consumed,
                                     response,
                                 })
+                            } else if let Some((cmd, key, values)) =
+                                borrowed_plain_keyed_values_args(&borrowed_args)
+                                && let Some(response) = runtime
+                                    .execute_plain_keyed_values_write_borrowed(
+                                        cmd, key, values, ts,
+                                    )
+                            {
+                                Ok(BorrowedMultibulkAction::FastReply {
+                                    consumed: parsed.consumed,
+                                    response,
+                                })
                             } else if let Some((key, field)) =
                                 borrowed_plain_hget_args(&borrowed_args)
                                 && let Some(response) =
@@ -2174,6 +2185,29 @@ fn borrowed_plain_append_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a 
         [command, key, value] if command.eq_ignore_ascii_case(b"APPEND") => Some((*key, *value)),
         _ => None,
     }
+}
+
+/// `SADD | LPUSH | RPUSH key value [value ...]` borrowed-arg matcher for the
+/// shared keyed-values write fast path. (frankenredis-ev067)
+fn borrowed_plain_keyed_values_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(PlainKeyedValuesCmd, &'a [u8], &'a [&'a [u8]])> {
+    let [command, key, values @ ..] = borrowed_args else {
+        return None;
+    };
+    if values.is_empty() {
+        return None;
+    }
+    let cmd = if command.eq_ignore_ascii_case(b"SADD") {
+        PlainKeyedValuesCmd::Sadd
+    } else if command.eq_ignore_ascii_case(b"LPUSH") {
+        PlainKeyedValuesCmd::Lpush
+    } else if command.eq_ignore_ascii_case(b"RPUSH") {
+        PlainKeyedValuesCmd::Rpush
+    } else {
+        return None;
+    };
+    Some((cmd, *key, values))
 }
 
 fn borrowed_plain_decrby_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
