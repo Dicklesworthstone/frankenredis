@@ -20115,7 +20115,9 @@ const CONFIG_STATIC_DEFAULTS: &[(&str, &str)] = &[
     ("notify-keyspace-events", ""),
     ("hz", "10"),
     ("dynamic-hz", "yes"),
-    ("active-expire-enabled", "yes"),
+    // redis 7.2.4 has no `active-expire-enabled` config (active expiry is a
+    // DEBUG SET-ACTIVE-EXPIRE toggle only); keeping it here leaked an fr-only
+    // param into CONFIG GET / accepted it in CONFIG SET. (frankenredis-cfgactexp)
     ("lfu-log-factor", "10"),
     ("lfu-decay-time", "1"),
     ("lazyfree-lazy-eviction", "no"),

@@ -782,7 +782,11 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("active-defrag-threshold-upper", "100"),
     ("active-defrag-cycle-min", "1"),
     ("active-defrag-cycle-max", "25"),
-    ("active-expire-enabled", "yes"),
+    // NOTE: redis 7.2.4 has NO `active-expire-enabled` config — active
+    // expiry is toggled only via DEBUG SET-ACTIVE-EXPIRE (→
+    // store.active_expire_enabled). Exposing it here leaked an fr-only
+    // param into CONFIG GET */active-* and made CONFIG SET accept an
+    // unknown option. (frankenredis-cfgactexp)
     ("active-expire-effort", "1"),
     ("lfu-log-factor", "10"),
     ("lfu-decay-time", "1"),
