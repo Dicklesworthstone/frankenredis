@@ -24179,61 +24179,102 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         let type_name =
             std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         let lower = type_name.to_ascii_lowercase();
+        // (frankenredis-nxw4z) Upstream debug.c::debugCommand emits the
+        // genuine RESP3 type (Double/Set/Map/Verbatim/Bool/BigNumber/Push) when
+        // the caller is on HELLO 3 and degrades to the RESP2 shape otherwise. fr
+        // previously emitted the RESP2 shape unconditionally, so every typed
+        // reply was wrong for RESP3 clients. Branch on the caller's protocol.
+        let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
+        let ints = || {
+            vec![
+                RespFrame::Integer(0),
+                RespFrame::Integer(1),
+                RespFrame::Integer(2),
+            ]
+        };
         match lower.as_str() {
             "string" => Ok(RespFrame::BulkString(Some(b"Hello World".to_vec()))),
             "integer" => Ok(RespFrame::Integer(12345)),
-            // RESP2 emits double as a BulkString with the numeric body.
-            // Upstream addReplyDouble for RESP2 formats with %.17Lg-ish
-            // precision but the literal 3.141 round-trips exactly to
-            // the 4-character text "3.141".
-            "double" => Ok(RespFrame::BulkString(Some(b"3.141".to_vec()))),
-            "bignum" => Ok(RespFrame::BulkString(Some(
-                b"1234567999999999999999999999999999999".to_vec(),
-            ))),
+            // The literal 3.141 round-trips exactly to "3.141"; RESP3 is a
+            // Double (`,3.141`), RESP2 the bulk-string body.
+            "double" => Ok(if resp3 {
+                RespFrame::Double("3.141".to_string())
+            } else {
+                RespFrame::BulkString(Some(b"3.141".to_vec()))
+            }),
+            "bignum" => {
+                let digits = "1234567999999999999999999999999999999";
+                Ok(if resp3 {
+                    RespFrame::BigNumber(digits.to_string())
+                } else {
+                    RespFrame::BulkString(Some(digits.as_bytes().to_vec()))
+                })
+            }
             "null" => Ok(RespFrame::BulkString(None)),
-            "true" => Ok(RespFrame::Integer(1)),
-            "false" => Ok(RespFrame::Integer(0)),
-            "array" => Ok(RespFrame::Array(Some(vec![
-                RespFrame::Integer(0),
-                RespFrame::Integer(1),
-                RespFrame::Integer(2),
-            ]))),
-            // Upstream emits a Set frame in RESP3; in RESP2 it
-            // degrades to an Array of the same elements (the wire
-            // type for an unordered collection).
-            "set" => Ok(RespFrame::Array(Some(vec![
-                RespFrame::Integer(0),
-                RespFrame::Integer(1),
-                RespFrame::Integer(2),
-            ]))),
-            // Upstream emits a Map frame in RESP3 with three (k, v)
-            // pairs where k is the index (0,1,2) and v is the bool
-            // (k == 1). RESP2 flattens to a 6-element Array
-            // [0, false=0, 1, true=1, 2, false=0].
-            "map" => Ok(RespFrame::Array(Some(vec![
-                RespFrame::Integer(0),
-                RespFrame::Integer(0),
-                RespFrame::Integer(1),
-                RespFrame::Integer(1),
-                RespFrame::Integer(2),
-                RespFrame::Integer(0),
-            ]))),
-            // Upstream wraps with an attribute frame in RESP3; RESP2
-            // sees only the trailing real reply.
+            "true" => Ok(if resp3 {
+                RespFrame::Bool(true)
+            } else {
+                RespFrame::Integer(1)
+            }),
+            "false" => Ok(if resp3 {
+                RespFrame::Bool(false)
+            } else {
+                RespFrame::Integer(0)
+            }),
+            "array" => Ok(RespFrame::Array(Some(ints()))),
+            // RESP3 Set frame; RESP2 degrades to an Array of the same elements.
+            "set" => Ok(if resp3 {
+                RespFrame::Set(Some(ints()))
+            } else {
+                RespFrame::Array(Some(ints()))
+            }),
+            // RESP3 Map of three (index, bool=index==1) pairs; RESP2 flattens to
+            // a 6-element Array [0, 0, 1, 1, 2, 0].
+            "map" => Ok(if resp3 {
+                RespFrame::Map(Some(vec![
+                    (RespFrame::Integer(0), RespFrame::Bool(false)),
+                    (RespFrame::Integer(1), RespFrame::Bool(true)),
+                    (RespFrame::Integer(2), RespFrame::Bool(false)),
+                ]))
+            } else {
+                RespFrame::Array(Some(vec![
+                    RespFrame::Integer(0),
+                    RespFrame::Integer(0),
+                    RespFrame::Integer(1),
+                    RespFrame::Integer(1),
+                    RespFrame::Integer(2),
+                    RespFrame::Integer(0),
+                ]))
+            }),
+            // RESP3 wraps the reply in an attribute frame (`|…`); fr has no
+            // RespFrame::Attribute yet, so RESP3 still emits the bare reply —
+            // tracked as a follow-up (frankenredis-01weh). RESP2 (the
+            // bare reply) is already correct.
             "attrib" => Ok(RespFrame::BulkString(Some(
                 b"Some real reply following the attribute".to_vec(),
             ))),
-            // Push frames have no RESP2 representation; upstream
-            // returns a hard error rather than degrading.
-            "push" => Ok(RespFrame::Error(
-                "ERR RESP2 is not supported by this command".to_string(),
-            )),
-            // Upstream's verbatim emits a Verbatim frame in RESP3
-            // ("=...txt:..."); RESP2 collapses to a plain BulkString
+            // RESP3 emits a bulk reply followed by an out-of-band Push frame;
+            // RESP2 has no push representation, so upstream hard-errors.
+            "push" => Ok(if resp3 {
+                RespFrame::Sequence(vec![
+                    RespFrame::BulkString(Some(
+                        b"Some real reply following the push reply".to_vec(),
+                    )),
+                    RespFrame::Push(vec![
+                        RespFrame::BulkString(Some(b"server-cpu-usage".to_vec())),
+                        RespFrame::Integer(42),
+                    ]),
+                ])
+            } else {
+                RespFrame::Error("ERR RESP2 is not supported by this command".to_string())
+            }),
+            // RESP3 Verbatim (`=…\r\ntxt:…`); RESP2 collapses to a bulk string
             // of the body without the format tag.
-            "verbatim" => Ok(RespFrame::BulkString(Some(
-                b"This is a verbatim\nstring".to_vec(),
-            ))),
+            "verbatim" => Ok(if resp3 {
+                RespFrame::Verbatim("This is a verbatim\nstring".to_string())
+            } else {
+                RespFrame::BulkString(Some(b"This is a verbatim\nstring".to_vec()))
+            }),
             _ => Ok(RespFrame::Error(
                 "ERR Wrong protocol type name. Please use one of the following: string|integer|double|bignum|null|array|set|map|attrib|push|verbatim|true|false".to_string(),
             )),
@@ -51342,6 +51383,65 @@ mod tests {
             matches!(&arity_err, CommandError::Custom(s) if s.contains("PROTOCOL")),
             "wrong-arity must surface envelope error, got {arity_err:?}"
         );
+    }
+
+    #[test]
+    fn debug_protocol_emits_resp3_typed_frames_under_hello3_nxw4z() {
+        // (frankenredis-nxw4z) Under HELLO 3 every typed DEBUG PROTOCOL
+        // reply must use its real RESP3 frame, matching vendored 7.2.4 byte-for-
+        // byte (verified live: ,3.141 / (digits / ~set / %map-of-bools / =verbatim
+        // / #t / #f / bulk+>push). attrib still degrades (needs an Attribute
+        // frame — frankenredis-01weh).
+        let mut store = Store::new();
+        store.dispatch_client_ctx.resp_protocol_version = 3;
+        let proto = |store: &mut Store, t: &str| {
+            dispatch_argv(
+                &[b"DEBUG".to_vec(), b"PROTOCOL".to_vec(), t.as_bytes().to_vec()],
+                store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("DEBUG PROTOCOL {t}"))
+        };
+        assert_eq!(proto(&mut store, "double"), RespFrame::Double("3.141".to_string()));
+        assert_eq!(
+            proto(&mut store, "bignum"),
+            RespFrame::BigNumber("1234567999999999999999999999999999999".to_string())
+        );
+        assert_eq!(proto(&mut store, "true"), RespFrame::Bool(true));
+        assert_eq!(proto(&mut store, "false"), RespFrame::Bool(false));
+        assert_eq!(
+            proto(&mut store, "set"),
+            RespFrame::Set(Some(vec![
+                RespFrame::Integer(0),
+                RespFrame::Integer(1),
+                RespFrame::Integer(2),
+            ]))
+        );
+        assert_eq!(
+            proto(&mut store, "map"),
+            RespFrame::Map(Some(vec![
+                (RespFrame::Integer(0), RespFrame::Bool(false)),
+                (RespFrame::Integer(1), RespFrame::Bool(true)),
+                (RespFrame::Integer(2), RespFrame::Bool(false)),
+            ]))
+        );
+        assert_eq!(
+            proto(&mut store, "verbatim"),
+            RespFrame::Verbatim("This is a verbatim\nstring".to_string())
+        );
+        assert_eq!(
+            proto(&mut store, "push"),
+            RespFrame::Sequence(vec![
+                RespFrame::BulkString(Some(b"Some real reply following the push reply".to_vec())),
+                RespFrame::Push(vec![
+                    RespFrame::BulkString(Some(b"server-cpu-usage".to_vec())),
+                    RespFrame::Integer(42),
+                ]),
+            ])
+        );
+        // Untyped scalars are protocol-agnostic.
+        assert_eq!(proto(&mut store, "integer"), RespFrame::Integer(12345));
+        assert_eq!(proto(&mut store, "null"), RespFrame::BulkString(None));
     }
 
     #[test]
