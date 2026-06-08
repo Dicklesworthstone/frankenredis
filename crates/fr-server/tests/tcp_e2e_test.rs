@@ -1545,8 +1545,30 @@ fn tcp_aof_restart_preserves_all_data() {
         // _server dropped here — process killed, port freed.
     }
 
-    assert!(aof_file.exists(), "AOF file was not created");
-    assert!(aof_file.metadata().unwrap().len() > 0, "AOF file is empty");
+    // Redis 7+ (the parity target) persists AOF as a multi-part appendonlydir —
+    // a manifest plus `<base>.N.base.rdb` and `<base>.N.incr.aof` parts — not a
+    // single-file AOF, so the literal `test.aof` path is never itself a file.
+    // fr matches this: with --aof <dir>/test.aof it uses appenddirname=<dir>,
+    // appendfilename=test.aof and writes test.aof.manifest + test.aof.N.base.rdb
+    // alongside. Verify the manifest and a non-empty base RDB were written; the
+    // real preservation guarantee is the Phase-2 DBSIZE/value readback below.
+    let manifest = tmp.join("test.aof.manifest");
+    assert!(manifest.exists(), "AOF manifest was not created");
+    assert!(
+        manifest.metadata().unwrap().len() > 0,
+        "AOF manifest is empty"
+    );
+    let base_written = std::fs::read_dir(&tmp)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("test.aof.")
+                && name.ends_with(".base.rdb")
+                && e.metadata().map(|m| m.len() > 0).unwrap_or(false)
+        });
+    assert!(base_written, "AOF base RDB was not created");
 
     // Phase 2: Restart on new port with same AOF, verify all data survived.
     let port2 = reserve_port();
