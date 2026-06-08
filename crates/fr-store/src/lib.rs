@@ -2754,7 +2754,21 @@ pub struct Store {
     /// each candidate's real `expires_at_ms`, so a stale entry only costs a
     /// wasted sample and a missing entry only defers a key to lazy expiry —
     /// never an incorrect result. (frankenredis-yvg7h)
+    ///
+    /// The sorted set is maintained lazily: deadline counts stay exact on every
+    /// write, while this key-ordered view is rebuilt only once an expiry
+    /// consumer observes that the earliest deadline is due. Long-TTL write-heavy
+    /// workloads therefore avoid a global `BTreeSet<Vec<u8>>` insertion on
+    /// every SETEX/PSETEX, but due-key sampling still uses the same sorted order.
     volatile_keys: BTreeSet<Vec<u8>>,
+    volatile_keys_dirty: bool,
+    /// Counts of absolute key-expiry deadlines, keyed by deadline ms.
+    ///
+    /// `volatile_keys` preserves deterministic key-order sampling once a key is
+    /// due. This sidecar answers the cheaper question first: can any key expire
+    /// at `now_ms`? Long-TTL write-heavy workloads can then skip the BTree key
+    /// walk until the earliest deadline arrives.
+    expiry_deadline_counts: BTreeMap<u64, usize>,
     running_digest: u64,
     digest_mutations: u64,
     digest_stale: bool,
@@ -3196,6 +3210,8 @@ impl Default for Store {
             random_key_slots: vec![Vec::new(); DEFAULT_NUM_DATABASES],
             random_key_positions: HashMap::default(),
             volatile_keys: BTreeSet::new(),
+            volatile_keys_dirty: false,
+            expiry_deadline_counts: BTreeMap::new(),
             running_digest: 0,
             digest_mutations: 0,
             digest_stale: false,
@@ -4258,6 +4274,7 @@ impl Store {
 
         let ttl_ms = u64::try_from(milliseconds).unwrap_or(u64::MAX);
         let expires_at_ms = now_ms.saturating_add(ttl_ms);
+        let old_expiry = self.entries.get(key).and_then(Entry::expiry_ms);
         let mut added_expiry = false;
         if self
             .with_mutated_entry(key, |entry| {
@@ -4273,8 +4290,10 @@ impl Store {
                     self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
                 }
             }
-            // The key now carries a TTL — track it for active-expire sampling.
-            self.volatile_keys.insert(key.to_vec());
+            // The key now carries a TTL; defer rebuilding the sorted sampling
+            // view until a due expiry consumer needs key-order iteration.
+            self.mark_volatile_keys_dirty();
+            self.update_expiry_deadline(old_expiry, Some(expires_at_ms));
             self.dirty = self.dirty.saturating_add(1);
             self.notify_keyspace_event(NOTIFY_GENERIC, "expire", &logical_key, db);
         }
@@ -4308,6 +4327,7 @@ impl Store {
         }
 
         let expires_at_ms = u64::try_from(when_ms).unwrap_or(u64::MAX);
+        let old_expiry = self.entries.get(key).and_then(Entry::expiry_ms);
         let mut added_expiry = false;
         if self
             .with_mutated_entry(key, |entry| {
@@ -4323,8 +4343,10 @@ impl Store {
                     self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
                 }
             }
-            // The key now carries a TTL — track it for active-expire sampling.
-            self.volatile_keys.insert(key.to_vec());
+            // The key now carries a TTL; defer rebuilding the sorted sampling
+            // view until a due expiry consumer needs key-order iteration.
+            self.mark_volatile_keys_dirty();
+            self.update_expiry_deadline(old_expiry, Some(expires_at_ms));
             self.dirty = self.dirty.saturating_add(1);
             self.notify_keyspace_event(NOTIFY_GENERIC, "expire", &logical_key, db);
         }
@@ -5281,20 +5303,14 @@ impl Store {
 
     pub fn persist(&mut self, key: &[u8], now_ms: u64) -> bool {
         self.drop_if_expired(key, now_ms);
-        let Some(had_expiry) = self
-            .entries
-            .get(key)
-            .map(|entry| entry.expires_at_ms.is_some())
-        else {
+        let Some(old_expiry) = self.entries.get(key).and_then(Entry::expiry_ms) else {
             return false;
         };
-        if !had_expiry {
-            return false;
-        }
         self.with_mutated_entry(key, |entry| {
             entry.expires_at_ms = None;
         });
-        self.volatile_keys.remove(key);
+        self.forget_volatile_key(key);
+        self.update_expiry_deadline(Some(old_expiry), None);
         self.expires_count = self.expires_count.saturating_sub(1);
         let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
         if db < self.database_count {
@@ -5912,6 +5928,36 @@ impl Store {
         }
     }
 
+    fn mark_volatile_keys_dirty(&mut self) {
+        self.volatile_keys_dirty = true;
+    }
+
+    fn forget_volatile_key(&mut self, key: &[u8]) {
+        if self.volatile_keys_dirty {
+            return;
+        }
+        self.volatile_keys.remove(key);
+    }
+
+    fn rebuild_volatile_keys_if_dirty(&mut self) {
+        if !self.volatile_keys_dirty {
+            return;
+        }
+        self.volatile_keys.clear();
+        self.volatile_keys.extend(
+            self.entries
+                .iter()
+                .filter(|(_, entry)| entry.expiry_ms().is_some())
+                .map(|(key, _)| key.clone()),
+        );
+        self.volatile_keys_dirty = false;
+    }
+
+    fn has_expiry_due(&self, now_ms: u64) -> bool {
+        self.earliest_expiry_deadline_ms()
+            .is_some_and(|deadline_ms| now_ms >= deadline_ms)
+    }
+
     fn volatile_physical_keys_in_db(&self, db: usize) -> Vec<Vec<u8>> {
         if db == 0 {
             return self
@@ -5930,7 +5976,44 @@ impl Store {
             .collect()
     }
 
+    fn track_expiry_deadline(&mut self, deadline_ms: u64) {
+        *self.expiry_deadline_counts.entry(deadline_ms).or_insert(0) += 1;
+    }
+
+    fn untrack_expiry_deadline(&mut self, deadline_ms: u64) {
+        let Some(count) = self.expiry_deadline_counts.get_mut(&deadline_ms) else {
+            return;
+        };
+        if *count > 1 {
+            *count -= 1;
+        } else {
+            self.expiry_deadline_counts.remove(&deadline_ms);
+        }
+    }
+
+    fn update_expiry_deadline(&mut self, old: Option<u64>, new: Option<u64>) {
+        if old == new {
+            return;
+        }
+        if let Some(deadline_ms) = old {
+            self.untrack_expiry_deadline(deadline_ms);
+        }
+        if let Some(deadline_ms) = new {
+            self.track_expiry_deadline(deadline_ms);
+        }
+    }
+
+    fn earliest_expiry_deadline_ms(&self) -> Option<u64> {
+        self.expiry_deadline_counts
+            .first_key_value()
+            .map(|(&deadline_ms, _)| deadline_ms)
+    }
+
     fn expire_volatile_keys_in_db(&mut self, db: usize, now_ms: u64) {
+        if !self.has_expiry_due(now_ms) {
+            return;
+        }
+        self.rebuild_volatile_keys_if_dirty();
         let volatile = self.volatile_physical_keys_in_db(db);
         for key in &volatile {
             self.drop_if_expired(key, now_ms);
@@ -5940,6 +6023,8 @@ impl Store {
     fn internal_entries_insert(&mut self, key: Vec<u8>, mut entry: Entry) -> Option<Entry> {
         let db = decode_db_key(&key).map(|(db, _)| db).unwrap_or(0);
         let is_new_key = !self.entries.contains_key(&key);
+        let old_expiry = self.entries.get(&key).and_then(Entry::expiry_ms);
+        let new_expiry = entry.expiry_ms();
         let new_is_stream = matches!(&entry.value, Value::Stream(_));
         if let Some(old_entry) = self.entries.get(&key) {
             entry.modification_count = old_entry.modification_count.wrapping_add(1);
@@ -5956,15 +6041,16 @@ impl Store {
             self.ordered_keys.insert(key.clone());
             self.random_key_index_insert(db, &key);
         }
-        // Keep the volatile-key sampling set in sync: the stored key is volatile
-        // iff the entry replacing it carries a TTL (an overwrite that drops the
-        // TTL must drop it from the set too). (frankenredis-yvg7h)
+        // Keep the volatile-key sampling set in sync lazily: deadline counts
+        // remain exact, and the sorted key view is rebuilt only when a due
+        // expiry consumer needs key-order iteration. (frankenredis-yvg7h)
         if new_has_expiry {
-            self.volatile_keys.insert(key.clone());
+            self.mark_volatile_keys_dirty();
         } else {
-            self.volatile_keys.remove(&key);
+            self.forget_volatile_key(&key);
         }
         let old_entry = self.entries.insert(key.clone(), entry);
+        self.update_expiry_deadline(old_expiry, new_expiry);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         if let Some(old) = old_entry {
             if matches!(&old.value, Value::Stream(_)) && !new_is_stream {
@@ -5992,7 +6078,8 @@ impl Store {
         if let Some(entry) = self.entries.remove(key) {
             self.ordered_keys.remove(key);
             self.random_key_index_remove(key);
-            self.volatile_keys.remove(key);
+            self.forget_volatile_key(key);
+            self.update_expiry_deadline(entry.expiry_ms(), None);
             let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
             if db < self.database_count {
                 self.db_key_counts[db] = self.db_key_counts[db].saturating_sub(1);
@@ -6295,7 +6382,26 @@ impl Store {
         // keyspace. With no volatile keys there is nothing to reap, so the
         // cycle is O(1) instead of sampling persistent keys in vain.
         // (frankenredis-yvg7h)
-        if sample_limit == 0 || self.volatile_keys.is_empty() {
+        if sample_limit == 0 || self.expiry_deadline_counts.is_empty() {
+            return ActiveExpireCycleResult {
+                sampled_keys: 0,
+                evicted_keys: 0,
+                next_cursor: None,
+                evicted_db_keys: Vec::new(),
+            };
+        }
+        if let Some(deadline_ms) = self.earliest_expiry_deadline_ms()
+            && now_ms < deadline_ms
+        {
+            return ActiveExpireCycleResult {
+                sampled_keys: 0,
+                evicted_keys: 0,
+                next_cursor: start_cursor,
+                evicted_db_keys: Vec::new(),
+            };
+        }
+        self.rebuild_volatile_keys_if_dirty();
+        if self.volatile_keys.is_empty() {
             return ActiveExpireCycleResult {
                 sampled_keys: 0,
                 evicted_keys: 0,
@@ -6383,6 +6489,8 @@ impl Store {
         // hashes, breaking HTTL/HEXPIRETIME on subsequent re-creates.
         self.ordered_keys.clear();
         self.volatile_keys.clear();
+        self.volatile_keys_dirty = false;
+        self.expiry_deadline_counts.clear();
         self.hash_field_expires.clear();
         self.running_digest = 0;
         self.digest_stale = false;
@@ -13602,6 +13710,7 @@ impl Store {
                 Some((db, lk)) => (db, lk.to_vec()),
                 None => (0, key.to_vec()),
             };
+            let old_expiry = self.entries.get(key).and_then(Entry::expiry_ms);
             match exp {
                 Some(deadline) if deadline <= now_ms => {
                     self.notify_keyspace_event(NOTIFY_GENERIC, "del", &logical_key, db);
@@ -13623,20 +13732,18 @@ impl Store {
                                 self.db_expires_counts[db].saturating_add(1);
                         }
                     }
-                    self.volatile_keys.insert(key.to_vec());
+                    self.mark_volatile_keys_dirty();
+                    self.update_expiry_deadline(old_expiry, Some(deadline));
                     self.dirty = self.dirty.saturating_add(1);
                     self.notify_keyspace_event(NOTIFY_GENERIC, "expire", &logical_key, db);
                 }
                 None => {
-                    let had_expiry = self
-                        .entries
-                        .get(key)
-                        .is_some_and(|entry| entry.expires_at_ms.is_some());
-                    if had_expiry {
+                    if old_expiry.is_some() {
                         self.with_mutated_entry(key, |entry| {
                             entry.expires_at_ms = None;
                         });
-                        self.volatile_keys.remove(key);
+                        self.forget_volatile_key(key);
+                        self.update_expiry_deadline(old_expiry, None);
                         self.expires_count = self.expires_count.saturating_sub(1);
                         if db < self.database_count {
                             self.db_expires_counts[db] =
@@ -14170,9 +14277,12 @@ impl Store {
         // but allocates O(volatile) instead of O(dbsize) per call (the prior
         // `entries.keys().cloned().collect()` cloned every key in the database
         // on every RANDOMKEY). (clone-storm elimination)
-        let volatile: Vec<Vec<u8>> = self.volatile_keys.iter().cloned().collect();
-        for key in &volatile {
-            self.drop_if_expired(key, now_ms);
+        if self.has_expiry_due(now_ms) {
+            self.rebuild_volatile_keys_if_dirty();
+            let volatile: Vec<Vec<u8>> = self.volatile_keys.iter().cloned().collect();
+            for key in &volatile {
+                self.drop_if_expired(key, now_ms);
+            }
         }
 
         let matching: Vec<Vec<u8>> = self
@@ -16486,6 +16596,10 @@ impl Store {
     /// expiry path, preserving notifications, stats, dirty tracking, and
     /// propagation records.
     pub fn expire_snapshot_volatile_keys(&mut self, now_ms: u64) {
+        if !self.has_expiry_due(now_ms) {
+            return;
+        }
+        self.rebuild_volatile_keys_if_dirty();
         let volatile_keys: Vec<Vec<u8>> = self.volatile_keys.iter().cloned().collect();
         for key in &volatile_keys {
             self.drop_if_expired(key, now_ms);
@@ -21817,32 +21931,44 @@ mod tests {
         let mut store = Store::new();
         store.set(b"p".to_vec(), b"v".to_vec(), None, 0); // persistent
         store.set(b"v".to_vec(), b"x".to_vec(), Some(5_000), 0); // volatile
+        store.rebuild_volatile_keys_if_dirty();
         assert!(!store.volatile_keys.contains(b"p".as_slice()));
         assert!(store.volatile_keys.contains(b"v".as_slice()));
+        assert_eq!(store.earliest_expiry_deadline_ms(), Some(5_000));
 
         // PERSIST drops the TTL -> leaves the volatile set.
         assert!(store.persist(b"v", 0));
         assert!(!store.volatile_keys.contains(b"v".as_slice()));
+        assert_eq!(store.earliest_expiry_deadline_ms(), None);
 
         // EXPIREAT adds a TTL to a persistent key -> enters the set.
         assert!(store.expire_at_milliseconds(b"p", 9_999, 0));
+        store.rebuild_volatile_keys_if_dirty();
         assert!(store.volatile_keys.contains(b"p".as_slice()));
+        assert_eq!(store.earliest_expiry_deadline_ms(), Some(9_999));
 
         // Overwriting with a TTL-less SET clears it again.
         store.set(b"p".to_vec(), b"y".to_vec(), None, 0);
         assert!(!store.volatile_keys.contains(b"p".as_slice()));
+        assert_eq!(store.earliest_expiry_deadline_ms(), None);
 
         // DEL of a volatile key removes it from the set.
         store.set(b"d".to_vec(), b"z".to_vec(), Some(1_000), 0);
+        store.rebuild_volatile_keys_if_dirty();
         assert!(store.volatile_keys.contains(b"d".as_slice()));
+        assert_eq!(store.earliest_expiry_deadline_ms(), Some(1_000));
         store.del(&[b"d".to_vec()], 0);
         assert!(!store.volatile_keys.contains(b"d".as_slice()));
+        assert_eq!(store.earliest_expiry_deadline_ms(), None);
 
         // FLUSHDB clears the set.
         store.set(b"f".to_vec(), b"z".to_vec(), Some(1_000), 0);
+        store.rebuild_volatile_keys_if_dirty();
         assert!(!store.volatile_keys.is_empty());
+        assert!(!store.expiry_deadline_counts.is_empty());
         store.flushdb();
         assert!(store.volatile_keys.is_empty());
+        assert!(store.expiry_deadline_counts.is_empty());
     }
 
     #[test]
@@ -21883,15 +22009,61 @@ mod tests {
     #[test]
     fn active_expire_cycle_wraparound_samples_each_key_once() {
         let mut store = Store::new();
-        store.set(b"a".to_vec(), b"1".to_vec(), Some(10_000), 0);
+        store.set(b"a".to_vec(), b"1".to_vec(), Some(1), 0);
         store.set(b"b".to_vec(), b"2".to_vec(), Some(10_000), 0);
         store.set(b"c".to_vec(), b"3".to_vec(), Some(10_000), 0);
 
         let result = store.run_active_expire_cycle(1, Some(b"b".to_vec()), 5);
 
         assert_eq!(result.sampled_keys, 3);
-        assert_eq!(result.evicted_keys, 0);
+        assert_eq!(result.evicted_keys, 1);
         assert_eq!(result.next_cursor, None);
+        assert!(!store.entries.contains_key(b"a".as_slice()));
+        assert!(store.entries.contains_key(b"b".as_slice()));
+        assert!(store.entries.contains_key(b"c".as_slice()));
+    }
+
+    #[test]
+    fn active_expire_cycle_skips_until_earliest_deadline_is_due() {
+        let mut store = Store::new();
+        store.set(b"a".to_vec(), b"1".to_vec(), Some(10_000), 0);
+        store.set(b"b".to_vec(), b"2".to_vec(), Some(20_000), 0);
+
+        let early = store.run_active_expire_cycle(9_999, Some(b"a".to_vec()), 5);
+        assert_eq!(early.sampled_keys, 0);
+        assert_eq!(early.evicted_keys, 0);
+        assert_eq!(early.next_cursor, Some(b"a".to_vec()));
+        assert_eq!(store.dbsize_in_db(0), 2);
+
+        let due = store.run_active_expire_cycle(10_000, None, 5);
+        assert_eq!(due.sampled_keys, 2);
+        assert_eq!(due.evicted_keys, 1);
+        assert_eq!(store.dbsize_in_db(0), 1);
+        assert!(!store.entries.contains_key(b"a".as_slice()));
+        assert!(store.entries.contains_key(b"b".as_slice()));
+    }
+
+    #[test]
+    fn volatile_key_sort_is_lazy_until_a_deadline_is_due() {
+        let mut store = Store::new();
+        store.set(b"a".to_vec(), b"1".to_vec(), Some(10_000), 0);
+        store.set(b"b".to_vec(), b"2".to_vec(), Some(20_000), 0);
+
+        assert!(store.volatile_keys_dirty);
+        assert!(store.volatile_keys.is_empty());
+
+        let early = store.run_active_expire_cycle(9_999, None, 10);
+        assert_eq!(early.sampled_keys, 0);
+        assert_eq!(early.evicted_keys, 0);
+        assert!(store.volatile_keys_dirty);
+        assert!(store.volatile_keys.is_empty());
+
+        let due = store.run_active_expire_cycle(10_000, None, 10);
+        assert_eq!(due.sampled_keys, 2);
+        assert_eq!(due.evicted_keys, 1);
+        assert!(!store.volatile_keys_dirty);
+        assert!(!store.volatile_keys.contains(b"a".as_slice()));
+        assert!(store.volatile_keys.contains(b"b".as_slice()));
     }
 
     #[test]
@@ -32173,7 +32345,7 @@ mod tests {
         // (matches redis verifyDumpPayload `len < 10`).
         let mut store = Store::new();
         assert!(
-            store.restore_key(b"z", 0, &vec![0u8; 9], true, 100).is_err(),
+            store.restore_key(b"z", 0, &[0u8; 9], true, 100).is_err(),
             "payload shorter than the footer must be rejected"
         );
 
@@ -35769,9 +35941,7 @@ mod tests {
             );
             // The all-classes-but-no-d string is NOT 'A' (d is part of A).
             assert_eq!(
-                keyspace_events_to_string(
-                    keyspace_events_parse("g$lshzxet").expect("classes")
-                ),
+                keyspace_events_to_string(keyspace_events_parse("g$lshzxet").expect("classes")),
                 "g$lshzxet"
             );
             // Canonical class order places 'd' before 'n' (upstream order).
@@ -35782,11 +35952,9 @@ mod tests {
             // Class flags WITHOUT K/E are preserved in the config (upstream
             // gates firing at emit time, not at parse), where fr used to drop
             // them to "".
-            for (input, want) in
-                [("g", "g"), ("n", "n"), ("m", "m"), ("t", "t"), ("d", "d")]
-            {
-                let flags = keyspace_events_parse(input)
-                    .unwrap_or_else(|| panic!("'{input}' must parse"));
+            for (input, want) in [("g", "g"), ("n", "n"), ("m", "m"), ("t", "t"), ("d", "d")] {
+                let flags =
+                    keyspace_events_parse(input).unwrap_or_else(|| panic!("'{input}' must parse"));
                 assert_ne!(flags, 0, "'{input}' must not collapse to 0");
                 assert_eq!(keyspace_events_to_string(flags), want);
             }

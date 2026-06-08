@@ -1,0 +1,1 @@
+{"bytes_received": 5000000, "bytes_sent": 71888890, "clients": 50, "datasize": 3, "elapsed_seconds": 5.140997280017473, "keyspace": 1000000, "mix": "alternate", "ops_per_sec": 194514.78877199508, "pipeline": 16, "requests": 1000000, "schema": "frankenredis_svgvb_setex_bench_v1"}
