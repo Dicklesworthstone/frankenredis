@@ -2431,13 +2431,18 @@ fn run_sentinel_monitoring_tick(runtime: &mut Runtime, now_ms: u64, last_probe_m
     if !runtime.sentinel_mode() {
         return;
     }
+    // Advance the sentinel clock on EVERY event-loop iteration (cheap tilt
+    // check), not just on a probe tick: SENTINEL MASTER/SLAVES render their
+    // "ms-ago" delta fields as (previous_time - last_event_time). Advancing it
+    // only once per probe pinned those fields to ~0; tracking real now makes
+    // them report the true elapsed time since the last ping/info (0..interval),
+    // matching redis's mstime()-based deltas.
+    runtime.sentinel_begin_tick(now_ms);
+    // Probing the masters (the network IO) stays throttled.
     if now_ms.saturating_sub(*last_probe_ms) < SENTINEL_PROBE_INTERVAL_MS {
         return;
     }
     *last_probe_ms = now_ms;
-    // Advance the sentinel clock so SENTINEL MASTER/SLAVES render their
-    // "ms-ago" delta fields against a real now (else they pin to 0).
-    runtime.sentinel_begin_tick(now_ms);
 
     let parser_config = runtime.parser_config();
     let query_buffer_limit = runtime.server.query_buffer_limit;
