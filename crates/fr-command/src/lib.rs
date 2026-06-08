@@ -23081,6 +23081,7 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let keys: Vec<&[u8]> = (0..numkeys)
         .map(|i| argv[2_usize.saturating_add(i)].as_slice())
         .collect();
+    record_source_key_lookups(store, &keys, now_ms);
     // (frankenredis-sdiffwt) Validate every source type up front: upstream
     // checks all sources before computing, so an empty/missing first key must
     // not mask a wrong-type later key (which the per-member loop would skip).
@@ -23102,13 +23103,13 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         }
     }
     // Compute difference: members in first set not in any other
-    let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
+    let first_members = store.zget_members_with_scores_no_stats(keys[0])?;
     let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
     for (member, score) in first_members {
         let mut in_other = false;
         for &key in &keys[1..] {
             if store
-                .zget_score_or_set_member(key, &member, now_ms)?
+                .zget_score_or_set_member_no_stats(key, &member)?
                 .is_some()
             {
                 in_other = true;
@@ -23154,6 +23155,7 @@ fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     let keys: Vec<&[u8]> = (0..numkeys)
         .map(|i| argv[3_usize.saturating_add(i)].as_slice())
         .collect();
+    record_source_key_lookups(store, &keys, now_ms);
     // (frankenredis-sdiffwt) Validate every source type up front (see zdiff).
     // (frankenredis-zsetop-wrongtype) The source-key type-check runs BEFORE the
     // trailing-token syntax check: upstream reads+checkType the keys
@@ -23165,13 +23167,13 @@ fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() != 3_usize.saturating_add(numkeys) {
         return Err(CommandError::SyntaxError);
     }
-    let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
+    let first_members = store.zget_members_with_scores_no_stats(keys[0])?;
     let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
     for (member, score) in first_members {
         let mut in_other = false;
         for &key in &keys[1..] {
             if store
-                .zget_score_or_set_member(key, &member, now_ms)?
+                .zget_score_or_set_member_no_stats(key, &member)?
                 .is_some()
             {
                 in_other = true;
@@ -23206,6 +23208,7 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     let keys: Vec<&[u8]> = (0..numkeys)
         .map(|i| argv[2_usize.saturating_add(i)].as_slice())
         .collect();
+    record_source_key_lookups(store, &keys, now_ms);
     // (frankenredis-zsetop-wrongtype) Source-key type-check precedes the
     // WEIGHTS/AGGREGATE/WITHSCORES option parse — see zunionstore().
     for &key in &keys {
@@ -23213,14 +23216,14 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     }
     let (weights, aggregate, withscores) =
         parse_zset_algebra_options(argv, 2 + numkeys, numkeys, true)?;
-    let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
+    let first_members = store.zget_members_with_scores_no_stats(keys[0])?;
     let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
     let w0 = weights.first().copied().unwrap_or(1.0);
     for (member, score) in first_members {
         let mut combined = normalize_weighted_score_cmd(score, w0);
         let mut in_all = true;
         for (i, &key) in keys[1..].iter().enumerate() {
-            match store.zget_score_or_set_member(key, &member, now_ms)? {
+            match store.zget_score_or_set_member_no_stats(key, &member)? {
                 Some(s) => {
                     let w = weights.get(i + 1).copied().unwrap_or(1.0);
                     combined = aggregate_scores_for_cmd(combined, s * w, &aggregate);
@@ -23325,6 +23328,10 @@ fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() < 2_usize.saturating_add(numkeys) {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
+    let keys: Vec<&[u8]> = (0..numkeys)
+        .map(|i| argv[2_usize.saturating_add(i)].as_slice())
+        .collect();
+    record_source_key_lookups(store, &keys, now_ms);
     // (frankenredis-zintercardwt) Upstream zinterCardCommand looks up + type-
     // checks every input key (a non-zset/non-set key is WRONGTYPE; a SET is a
     // valid zset-like operand) BEFORE parsing the optional LIMIT clause — so a
@@ -23332,8 +23339,8 @@ fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     // parsed LIMIT first, surfacing the LIMIT/syntax error instead. (SINTERCARD
     // parses LIMIT first — a different upstream code path — so it is unchanged.)
     // The peek is no-stat so it does not perturb keyspace hit/miss accounting.
-    for i in 0..numkeys {
-        match store.peek_value_type(&argv[2_usize.saturating_add(i)], now_ms) {
+    for &key in &keys {
+        match store.peek_value_type(key, now_ms) {
             None | Some(ValueType::ZSet) | Some(ValueType::Set) => {}
             Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
         }
@@ -23364,33 +23371,7 @@ fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         }
         idx += 1;
     }
-    let keys: Vec<&[u8]> = (0..numkeys)
-        .map(|i| argv[2_usize.saturating_add(i)].as_slice())
-        .collect();
-    // Compute intersection count
-    if keys.is_empty() {
-        return Ok(RespFrame::Integer(0));
-    }
-    let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
-    let mut count: u64 = 0;
-    for (member, _) in first_members {
-        let mut in_all = true;
-        for &key in &keys[1..] {
-            if store
-                .zget_score_or_set_member(key, &member, now_ms)?
-                .is_none()
-            {
-                in_all = false;
-                break;
-            }
-        }
-        if in_all {
-            count += 1;
-            if limit > 0 && count >= limit {
-                break;
-            }
-        }
-    }
+    let count = store.zintercard_count_cached(&keys, limit, now_ms)?;
     Ok(RespFrame::Integer(count as i64))
 }
 
@@ -47951,6 +47932,128 @@ mod tests {
         )
         .expect("zintercard");
         assert_eq!(out, RespFrame::Integer(1));
+    }
+
+    #[test]
+    fn zintercard_cache_records_lookups_and_invalidates_on_write() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"za".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zb".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        store.stat_keyspace_hits = 0;
+        store.stat_keyspace_misses = 0;
+
+        let argv = [
+            b"ZINTERCARD".to_vec(),
+            b"2".to_vec(),
+            b"za".to_vec(),
+            b"zb".to_vec(),
+        ];
+        assert_eq!(
+            dispatch_argv(&argv, &mut store, 0).expect("first zintercard"),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            dispatch_argv(&argv, &mut store, 0).expect("cached zintercard"),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(store.stat_keyspace_hits, 4);
+        assert_eq!(store.stat_keyspace_misses, 0);
+
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zb".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            dispatch_argv(&argv, &mut store, 0).expect("invalidated zintercard"),
+            RespFrame::Integer(2)
+        );
+    }
+
+    #[test]
+    fn zset_algebra_source_stats_record_once_per_input_key() {
+        fn seed() -> Store {
+            let mut store = Store::new();
+            for argv in [
+                [
+                    b"ZADD".as_slice(),
+                    b"za",
+                    b"1",
+                    b"a",
+                    b"2",
+                    b"b",
+                    b"3",
+                    b"c",
+                    b"4",
+                    b"d",
+                    b"5",
+                    b"e",
+                ]
+                .as_slice(),
+                [b"ZADD".as_slice(), b"zb", b"1", b"a", b"2", b"b", b"3", b"c"].as_slice(),
+                [b"ZADD".as_slice(), b"zc", b"1", b"c", b"2", b"d", b"3", b"e"].as_slice(),
+            ] {
+                let argv: Vec<Vec<u8>> = argv.iter().map(|arg| arg.to_vec()).collect();
+                dispatch_argv(&argv, &mut store, 0).unwrap();
+            }
+            store.stat_keyspace_hits = 0;
+            store.stat_keyspace_misses = 0;
+            store
+        }
+
+        for (argv, expected_hits) in [
+            (
+                [b"ZINTERCARD".as_slice(), b"2", b"za", b"zb"].as_slice(),
+                2,
+            ),
+            ([b"ZINTER".as_slice(), b"2", b"za", b"zb"].as_slice(), 2),
+            (
+                [b"ZINTER".as_slice(), b"3", b"za", b"zb", b"zc"].as_slice(),
+                3,
+            ),
+            ([b"ZDIFF".as_slice(), b"2", b"za", b"zb"].as_slice(), 2),
+            (
+                [b"ZDIFFSTORE".as_slice(), b"d", b"2", b"za", b"zb"].as_slice(),
+                2,
+            ),
+        ] {
+            let mut store = seed();
+            let argv: Vec<Vec<u8>> = argv.iter().map(|arg| arg.to_vec()).collect();
+            dispatch_argv(&argv, &mut store, 0).expect("zset algebra command");
+            assert_eq!(store.stat_keyspace_hits, expected_hits, "{argv:?}");
+            assert_eq!(store.stat_keyspace_misses, 0, "{argv:?}");
+        }
     }
 
     #[test]

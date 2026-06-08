@@ -1837,6 +1837,25 @@ impl<'a> ZSetAlgebraInput<'a> {
         }
     }
 
+    fn for_each_until(self, mut f: impl FnMut(&[u8], f64) -> bool) {
+        match self {
+            Self::SortedSet(zs) => {
+                for (member, score) in zs.iter() {
+                    if !f(member, score) {
+                        break;
+                    }
+                }
+            }
+            Self::Set(s) => {
+                for member in s.iter() {
+                    if !f(member.as_ref(), 1.0) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     fn for_each(self, mut f: impl FnMut(&[u8], f64)) {
         match self {
             Self::SortedSet(zs) => {
@@ -1928,6 +1947,14 @@ struct Entry {
     /// INCRBY/GETSET) replaces the whole Entry and clears it, re-sharing
     /// like upstream's createStringObjectFromLongLongForValue.
     int_copy_not_shared: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ZIntercardCache {
+    dirty: u64,
+    limit: u64,
+    keys: Vec<Vec<u8>>,
+    count: u64,
 }
 
 /// Upstream evict.h::LFU_INIT_VAL. Newly-created objects start at this
@@ -2829,6 +2856,7 @@ pub struct Store {
     running_digest: u64,
     digest_mutations: u64,
     digest_stale: bool,
+    zintercard_cache: Option<ZIntercardCache>,
     db_key_counts: Vec<usize>,
     db_expires_counts: Vec<usize>,
     /// Number of databases (configurable at startup, default 16).
@@ -3277,6 +3305,7 @@ impl Default for Store {
             running_digest: 0,
             digest_mutations: 0,
             digest_stale: false,
+            zintercard_cache: None,
             db_key_counts: vec![0; DEFAULT_NUM_DATABASES],
             db_expires_counts: vec![0; DEFAULT_NUM_DATABASES],
             database_count: DEFAULT_NUM_DATABASES,
@@ -10042,6 +10071,21 @@ impl Store {
         }
     }
 
+    pub fn zget_score_or_set_member_no_stats(
+        &self,
+        key: &[u8],
+        member: &[u8],
+    ) -> Result<Option<f64>, StoreError> {
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::SortedSet(zs) => Ok(zs.get_score(member)),
+                Value::Set(s) => Ok(if s.contains(member) { Some(1.0) } else { None }),
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
     pub fn zget_members_with_scores(
         &mut self,
         key: &[u8],
@@ -10068,6 +10112,103 @@ impl Store {
             },
             None => Ok(Vec::new()),
         }
+    }
+
+    pub fn zget_members_with_scores_no_stats(
+        &self,
+        key: &[u8],
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::SortedSet(zs) => Ok(zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect()),
+                Value::Set(s) => {
+                    let mut members: Vec<_> = s.iter().map(|m| m.into_owned()).collect();
+                    members.sort();
+                    Ok(members.into_iter().map(|m| (m, 1.0)).collect())
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn zintercard_cache_hit(&self, keys: &[&[u8]], limit: u64) -> Option<u64> {
+        let cache = self.zintercard_cache.as_ref()?;
+        if cache.dirty != self.dirty || cache.limit != limit || cache.keys.len() != keys.len() {
+            return None;
+        }
+        cache
+            .keys
+            .iter()
+            .zip(keys.iter())
+            .all(|(cached, key)| cached.as_slice() == *key)
+            .then_some(cache.count)
+    }
+
+    /// ZINTERCARD: validate/touch/count source keys once, then reuse a
+    /// dirty-guarded one-entry capsule for repeated unchanged read workloads.
+    pub fn zintercard_count_cached(
+        &mut self,
+        keys: &[&[u8]],
+        limit: u64,
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+
+        let mut has_empty = false;
+
+        for &key in keys {
+            self.drop_if_expired(key, now_ms);
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    if ZSetAlgebraInput::from_value(&entry.value).is_none() {
+                        return Err(StoreError::WrongType);
+                    }
+                    entry.touch(now_ms);
+                }
+                None => has_empty = true,
+            }
+        }
+
+        if let Some(count) = self.zintercard_cache_hit(keys, limit) {
+            return Ok(count);
+        }
+
+        let count = if has_empty {
+            0
+        } else {
+            let inputs: Vec<ZSetAlgebraInput<'_>> = keys
+                .iter()
+                .map(|key| {
+                    self.entries
+                        .get(*key)
+                        .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
+                        .ok_or(StoreError::WrongType)
+                })
+                .collect::<Result<_, _>>()?;
+
+            let mut count = 0_u64;
+            inputs[0].for_each_until(|member, _| {
+                for input in inputs.iter().copied().skip(1) {
+                    if input.score(member).is_none() {
+                        return true;
+                    }
+                }
+                count = count.saturating_add(1);
+                limit == 0 || count < limit
+            });
+            count
+        };
+
+        self.zintercard_cache = Some(ZIntercardCache {
+            dirty: self.dirty,
+            limit,
+            keys: keys.iter().map(|key| (*key).to_vec()).collect(),
+            count,
+        });
+        Ok(count)
     }
 
     /// Get the score of a member. Returns None if member or key doesn't exist.

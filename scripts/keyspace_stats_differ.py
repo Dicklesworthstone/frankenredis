@@ -3,10 +3,8 @@
 
 A novel parity dimension the reply/state/encoding differs don't cover: how many
 keyspace lookups (hits/misses) a command records. Redis counts one lookupKeyRead
-per accessed key; fr can over-count when a command probes one key's dict once per
-element of another (the set/zset-algebra family: ZINTER/ZINTERCARD/ZDIFF probe
-each "other" key per member of the base key). Each probe wrongly records a hit, so
-ZINTERCARD over a 5-member base reports ~6 hits where redis reports 2.
+per accessed key; this gate covers set/zset algebra commands that historically
+over-counted when probing one key's dict once per element of another.
 
 For each case: FLUSHALL + identical seed on both, CONFIG RESETSTAT, run the command,
 then compare keyspace_hits and keyspace_misses. Reports per-command divergence.
@@ -107,20 +105,10 @@ def run(oport, fport):
     return diverged
 
 
-# (frankenredis-6f2f5) Known keyspace_hits/misses divergences in the set/zset
-# algebra family: over-counts (per-member probe records a hit each) and
-# under-counts (store method never records a lookup). Fix lives in fr-store
-# (no-stat member probe + record_keyspace_lookup per input key). Until then these
-# are tracked, not new: the gate passes when ONLY these diverge and fails on any
-# NEW divergence.
-KNOWN_DIVERGENCES = {
-    # Remaining OVER-counts: ZINTER/ZDIFF/ZINTERCARD/ZDIFFSTORE probe each
-    # "other" key once per base member, recording a hit per probe. Suppressing
-    # that needs a no-stat member probe in fr-store (locked). The UNDER-count
-    # half is FIXED (record_source_key_lookups in the fr-command handlers).
-    "ZINTERCARD 2 za zb", "ZINTER 2 za zb", "ZINTER 3 za zb zc",
-    "ZDIFF 2 za zb", "ZDIFFSTORE d 2 za zb",
-}
+# (frankenredis-6f2f5, frankenredis-u2r0c.1) The set/zset algebra
+# keyspace_hits/misses gaps are fixed. Keep this allowlist empty so any future
+# Redis-vs-fr stats drift fails the gate immediately.
+KNOWN_DIVERGENCES = set()
 
 
 def main():

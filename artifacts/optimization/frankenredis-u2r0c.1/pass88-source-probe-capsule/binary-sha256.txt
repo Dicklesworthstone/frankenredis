@@ -1,0 +1,2 @@
+e97ea910a3c8aab634028b49fb1da6bd6f4d7fcf28b54854d64d838765f757b6  /data/projects/.scratch/frankenredis-u2r0c1-candidate-target-release3/release-perf/frankenredis
+29b9c937d1044d66a3ea531b7712de766396c4fdcccd9ebf74d4806959ac48ab  /data/projects/.scratch/frankenredis-u2r0c-baseline-target-release/release-perf/frankenredis

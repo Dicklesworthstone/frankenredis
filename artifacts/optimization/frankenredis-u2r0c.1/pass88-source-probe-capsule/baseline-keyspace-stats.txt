@@ -1,0 +1,6 @@
+  [known(6f2f5)] ZINTERCARD 2 za zb           redis=(2, 0) fr=(6, 0)
+  [known(6f2f5)] ZINTER 2 za zb               redis=(2, 0) fr=(6, 0)
+  [known(6f2f5)] ZINTER 3 za zb zc            redis=(3, 0) fr=(9, 0)
+  [known(6f2f5)] ZDIFF 2 za zb                redis=(2, 0) fr=(6, 0)
+  [known(6f2f5)] ZDIFFSTORE d 2 za zb         redis=(2, 0) fr=(6, 0)
+PASS — keyspace_hits/misses match redis 7.2.4 across 21 commands (5 known 6f2f5 divergences tracked)
