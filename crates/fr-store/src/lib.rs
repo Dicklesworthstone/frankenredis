@@ -16103,7 +16103,12 @@ impl Store {
             return Err(StoreError::BusyKey);
         }
 
-        if payload.len() < DUMP_TRAILER_LEN + 1 {
+        // Upstream cluster.c::verifyDumpPayload requires only the 10-byte
+        // footer (2-byte RDB version + 8-byte CRC64). It does NOT require a
+        // separate type byte: for a 10-byte payload the type byte (read from
+        // the front by rdbLoadObjectType) overlaps the footer's version low
+        // byte, exactly as it does here. (frankenredis-b19ln)
+        if payload.len() < DUMP_TRAILER_LEN {
             return Err(StoreError::InvalidDumpPayload);
         }
         let version_offset = payload.len() - DUMP_TRAILER_LEN;
@@ -16129,8 +16134,14 @@ impl Store {
         }
         let type_byte = payload[0];
         let mut cursor = 1;
-        // Data boundary: exclude trailer (2-byte version + 8-byte CRC64).
-        let data_end = payload.len() - DUMP_TRAILER_LEN;
+        // Upstream restoreCommand parses the object straight off the front of
+        // the buffer (rioInitWithBuffer over the WHOLE payload, footer
+        // included) and simply stops when the object is complete — any bytes
+        // after that, including the version+CRC footer, are never read. So the
+        // body's read bound is the full payload length, NOT len-10: a short
+        // payload whose object legitimately overlaps the footer region still
+        // decodes. (frankenredis-b19ln)
+        let data_end = payload.len();
         let mut restored_stream_last_id = None;
         let mut restored_stream_entries_added = None;
         let mut restored_stream_max_deleted_id = None;
@@ -16403,9 +16414,13 @@ impl Store {
             }
             _ => return Err(StoreError::InvalidDumpPayload),
         };
-        if cursor != data_end {
-            return Err(StoreError::InvalidDumpPayload);
-        }
+        // No "object must consume the buffer exactly" check: upstream ignores
+        // trailing bytes after a complete object (it never validates that the
+        // body abuts the footer). A truncated/short object still fails because
+        // the per-element decoders error when they read past `data_end`.
+        // `cursor` marks where the object ended; nothing past it is read.
+        // (frankenredis-b19ln)
+        let _ = cursor;
         let expires_at_ms = if ttl_ms > 0 {
             Some(now_ms.saturating_add(ttl_ms))
         } else {
@@ -32122,6 +32137,48 @@ mod tests {
             Ok(Some(value)) if value.is_empty() => Ok(()),
             _ => Err("empty string restore produced the wrong value"),
         }
+    }
+
+    #[test]
+    fn restore_accepts_short_and_trailing_payloads_like_upstream_b19ln() {
+        // Upstream verifyDumpPayload requires only the 10-byte footer; the
+        // object is parsed off the FRONT and any trailing bytes (including the
+        // footer itself) are ignored. So an all-zeros payload of length >= 10
+        // decodes as type 0 (string) with a zero-length body — redis returns
+        // +OK — while a payload shorter than the footer is rejected.
+        // (frankenredis-b19ln)
+        for len in [10usize, 11, 13, 20] {
+            let mut store = Store::new();
+            let payload = vec![0u8; len];
+            store
+                .restore_key(b"z", 0, &payload, true, 100)
+                .unwrap_or_else(|_| panic!("all-zeros len {len} should restore like redis"));
+            assert!(
+                matches!(store.get(b"z", 100), Ok(Some(v)) if v.is_empty()),
+                "all-zeros len {len} should decode to an empty string"
+            );
+        }
+
+        // Fewer bytes than the 10-byte footer -> nothing to validate, rejected
+        // (matches redis verifyDumpPayload `len < 10`).
+        let mut store = Store::new();
+        assert!(
+            store.restore_key(b"z", 0, &vec![0u8; 9], true, 100).is_err(),
+            "payload shorter than the footer must be rejected"
+        );
+
+        // A complete object followed by trailing garbage (re-CRC'd over the
+        // whole body) is accepted; the trailing bytes are ignored, exactly as
+        // upstream rioInitWithBuffer reads only what the object needs.
+        let mut body = vec![RDB_TYPE_STRING];
+        append_raw_dump_bulk(&mut body, b"hi");
+        body.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let payload = append_dump_footer(body);
+        let mut store = Store::new();
+        store
+            .restore_key(b"t", 0, &payload, true, 100)
+            .expect("trailing garbage after a complete object must be ignored");
+        assert!(matches!(store.get(b"t", 100), Ok(Some(v)) if v.as_slice() == b"hi"));
     }
 
     #[test]
