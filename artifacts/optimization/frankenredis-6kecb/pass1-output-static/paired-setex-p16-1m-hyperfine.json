@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /tmp/codex-fr-6kecb-pass1-baseline-target2/release-perf/frankenredis --port 26953 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix fr6kecbpass1pairbase --json-out artifacts/optimization/frankenredis-6kecb/pass1-output-static/baseline/last-paired-setex-p16-1m.json",
+      "mean": 4.452678600314285,
+      "stddev": 0.05503998601236914,
+      "median": 4.4386597646,
+      "user": 6.712176251428572,
+      "system": 5.360178651428571,
+      "min": 4.4044971146,
+      "max": 4.5480733756,
+      "times": [
+        4.4121355446,
+        4.5480733756,
+        4.4386597646,
+        4.4044971146,
+        4.4133786706,
+        4.4422242685999995,
+        4.5097814636
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /tmp/codex-fr-6kecb-pass1-okstatic-candidate-target/release-perf/frankenredis --port 26954 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix fr6kecbpass1paircand --json-out artifacts/optimization/frankenredis-6kecb/pass1-output-static/candidate/last-paired-setex-p16-1m.json",
+      "mean": 4.4174800416,
+      "stddev": 0.07855304506602873,
+      "median": 4.4417691465999996,
+      "user": 6.629170822857142,
+      "system": 5.279419079999999,
+      "min": 4.3242522846,
+      "max": 4.5022540636,
+      "times": [
+        4.5022540636,
+        4.4913849026,
+        4.3368714006,
+        4.4783134086,
+        4.4417691465999996,
+        4.3242522846,
+        4.3475150846
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
