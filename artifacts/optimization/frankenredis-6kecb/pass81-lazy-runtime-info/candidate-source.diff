@@ -1,0 +1,43 @@
+diff --git a/crates/fr-runtime/src/lib.rs b/crates/fr-runtime/src/lib.rs
+index ff01521fb..b58f5e0cd 100644
+--- a/crates/fr-runtime/src/lib.rs
++++ b/crates/fr-runtime/src/lib.rs
+@@ -9296,7 +9296,6 @@ impl Runtime {
+             self.session.connected_at_ms = now_ms;
+         }
+         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+-        self.refresh_store_runtime_info_context();
+         // (frankenredis-replro) Expose read-only-replica state to the store so a
+         // write attempted from inside a script/function — whose inner redis.call
+         // bypasses the top-level read-only gate (reject_write_on_readonly_replica)
+@@ -17767,6 +17766,7 @@ impl Runtime {
+         argv: &[Vec<u8>],
+         now_ms: u64,
+     ) -> Result<RespFrame, CommandError> {
++        self.refresh_store_runtime_info_context();
+         let sections: Vec<&str> = argv[1..]
+             .iter()
+             .map(|arg| std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument))
+@@ -30947,6 +30947,22 @@ mod tests {
+         assert!(info.contains("tracking_clients:0\r\n"));
+     }
+ 
++    #[test]
++    fn info_clients_refreshes_tracking_context_on_demand() {
++        let mut rt = Runtime::default_strict();
++
++        assert_eq!(
++            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON"]), 0),
++            RespFrame::SimpleString("OK".to_string())
++        );
++        let out = rt.execute_frame(command(&[b"INFO", b"clients"]), 1);
++        let RespFrame::BulkString(Some(bytes)) = out else {
++            unreachable!("expected bulk string");
++        };
++        let info = String::from_utf8(bytes).expect("utf8");
++        assert!(info.contains("tracking_clients:1\r\n"), "{info}");
++    }
++
+     #[test]
+     fn config_set_common_params_accepted() {
+         let mut rt = Runtime::default_strict();
