@@ -1881,6 +1881,15 @@ struct Entry {
     /// (frankenredis-yp503) Same one-way promotion for sorted sets:
     /// once promoted to skiplist, never demoted back to listpack.
     force_zset_skiplist_encoding: bool,
+    /// (frankenredis-gt318) COPY duplicates a value via upstream
+    /// dupStringObject, which for an int-encoded string allocates a
+    /// FRESH private object (createObject, refcount 1) rather than the
+    /// interned shared integer — so OBJECT REFCOUNT on a COPY destination
+    /// reports 1, not INT_MAX, even for a value in [0, 10000). Set only on
+    /// the COPY destination entry; any int-producing write (SET/INCR/
+    /// INCRBY/GETSET) replaces the whole Entry and clears it, re-sharing
+    /// like upstream's createStringObjectFromLongLongForValue.
+    int_copy_not_shared: bool,
 }
 
 /// Upstream evict.h::LFU_INIT_VAL. Newly-created objects start at this
@@ -1920,6 +1929,7 @@ impl Entry {
             force_set_hashtable_encoding: false,
             force_hash_hashtable_encoding: false,
             force_zset_skiplist_encoding: false,
+            int_copy_not_shared: false,
         }
     }
 
@@ -2002,6 +2012,9 @@ impl Entry {
         entry.force_set_hashtable_encoding = self.force_set_hashtable_encoding;
         entry.force_hash_hashtable_encoding = self.force_hash_hashtable_encoding;
         entry.force_zset_skiplist_encoding = self.force_zset_skiplist_encoding;
+        // (frankenredis-gt318) A COPY destination is a private (non-shared)
+        // duplicate — OBJECT REFCOUNT must report 1 even for a shared-range int.
+        entry.int_copy_not_shared = true;
         entry
     }
 }
@@ -5701,6 +5714,12 @@ impl Store {
         }
         let entry = self.entries.get(key)?;
         if entry.force_raw_encoding || entry.force_string_encoding {
+            return Some(1);
+        }
+        // (frankenredis-gt318) A COPY destination is a private dupStringObject
+        // copy (refcount 1), never the interned shared integer — so it never
+        // reports INT_MAX even for an int-encoded value in [0, 10000).
+        if entry.int_copy_not_shared {
             return Some(1);
         }
         let n = match &entry.value {
@@ -21689,6 +21708,29 @@ mod tests {
         let _ = store.rpush(b"list", &[b"a".to_vec(), b"b".to_vec()], 0);
 
         assert_eq!(store.object_encoding(b"list", 0), Some("quicklist"));
+    }
+
+    #[test]
+    fn object_refcount_copy_of_shared_int_is_private() {
+        // (frankenredis-gt318) Upstream COPY duplicates via dupStringObject,
+        // which for an int-encoded value allocates a fresh private object
+        // (refcount 1) instead of the interned shared integer. A plain SET of a
+        // shared-range int still reports INT_MAX; the COPY destination reports 1
+        // (while still OBJECT ENCODING int); and a later int-producing write
+        // (INCR/SET) replaces the entry and re-shares it.
+        let mut store = Store::new();
+        store.set(b"src".to_vec(), b"3".to_vec(), None, 0);
+        assert_eq!(store.object_refcount(b"src", 0), Some(i64::from(i32::MAX)));
+        assert!(store.copy(b"src", b"dst", false, 0).unwrap());
+        assert_eq!(store.object_encoding(b"dst", 0), Some("int"));
+        assert_eq!(store.object_refcount(b"dst", 0), Some(1));
+        // INCR replaces the entry -> re-shared.
+        let _ = store.incr(b"dst", 0).unwrap();
+        assert_eq!(store.object_refcount(b"dst", 0), Some(i64::from(i32::MAX)));
+        // A non-shared-range int copy is 1 regardless (already was).
+        store.set(b"big".to_vec(), b"50000".to_vec(), None, 0);
+        assert!(store.copy(b"big", b"bigdst", false, 0).unwrap());
+        assert_eq!(store.object_refcount(b"bigdst", 0), Some(1));
     }
 
     #[test]
