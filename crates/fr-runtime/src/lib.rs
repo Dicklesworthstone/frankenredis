@@ -563,22 +563,14 @@ fn parse_client_output_buffer_limit(
 /// (frankenredis-8who6), and any other site that needs to mirror
 /// `cmd->fullname` from server.c.
 fn canonical_command_fullname(argv: &[Vec<u8>]) -> String {
-    let command = String::from_utf8_lossy(argv.first().map_or(b"", Vec::as_slice));
-    let lower = command.to_ascii_lowercase();
-    const CONTAINERS: &[&str] = &[
-        "acl", "client", "cluster", "command", "config", "debug", "function", "latency", "memory",
-        "module", "object", "pubsub", "script", "slowlog", "xgroup", "xinfo",
-    ];
-    if CONTAINERS.iter().any(|c| *c == lower)
-        && let Some(subcommand) = argv.get(1)
-    {
-        return format!(
-            "{}|{}",
-            lower,
-            String::from_utf8_lossy(subcommand).to_ascii_lowercase()
-        );
-    }
-    lower
+    // Delegate to the single source of truth in fr-command, whose
+    // container list mirrors upstream's *registered* subcommand
+    // parents. Crucially that list excludes DEBUG: redis dispatches
+    // DEBUG's subcommands inline (none are registered as separate
+    // table entries), so INFO commandstats/latencystats and the
+    // pub/sub-context error use the bare "debug" name, never
+    // "debug|sleep". (br-frankenredis-k6ei4)
+    fr_command::canonical_command_fullname(argv)
 }
 
 impl Runtime {
@@ -22414,7 +22406,12 @@ mod tests {
             (&[b"CLIENT", b"LIST"], "client|list"),
             (&[b"CLIENT", b"KILL", b"ID", b"1"], "client|kill"),
             (&[b"CONFIG", b"GET", b"maxmemory"], "config|get"),
-            (&[b"DEBUG", b"OBJECT", b"k"], "debug|object"),
+            // (frankenredis-k6ei4) DEBUG has no *registered* subcommands
+            // upstream (debugCommand dispatches them inline), so
+            // c->cmd->fullname is the bare "debug" — verified against
+            // redis 7.2.4 with enable-debug-command yes:
+            //   "Can't execute 'debug': ...", not 'debug|object'.
+            (&[b"DEBUG", b"OBJECT", b"k"], "debug"),
             (&[b"OBJECT", b"ENCODING", b"k"], "object|encoding"),
             (&[b"MEMORY", b"USAGE", b"k"], "memory|usage"),
             (&[b"SLOWLOG", b"GET"], "slowlog|get"),
