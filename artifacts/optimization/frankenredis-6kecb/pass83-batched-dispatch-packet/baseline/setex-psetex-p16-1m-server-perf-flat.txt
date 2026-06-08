@@ -1,0 +1,449 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cycles:u'
+# Event count (approx.): 7808111268
+#
+# Overhead  Command       Shared Object     Symbol
+# ........  ............  ................  ...............................................................................................................................................................................................................................................................
+#
+     8.46%  frankenredis  frankenredis      [.] <fr_store::Store>::drop_if_expired
+            |
+            ---<fr_store::Store>::drop_if_expired
+
+     8.29%  frankenredis  libc.so.6         [.] __memcmp_avx2_movbe
+            |
+            ---__memcmp_avx2_movbe
+
+     6.18%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::refresh_store_runtime_info_context
+     5.11%  frankenredis  [vdso]            [.] 0x0000000000000986
+            |
+            ---0x75e50893a986
+               clock_gettime@@GLIBC_2.17
+               <std::sys::pal::unix::time::Timespec>::now
+               |
+               |--2.04%--<fr_runtime::Runtime>::execute_frame_internal
+               |
+               |--1.98%--<fr_runtime::ServerState>::run_active_expire_cycle
+               |
+                --1.09%--<std::time::Instant>::elapsed
+                          |
+                           --1.03%--<fr_runtime::Runtime>::execute_frame_internal
+
+     4.82%  frankenredis  frankenredis      [.] _mi_page_malloc_zero
+            |
+            ---_mi_page_malloc_zero
+
+     2.97%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::execute_frame_internal
+            |
+            ---<fr_runtime::Runtime>::execute_frame_internal
+
+     2.76%  frankenredis  frankenredis      [.] frankenredis::process_buffered_frames
+            |
+            ---frankenredis::process_buffered_frames
+
+     2.38%  frankenredis  frankenredis      [.] mi_free
+            |
+             --2.21%--mi_free
+
+     2.10%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::dispatch_with_client_context
+            |
+            ---<fr_runtime::Runtime>::dispatch_with_client_context
+               |
+                --0.99%--0x7ffef17b6940
+
+     2.10%  frankenredis  frankenredis      [.] <fr_store::Store>::internal_entries_insert
+            |
+            ---<fr_store::Store>::internal_entries_insert
+
+     1.77%  frankenredis  frankenredis      [.] fr_command::rewrite_relative_expire_for_propagation
+            |
+            ---fr_command::rewrite_relative_expire_for_propagation
+
+     1.59%  frankenredis  frankenredis      [.] <core::str::iter::Split<core::str::IsWhitespace> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::find::check<&str, &mut core::str::IsNotEmpty>::{closure#0}, core::ops::control_flow::ControlFlow<&str>>
+            |
+            ---<core::str::iter::Split<core::str::IsWhitespace> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::find::check<&str, &mut core::str::IsNotEmpty>::{closure#0}, core::ops::control_flow::ControlFlow<&str>>
+
+     1.52%  frankenredis  frankenredis      [.] fr_protocol::parse_command_args_borrowed_into
+            |
+            ---fr_protocol::parse_command_args_borrowed_into
+
+     1.45%  frankenredis  libc.so.6         [.] __memmove_avx_unaligned_erms
+            |
+            ---__memmove_avx_unaligned_erms
+
+     1.40%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::execute_dispatch
+            |
+             --1.04%--<fr_runtime::Runtime>::execute_dispatch
+
+     1.36%  frankenredis  frankenredis      [.] fr_command::command_table_index
+            |
+            ---fr_command::command_table_index
+
+     1.36%  frankenredis  frankenredis      [.] fr_command::classify_command
+            |
+            ---fr_command::classify_command
+
+     1.29%  frankenredis  frankenredis      [.] mi_theap_malloc_aligned
+            |
+            ---mi_theap_malloc_aligned
+
+     1.22%  frankenredis  frankenredis      [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::vec::Vec<u8>>
+            |
+            ---<foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::vec::Vec<u8>>
+
+     1.10%  frankenredis  frankenredis      [.] <alloc::string::String>::from_utf8_lossy
+            |
+            ---<alloc::string::String>::from_utf8_lossy
+
+     1.02%  frankenredis  frankenredis      [.] core::str::converts::from_utf8
+            |
+            ---core::str::converts::from_utf8
+
+     1.02%  frankenredis  frankenredis      [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+            |
+            ---<foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+
+     0.97%  frankenredis  frankenredis      [.] <fr_runtime::AclUser>::acl_permission_error_for_argv
+            |
+            ---<fr_runtime::AclUser>::acl_permission_error_for_argv
+
+     0.94%  frankenredis  frankenredis      [.] <fr_store::ClientTrackingState as core::clone::Clone>::clone_from
+            |
+            ---<fr_store::ClientTrackingState as core::clone::Clone>::clone_from
+
+     0.93%  frankenredis  frankenredis      [.] fr_runtime::push_ascii_lowercase_lossy
+            |
+            ---fr_runtime::push_ascii_lowercase_lossy
+
+     0.88%  frankenredis  frankenredis      [.] <fr_store::CommandHistogramTracker>::record_canonical_with_kind
+            |
+            ---<fr_store::CommandHistogramTracker>::record_canonical_with_kind
+               |
+                --0.76%--0xfec5000002d2820f
+
+     0.88%  frankenredis  frankenredis      [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+            |
+            ---<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+
+     0.79%  frankenredis  frankenredis      [.] <usize>::_fmt_inner
+            |
+            ---<usize>::_fmt_inner
+               <i64 as alloc::string::SpecToString>::spec_to_string
+
+     0.77%  frankenredis  frankenredis      [.] <fr_store::Store>::update_expiry_deadline
+            |
+            ---<fr_store::Store>::update_expiry_deadline
+
+     0.77%  frankenredis  frankenredis      [.] <alloc::collections::btree::map::IntoIter<alloc::vec::Vec<u8>, alloc::collections::btree::set_val::SetValZST>>::dying_next
+            |
+            ---<alloc::collections::btree::map::IntoIter<alloc::vec::Vec<u8>, alloc::collections::btree::set_val::SetValZST>>::dying_next
+
+     0.77%  frankenredis  frankenredis      [.] <core::str::lossy::Utf8Chunks as core::iter::traits::iterator::Iterator>::next
+            |
+            ---<core::str::lossy::Utf8Chunks as core::iter::traits::iterator::Iterator>::next
+
+     0.73%  frankenredis  frankenredis      [.] fr_store::canonical_string_value
+            |
+            ---fr_store::canonical_string_value
+
+     0.73%  frankenredis  frankenredis      [.] fr_command::acl_command_selectors_for_argv
+            |
+            ---fr_command::acl_command_selectors_for_argv
+
+     0.63%  frankenredis  frankenredis      [.] fr_command::canonical_command_fullname
+            |
+            ---fr_command::canonical_command_fullname
+
+     0.63%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::refresh_client_memory_aggregates
+            |
+            ---<fr_runtime::Runtime>::refresh_client_memory_aggregates
+
+     0.62%  frankenredis  frankenredis      [.] <fr_runtime::ServerState>::run_active_expire_cycle
+            |
+            ---<fr_runtime::ServerState>::run_active_expire_cycle
+
+     0.61%  frankenredis  frankenredis      [.] mi_malloc_aligned
+            |
+            ---mi_malloc_aligned
+
+     0.60%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::execute_db_scoped_command
+            |
+            ---<fr_runtime::Runtime>::execute_db_scoped_command
+
+     0.59%  frankenredis  frankenredis      [.] frankenredis::process_argv_frame
+     0.57%  frankenredis  frankenredis      [.] frankenredis::copy_borrowed_argv_into_scratch
+            |
+            ---frankenredis::copy_borrowed_argv_into_scratch
+
+     0.56%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::pubsub_sub_count
+            |
+            ---<fr_runtime::Runtime>::pubsub_sub_count
+
+     0.55%  frankenredis  frankenredis      [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u64>
+     0.52%  frankenredis  frankenredis      [.] <fr_protocol::RespFrame>::encode_into
+     0.52%  frankenredis  frankenredis      [.] core::fmt::write
+            |
+            ---core::fmt::write
+
+     0.51%  frankenredis  frankenredis      [.] <fr_store::Store>::set
+            |
+            ---<fr_store::Store>::set
+
+     0.51%  frankenredis  frankenredis      [.] <std::sys::pal::unix::time::Timespec>::now
+            |
+            ---<std::sys::pal::unix::time::Timespec>::now
+
+     0.50%  frankenredis  frankenredis      [.] <fr_runtime::ServerState>::capture_aof_record
+     0.49%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::refresh_dispatch_peer_addr_cache
+     0.46%  frankenredis  frankenredis      [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     0.46%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::reject_due_to_replica_write_quorum
+     0.46%  frankenredis  frankenredis      [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     0.45%  frankenredis  [unknown]         [k] 0xffffffff860259b1
+     0.45%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::drain_pending_pubsub
+     0.44%  frankenredis  frankenredis      [.] fr_command::dispatch_argv
+     0.41%  frankenredis  frankenredis      [.] <std::sys::pal::unix::time::Timespec>::sub_timespec
+     0.39%  frankenredis  frankenredis      [.] mi_theap_malloc_zero_aligned_at_generic
+     0.39%  frankenredis  frankenredis      [.] fr_command::is_write_command
+     0.37%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::command_uses_script_propagation
+     0.36%  frankenredis  frankenredis      [.] <core::fmt::Formatter>::pad_integral
+     0.35%  frankenredis  frankenredis      [.] core::ptr::drop_glue::<alloc::vec::Vec<alloc::vec::Vec<u8>>>
+     0.35%  frankenredis  frankenredis      [.] fr_command::rewrite_effect_command_for_propagation
+     0.34%  frankenredis  frankenredis      [.] fr_command::check_full_command_arity
+     0.33%  frankenredis  frankenredis      [.] fr_command::parse_expire_time_arg
+     0.31%  frankenredis  libc.so.6         [.] clock_gettime@@GLIBC_2.17
+     0.30%  frankenredis  frankenredis      [.] frankenredis::drain_pending_pubsub_to_connection
+     0.30%  frankenredis  frankenredis      [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+     0.29%  frankenredis  frankenredis      [.] frankenredis::main
+     0.28%  frankenredis  frankenredis      [.] _mi_theap_malloc_zero
+     0.28%  frankenredis  frankenredis      [.] <fr_store::CommandHistogramTracker>::record_with_kind
+     0.26%  frankenredis  frankenredis      [.] frankenredis::borrowed_plain_sismember_args
+     0.26%  frankenredis  frankenredis      [.] <hashbrown::map::HashMap<u64, alloc::vec::Vec<fr_store::PubSubMessage>, std::hash::random::RandomState>>::remove::<u64>
+     0.24%  frankenredis  frankenredis      [.] <alloc::raw_vec::RawVecInner>::finish_grow
+     0.23%  frankenredis  frankenredis      [.] <fr_store::Store>::run_active_expire_cycle
+     0.23%  frankenredis  frankenredis      [.] <i64 as alloc::string::SpecToString>::spec_to_string
+     0.22%  frankenredis  frankenredis      [.] fr_command::command_acl_parent_has_subcommands
+     0.21%  frankenredis  frankenredis      [.] fr_command::setex
+     0.21%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::is_pubsub_client
+     0.20%  frankenredis  frankenredis      [.] <hashbrown::map::HashMap<alloc::vec::Vec<u8>, (u64, u64), std::hash::random::RandomState>>::remove::<[u8]>
+     0.20%  frankenredis  frankenredis      [.] fr_command::parse_client_reply_action
+     0.20%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::take_script_propagation_commands_for_capture
+     0.19%  frankenredis  frankenredis      [.] _mi_bin_size
+     0.19%  frankenredis  frankenredis      [.] fr_command::check_command_arity
+     0.18%  frankenredis  [unknown]         [k] 0xffffffff854fe2fe
+     0.18%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::reject_due_to_disk_write_error
+     0.18%  frankenredis  [unknown]         [k] 0xffffffff854fe6fb
+     0.17%  frankenredis  frankenredis      [.] mi_find_page
+     0.16%  frankenredis  [vdso]            [.] 0x0000000000000994
+     0.16%  frankenredis  frankenredis      [.] <hashbrown::map::HashMap<alloc::vec::Vec<u8>, alloc::collections::btree::map::BTreeMap<alloc::vec::Vec<u8>, fr_store::StreamGroup>, std::hash::random::RandomState>>::remove::<[u8]>
+     0.16%  frankenredis  frankenredis      [.] fr_protocol::push_inline_sanitized
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85021ad9
+     0.15%  frankenredis  frankenredis      [.] <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+     0.15%  frankenredis  frankenredis      [.] core::ptr::drop_glue::<fr_protocol::RespFrame>
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff8572a61e
+     0.15%  frankenredis  frankenredis      [.] <fr_store::Store>::record_slowlog_with_client
+     0.15%  frankenredis  frankenredis      [.] <fr_runtime::ClientSession as core::clone::Clone>::clone
+     0.14%  frankenredis  frankenredis      [.] mi_theap_malloc_zero_aligned_at_overalloc
+     0.14%  frankenredis  [unknown]         [k] 0xffffffff85eef8ec
+     0.14%  frankenredis  frankenredis      [.] frankenredis::record_deferred_buffered_token
+     0.13%  frankenredis  [unknown]         [k] 0xffffffff84c00f30
+     0.13%  frankenredis  frankenredis      [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+     0.13%  frankenredis  [unknown]         [k] 0xffffffff86073375
+     0.13%  frankenredis  [unknown]         [k] 0xffffffff856a20c1
+     0.13%  frankenredis  [unknown]         [k] 0xffffffff85eefcf9
+     0.13%  frankenredis  [vdso]            [.] 0x00000000000009bf
+     0.13%  frankenredis  libc.so.6         [.] __memset_avx2_unaligned_erms
+     0.12%  frankenredis  frankenredis      [.] mi_bin
+     0.12%  frankenredis  frankenredis      [.] <alloc::collections::btree::map::BTreeMap<u64, alloc::collections::btree::set_val::SetValZST>>::remove::<u64>
+     0.12%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::command_advances_replication_offset
+     0.12%  frankenredis  [unknown]         [k] 0xffffffff84d04104
+     0.11%  frankenredis  [unknown]         [k] 0xffffffff854feb6a
+     0.11%  frankenredis  frankenredis      [.] _mi_malloc_generic
+     0.11%  frankenredis  frankenredis      [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     0.11%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::queue_client_tracking_invalidations
+     0.11%  frankenredis  frankenredis      [.] <fr_runtime::ServerState>::record_command_histogram_outcome
+     0.10%  frankenredis  [unknown]         [k] 0xffffffff86220541
+     0.10%  frankenredis  [unknown]         [k] 0xffffffff8513d739
+     0.10%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::record_slowlog
+     0.10%  frankenredis  frankenredis      [.] core::ptr::drop_glue::<fr_store::Value>
+     0.10%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::reject_stale_replica_read_request
+     0.10%  frankenredis  frankenredis      [.] frankenredis::borrowed_plain_zscore_args
+     0.10%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::is_in_subscription_mode
+     0.09%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::reject_write_on_readonly_replica
+     0.09%  frankenredis  frankenredis      [.] <alloc::collections::btree::map::BTreeMap<u64, fr_runtime::ClientSession>>::insert
+     0.09%  frankenredis  frankenredis      [.] <fr_store::Store>::record_ops_sec_sample
+     0.09%  frankenredis  [unknown]         [k] 0xffffffff84c00083
+     0.08%  frankenredis  [unknown]         [k] 0xffffffff84c00080
+     0.08%  frankenredis  [unknown]         [k] 0xffffffff85ef6e5e
+     0.08%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::execute_frame_internal::{closure#3}
+     0.08%  frankenredis  [unknown]         [k] 0xffffffff860240cc
+     0.07%  frankenredis  [unknown]         [k] 0xffffffff86229e60
+     0.07%  frankenredis  [unknown]         [k] 0xffffffff86232e91
+     0.07%  frankenredis  [unknown]         [k] 0xffffffff8519f7ca
+     0.07%  frankenredis  frankenredis      [.] core::ptr::drop_glue::<fr_runtime::ClientSession>
+     0.07%  frankenredis  [unknown]         [k] 0xffffffff851a2a27
+     0.07%  frankenredis  [unknown]         [k] 0xffffffff84d04109
+     0.07%  frankenredis  [unknown]         [k] 0xffffffff84c00ef3
+     0.07%  frankenredis  [unknown]         [k] 0xffffffff8605411c
+     0.07%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::record_client_session
+     0.07%  frankenredis  [vdso]            [.] 0x000000000000093b
+     0.07%  frankenredis  [unknown]         [k] 0xffffffff854afe8d
+     0.07%  frankenredis  [unknown]         [k] 0xffffffff85104b41
+     0.07%  frankenredis  [unknown]         [k] 0xffffffff8623a4ce
+     0.07%  frankenredis  [unknown]         [k] 0xffffffff85124d22
+     0.07%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::capture_aof_record
+     0.06%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::run_active_expire_cycle
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff85ef6b00
+     0.06%  frankenredis  [vdso]            [.] 0x000000000000098f
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff853f1405
+     0.06%  frankenredis  frankenredis      [.] core::ptr::drop_glue::<fr_runtime::TransactionState>
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff85456e3f
+     0.06%  frankenredis  [vdso]            [.] 0x0000000000000969
+     0.06%  frankenredis  frankenredis      [.] <alloc::vec::Vec<u8> as core::clone::Clone>::clone
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff85133375
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff86054110
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff86223c78
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff851a2948
+     0.06%  frankenredis  frankenredis      [.] <core::net::socket_addr::SocketAddrV4 as core::fmt::Display>::fmt
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff854fe8fb
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff85eec2b3
+     0.06%  frankenredis  [vdso]            [.] 0x00000000000009d4
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff851965ff
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff84f8c381
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff84f24010
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff84fef63a
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff84c00173
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff84f87bc3
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff860249f4
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff85eefb05
+     0.06%  frankenredis  frankenredis      [.] <hashbrown::map::HashMap<mio::token::Token, (), std::hash::random::RandomState>>::contains_key::<mio::token::Token>
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff86025892
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff85124a16
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff86022ff0
+     0.06%  frankenredis  frankenredis      [.] _mi_page_retire
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff86073394
+     0.05%  frankenredis  frankenredis      [.] fr_store::estimate_entry_memory_usage_bytes
+     0.05%  frankenredis  [vdso]            [.] 0x0000000000000942
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff84f25588
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff8519f409
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff860317d5
+     0.05%  frankenredis  frankenredis      [.] <core::net::ip_addr::Ipv4Addr as core::fmt::Display>::fmt
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff85729231
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff8510f1d0
+     0.05%  frankenredis  frankenredis      [.] <std::time::Instant>::elapsed
+     0.05%  frankenredis  frankenredis      [.] <alloc::string::String as core::fmt::Write>::write_str
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff85eefc98
+     0.05%  frankenredis  [vdso]            [.] 0x000000000000098c
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff862204ea
+     0.05%  frankenredis  frankenredis      [.] <u8 as core::fmt::Display>::fmt
+     0.05%  frankenredis  frankenredis      [.] <hashbrown::map::HashMap<mio::token::Token, (), std::hash::random::RandomState>>::insert
+     0.05%  frankenredis  frankenredis      [.] <fr_runtime::ServerState>::record_latency_sample
+     0.05%  frankenredis  libc.so.6         [.] __syscall_cancel
+     0.05%  frankenredis  [vdso]            [.] 0x0000000000000930
+     0.05%  frankenredis  frankenredis      [.] <frankenredis::ClientConnection>::try_flush
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff86220544
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff862287e0
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff86054115
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff84c001c4
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff84c00005
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff854fe905
+     0.05%  frankenredis  [vdso]            [.] 0x00000000000009ae
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff862204fb
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff86220555
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff85ef6ae6
+     0.05%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::namespace_argv_for_selected_db
+     0.04%  frankenredis  [unknown]         [k] 0xffffffff8600301a
+     0.04%  frankenredis  frankenredis      [.] alloc::boxed::box_new_uninit
+     0.04%  frankenredis  [unknown]         [k] 0xffffffff86026096
+     0.04%  frankenredis  [unknown]         [k] 0xffffffff8600307d
+     0.04%  frankenredis  [unknown]         [k] 0xffffffff85480b65
+     0.04%  frankenredis  frankenredis      [.] <fr_runtime::ClientSession>::refresh_authentication_for_server
+     0.04%  frankenredis  [unknown]         [k] 0xffffffff86022fe6
+     0.03%  frankenredis  [unknown]         [k] 0xffffffff84f8c37e
+     0.03%  frankenredis  [unknown]         [k] 0xffffffff85f0cc9b
+     0.01%  frankenredis  frankenredis      [.] <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+     0.01%  frankenredis  [unknown]         [k] 0xffffffff853a4f65
+     0.01%  frankenredis  [unknown]         [k] 0xffffffff84c00000
+     0.01%  frankenredis  frankenredis      [.] <hashbrown::map::HashMap<alloc::vec::Vec<u8>, (usize, usize), foldhash::quality::RandomState>>::insert
+     0.01%  frankenredis  frankenredis      [.] <alloc::collections::btree::map::BTreeMap<alloc::vec::Vec<u8>, alloc::collections::btree::set_val::SetValZST>>::insert
+     0.01%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::strip_db_prefixes_from_frame
+     0.01%  frankenredis  [unknown]         [k] 0xffffffff854fe4bd
+     0.00%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::enforce_maxmemory_before_dispatch
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff851a2ab6
+     0.00%  frankenredis  frankenredis      [.] <fr_runtime::ServerState>::propagate_expired_key_deletions
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff84c00b90
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff851a0548
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff860262ef
+     0.00%  frankenredis  frankenredis      [.] mi_bitmap_setN
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff84feb741
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff851a2aa4
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff86024b23
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85ef6b01
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff860719d5
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff854afe55
+     0.00%  frankenredis  frankenredis      [.] core::ptr::drop_glue::<fr_runtime::ClientSession>
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff86071a2d
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff851a2b38
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8572a617
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff860274d0
+     0.00%  frankenredis  frankenredis      [.] frankenredis::borrowed_plain_getrange_args
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff86027543
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85ef6dd0
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff86071a0e
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85eec2a3
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff86025d62
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff86027514
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8547a8e5
+     0.00%  frankenredis  frankenredis      [.] frankenredis::borrowed_plain_lindex_args
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff854afe71
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85729256
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff854afe66
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8572925a
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85eec2fb
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff84f23455
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff854afe84
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8572925f
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff86024b1b
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff855005f1
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8572a5a5
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85eec30b
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85712c25
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff84f23464
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff854afe64
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8572a5fb
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8572a609
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85eefdd0
+     0.00%  frankenredis  frankenredis      [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&mio::token::Token>
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85eec306
+     0.00%  frankenredis  frankenredis      [.] <core::ffi::c_str::CStr>::from_bytes_with_nul
+     0.00%  frankenredis  frankenredis      [.] core::ptr::drop_glue::<core::result::Result<bool, std::io::error::Error>>
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff84c000c8
+     0.00%  frankenredis  [vdso]            [.] 0x00000000000009f9
+     0.00%  frankenredis  frankenredis      [.] <hashbrown::map::HashMap<mio::token::Token, (), std::hash::random::RandomState>>::remove::<mio::token::Token>
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff850b6a68
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff860274e6
+     0.00%  frankenredis  [vdso]            [.] 0x00000000000009ee
+     0.00%  frankenredis  [vdso]            [.] 0x0000000000000a10
+     0.00%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::check_child_processes
+     0.00%  frankenredis  libc.so.6         [.] __libc_recv
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff84c0008b
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8506fd73
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff851a2903
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85304ba1
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff856a2137
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85729263
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8572a5cc
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85eefdd5
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85ef6bc5
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85ef6df6
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff86025946
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff86025bfd
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff862204f3
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8623a357
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

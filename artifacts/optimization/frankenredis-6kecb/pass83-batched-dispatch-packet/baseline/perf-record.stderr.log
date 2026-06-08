@@ -1,0 +1,2 @@
+[ perf record: Woken up 1 times to write data ]
+[ perf record: Captured and wrote 0.150 MB artifacts/optimization/frankenredis-6kecb/pass83-batched-dispatch-packet/baseline/setex-psetex-p16-1m-server.perf.data (1997 samples) ]
