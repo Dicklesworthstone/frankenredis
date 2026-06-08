@@ -6788,6 +6788,10 @@ impl Runtime {
         Some(reply)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "borrowed variadic write metrics carry command identity plus key/value slices"
+    )]
     fn record_plain_keyed_values_borrowed_metrics(
         &mut self,
         cmd: PlainKeyedValuesCmd,

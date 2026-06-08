@@ -1272,29 +1272,29 @@ fn main() -> ExitCode {
         // binds + registers the NEW set first and only swaps it in on success,
         // leaving the old set reachable on any rare TOCTOU failure. Existing
         // client connections (tokens >= MAX_LISTENERS) are untouched.
-        if let Some(new_port) = runtime.take_pending_port_change() {
-            if rebind_listeners(
+        if let Some(new_port) = runtime.take_pending_port_change()
+            && rebind_listeners(
                 &mut poll,
                 &mut listeners,
                 &cur_binds,
                 cur_listen_port,
                 &cur_binds.clone(),
                 new_port,
-            ) {
-                cur_listen_port = new_port;
-            }
+            )
+        {
+            cur_listen_port = new_port;
         }
-        if let Some(new_binds) = runtime.take_pending_bind_change() {
-            if rebind_listeners(
+        if let Some(new_binds) = runtime.take_pending_bind_change()
+            && rebind_listeners(
                 &mut poll,
                 &mut listeners,
                 &cur_binds,
                 cur_listen_port,
                 &new_binds,
                 cur_listen_port,
-            ) {
-                cur_binds = new_binds;
-            }
+            )
+        {
+            cur_binds = new_binds;
         }
 
         let eventloop_duration_us =
@@ -2218,9 +2218,11 @@ fn borrowed_plain_append_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a 
 
 /// `SADD | LPUSH | RPUSH key value [value ...]` borrowed-arg matcher for the
 /// shared keyed-values write fast path. (frankenredis-ev067)
+type BorrowedKeyedValuesArgs<'a> = (PlainKeyedValuesCmd, &'a [u8], &'a [&'a [u8]]);
+
 fn borrowed_plain_keyed_values_args<'a>(
     borrowed_args: &'a [&'a [u8]],
-) -> Option<(PlainKeyedValuesCmd, &'a [u8], &'a [&'a [u8]])> {
+) -> Option<BorrowedKeyedValuesArgs<'a>> {
     let [command, key, values @ ..] = borrowed_args else {
         return None;
     };
