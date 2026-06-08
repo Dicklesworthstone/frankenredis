@@ -1,0 +1,80 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 3K of event 'cycles:P'
+# Event count (approx.): 22262446001
+#
+# Overhead  Symbol                                                                                                                                                                                                                                                           Shared Object     IPC   [IPC Coverage]
+# ........  ...............................................................................................................................................................................................................................................................  ................  ....................
+#
+    17.28%  [.] <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, fr_store::ScoreMember, (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<fr_store::ScoreMember>                                           frankenredis      -      -            
+            |          
+            |--8.04%--<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, fr_store::ScoreMember, (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<fr_store::ScoreMember>
+            |          
+            |--2.41%--<hashbrown::map::HashMap<alloc::vec::Vec<u8>, f64, foldhash::quality::RandomState>>::insert
+            |          
+            |--1.26%--<alloc::collections::btree::map::BTreeMap<fr_store::ScoreMember, ()>>::insert
+            |          
+            |--1.21%--__memmove_avx_unaligned_erms
+            |          
+            |--1.13%--_mi_page_malloc_zero
+            |          
+             --1.06%--<foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::vec::Vec<u8>>
+
+     8.79%  [.] __memcmp_avx2_movbe                                                                                                                                                                                                                                          libc.so.6         -      -            
+            |          
+            |--4.49%--<fr_store::SortedSet>::get_score
+            |          |          
+            |           --4.40%--0x1c6c783226612e6f
+            |          
+            |--1.28%--__memcmp_avx2_movbe
+            |          
+            |--1.05%--<fr_store::Store>::zget_score_or_set_member
+            |          
+             --0.59%--<foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+
+     5.97%  [.] <fr_store::Store>::zget_members_with_scores                                                                                                                                                                                                                  frankenredis      -      -            
+            |          
+            |--2.18%--<fr_store::Store>::zget_members_with_scores
+            |          |          
+            |           --1.29%--0x3fff
+            |          
+            |--1.35%--__memmove_avx_unaligned_erms
+            |          
+            |--0.89%--mi_malloc_aligned
+            |          
+             --0.61%--_mi_page_malloc_zero
+
+     5.21%  [.] <fr_store::Store>::zget_score_or_set_member                                                                                                                                                                                                                  frankenredis      -      -            
+            |          
+            |--1.85%--<fr_store::SortedSet>::get_score
+            |          |          
+            |           --1.85%--0x1c6c783226612e6f
+            |          
+            |--0.75%--__memcmp_avx2_movbe
+            |          
+            |--0.64%--<hashbrown::map::HashMap<alloc::vec::Vec<u8>, f64, std::hash::random::RandomState>>::insert
+            |          
+            |--0.55%--<foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+            |          
+             --0.52%--<fr_store::Store>::zget_score_or_set_member
+
+     5.06%  [.] __memmove_avx_unaligned_erms                                                                                                                                                                                                                                 libc.so.6         -      -            
+            |          
+            |--1.79%--__memmove_avx_unaligned_erms
+            |          |          
+            |           --1.26%--<alloc::raw_vec::RawVecInner>::finish_grow
+            |          
+            |--0.86%--<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, fr_store::ScoreMember, (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<fr_store::ScoreMember>
+            |          
+             --0.62%--_mi_page_malloc_zero
+
+     3.95%  [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>                                                                                                                                                                               frankenredis      -      -            
+            |          
+            |--1.21%--<fr_store::SortedSet>::get_score
+            |          |          
+            |           --1.11%--0x1c6c783226612e6f
+            |          
+            |--0.73%--<fr_store::Store>::zget_score_or_set_member

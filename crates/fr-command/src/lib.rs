@@ -23166,7 +23166,7 @@ fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         return Err(CommandError::SyntaxError);
     }
     let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
-    let mut result: std::collections::HashMap<Vec<u8>, f64> = std::collections::HashMap::new();
+    let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
     for (member, score) in first_members {
         let mut in_other = false;
         for &key in &keys[1..] {
@@ -23179,11 +23179,11 @@ fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             }
         }
         if !in_other {
-            result.insert(member, score);
+            result.push((member, score));
         }
     }
     let count = result.len();
-    store.store_sorted_set(dest, result, now_ms);
+    store.store_sorted_set_from_pairs(dest, result, now_ms);
     Ok(RespFrame::Integer(count as i64))
 }
 
@@ -47840,6 +47840,73 @@ mod tests {
         assert_eq!(
             out,
             RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"b".to_vec()))]))
+        );
+    }
+
+    #[test]
+    fn zdiffstore_preserves_dest_source_scores_and_order() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"other".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        let count = dispatch_argv(
+            &[
+                b"ZDIFFSTORE".to_vec(),
+                b"z".to_vec(),
+                b"2".to_vec(),
+                b"z".to_vec(),
+                b"other".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zdiffstore");
+        assert_eq!(count, RespFrame::Integer(2));
+
+        let stored = dispatch_argv(
+            &[
+                b"ZRANGE".to_vec(),
+                b"z".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+                b"WITHSCORES".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zrange");
+        assert_eq!(
+            stored,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"b".to_vec())),
+                RespFrame::BulkString(Some(b"2".to_vec())),
+                RespFrame::BulkString(Some(b"c".to_vec())),
+                RespFrame::BulkString(Some(b"3".to_vec())),
+            ]))
         );
     }
 

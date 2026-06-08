@@ -15107,6 +15107,34 @@ impl Store {
         self.dirty = self.dirty.saturating_add(1);
     }
 
+    pub fn store_sorted_set_from_pairs(
+        &mut self,
+        dest: &[u8],
+        members: Vec<(Vec<u8>, f64)>,
+        now_ms: u64,
+    ) {
+        self.internal_entries_remove(dest);
+        self.stream_groups.remove(dest);
+        self.stream_last_ids.remove(dest);
+
+        if members.is_empty() {
+            self.dirty = self.dirty.saturating_add(1);
+            return;
+        }
+
+        let mut zs = SortedSet::new();
+        let zset_max_entries = self.zset_max_listpack_entries;
+        let zset_max_value = self.zset_max_listpack_value;
+        for (m, s) in members {
+            zs.insert_with_limits(m, s, zset_max_entries, zset_max_value);
+        }
+        self.internal_entries_insert(
+            dest.to_vec(),
+            Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
+        );
+        self.dirty = self.dirty.saturating_add(1);
+    }
+
     pub fn memory_usage_for_key(&mut self, key: &[u8], now_ms: u64) -> Option<usize> {
         self.drop_if_expired(key, now_ms);
         self.entries
