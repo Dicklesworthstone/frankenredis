@@ -1014,12 +1014,18 @@ fn main() -> ExitCode {
     loop {
         // Use fr-eventloop's tick planner to determine poll timeout.
         let has_blocked = !blocked_tokens.is_empty();
+        // (frankenredis) Clients deferred by CLIENT PAUSE must be released when
+        // the pause deadline passes. No socket I/O is involved, so mio will not
+        // wake us on its own — if we sleep for the full idle tick the paused
+        // command hangs until unrelated traffic arrives. Bound the sleep like the
+        // blocked case so the pause-expiry re-check below runs promptly.
+        let has_paused = !paused_tokens.is_empty();
         let has_deferred = !deferred_tokens.is_empty() && !runtime.is_client_paused(now_ms());
         let pending_writes = write_tokens.len();
         let tick_plan = plan_tick(0, pending_writes, tick_budget, EventLoopMode::Normal);
         let poll_timeout = if tick_plan.poll_timeout_ms == 0 || has_deferred {
             Some(std::time::Duration::from_millis(0))
-        } else if has_blocked {
+        } else if has_blocked || has_paused {
             // When clients are blocked, use a short poll timeout so we
             // can check for available data and timeout expiry frequently.
             Some(std::time::Duration::from_millis(100))
@@ -1144,25 +1150,22 @@ fn main() -> ExitCode {
             ts_us,
         });
 
-        // Re-process clients whose commands were deferred by CLIENT PAUSE.
-        // When the pause expires, we must re-trigger processing since mio won't
-        // generate a readable event for data already in the read buffer.
-        if !paused_tokens.is_empty() && !runtime.is_client_paused(ts) {
-            let tokens = std::mem::take(&mut paused_tokens);
-            for token in tokens {
-                if let Some(conn) = clients.get_mut(&token)
-                    && !conn.read_buf.is_empty()
-                    && !conn.closing
-                {
-                    // Re-register as readable to trigger processing on next tick
-                    let _ = poll.registry().reregister(
-                        &mut conn.stream,
-                        token,
-                        Interest::READABLE | Interest::WRITABLE,
-                    );
-                }
-            }
-        }
+        // Re-process clients whose commands were deferred by CLIENT PAUSE once the
+        // pause window expires (see release_expired_client_pause for why a direct
+        // re-drive is required rather than a mio re-register).
+        release_expired_client_pause(
+            &mut clients,
+            &mut runtime,
+            &mut poll,
+            &mut blocked_tokens,
+            &mut blocked_wake_index,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut paused_tokens,
+            &mut deferred_tokens,
+            ts,
+            ts_us,
+        );
 
         // (frankenredis-pkdgs) In Sentinel mode, actively PING + INFO the
         // monitored masters so their runid / flags / ping & info-refresh times
@@ -1482,6 +1485,59 @@ fn accept_connections(
                 eprintln!("warn: accept error: {e}");
                 break;
             }
+        }
+    }
+}
+
+/// Re-drive command processing for clients whose commands were deferred by
+/// CLIENT PAUSE, once the pause window has expired.
+///
+/// The deferred command bytes already sit in each client's `read_buf`, the
+/// socket has no NEW data, and mio registers epoll EDGE-triggered — so merely
+/// re-registering READABLE never re-fires and the command would hang until
+/// unrelated traffic happened to arrive on that connection. We therefore re-run
+/// the full read/dispatch path: `handle_readable` drains the socket (an
+/// immediate WouldBlock), then `process_buffered_frames` executes the now
+/// un-paused command and flushes its reply. The event loop bounds its poll
+/// timeout while any client is paused so this runs promptly at expiry.
+/// (frankenredis)
+#[allow(clippy::too_many_arguments)]
+fn release_expired_client_pause(
+    clients: &mut HashMap<Token, ClientConnection>,
+    runtime: &mut Runtime,
+    poll: &mut Poll,
+    blocked_tokens: &mut HashSet<Token>,
+    blocked_wake_index: &mut BlockedWakeIndex,
+    closing_tokens: &mut HashSet<Token>,
+    write_tokens: &mut HashSet<Token>,
+    paused_tokens: &mut HashSet<Token>,
+    deferred_tokens: &mut HashSet<Token>,
+    ts: u64,
+    ts_us: u64,
+) {
+    if paused_tokens.is_empty() || runtime.is_client_paused(ts) {
+        return;
+    }
+    let tokens = std::mem::take(paused_tokens);
+    for token in tokens {
+        let still_pending = clients
+            .get(&token)
+            .is_some_and(|c| !c.read_buf.is_empty() && !c.closing && c.blocked.is_none());
+        if still_pending {
+            handle_readable(
+                token,
+                clients,
+                runtime,
+                poll,
+                blocked_tokens,
+                blocked_wake_index,
+                closing_tokens,
+                write_tokens,
+                paused_tokens,
+                deferred_tokens,
+                ts,
+                ts_us,
+            );
         }
     }
 }
@@ -6856,6 +6912,94 @@ mod tests {
             b"-ERR max number of clients reached\r\n",
             "client must receive the upstream error before close"
         );
+    }
+
+    // (frankenredis) A command deferred by CLIENT PAUSE must auto-execute once the
+    // pause window expires, even with no further socket I/O on that connection —
+    // mio is edge-triggered, so the bytes buffered in read_buf would otherwise
+    // hang forever. Drives release_expired_client_pause across the deadline.
+    #[test]
+    fn client_pause_releases_deferred_command_after_deadline() {
+        use mio::{Poll, Token};
+        use std::collections::{HashMap, HashSet};
+        use std::io::Read as _;
+        use std::time::Duration;
+
+        let mut runtime = Runtime::default_strict();
+        let mut poll = Poll::new().unwrap();
+        let listener =
+            mio::net::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let mut client = StdTcpStream::connect(addr).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        std::thread::sleep(Duration::from_millis(40));
+        let (srv, _) = listener.accept().unwrap();
+
+        let session = runtime.new_session();
+        let token = Token(crate::MAX_LISTENERS + 1);
+        let mut conn = crate::ClientConnection::new(srv, session, 1_000);
+        // A write command sitting in read_buf, deferred while paused.
+        conn.read_buf.extend_from_slice(
+            &RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"SET".to_vec())),
+                RespFrame::BulkString(Some(b"pk".to_vec())),
+                RespFrame::BulkString(Some(b"pv".to_vec())),
+            ]))
+            .to_bytes(),
+        );
+
+        let mut clients: HashMap<Token, crate::ClientConnection> = HashMap::new();
+        clients.insert(token, conn);
+        let mut blocked_tokens = HashSet::new();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+        let mut closing_tokens = HashSet::new();
+        let mut write_tokens = HashSet::new();
+        let mut paused_tokens: HashSet<Token> = HashSet::new();
+        paused_tokens.insert(token);
+        let mut deferred_tokens = HashSet::new();
+
+        // Pause active until ts=1000.
+        runtime.server.client_pause_deadline_ms = 1_000;
+        runtime.server.client_pause_all = true;
+
+        // Before the deadline: nothing is released, the command stays buffered.
+        crate::release_expired_client_pause(
+            &mut clients, &mut runtime, &mut poll, &mut blocked_tokens,
+            &mut blocked_wake_index, &mut closing_tokens, &mut write_tokens,
+            &mut paused_tokens, &mut deferred_tokens, 500, 500_000,
+        );
+        assert!(paused_tokens.contains(&token), "still paused before deadline");
+        assert!(
+            !clients[&token].read_buf.is_empty(),
+            "deferred command must stay buffered before the deadline"
+        );
+
+        // After the deadline: the command executes and its reply flushes.
+        crate::release_expired_client_pause(
+            &mut clients, &mut runtime, &mut poll, &mut blocked_tokens,
+            &mut blocked_wake_index, &mut closing_tokens, &mut write_tokens,
+            &mut paused_tokens, &mut deferred_tokens, 2_000, 2_000_000,
+        );
+        assert!(paused_tokens.is_empty(), "pause must be cleared after deadline");
+        assert!(
+            clients[&token].read_buf.is_empty(),
+            "deferred command must be consumed after release"
+        );
+        assert_eq!(
+            runtime.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"GET".to_vec())),
+                    RespFrame::BulkString(Some(b"pk".to_vec())),
+                ])),
+                2_000,
+            ),
+            RespFrame::BulkString(Some(b"pv".to_vec())),
+            "the released SET must have executed"
+        );
+        let mut buf = [0u8; 16];
+        let n = client.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"+OK\r\n", "client must receive the SET reply");
     }
 
     #[test]
