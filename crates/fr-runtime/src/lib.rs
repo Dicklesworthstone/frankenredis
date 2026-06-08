@@ -3971,6 +3971,12 @@ impl Runtime {
             .sentinel_take_hello_to_publish(name, now_ms)
     }
 
+    /// (frankenredis-pkdgs) Ingest a `__sentinel__:hello` payload received from a
+    /// monitored master's pub/sub channel so this sentinel discovers its peers.
+    pub fn sentinel_process_hello(&mut self, payload: &str, now_ms: u64) {
+        self.server.store.sentinel_process_hello(payload, now_ms);
+    }
+
     /// (frankenredis-pkdgs) Monitored masters' (name, ip, port) for the
     /// fr-server Sentinel monitoring tick.
     #[must_use]

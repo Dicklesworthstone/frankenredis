@@ -3422,6 +3422,19 @@ impl Store {
         }
     }
 
+    /// (frankenredis-pkdgs) Ingest a `__sentinel__:hello` payload received from a
+    /// master's pub/sub channel: parse it and fold via process_hello_message +
+    /// apply_discovery_action so this sentinel discovers its peers (the receive
+    /// half of gossip — the publish half is sentinel_take_hello_to_publish).
+    pub fn sentinel_process_hello(&mut self, payload: &str, now_ms: u64) {
+        let Some(hello) = fr_sentinel::discovery::HelloMessage::parse(payload) else {
+            return;
+        };
+        let action =
+            fr_sentinel::discovery::process_hello_message(&self.sentinel_state, &hello, now_ms);
+        fr_sentinel::discovery::apply_discovery_action(&mut self.sentinel_state, action, now_ms);
+    }
+
     /// (frankenredis-pkdgs) If it is time to gossip (every PUBLISH_PERIOD_MS),
     /// return the encoded hello payload for `PUBLISH __sentinel__:hello` and
     /// stamp last_pub_time; else None. Lets other sentinels (incl. real

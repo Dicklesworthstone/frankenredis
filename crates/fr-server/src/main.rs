@@ -1005,6 +1005,9 @@ fn main() -> ExitCode {
     // (frankenredis-pkdgs) Last wall-clock ms a sentinel-mode INFO/PING probe of
     // the monitored masters ran. 0 = never, so the first tick probes immediately.
     let mut last_sentinel_probe_ms: u64 = 0;
+    // (frankenredis-pkdgs) Per-master persistent __sentinel__:hello subscriptions
+    // (sentinel mode only), drained each iteration to discover peer sentinels.
+    let mut sentinel_hello_subs: HashMap<String, SentinelHelloSub> = HashMap::new();
 
     loop {
         // Use fr-eventloop's tick planner to determine poll timeout.
@@ -1161,7 +1164,12 @@ fn main() -> ExitCode {
         // monitored masters so their runid / flags / ping & info-refresh times
         // fill in (otherwise SENTINEL MASTER reports an empty,
         // "master,disconnected" instance forever).
-        run_sentinel_monitoring_tick(&mut runtime, ts, &mut last_sentinel_probe_ms);
+        run_sentinel_monitoring_tick(
+            &mut runtime,
+            ts,
+            &mut last_sentinel_probe_ms,
+            &mut sentinel_hello_subs,
+        );
 
         // Deliver pending replication writes to connected replicas.
         propagate_writes_to_replicas(&mut clients, &mut runtime, &mut poll, &mut write_tokens);
@@ -2444,7 +2452,91 @@ fn probe_sentinel_master(
 /// link liveness, discovered replicas) via the fr-store/fr-sentinel primitives.
 /// Without this, a sentinel registers a master but never contacts it, so
 /// SENTINEL MASTER reports an empty "master,disconnected" instance forever.
-fn run_sentinel_monitoring_tick(runtime: &mut Runtime, now_ms: u64, last_probe_ms: &mut u64) {
+/// (frankenredis-pkdgs) A persistent connection SUBSCRIBEd to a monitored
+/// master's `__sentinel__:hello` channel, drained non-blocking each iteration to
+/// receive peer sentinels' hello announcements.
+struct SentinelHelloSub {
+    stream: StdTcpStream,
+    buf: Vec<u8>,
+}
+
+/// Open + SUBSCRIBE + switch to non-blocking. None on any connect/IO failure
+/// (the caller retries next tick).
+fn open_sentinel_hello_sub(ip: &str, port: u16) -> Option<SentinelHelloSub> {
+    let addr: SocketAddr = format!("{ip}:{port}").parse().ok()?;
+    let mut stream = StdTcpStream::connect_timeout(&addr, Duration::from_millis(200)).ok()?;
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(300)));
+    stream
+        .write_all(&replica_handshake_frame(&[b"SUBSCRIBE", b"__sentinel__:hello"]).to_bytes())
+        .ok()?;
+    stream.set_nonblocking(true).ok()?;
+    Some(SentinelHelloSub {
+        stream,
+        buf: Vec::new(),
+    })
+}
+
+/// Non-blocking drain of pending bytes, parsing pub/sub `message` frames on
+/// `__sentinel__:hello` and folding each payload via runtime.sentinel_process_hello.
+/// Err means the connection is dead/garbled and should be reopened.
+fn drain_sentinel_hello_sub(
+    sub: &mut SentinelHelloSub,
+    runtime: &mut Runtime,
+    parser_config: &ParserConfig,
+    now_ms: u64,
+) -> io::Result<()> {
+    let mut tmp = [0u8; 8192];
+    loop {
+        match sub.stream.read(&mut tmp) {
+            Ok(0) => return Err(io::Error::new(ErrorKind::UnexpectedEof, "hello sub closed")),
+            Ok(n) => sub.buf.extend_from_slice(&tmp[..n]),
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
+            Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+        // Cap the buffer to avoid unbounded growth on a chatty channel.
+        if sub.buf.len() > 1 << 20 {
+            return Err(io::Error::new(ErrorKind::InvalidData, "hello sub overflow"));
+        }
+    }
+    loop {
+        match fr_protocol::parse_frame_with_config(&sub.buf, parser_config) {
+            Ok(parsed) => {
+                handle_sentinel_hello_frame(&parsed.frame, runtime, now_ms);
+                sub.buf.drain(..parsed.consumed);
+            }
+            Err(RespParseError::Incomplete) => break,
+            Err(_) => return Err(io::Error::new(ErrorKind::InvalidData, "bad hello frame")),
+        }
+    }
+    Ok(())
+}
+
+/// A pub/sub push is `["message", "__sentinel__:hello", "<payload>"]`; ignore the
+/// `subscribe` confirmation and anything else.
+fn handle_sentinel_hello_frame(frame: &RespFrame, runtime: &mut Runtime, now_ms: u64) {
+    if let RespFrame::Array(Some(items)) = frame
+        && items.len() == 3
+        && let (
+            RespFrame::BulkString(Some(kind)),
+            RespFrame::BulkString(Some(chan)),
+            RespFrame::BulkString(Some(payload)),
+        ) = (&items[0], &items[1], &items[2])
+        && kind.eq_ignore_ascii_case(b"message")
+        && chan.as_slice() == b"__sentinel__:hello"
+        && let Ok(s) = std::str::from_utf8(payload)
+    {
+        runtime.sentinel_process_hello(s, now_ms);
+    }
+}
+
+fn run_sentinel_monitoring_tick(
+    runtime: &mut Runtime,
+    now_ms: u64,
+    last_probe_ms: &mut u64,
+    hello_subs: &mut HashMap<String, SentinelHelloSub>,
+) {
     if !runtime.sentinel_mode() {
         return;
     }
@@ -2455,26 +2547,47 @@ fn run_sentinel_monitoring_tick(runtime: &mut Runtime, now_ms: u64, last_probe_m
     // them report the true elapsed time since the last ping/info (0..interval),
     // matching redis's mstime()-based deltas.
     runtime.sentinel_begin_tick(now_ms);
-    // Probing the masters (the network IO) stays throttled.
+
+    let parser_config = runtime.parser_config();
+    // Snapshot (name, ip, port) so the blocking probes hold no borrow of the
+    // sentinel state across the network IO.
+    let targets = runtime.sentinel_monitor_targets();
+
+    // Receive half of gossip (every iteration): keep a hello subscription per
+    // monitored master and drain it so peer sentinels' hellos are ingested as
+    // they arrive. Reconcile against the current master set first.
+    {
+        let current: HashSet<&str> = targets.iter().map(|(n, _, _)| n.as_str()).collect();
+        hello_subs.retain(|name, _| current.contains(name.as_str()));
+        for (name, ip, port) in &targets {
+            if !hello_subs.contains_key(name)
+                && let Some(conn) = open_sentinel_hello_sub(ip, *port)
+            {
+                hello_subs.insert(name.clone(), conn);
+            }
+            if let Some(conn) = hello_subs.get_mut(name)
+                && drain_sentinel_hello_sub(conn, runtime, &parser_config, now_ms).is_err()
+            {
+                hello_subs.remove(name);
+            }
+        }
+    }
+
+    // Probe half (network IO) stays throttled.
     if now_ms.saturating_sub(*last_probe_ms) < SENTINEL_PROBE_INTERVAL_MS {
         return;
     }
     *last_probe_ms = now_ms;
-
-    let parser_config = runtime.parser_config();
     let query_buffer_limit = runtime.server.query_buffer_limit;
-    // Snapshot (name, ip, port) so the blocking probes hold no borrow of the
-    // sentinel state across the network IO.
-    let targets = runtime.sentinel_monitor_targets();
-    for (name, ip, port) in targets {
+    for (name, ip, port) in &targets {
         // Gossip a hello on this master's __sentinel__:hello channel when due,
         // so peer sentinels discover this instance. Decided (and rate-limited)
         // by the store before the blocking probe sends it.
-        let hello = runtime.sentinel_take_hello_to_publish(&name, now_ms);
+        let hello = runtime.sentinel_take_hello_to_publish(name, now_ms);
         let info =
-            probe_sentinel_master(&ip, port, &parser_config, query_buffer_limit, hello.as_deref())
+            probe_sentinel_master(ip, *port, &parser_config, query_buffer_limit, hello.as_deref())
                 .ok();
-        runtime.apply_sentinel_probe_result(&name, now_ms, info.as_deref());
+        runtime.apply_sentinel_probe_result(name, now_ms, info.as_deref());
     }
 }
 
