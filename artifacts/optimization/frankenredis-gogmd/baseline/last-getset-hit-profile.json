@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "frgogmd-profile",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 2700000,
+    "bytes_sent": 17400000,
+    "commands": 300000,
+    "ops_per_sec": 145967.70378391645,
+    "pipeline_latency_us": {
+      "mean": 5116.158129988859,
+      "p50": 4224.822041578591,
+      "p95": 11778.376996517181,
+      "p99": 16744.33401785791,
+      "samples": 18750
+    },
+    "seconds": 2.0552491559647024
+  },
+  "mode": "getset-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 50000,
+    "bytes_sent": 550000,
+    "commands": 10000,
+    "seconds": 0.06960644200444221
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

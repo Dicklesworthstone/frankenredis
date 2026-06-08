@@ -2370,6 +2370,21 @@ fn classify_runtime_special_command_linear(cmd: &[u8]) -> Option<RuntimeSpecialC
     }
 }
 
+/// Mirror upstream `call()`'s MONITOR gate: a successfully-executed command is
+/// fed to MONITOR clients unless it carries `CMD_ADMIN` or `CMD_SKIP_MONITOR`.
+/// Used on the replication-replay path so a replica's MONITOR echoes the SELECT
+/// (and PUBLISH / MULTI / EXEC) commands the primary streams, while the
+/// replication-internal REPLCONF (admin) stays hidden. (frankenredis-3s0ra)
+fn command_should_feed_monitors(cmd: &[u8]) -> bool {
+    let lower = cmd.to_ascii_lowercase();
+    match fr_command::get_command_flags(&lower) {
+        Some(flags) => !flags
+            .split_whitespace()
+            .any(|f| f == "admin" || f == "skip_monitor"),
+        None => true,
+    }
+}
+
 #[cfg(test)]
 #[inline]
 fn classify_cluster_subcommand(cmd: &[u8]) -> Result<ClusterSubcommand, CommandError> {
@@ -9244,6 +9259,22 @@ impl Runtime {
                     self.server.record_latency_sample(argv, elapsed_us, now_ms);
                     self.server
                         .record_command_histogram(argv, elapsed_us, &reply);
+                    // Upstream call() feeds MONITOR for every executed command
+                    // except CMD_ADMIN / CMD_SKIP_MONITOR ones. This special-
+                    // command early-return path skipped the feed, so a replica
+                    // replaying its primary's stream never echoed the SELECT
+                    // commands the primary injects on a db change (redis shows
+                    // them in the replica's MONITOR). Scope the feed to the
+                    // replication-replay path: those streams carry only
+                    // replicable, monitorable commands (SELECT / writes /
+                    // MULTI / EXEC / PUBLISH), and REPLCONF (admin) is filtered
+                    // out, while a normal client's special-command MONITOR
+                    // behaviour is left exactly as-is. (frankenredis-3s0ra)
+                    if self.server.applying_master_stream
+                        && command_should_feed_monitors(&argv[0])
+                    {
+                        self.feed_monitors(argv, now_ms, self.session.selected_db);
+                    }
                 }
                 return reply;
             }
@@ -25536,6 +25567,49 @@ mod tests {
                 7,
                 b"+0.003000 [2 127.0.0.1:0] \"SET\" \"beta\" \"2\"\r\n".to_vec(),
             )]
+        );
+    }
+
+    #[test]
+    fn replica_monitor_echoes_select_from_master_stream_3s0ra() {
+        // Upstream: a replica's MONITOR echoes the SELECT commands its primary
+        // injects into the replication stream when the db changes. fr's special-
+        // command dispatch early-returned before the MONITOR feed, so SELECT
+        // never reached a monitoring client on the replica. The feed is scoped
+        // to the replication-replay path (applying_master_stream).
+        // (frankenredis-3s0ra)
+        let mut rt = Runtime::default_strict();
+        rt.session.client_id = 9;
+        assert_eq!(
+            rt.execute_frame(command(&[b"MONITOR"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.drain_monitor_output();
+
+        // Replaying the primary's stream: SELECT 1 must reach the monitor with
+        // the post-switch db in the prefix, exactly like redis.
+        rt.server.applying_master_stream = true;
+        let _ = rt.execute_frame(command(&[b"SELECT", b"1"]), 2);
+        assert_eq!(
+            rt.drain_monitor_output(),
+            vec![(9, b"+0.002000 [1 127.0.0.1:0] \"SELECT\" \"1\"\r\n".to_vec())],
+            "replica MONITOR must echo the replayed SELECT"
+        );
+
+        // REPLCONF (admin) carried in the stream stays hidden from MONITOR.
+        let _ = rt.execute_frame(command(&[b"REPLCONF", b"GETACK", b"*"]), 3);
+        assert!(
+            rt.drain_monitor_output().is_empty(),
+            "REPLCONF (admin) must not reach MONITOR"
+        );
+        rt.server.applying_master_stream = false;
+
+        // A normal client's SELECT keeps its prior behaviour (not fed via the
+        // special-command path) — this fix changes only the replica stream.
+        let _ = rt.execute_frame(command(&[b"SELECT", b"2"]), 4);
+        assert!(
+            rt.drain_monitor_output().is_empty(),
+            "normal-client special-command MONITOR behaviour must be unchanged"
         );
     }
 
