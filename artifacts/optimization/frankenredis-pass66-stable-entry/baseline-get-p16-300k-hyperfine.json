@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "/tmp/codex-fr-pass66-target/release-perf/fr-bench --host 127.0.0.1 --port 6470 --clients 16 --requests 300000 --pipeline 16 --workload get --key-prefix pass66-baseline --json-out /data/projects/frankenredis/artifacts/optimization/frankenredis-pass66-stable-entry/baseline-get-p16-300k-last.json",
+      "mean": 0.3998065571828572,
+      "stddev": 0.010994767757875987,
+      "median": 0.40064989104000004,
+      "user": 0.18456300857142857,
+      "system": 0.3958753257142858,
+      "min": 0.38227474404,
+      "max": 0.41670743604000005,
+      "times": [
+        0.38227474404,
+        0.40064989104000004,
+        0.40165563804000004,
+        0.41670743604000005,
+        0.39226933704000005,
+        0.40785354504000004,
+        0.39723530904000004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "/tmp/codex-fr-pass66-target/release-perf/fr-bench --host 127.0.0.1 --port 6471 --clients 16 --requests 1000000 --pipeline 16 --workload get --key-prefix pass66-rev-candidate --json-out /data/projects/frankenredis/artifacts/optimization/frankenredis-pass66-stable-entry/candidate-get-p16-1m-reversed-last.json",
+      "mean": 1.3210520238399996,
+      "stddev": 0.02209163763450243,
+      "median": 1.32343322624,
+      "user": 0.62456172,
+      "system": 1.3008313,
+      "min": 1.2938517862399999,
+      "max": 1.34455159724,
+      "times": [
+        1.33978851224,
+        1.34455159724,
+        1.32343322624,
+        1.3036349972399999,
+        1.2938517862399999
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/tmp/codex-fr-pass66-target/release-perf/fr-bench --host 127.0.0.1 --port 6470 --clients 16 --requests 1000000 --pipeline 16 --workload get --key-prefix pass66-rev-baseline --json-out /data/projects/frankenredis/artifacts/optimization/frankenredis-pass66-stable-entry/baseline-get-p16-1m-reversed-last.json",
+      "mean": 1.3166709024399998,
+      "stddev": 0.023040287866422707,
+      "median": 1.3279923222399999,
+      "user": 0.61678992,
+      "system": 1.3100759,
+      "min": 1.28371448224,
+      "max": 1.34006648324,
+      "times": [
+        1.34006648324,
+        1.3279923222399999,
+        1.28371448224,
+        1.3023701752399999,
+        1.32921104924
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

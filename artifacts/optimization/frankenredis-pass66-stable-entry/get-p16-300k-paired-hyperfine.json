@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "/tmp/codex-fr-pass66-target/release-perf/fr-bench --host 127.0.0.1 --port 6470 --clients 16 --requests 300000 --pipeline 16 --workload get --key-prefix pass66-paired-baseline --json-out /data/projects/frankenredis/artifacts/optimization/frankenredis-pass66-stable-entry/baseline-get-p16-300k-paired-last.json",
+      "mean": 0.47184645119428575,
+      "stddev": 0.026667910536153826,
+      "median": 0.47187100648,
+      "user": 0.20040407999999998,
+      "system": 0.3964432342857143,
+      "min": 0.42326923348,
+      "max": 0.50741724848,
+      "times": [
+        0.47981918848000005,
+        0.47187100648,
+        0.49138881348,
+        0.45783592948,
+        0.50741724848,
+        0.42326923348,
+        0.47132373848000003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/tmp/codex-fr-pass66-target/release-perf/fr-bench --host 127.0.0.1 --port 6471 --clients 16 --requests 300000 --pipeline 16 --workload get --key-prefix pass66-paired-candidate --json-out /data/projects/frankenredis/artifacts/optimization/frankenredis-pass66-stable-entry/candidate-get-p16-300k-paired-last.json",
+      "mean": 0.4614435736228572,
+      "stddev": 0.01682465688202312,
+      "median": 0.45917575848000003,
+      "user": 0.18995536571428567,
+      "system": 0.4052776628571428,
+      "min": 0.44038440648000005,
+      "max": 0.48528835248,
+      "times": [
+        0.44579089248000003,
+        0.45917575848000003,
+        0.48194466548000003,
+        0.44038440648000005,
+        0.48528835248,
+        0.45789150348,
+        0.45962943648000004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

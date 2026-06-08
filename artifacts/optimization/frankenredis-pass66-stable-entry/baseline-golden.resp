@@ -1,0 +1,22 @@
++OK
++OK
+$1
+v
+$-1
+:1
+-WRONGTYPE Operation against a key holding the wrong kind of value
+:0
++OK
+$1
+v
+$1
+v
++OK
++OK
++OK
+$1
+v
+:6
+$-1
++OK
++OK

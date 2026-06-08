@@ -1,0 +1,74 @@
+[
+  {
+    "command": "FLUSHALL",
+    "reply_hex": "2b4f4b0d0a"
+  },
+  {
+    "command": "SET k v",
+    "reply_hex": "2b4f4b0d0a"
+  },
+  {
+    "command": "GET k",
+    "reply_hex": "24310d0a760d0a"
+  },
+  {
+    "command": "GET missing",
+    "reply_hex": "242d310d0a"
+  },
+  {
+    "command": "LPUSH l x",
+    "reply_hex": "3a310d0a"
+  },
+  {
+    "command": "GET l",
+    "reply_hex": "2d57524f4e4754595045204f7065726174696f6e20616761696e73742061206b657920686f6c64696e67207468652077726f6e67206b696e64206f662076616c75650d0a"
+  },
+  {
+    "command": "OBJECT IDLETIME k",
+    "reply_hex": "3a300d0a"
+  },
+  {
+    "command": "SET ttl v PX 100000",
+    "reply_hex": "2b4f4b0d0a"
+  },
+  {
+    "command": "GET ttl",
+    "reply_hex": "24310d0a760d0a"
+  },
+  {
+    "command": "GET k",
+    "reply_hex": "24310d0a760d0a"
+  },
+  {
+    "command": "FLUSHALL",
+    "reply_hex": "2b4f4b0d0a"
+  },
+  {
+    "command": "CONFIG SET maxmemory-policy allkeys-lfu",
+    "reply_hex": "2b4f4b0d0a"
+  },
+  {
+    "command": "SET f v",
+    "reply_hex": "2b4f4b0d0a"
+  },
+  {
+    "command": "GET f",
+    "reply_hex": "24310d0a760d0a"
+  },
+  {
+    "command": "OBJECT FREQ f",
+    "reply_hex": "3a360d0a"
+  },
+  {
+    "command": "GET nope",
+    "reply_hex": "242d310d0a"
+  },
+  {
+    "command": "CONFIG SET maxmemory-policy noeviction",
+    "reply_hex": "2b4f4b0d0a"
+  },
+  {
+    "command": "QUIT",
+    "reply_hex": "2b4f4b0d0a"
+  }
+]

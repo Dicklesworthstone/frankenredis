@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780876749189,
+  "host": "127.0.0.1",
+  "port": 6470,
+  "workload": "get",
+  "clients": 16,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "pass66-paired-baseline",
+  "total_time_ms": 456,
+  "ops_per_sec": 657623.6242922054,
+  "bytes_sent": 16166849,
+  "bytes_received": 2700000,
+  "latency_us": {
+    "min": 32,
+    "p50": 312,
+    "p95": 583,
+    "p99": 2020,
+    "p999": 3091,
+    "max": 10079,
+    "mean": 364.65343000000036,
+    "samples": 300000
+  }
+}

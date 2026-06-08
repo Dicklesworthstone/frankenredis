@@ -1,0 +1,232 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 807  of event 'cycles:u'
+# Event count (approx.): 2256140210
+#
+# Overhead  Command       Shared Object     Symbol                                                                                                                                                                                                  IPC   [IPC Coverage]
+# ........  ............  ................  ......................................................................................................................................................................................................  ....................
+#
+    16.12%  frankenredis  libc.so.6         [.] __memcmp_avx2_movbe                                                                                                                                                                                 -      -            
+            |          
+             --16.12%--__memcmp_avx2_movbe
+
+    15.36%  frankenredis  [vdso]            [.] 0x0000000000000986                                                                                                                                                                                  -      -            
+            |
+            ---0x7be4acef7986
+               clock_gettime@@GLIBC_2.17
+               <std::sys::pal::unix::time::Timespec>::now
+               |          
+               |--9.29%--<fr_runtime::ServerState>::run_active_expire_cycle
+               |          
+                --6.07%--<fr_runtime::Runtime>::execute_plain_get_borrowed
+
+    13.20%  frankenredis  frankenredis      [.] <fr_store::Store>::drop_if_expired                                                                                                                                                                  -      -            
+            |
+            ---<fr_store::Store>::drop_if_expired
+
+     4.86%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::refresh_store_runtime_info_context                                                                                                                                           -      -            
+            |
+            ---<fr_runtime::Runtime>::refresh_store_runtime_info_context
+
+     2.56%  frankenredis  frankenredis      [.] _mi_page_malloc_zero                                                                                                                                                                                -      -            
+            |
+            ---_mi_page_malloc_zero
+               |          
+                --2.06%--0x3832240a0d544547
+
+     2.46%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::execute_plain_get_borrowed                                                                                                                                                   -      -            
+            |
+            ---<fr_runtime::Runtime>::execute_plain_get_borrowed
+
+     2.30%  frankenredis  frankenredis      [.] frankenredis::process_buffered_frames                                                                                                                                                               -      -            
+            |
+            ---frankenredis::process_buffered_frames
+
+     2.09%  frankenredis  frankenredis      [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u64>                                                                                                                       -      -            
+            |
+            ---<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u64>
+
+     1.97%  frankenredis  frankenredis      [.] <fr_runtime::ServerState>::run_active_expire_cycle                                                                                                                                                  -      -            
+            |
+            ---<fr_runtime::ServerState>::run_active_expire_cycle
+
+     1.66%  frankenredis  frankenredis      [.] <fr_store::CommandHistogramTracker>::record_canonical_with_kind                                                                                                                                     -      -            
+            |
+            ---<fr_store::CommandHistogramTracker>::record_canonical_with_kind
+               |          
+                --1.00%--0xfec5000002d2820f
+
+     1.35%  frankenredis  frankenredis      [.] mi_theap_malloc_aligned                                                                                                                                                                             -      -            
+            |
+            ---mi_theap_malloc_aligned
+               |          
+                --0.76%--0x3832240a0d544547
+
+     1.17%  frankenredis  [unknown]         [k] 0xffffffff86229e6b                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff86229e6b
+               |          
+               |--0.65%--0xffffffff85efbc79
+               |          0xffffffff85eff157
+               |          0xffffffff86022e9a
+               |          0xffffffff860239fb
+               |          0xffffffff860248f0
+               |          0xffffffff860733b6
+               |          0xffffffff85eefaba
+               |          0xffffffff85eefb24
+               |          0xffffffff84f24d8f
+               |          0xffffffff86220551
+               |          0xffffffff84c0012b
+               |          __syscall_cancel
+               |          __send
+               |          <frankenredis::ClientConnection>::try_flush
+               |          0
+               |          
+                --0.52%--0xffffffff85eff22b
+                          0xffffffff86022e9a
+                          0xffffffff860239fb
+                          0xffffffff860248f0
+                          0xffffffff860733b6
+                          0xffffffff85eefaba
+                          0xffffffff85eefb24
+                          0xffffffff84f24d8f
+                          0xffffffff86220551
+                          0xffffffff84c0012b
+                          __syscall_cancel
+                          __send
+                          <frankenredis::ClientConnection>::try_flush
+                          0
+
+     1.17%  frankenredis  frankenredis      [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>                                                                                                     -      -            
+            |
+            ---<foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+
+     1.09%  frankenredis  libc.so.6         [.] __memmove_avx_unaligned_erms                                                                                                                                                                        -      -            
+            |
+            ---__memmove_avx_unaligned_erms
+               |          
+                --0.66%--0
+
+     1.07%  frankenredis  libc.so.6         [.] clock_gettime@@GLIBC_2.17                                                                                                                                                                           -      -            
+            |
+            ---clock_gettime@@GLIBC_2.17
+               |          
+                --0.75%--<fr_runtime::ServerState>::run_active_expire_cycle
+
+     1.06%  frankenredis  frankenredis      [.] <hashbrown::map::HashMap<u64, alloc::vec::Vec<fr_store::PubSubMessage>, std::hash::random::RandomState>>::remove::<u64>                                                                             -      -            
+            |
+            ---<hashbrown::map::HashMap<u64, alloc::vec::Vec<fr_store::PubSubMessage>, std::hash::random::RandomState>>::remove::<u64>
+
+     1.00%  frankenredis  frankenredis      [.] <std::sys::pal::unix::time::Timespec>::now                                                                                                                                                          -      -            
+            |
+            ---<std::sys::pal::unix::time::Timespec>::now
+               |          
+                --1.00%--<fr_runtime::ServerState>::run_active_expire_cycle
+
+     0.98%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::plain_borrowed_default_key_read_allows                                                                                                                                       -      -            
+            |
+            ---<fr_runtime::Runtime>::plain_borrowed_default_key_read_allows
+               |          
+                --0.98%--0
+
+     0.97%  frankenredis  frankenredis      [.] core::str::converts::from_utf8                                                                                                                                                                      -      -            
+            |
+            ---core::str::converts::from_utf8
+
+     0.96%  frankenredis  frankenredis      [.] fr_protocol::parse_command_args_borrowed_into                                                                                                                                                       -      -            
+            |
+            ---fr_protocol::parse_command_args_borrowed_into
+
+     0.96%  frankenredis  frankenredis      [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write                                                                                                                -      -            
+            |
+            ---<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+
+     0.94%  frankenredis  [unknown]         [k] 0xffffffff85eefaa9                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff85eefaa9
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0
+
+     0.79%  frankenredis  [unknown]         [k] 0xffffffff85efbc12                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff85efbc12
+               0xffffffff85eff157
+               0xffffffff86022e9a
+               0xffffffff860239fb
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0
+
+     0.75%  frankenredis  frankenredis      [.] fr_protocol::push_usize                                                                                                                                                                             -      -            
+            |
+            ---fr_protocol::push_usize
+
+     0.72%  frankenredis  frankenredis      [.] mi_free                                                                                                                                                                                             -      -            
+            |
+            ---mi_free
+
+     0.68%  frankenredis  frankenredis      [.] <std::sys::pal::unix::time::Timespec>::sub_timespec                                                                                                                                                 -      -            
+            |
+            ---<std::sys::pal::unix::time::Timespec>::sub_timespec
+
+     0.67%  frankenredis  frankenredis      [.] frankenredis::record_deferred_buffered_token                                                                                                                                                        -      -            
+            |
+            ---frankenredis::record_deferred_buffered_token
+               0
+
+     0.66%  frankenredis  frankenredis      [.] <fr_runtime::ClientSession as core::clone::Clone>::clone                                                                                                                                            -      -            
+            |
+            ---<fr_runtime::ClientSession as core::clone::Clone>::clone
+
+     0.61%  frankenredis  frankenredis      [.] <hashbrown::raw::RawTable<(alloc::vec::Vec<u8>, (usize, usize))>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::vec::Vec<u8>, (usize, usize), foldhash::quality::RandomState>::{closure#0}>  -      -            
+            |
+            ---<hashbrown::raw::RawTable<(alloc::vec::Vec<u8>, (usize, usize))>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::vec::Vec<u8>, (usize, usize), foldhash::quality::RandomState>::{closure#0}>
+               0x31ffff35ffffff72
+
+     0.55%  frankenredis  frankenredis      [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>                                                                                                                      -      -            
+            |
+            ---<foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+
+     0.55%  frankenredis  [unknown]         [k] 0xffffffff84c00080                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff84c00080
+               |          
+                --0.55%--__syscall_cancel
+                          0x1
+
+     0.54%  frankenredis  frankenredis      [.] <alloc::collections::btree::map::IntoIter<alloc::vec::Vec<u8>, alloc::collections::btree::set_val::SetValZST>>::dying_next                                                                          -      -            
+            |
+            ---<alloc::collections::btree::map::IntoIter<alloc::vec::Vec<u8>, alloc::collections::btree::set_val::SetValZST>>::dying_next
+               0
+
+     0.53%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::record_client_session                                                                                                                                                        -      -            
+            |
+            ---<fr_runtime::Runtime>::record_client_session
+               0
+
+     0.52%  frankenredis  frankenredis      [.] frankenredis::drain_pending_pubsub_to_connection                                                                                                                                                    -      -            
+            |
+            ---frankenredis::drain_pending_pubsub_to_connection
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
