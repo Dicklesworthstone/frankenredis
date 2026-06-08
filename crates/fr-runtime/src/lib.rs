@@ -3566,6 +3566,67 @@ impl ServerState {
             self.replication_ack_state.primary_offset,
             self.repl_backlog_size,
         );
+        self.trim_replication_backlog();
+    }
+
+    /// Reclaim memory from the in-memory replication/AOF buffer by dropping
+    /// leading records that are BOTH (a) already persisted to the on-disk AOF
+    /// (index < `aof_disk_flushed_records`) AND (b) fully below the live
+    /// replication backlog window (`record_end <= backlog.start_offset`).
+    ///
+    /// `aof_records` doubles as the AOF pre-flush buffer and the replication
+    /// backlog; without trimming it grows for the life of the process on any
+    /// master with a replica (the f82ny latch) or AOF enabled, since neither
+    /// `flush_aof_to_disk` nor `rewrite_aof_manifest` ever shrink it — they only
+    /// advance the flush cursor. Upstream caps its circular `repl_backlog` at
+    /// `repl-backlog-size` and evicts the oldest bytes; this is the equivalent.
+    ///
+    /// Invariant preserved: `aof_base_offset` is advanced by exactly the bytes
+    /// dropped, so `encoded_aof_stream_from_offset` still maps any absolute
+    /// offset within `[start_offset, end]` correctly (the window is fully
+    /// covered because we never drop a record reaching into it), and the
+    /// `[aof_disk_flushed_records..]` un-flushed flush slice is unchanged
+    /// (both the buffer and the cursor shift left together). (frankenredis-in22o)
+    fn trim_replication_backlog(&mut self) {
+        let window_start = self.replication_runtime_state.backlog.start_offset.0;
+        // The window has not yet advanced past what we already discarded — and
+        // before the backlog fills to `repl-backlog-size`, `start_offset` is 1,
+        // so this is a cheap early-out on the common (small-backlog) path.
+        if window_start <= self.aof_base_offset {
+            return;
+        }
+        // When AOF is active, records still doubling as un-flushed AOF data must
+        // stay until the incremental flush writes them. When AOF is disabled the
+        // flush cursor is meaningless (always 0) and a record exists purely as
+        // backlog, so it is trimmable as soon as it falls below the window —
+        // otherwise a replica-only master with no persistence would still grow
+        // unbounded. (Re-enabling AOF later rewrites a fresh base from the live
+        // store, so trimmed backlog history is never needed on disk.)
+        let aof_active = self.aof_path.is_some() && self.store.aof_enabled;
+        let mut drop_count = 0usize;
+        let mut dropped_bytes = 0u64;
+        let mut cursor = self.aof_base_offset;
+        for (i, record) in self.aof_records.iter().enumerate() {
+            if aof_active && i >= self.aof_disk_flushed_records {
+                break;
+            }
+            let len = u64::try_from(record.to_resp_frame().to_bytes().len()).unwrap_or(u64::MAX);
+            let record_end = cursor.saturating_add(len);
+            // Stop once a record reaches into the live backlog window — keeping
+            // it (and everything after) means `aof_base_offset <= start_offset`.
+            if record_end > window_start {
+                break;
+            }
+            cursor = record_end;
+            dropped_bytes = dropped_bytes.saturating_add(len);
+            drop_count = i + 1;
+        }
+        if drop_count == 0 {
+            return;
+        }
+        self.aof_records.drain(0..drop_count);
+        self.aof_disk_flushed_records = self.aof_disk_flushed_records.saturating_sub(drop_count);
+        self.aof_base_offset = self.aof_base_offset.saturating_add(dropped_bytes);
     }
 
     /// Propagate a command to replicas and the replication backlog but NOT the
@@ -3605,6 +3666,7 @@ impl ServerState {
             self.replication_ack_state.primary_offset,
             self.repl_backlog_size,
         );
+        self.trim_replication_backlog();
     }
 
     fn local_waitaof_fsync_tracks_primary_offset(&self) -> bool {
@@ -28635,6 +28697,142 @@ mod tests {
             ),
             RespFrame::SimpleString("CONTINUE".to_string())
         );
+    }
+
+    // (frankenredis-in22o) The in-memory backlog (aof_records) must be capped at
+    // ~repl-backlog-size and evict the oldest records — without AOF, a
+    // replica-only master would otherwise retain every write for the life of the
+    // process. Asserts the bound AND that partial resync stays exact after eviction.
+    #[test]
+    fn replication_backlog_evicts_below_window_and_stays_bounded_without_aof() {
+        let mut rt = Runtime::default_strict();
+        // A small backlog so eviction triggers after a handful of writes.
+        rt.server.repl_backlog_size = 64;
+        // First replica registers -> backlog materializes (no AOF on disk).
+        rt.server.replication_runtime_state.ensure_replica(1);
+
+        let largest_record = {
+            // Upper bound on a single encoded record we emit below.
+            let r = AofRecord {
+                argv: vec![b"SET".to_vec(), b"kxxxx".to_vec(), b"vxxxx".to_vec()],
+            };
+            r.to_resp_frame().to_bytes().len() as u64
+        };
+
+        for i in 0..200u32 {
+            let key = format!("k{i:04}");
+            let val = format!("v{i:04}");
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", key.as_bytes(), val.as_bytes()]), 0),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+
+        let end = rt.replication_primary_offset().0;
+        let start = rt.server.replication_runtime_state.backlog.start_offset.0;
+        let base = rt.server.aof_base_offset;
+
+        // Invariant 1: the window is fully covered by the retained buffer.
+        assert!(
+            base <= start,
+            "aof_base_offset ({base}) must stay <= backlog start_offset ({start})"
+        );
+        // Invariant 2: the buffer holds exactly [base, end].
+        let stream_len = rt.encoded_aof_stream().len() as u64;
+        assert_eq!(
+            stream_len,
+            end - base,
+            "encoded stream length must equal end-base"
+        );
+        // Invariant 3: bounded by ~repl-backlog-size (not the full 200-write history).
+        assert!(
+            stream_len <= rt.server.repl_backlog_size + largest_record,
+            "backlog bytes {stream_len} must stay within repl_backlog_size+one record \
+             ({} + {largest_record})",
+            rt.server.repl_backlog_size
+        );
+        assert!(
+            stream_len < end,
+            "eviction must have occurred (held {stream_len} of {end} total bytes)"
+        );
+        // Invariant 4: partial resync from the window start still returns the exact tail.
+        let tail = rt.encoded_aof_stream_from_offset(start);
+        assert_eq!(
+            tail.len() as u64,
+            end - start,
+            "partial-resync tail from start_offset must be exact after eviction"
+        );
+        // And the most recent write is replayable from the backlog.
+        let recent = rt.encoded_aof_stream_from_offset(end.saturating_sub(largest_record));
+        assert!(
+            String::from_utf8_lossy(&recent).contains("k0199"),
+            "newest write must survive in the backlog: {:?}",
+            String::from_utf8_lossy(&recent)
+        );
+    }
+
+    // (frankenredis-in22o) Eviction must never drop a record the on-disk AOF still
+    // needs: with AOF enabled, write/flush/evict/write/flush then reload a fresh
+    // runtime and assert the full dataset reconstructs (no lost or duplicated keys).
+    #[test]
+    fn replication_backlog_trim_preserves_aof_durability() {
+        let dir = std::env::temp_dir().join("fr_runtime_backlog_trim_durability");
+        let _ = std::fs::create_dir_all(&dir);
+        clean_aof_artifacts(&dir, "trim.aof");
+        let aof_path = dir.join("trim.aof");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(aof_path.clone());
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendonly", b"yes"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // Small backlog so trimming fires while AOF is the durable copy.
+        rt.server.repl_backlog_size = 96;
+        // Anchor the appendonlydir base before incremental writes.
+        rt.flush_aof_to_disk(0);
+
+        // Interleave writes and flushes so records become disk-flushed (hence
+        // trim-eligible) while later writes drive eviction of the older ones.
+        for i in 0..120u32 {
+            let key = format!("d{i:04}");
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", key.as_bytes(), b"val"]), i as u64),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            if i % 8 == 0 {
+                rt.flush_aof_to_disk(i as u64);
+            }
+        }
+        rt.flush_aof_to_disk(200);
+
+        // Eviction must actually have occurred (buffer << total history).
+        assert!(
+            (rt.server.aof_records.len() as u32) < 120,
+            "expected eviction to shrink the in-memory buffer, held {}",
+            rt.server.aof_records.len()
+        );
+
+        // Reload into a fresh runtime from disk alone — every key must survive.
+        let mut rt2 = Runtime::default_strict();
+        rt2.set_aof_path(aof_path.clone());
+        rt2.load_aof(300).expect("appendonlydir load should succeed");
+        let dbsize = rt2.execute_frame(command(&[b"DBSIZE"]), 300);
+        assert_eq!(
+            dbsize,
+            RespFrame::Integer(120),
+            "all 120 keys must reload despite backlog eviction"
+        );
+        for i in [0u32, 7, 8, 63, 64, 119] {
+            let key = format!("d{i:04}");
+            assert_eq!(
+                rt2.execute_frame(command(&[b"GET", key.as_bytes()]), 300),
+                RespFrame::BulkString(Some(b"val".to_vec())),
+                "key {key} lost across trim+reload"
+            );
+        }
+
+        clean_aof_artifacts(&dir, "trim.aof");
     }
 
     #[test]
