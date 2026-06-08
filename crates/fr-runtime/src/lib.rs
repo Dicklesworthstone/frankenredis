@@ -13372,24 +13372,13 @@ impl Runtime {
                 // and an INCLUSIVE [1, INT64_MAX] range. Vendored
                 // returns 'argument must be a memory value' for
                 // unparseable input and 'argument must be between 1
-                // and 9223372036854775807 inclusive' for 0 / negative.
-                // fr previously emitted the non-standard 'Invalid
-                // argument' wording AND silently accepted 0.
-                let parsed = match parse_memory_size_arg(&pair[1]) {
+                // and 9223372036854775807 inclusive' for 0 / negative /
+                // over-cap (overflow saturates to ULLONG_MAX which is a
+                // RANGE error, not a parse error — frankenredis-vqmkt).
+                let parsed = match parse_memory_config_value("repl-backlog-size", &pair[1], 1) {
                     Ok(value) => value,
-                    Err(()) => {
-                        return config_set_failed(
-                            "repl-backlog-size",
-                            "argument must be a memory value",
-                        );
-                    }
+                    Err(resp) => return resp,
                 };
-                if parsed == 0 {
-                    return config_set_failed(
-                        "repl-backlog-size",
-                        "argument must be between 1 and 9223372036854775807 inclusive",
-                    );
-                }
                 next_repl_backlog_size = Some(parsed);
                 static_override_updates.push(("repl-backlog-size".to_string(), parsed.to_string()));
                 continue;
@@ -13793,21 +13782,15 @@ impl Runtime {
             if parameter.eq_ignore_ascii_case("client-query-buffer-limit") {
                 // Upstream config.c marks this as MEMORY_CONFIG with
                 // a 1MB lower bound. (br-frankenredis-cfgmemvalue)
-                let parsed = match parse_memory_size_arg(&pair[1]) {
+                // Over-cap/overflow is a RANGE error. (frankenredis-vqmkt)
+                let parsed = match parse_memory_config_value(
+                    "client-query-buffer-limit",
+                    &pair[1],
+                    1024 * 1024,
+                ) {
                     Ok(value) => value as usize,
-                    Err(()) => {
-                        return config_set_failed(
-                            "client-query-buffer-limit",
-                            "argument must be a memory value",
-                        );
-                    }
+                    Err(resp) => return resp,
                 };
-                if parsed < 1024 * 1024 {
-                    return config_set_failed(
-                        "client-query-buffer-limit",
-                        "argument must be between 1048576 and 9223372036854775807 inclusive",
-                    );
-                }
                 next_query_buffer_limit = Some(parsed);
                 static_override_updates
                     .push(("client-query-buffer-limit".to_string(), parsed.to_string()));
@@ -13816,21 +13799,15 @@ impl Runtime {
             if parameter.eq_ignore_ascii_case("proto-max-bulk-len") {
                 // Upstream config.c marks this as MEMORY_CONFIG with
                 // a 1MB lower bound. (br-frankenredis-cfgmemvalue)
-                let parsed = match parse_memory_size_arg(&pair[1]) {
+                // Over-cap/overflow is a RANGE error. (frankenredis-vqmkt)
+                let parsed = match parse_memory_config_value(
+                    "proto-max-bulk-len",
+                    &pair[1],
+                    1024 * 1024,
+                ) {
                     Ok(value) => value as usize,
-                    Err(()) => {
-                        return config_set_failed(
-                            "proto-max-bulk-len",
-                            "argument must be a memory value",
-                        );
-                    }
+                    Err(resp) => return resp,
                 };
-                if parsed < 1024 * 1024 {
-                    return config_set_failed(
-                        "proto-max-bulk-len",
-                        "argument must be between 1048576 and 9223372036854775807 inclusive",
-                    );
-                }
                 next_proto_max_bulk_len = Some(parsed);
                 static_override_updates
                     .push(("proto-max-bulk-len".to_string(), parsed.to_string()));
@@ -13850,31 +13827,101 @@ impl Runtime {
                     } else {
                         "active-defrag-ignore-bytes"
                     };
-                let parsed = match parse_memory_size_arg(&pair[1]) {
-                    Ok(value) => value as usize,
-                    Err(()) => {
-                        return config_set_failed(canonical, "argument must be a memory value");
-                    }
-                };
                 // (frankenredis-ap2eo) Upstream config.c declares
-                // active-defrag-ignore-bytes as INTEGER_CONFIG with
+                // active-defrag-ignore-bytes as MEMORY_CONFIG with an
                 // INCLUSIVE range [1, INT64_MAX] — a value of 0 means
                 // 'never trigger defrag', which Redis represents as
-                // active-defrag disabled, not as a 0 byte threshold.
-                // Vendored emits 'argument must be between 1 and
-                // 9223372036854775807 inclusive'. fr previously accepted
-                // 0 and silently stored it.
-                if canonical == "active-defrag-ignore-bytes" && parsed == 0 {
-                    return config_set_failed(
-                        canonical,
-                        "argument must be between 1 and 9223372036854775807 inclusive",
-                    );
-                }
+                // active-defrag disabled, not as a 0 byte threshold;
+                // stream-node-max-bytes / hll-sparse-max-bytes allow 0.
+                // Over-cap/overflow values are RANGE errors in every
+                // case. (frankenredis-vqmkt)
+                let min: u64 = if canonical == "active-defrag-ignore-bytes" {
+                    1
+                } else {
+                    0
+                };
+                let parsed = match parse_memory_config_value(canonical, &pair[1], min) {
+                    Ok(value) => value as usize,
+                    Err(resp) => return resp,
+                };
                 if canonical == "hll-sparse-max-bytes" {
                     next_hll_sparse_max_bytes = Some(parsed);
                 } else {
                     static_override_updates.push((canonical.to_string(), parsed.to_string()));
                 }
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("auto-aof-rewrite-min-size") {
+                // (frankenredis-vqmkt) Upstream config.c declares
+                // auto-aof-rewrite-min-size as createOffTConfig with the
+                // MEMORY_CONFIG flag and an INCLUSIVE [0, INT64_MAX]
+                // range. fr previously fell through to the unvalidated
+                // store fallback, silently accepting garbage and
+                // negatives.
+                let parsed =
+                    match parse_memory_config_value("auto-aof-rewrite-min-size", &pair[1], 0) {
+                        Ok(value) => value,
+                        Err(resp) => return resp,
+                    };
+                static_override_updates
+                    .push(("auto-aof-rewrite-min-size".to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("auto-aof-rewrite-percentage") {
+                // (frankenredis-vqmkt) Upstream config.c declares
+                // auto-aof-rewrite-percentage as createIntConfig
+                // (INTEGER_CONFIG) with an INCLUSIVE [0, INT_MAX] range.
+                let parsed = match parse_int_config_value(
+                    "auto-aof-rewrite-percentage",
+                    &pair[1],
+                    0,
+                    i32::MAX as i64,
+                ) {
+                    Ok(value) => value,
+                    Err(resp) => return resp,
+                };
+                static_override_updates
+                    .push(("auto-aof-rewrite-percentage".to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("active-defrag-threshold-lower")
+                || parameter.eq_ignore_ascii_case("active-defrag-threshold-upper")
+            {
+                // (frankenredis-vqmkt) Upstream config.c declares both
+                // active-defrag-threshold-lower/upper as createIntConfig
+                // (INTEGER_CONFIG) with an INCLUSIVE [0, 1000] range —
+                // these are fragmentation percentages.
+                let canonical = parameter.to_ascii_lowercase();
+                let parsed = match parse_int_config_value(&canonical, &pair[1], 0, 1000) {
+                    Ok(value) => value,
+                    Err(resp) => return resp,
+                };
+                static_override_updates.push((canonical, parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("cluster-announce-hostname") {
+                // (frankenredis-vqmkt) Upstream config.c declares
+                // cluster-announce-hostname as createStringConfig with
+                // the isValidAnnouncedHostname validator: the hostname
+                // must be shorter than NET_HOST_STR_LEN (256) and contain
+                // only [A-Za-z0-9.-]. An empty string clears it.
+                let value_bytes = &pair[1];
+                if value_bytes.len() >= 256 {
+                    return config_set_failed(
+                        "cluster-announce-hostname",
+                        "Hostnames must be less than 256 characters",
+                    );
+                }
+                if value_bytes.iter().any(|&c| {
+                    !(c.is_ascii_alphanumeric() || c == b'-' || c == b'.')
+                }) {
+                    return config_set_failed(
+                        "cluster-announce-hostname",
+                        "Hostnames may only contain alphanumeric characters, hyphens or dots",
+                    );
+                }
+                let value = String::from_utf8_lossy(value_bytes).to_string();
+                static_override_updates.push(("cluster-announce-hostname".to_string(), value));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("maxmemory-clients") {
@@ -14457,11 +14504,12 @@ impl Runtime {
                 || parameter.eq_ignore_ascii_case("zset-max-ziplist-entries");
             if is_memory_threshold || is_integer_threshold {
                 let parsed = if is_memory_threshold {
-                    match parse_memory_size_arg(&pair[1]) {
+                    // Upstream marks these MEMORY_CONFIG with range
+                    // [0, LONG_MAX]; over-cap/overflow is a RANGE error,
+                    // not a parse error. (frankenredis-vqmkt)
+                    match parse_memory_config_value(parameter, &pair[1], 0) {
                         Ok(value) => value as usize,
-                        Err(()) => {
-                            return config_set_failed(parameter, "argument must be a memory value");
-                        }
+                        Err(resp) => return resp,
                     }
                 } else {
                     match parse_i64_arg(&pair[1]) {
@@ -18617,6 +18665,59 @@ fn parse_memory_size_arg(arg: &[u8]) -> Result<u64, ()> {
         digits.parse().unwrap_or(u64::MAX)
     };
     Ok(val.wrapping_mul(mul))
+}
+
+/// Validate a CONFIG SET MEMORY_CONFIG value the way upstream
+/// config.c::numericConfigSet does: a memtoull-style parse (suffix
+/// aware, ULLONG_MAX-saturating on digit overflow — strtoull's errno is
+/// never checked) followed by an inclusive boundary check. Upstream's
+/// signed numeric types (LONG_LONG/OFF_T) cap at LLONG_MAX and the
+/// unsigned SIZE_T types cap at LONG_MAX; both equal i64::MAX on 64-bit,
+/// so any over-cap or overflow-saturated value is a RANGE error
+/// ("argument must be between {min} and 9223372036854775807 inclusive"),
+/// NOT the "argument must be a memory value" parse error. (frankenredis-vqmkt)
+fn parse_memory_config_value(canonical: &str, value: &[u8], min: u64) -> Result<u64, RespFrame> {
+    let parsed = match parse_memory_size_arg(value) {
+        Ok(value) => value,
+        Err(()) => {
+            return Err(config_set_failed(canonical, "argument must be a memory value"));
+        }
+    };
+    if parsed < min || parsed > i64::MAX as u64 {
+        return Err(config_set_failed(
+            canonical,
+            &format!("argument must be between {min} and 9223372036854775807 inclusive"),
+        ));
+    }
+    Ok(parsed)
+}
+
+/// Validate a CONFIG SET INTEGER_CONFIG value the way upstream
+/// config.c::numericConfigSet does for non-MEMORY integer configs:
+/// string2ll parse (overflow is a parse failure, unlike memtoull) then
+/// an inclusive boundary check. (frankenredis-vqmkt)
+fn parse_int_config_value(
+    canonical: &str,
+    value: &[u8],
+    min: i64,
+    max: i64,
+) -> Result<i64, RespFrame> {
+    let parsed = match parse_i64_arg(value) {
+        Ok(value) => value,
+        Err(_) => {
+            return Err(config_set_failed(
+                canonical,
+                "argument couldn't be parsed into an integer",
+            ));
+        }
+    };
+    if parsed < min || parsed > max {
+        return Err(config_set_failed(
+            canonical,
+            &format!("argument must be between {min} and {max} inclusive"),
+        ));
+    }
+    Ok(parsed)
 }
 
 /// Mirror the canonical Redis 7.2 ACL category names accepted by
@@ -32216,6 +32317,93 @@ mod tests {
                 ok,
             );
         }
+    }
+
+    /// (frankenredis-vqmkt) The harder ACCEPT-GAP subset: MEMORY_CONFIG
+    /// params whose digit-overflow saturates (memtoull-style) and so is a
+    /// RANGE error not a parse error; INTEGER_CONFIG params that fell
+    /// through unvalidated; and the cluster-announce-hostname charset
+    /// validator. All wording is byte-exact vs vendored redis 7.2.4.
+    #[test]
+    fn config_set_memory_int_hostname_validation_vqmkt() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let err = |field: &str, detail: &str| {
+            RespFrame::Error(format!(
+                "ERR CONFIG SET failed (possibly related to argument '{field}') - {detail}"
+            ))
+        };
+        let set = |rt: &mut Runtime, p: &str, v: &str| {
+            rt.execute_frame(command(&[b"CONFIG", b"SET", p.as_bytes(), v.as_bytes()]), 0)
+        };
+
+        // MEMORY_CONFIG: garbage -> "memory value"; overflow/over-cap and
+        // sub-minimum -> RANGE error (upper always i64::MAX). (param, min)
+        for (p, min) in [
+            ("repl-backlog-size", 1u64),
+            ("proto-max-bulk-len", 1024 * 1024),
+            ("client-query-buffer-limit", 1024 * 1024),
+            ("stream-node-max-bytes", 0),
+            ("hll-sparse-max-bytes", 0),
+            ("active-defrag-ignore-bytes", 1),
+            ("auto-aof-rewrite-min-size", 0),
+            ("hash-max-listpack-value", 0),
+            ("hash-max-ziplist-value", 0),
+            ("zset-max-listpack-value", 0),
+            ("zset-max-ziplist-value", 0),
+        ] {
+            assert_eq!(set(&mut rt, p, "__garbage__"), err(p, "argument must be a memory value"));
+            let range = format!("argument must be between {min} and 9223372036854775807 inclusive");
+            assert_eq!(
+                set(&mut rt, p, "99999999999999999999999"),
+                err(p, &range),
+                "{p}: digit overflow is a RANGE error, not a parse error",
+            );
+            if min > 0 {
+                assert_eq!(set(&mut rt, p, "0"), err(p, &range), "{p}: 0 is below min");
+            } else {
+                assert_eq!(set(&mut rt, p, "0"), ok, "{p}: 0 is in range");
+            }
+            // A plain valid value (>= min) is accepted; suffix forms too.
+            assert_eq!(set(&mut rt, p, "2097152"), ok, "{p}: in-range value accepted");
+        }
+
+        // INTEGER_CONFIG: garbage/overflow -> parse error; out-of-range -> range.
+        for (p, max) in [
+            ("auto-aof-rewrite-percentage", i32::MAX as i64),
+            ("active-defrag-threshold-lower", 1000),
+            ("active-defrag-threshold-upper", 1000),
+        ] {
+            assert_eq!(
+                set(&mut rt, p, "__garbage__"),
+                err(p, "argument couldn't be parsed into an integer"),
+            );
+            assert_eq!(
+                set(&mut rt, p, "99999999999999999999999"),
+                err(p, "argument couldn't be parsed into an integer"),
+                "{p}: i64 overflow is a parse error for INTEGER_CONFIG",
+            );
+            let range = format!("argument must be between 0 and {max} inclusive");
+            assert_eq!(set(&mut rt, p, "-1"), err(p, &range));
+            assert_eq!(set(&mut rt, p, &(max + 1).to_string()), err(p, &range));
+            assert_eq!(set(&mut rt, p, &max.to_string()), ok);
+        }
+
+        // cluster-announce-hostname: charset + length validators; "" clears.
+        let hp = "cluster-announce-hostname";
+        assert_eq!(set(&mut rt, hp, "good.example-1.com"), ok);
+        assert_eq!(set(&mut rt, hp, ""), ok);
+        for bad in ["bad_underscore", "has space", "a@b"] {
+            assert_eq!(
+                set(&mut rt, hp, bad),
+                err(hp, "Hostnames may only contain alphanumeric characters, hyphens or dots"),
+            );
+        }
+        assert_eq!(
+            set(&mut rt, hp, &"x".repeat(256)),
+            err(hp, "Hostnames must be less than 256 characters"),
+        );
+        assert_eq!(set(&mut rt, hp, &"x".repeat(255)), ok);
     }
 
     /// upstream's config_set_failed wrapper + specific detail.

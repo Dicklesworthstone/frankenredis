@@ -1,0 +1,6 @@
+611229d967d4e5cf1d3517bf198bc43d2912f828c5331f0e27530aa62fb25d2e  artifacts/optimization/frankenredis-pe47p/PROOF.md
+9118b58af555942140c72705fffcf7549551d65d78f60310039d41c04e034d2a  artifacts/optimization/frankenredis-pe47p/candidate/resp-golden-compare.json
+0ba66a3a778b2d4f2473bddbe29ed5adf1a9a9757626b66700ea4d2e53d19550  artifacts/optimization/frankenredis-pe47p/baseline/setex-p16-1m-hyperfine.json
+f194337b4966c0b030e70e5c4fc7fc1a533a62308c02b7bf01977a38e7eecadb  artifacts/optimization/frankenredis-pe47p/candidate/setex-p16-1m-paired-hyperfine.json
+9584377cca897937dba49c073cc6dd00c17a94e29fee6a2fa141905b76cbb11e  artifacts/optimization/frankenredis-pe47p/baseline/last-paired-setex-p16-1m.json
+99cded41cfd127d673094a438744b50c015e3dd780b4a8e5545776de7cc80c7b  artifacts/optimization/frankenredis-pe47p/candidate/last-paired-setex-p16-1m.json
