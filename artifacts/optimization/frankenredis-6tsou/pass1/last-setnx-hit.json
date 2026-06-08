@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "hf-setnx-hit",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 1200000,
+    "bytes_sent": 16200000,
+    "commands": 300000,
+    "ops_per_sec": 150122.61497754187,
+    "pipeline_latency_us": {
+      "mean": 4967.565156215182,
+      "p50": 4146.5089889243245,
+      "p95": 11471.514008007944,
+      "p99": 16056.463937275112,
+      "samples": 18750
+    },
+    "seconds": 1.9983664689352736
+  },
+  "mode": "setnx-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 50000,
+    "bytes_sent": 520000,
+    "commands": 10000,
+    "seconds": 0.08146307501010597
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

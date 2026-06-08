@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "hf-getdel-hit",
+  "keyspace": 300000,
+  "measured": {
+    "bytes_received": 2700000,
+    "bytes_sent": 14100000,
+    "commands": 300000,
+    "ops_per_sec": 159390.30589596758,
+    "pipeline_latency_us": {
+      "mean": 4783.977713976055,
+      "p50": 4343.861946836114,
+      "p95": 10127.232992090285,
+      "p99": 14017.796027474105,
+      "samples": 18750
+    },
+    "seconds": 1.8821721830172464
+  },
+  "mode": "getdel-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 1500000,
+    "bytes_sent": 15900000,
+    "commands": 300000,
+    "seconds": 2.215180967003107
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

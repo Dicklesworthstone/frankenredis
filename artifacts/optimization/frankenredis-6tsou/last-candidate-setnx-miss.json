@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr:6tsou:candmiss",
+  "keyspace": 300000,
+  "measured": {
+    "bytes_received": 1200000,
+    "bytes_sent": 17700000,
+    "commands": 300000,
+    "ops_per_sec": 154831.44694403483,
+    "pipeline_latency_us": {
+      "mean": 4881.893253500263,
+      "p50": 3966.7340461164713,
+      "p95": 10713.606956414878,
+      "p99": 16756.305005401373,
+      "samples": 18750
+    },
+    "seconds": 1.9375908829970285
+  },
+  "mode": "setnx-miss",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 0,
+    "bytes_sent": 0,
+    "commands": 0,
+    "seconds": 0.0
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

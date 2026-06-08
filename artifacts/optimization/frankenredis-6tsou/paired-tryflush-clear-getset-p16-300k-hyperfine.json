@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /tmp/codex-fr-6tsou-getset-base-target/release-perf/frankenredis --mode getset-hit --port 6402 --json-out artifacts/optimization/frankenredis-6tsou/last-tryflush-baseline-getset.json --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:6tsou:tryflushbase",
+      "mean": 2.3439640708400002,
+      "stddev": 0.22428056900835153,
+      "median": 2.2252386704400005,
+      "user": 3.03051028,
+      "system": 2.13737438,
+      "min": 2.17601026994,
+      "max": 2.8266608309400003,
+      "times": [
+        2.2052558489400003,
+        2.17601026994,
+        2.49681149794,
+        2.8266608309400003,
+        2.61351447894,
+        2.27902903694,
+        2.2284068819400003,
+        2.1950238249400003,
+        2.19685757894,
+        2.22207045894
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /tmp/codex-fr-6tsou-tryflush-candidate-target/release-perf/frankenredis --mode getset-hit --port 6403 --json-out artifacts/optimization/frankenredis-6tsou/last-tryflush-candidate-getset.json --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:6tsou:tryflushcand",
+      "mean": 2.29397616324,
+      "stddev": 0.11857374525053846,
+      "median": 2.23835131344,
+      "user": 2.9610779799999998,
+      "system": 2.0460434800000002,
+      "min": 2.21803637594,
+      "max": 2.5824971909400003,
+      "times": [
+        2.41850391094,
+        2.31497564794,
+        2.5824971909400003,
+        2.23075444794,
+        2.24207830894,
+        2.23865681794,
+        2.2314087269400003,
+        2.23804580894,
+        2.22480439594,
+        2.21803637594
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

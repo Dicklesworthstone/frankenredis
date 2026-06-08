@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /tmp/codex-fr-6tsou-head-baseline-target/release-perf/frankenredis --mode setnx-hit --port 6393 --json-out artifacts/optimization/frankenredis-6tsou/last-baseline-setnx-hit.json --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:6tsou:basehit",
+      "mean": 2.0432950313200005,
+      "stddev": 0.03404520924702641,
+      "median": 2.04016715392,
+      "user": 2.5933073999999996,
+      "system": 1.7897024599999998,
+      "min": 1.9807289054200001,
+      "max": 2.0855794374200003,
+      "times": [
+        2.0194671424200004,
+        2.0192619414200004,
+        2.0772739754200003,
+        2.02588350142,
+        2.06550502442,
+        2.05328960942,
+        2.07891607742,
+        1.9807289054200001,
+        2.0855794374200003,
+        2.02704469842
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /tmp/codex-fr-6tsou-main-target/release-perf/frankenredis --mode setnx-hit --port 6394 --json-out artifacts/optimization/frankenredis-6tsou/last-candidate-setnx-hit.json --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:6tsou:candhit",
+      "mean": 2.0308133845199996,
+      "stddev": 0.03195729870736284,
+      "median": 2.0231887624200002,
+      "user": 2.2072239,
+      "system": 1.7997730599999997,
+      "min": 1.98568835642,
+      "max": 2.07368277542,
+      "times": [
+        2.0160295234200003,
+        2.0089333064200003,
+        2.07368277542,
+        2.06831340142,
+        2.05843761842,
+        2.06031482342,
+        2.00840824142,
+        1.98568835642,
+        1.9979777974200001,
+        2.03034800142
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

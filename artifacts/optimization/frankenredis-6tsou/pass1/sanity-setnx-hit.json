@@ -1,0 +1,30 @@
+{
+  "clients": 4,
+  "datasize": 3,
+  "key_prefix": "sanity",
+  "keyspace": 100,
+  "measured": {
+    "bytes_received": 4000,
+    "bytes_sent": 48000,
+    "commands": 1000,
+    "ops_per_sec": 129080.32695349085,
+    "pipeline_latency_us": {
+      "mean": 340.1102985662874,
+      "p50": 282.1540692821145,
+      "p95": 740.4430070891976,
+      "p99": 1099.211978726089,
+      "samples": 64
+    },
+    "seconds": 0.00774711393751204
+  },
+  "mode": "setnx-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 500,
+    "bytes_sent": 4600,
+    "commands": 100,
+    "seconds": 0.0007451910059899092
+  },
+  "requests": 1000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

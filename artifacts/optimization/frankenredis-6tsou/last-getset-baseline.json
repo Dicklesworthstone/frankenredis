@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr:6tsou:getsetbase",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 2700000,
+    "bytes_sent": 18600000,
+    "commands": 300000,
+    "ops_per_sec": 101336.04775681828,
+    "pipeline_latency_us": {
+      "mean": 7476.1615188295655,
+      "p50": 6778.600974939764,
+      "p95": 17419.348005205393,
+      "p99": 24505.72093948722,
+      "samples": 18750
+    },
+    "seconds": 2.9604470140766352
+  },
+  "mode": "getset-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 50000,
+    "bytes_sent": 590000,
+    "commands": 10000,
+    "seconds": 0.0761298140278086
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

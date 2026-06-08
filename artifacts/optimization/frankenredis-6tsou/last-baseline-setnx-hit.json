@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr:6tsou:basehit",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 1200000,
+    "bytes_sent": 17400000,
+    "commands": 300000,
+    "ops_per_sec": 162108.0840502107,
+    "pipeline_latency_us": {
+      "mean": 4693.992844590297,
+      "p50": 3970.862948335707,
+      "p95": 10628.817020915449,
+      "p99": 14314.870000816882,
+      "samples": 18750
+    },
+    "seconds": 1.8506171469343826
+  },
+  "mode": "setnx-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 50000,
+    "bytes_sent": 560000,
+    "commands": 10000,
+    "seconds": 0.06482535391114652
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

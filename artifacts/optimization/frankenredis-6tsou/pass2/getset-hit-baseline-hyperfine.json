@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /tmp/codex-fr-6tsou-pass2-head-target/release-perf/frankenredis --mode getset-hit --port 26362 --json-out artifacts/optimization/frankenredis-6tsou/pass2/last-getset-hit-baseline.json --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr6tsou-pass2-getset",
+      "mean": 2.35002641508,
+      "stddev": 0.3068183079227753,
+      "median": 2.2194074968799997,
+      "user": 2.8357523799999997,
+      "system": 1.86586908,
+      "min": 2.13099115338,
+      "max": 3.0398072053800003,
+      "times": [
+        2.13099115338,
+        2.22992808338,
+        2.18727921038,
+        2.29620040438,
+        2.17729155938,
+        2.20052231538,
+        2.23779790838,
+        2.20888691038,
+        2.79155940038,
+        3.0398072053800003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "hf-getset-hit",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 2700000,
+    "bytes_sent": 16800000,
+    "commands": 300000,
+    "ops_per_sec": 147495.4334339202,
+    "pipeline_latency_us": {
+      "mean": 5118.6176702566445,
+      "p50": 4282.998037524521,
+      "p95": 11557.03398399055,
+      "p99": 15699.4549324736,
+      "samples": 18750
+    },
+    "seconds": 2.0339612760581076
+  },
+  "mode": "getset-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 50000,
+    "bytes_sent": 530000,
+    "commands": 10000,
+    "seconds": 0.07443447399418801
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

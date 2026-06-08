@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "hf-append",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 1480000,
+    "bytes_sent": 15600000,
+    "commands": 300000,
+    "ops_per_sec": 147185.59556575993,
+    "pipeline_latency_us": {
+      "mean": 5111.08417271326,
+      "p50": 4186.484031379223,
+      "p95": 12080.48197440803,
+      "p99": 16881.94100279361,
+      "samples": 18750
+    },
+    "seconds": 2.0382429329911247
+  },
+  "mode": "append",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 50000,
+    "bytes_sent": 490000,
+    "commands": 10000,
+    "seconds": 0.06851675896905363
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

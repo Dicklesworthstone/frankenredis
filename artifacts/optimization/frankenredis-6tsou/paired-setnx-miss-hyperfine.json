@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /tmp/codex-fr-6tsou-head-baseline-target/release-perf/frankenredis --mode setnx-miss --port 6395 --json-out artifacts/optimization/frankenredis-6tsou/last-baseline-setnx-miss.json --requests 300000 --clients 50 --pipeline 16 --keyspace 300000 --datasize 3 --key-prefix fr:6tsou:basemiss",
+      "mean": 2.1013357525000003,
+      "stddev": 0.030690052227472737,
+      "median": 2.0973355005,
+      "user": 2.89512058,
+      "system": 1.87040284,
+      "min": 2.040950526,
+      "max": 2.153838059,
+      "times": [
+        2.09370256,
+        2.0961003,
+        2.088839392,
+        2.123639269,
+        2.078497926,
+        2.098570701,
+        2.111311788,
+        2.040950526,
+        2.127907004,
+        2.153838059
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /tmp/codex-fr-6tsou-main-target/release-perf/frankenredis --mode setnx-miss --port 6396 --json-out artifacts/optimization/frankenredis-6tsou/last-candidate-setnx-miss.json --requests 300000 --clients 50 --pipeline 16 --keyspace 300000 --datasize 3 --key-prefix fr:6tsou:candmiss",
+      "mean": 2.0971559058,
+      "stddev": 0.04153185654722688,
+      "median": 2.1035050440000003,
+      "user": 2.54079958,
+      "system": 1.89456444,
+      "min": 2.014612745,
+      "max": 2.157684863,
+      "times": [
+        2.0558599109999998,
+        2.07761755,
+        2.119823346,
+        2.133866189,
+        2.123138322,
+        2.110965429,
+        2.096044659,
+        2.014612745,
+        2.157684863,
+        2.081946044
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

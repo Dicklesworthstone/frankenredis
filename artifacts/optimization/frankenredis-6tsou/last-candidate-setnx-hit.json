@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr:6tsou:candhit",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 1200000,
+    "bytes_sent": 17400000,
+    "commands": 300000,
+    "ops_per_sec": 163456.39995267385,
+    "pipeline_latency_us": {
+      "mean": 4606.433291987826,
+      "p50": 3866.325016133487,
+      "p95": 10419.399943202734,
+      "p99": 14306.132914498448,
+      "samples": 18750
+    },
+    "seconds": 1.8353518130024895
+  },
+  "mode": "setnx-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 50000,
+    "bytes_sent": 560000,
+    "commands": 10000,
+    "seconds": 0.0766500560566783
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

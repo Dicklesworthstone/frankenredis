@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr:6tsou:refreshcand",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 2700000,
+    "bytes_sent": 18900000,
+    "commands": 300000,
+    "ops_per_sec": 147062.28331337846,
+    "pipeline_latency_us": {
+      "mean": 5134.567913096398,
+      "p50": 4253.807943314314,
+      "p95": 11573.21291975677,
+      "p99": 16302.781994454563,
+      "samples": 18750
+    },
+    "seconds": 2.0399520070059225
+  },
+  "mode": "getset-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 50000,
+    "bytes_sent": 600000,
+    "commands": 10000,
+    "seconds": 0.08230943698436022
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr6tsou-pass2-getset",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 2700000,
+    "bytes_sent": 18900000,
+    "commands": 300000,
+    "ops_per_sec": 106488.39339259487,
+    "pipeline_latency_us": {
+      "mean": 7108.3174430516865,
+      "p50": 6527.915946207941,
+      "p95": 16233.541071414948,
+      "p99": 22807.91604425758,
+      "samples": 18750
+    },
+    "seconds": 2.8172084341058508
+  },
+  "mode": "getset-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 50000,
+    "bytes_sent": 600000,
+    "commands": 10000,
+    "seconds": 0.0907451530219987
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

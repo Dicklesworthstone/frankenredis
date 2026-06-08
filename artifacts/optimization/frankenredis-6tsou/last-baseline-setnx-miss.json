@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr:6tsou:basemiss",
+  "keyspace": 300000,
+  "measured": {
+    "bytes_received": 1200000,
+    "bytes_sent": 17700000,
+    "commands": 300000,
+    "ops_per_sec": 149892.62561548137,
+    "pipeline_latency_us": {
+      "mean": 5050.083371220778,
+      "p50": 4058.007034473121,
+      "p95": 11084.408964961767,
+      "p99": 17680.144985206425,
+      "samples": 18750
+    },
+    "seconds": 2.0014326840173453
+  },
+  "mode": "setnx-miss",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 0,
+    "bytes_sent": 0,
+    "commands": 0,
+    "seconds": 0.0
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

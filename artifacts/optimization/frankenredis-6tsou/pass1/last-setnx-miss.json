@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "hf-setnx-miss",
+  "keyspace": 300000,
+  "measured": {
+    "bytes_received": 1200000,
+    "bytes_sent": 16500000,
+    "commands": 300000,
+    "ops_per_sec": 152367.2373567822,
+    "pipeline_latency_us": {
+      "mean": 4944.617703041682,
+      "p50": 4091.764916665852,
+      "p95": 10867.057018913329,
+      "p99": 17160.93602590263,
+      "samples": 18750
+    },
+    "seconds": 1.9689272129908204
+  },
+  "mode": "setnx-miss",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 0,
+    "bytes_sent": 0,
+    "commands": 0,
+    "seconds": 0.0
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

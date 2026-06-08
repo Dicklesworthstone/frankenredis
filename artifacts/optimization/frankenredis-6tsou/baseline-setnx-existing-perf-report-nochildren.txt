@@ -1,0 +1,136 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 2K of event 'cycles:P'
+# Event count (approx.): 12378725617
+#
+# Overhead  Command       Shared Object         Symbol
+# ........  ............  ....................  ...............................................................................................................................................................................................................................................................
+#
+     8.02%  python3       python3.13            [.] _PyEval_EvalFrameDefault
+            |
+             --7.55%--_PyEval_EvalFrameDefault
+                       |
+                       |--2.35%--PyEval_EvalCode
+                       |          |
+                       |           --2.35%--0x6cba74
+                       |                     0x6c89c0
+                       |                     0x6da3a4
+                       |                     0x6d9da7
+                       |                     0x6d9be4
+                       |                     Py_RunMain
+                       |                     Py_BytesMain
+                       |                     __libc_start_call_main
+                       |                     __libc_start_main_impl (inlined)
+                       |                     _start
+                       |
+                       |--1.67%--_PyEval_EvalFrameDefault
+                       |          PyEval_EvalCode
+                       |          0x6cba74
+                       |          0x6c89c0
+                       |          0x6da3a4
+                       |          0x6d9da7
+                       |          0x6d9be4
+                       |          Py_RunMain
+                       |          Py_BytesMain
+                       |          __libc_start_call_main
+                       |          __libc_start_main_impl (inlined)
+                       |          _start
+                       |
+                        --0.76%--PyNumber_Remainder
+                                  _PyEval_EvalFrameDefault
+                                  PyEval_EvalCode
+                                  0x6cba74
+                                  0x6c89c0
+                                  0x6da3a4
+                                  0x6d9da7
+                                  0x6d9be4
+                                  Py_RunMain
+                                  Py_BytesMain
+                                  __libc_start_call_main
+                                  __libc_start_main_impl (inlined)
+                                  _start
+
+     3.09%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::refresh_store_runtime_info_context
+            |
+            |--1.75%--<fr_runtime::Runtime>::refresh_store_runtime_info_context
+            |
+             --0.51%--force<alloc::collections::btree::node::marker::Immut, u64, fr_runtime::ClientSession> (inlined)
+                       force<alloc::collections::btree::node::marker::Immut, u64, fr_runtime::ClientSession, alloc::collections::btree::node::marker::KV> (inlined)
+                       next_leaf_edge<alloc::collections::btree::node::marker::Immut, u64, fr_runtime::ClientSession> (inlined)
+                       {closure#0}<u64, fr_runtime::ClientSession> (inlined)
+                       replace<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u64, fr_runtime::ClientSession, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>, (&u64, &fr_runtime::ClientSession), alloc::collections::btree::navigate::{impl#22}::next_unchecked::{closure_env#0}<u64, fr_runtime::ClientSession>> (inlined)
+                       next_unchecked<u64, fr_runtime::ClientSession> (inlined)
+                       next_unchecked<u64, fr_runtime::ClientSession> (inlined)
+                       next<u64, fr_runtime::ClientSession> (inlined)
+                       next<u64, fr_runtime::ClientSession> (inlined)
+                       <fr_runtime::Runtime>::refresh_store_runtime_info_context
+
+     2.70%  frankenredis  frankenredis          [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+            |
+             --2.13%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+                       |
+                        --0.63%--finish<core::hash::sip::Sip13Rounds> (inlined)
+                                  finish (inlined)
+                                  finish (inlined)
+                                  hash_one<std::hash::random::RandomState, &[u8]> (inlined)
+
+     2.04%  frankenredis  [vdso]                [.] 0x0000000000000983
+            |
+             --1.96%--0x7447229da983
+
+     1.55%  python3       libc.so.6             [.] __memmove_avx_unaligned_erms
+            |
+             --1.46%--__memcpy_avx_unaligned_erms (inlined)
+
+     1.35%  frankenredis  frankenredis          [.] fr_command::dispatch_argv
+            |
+             --0.70%--fr_command::dispatch_argv
+
+     1.28%  python3       [unknown]             [k] 0xffffffff84c001bd
+     1.15%  frankenredis  frankenredis          [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+            |
+             --1.06%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+
+     1.03%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::dispatch_with_client_context
+            |
+             --0.60%--next_match<core::str::pattern::MultiCharEqSearcher<core::str::IsWhitespace>> (inlined)
+                       next_match<core::str::IsWhitespace> (inlined)
+                       next<core::str::IsWhitespace> (inlined)
+                       next<core::str::IsWhitespace> (inlined)
+                       try_fold<core::str::iter::Split<core::str::IsWhitespace>, (), core::iter::traits::iterator::Iterator::find::check::{closure_env#0}<&str, &mut core::str::IsNotEmpty>, core::ops::control_flow::ControlFlow<&str, ()>> (inlined)
+
+     1.03%  python3       python3.13            [.] _PyUnicode_JoinArray
+            |
+            ---_PyUnicode_JoinArray
+
+     1.01%  frankenredis  frankenredis          [.] <fr_runtime::Runtime>::execute_frame_internal
+            |
+             --0.52%--<fr_runtime::Runtime>::execute_frame_internal
+
+     0.82%  frankenredis  frankenredis          [.] fr_protocol::parse_command_args_borrowed_into
+     0.79%  frankenredis  [unknown]             [k] 0xffffffff84c001bd
+     0.76%  frankenredis  frankenredis          [.] <fr_store::Store>::setnx
+     0.76%  frankenredis  frankenredis          [.] frankenredis::process_buffered_frames
+     0.69%  python3       python3.13            [.] _PyBytesWriter_Finish
+            |
+            ---_PyBytesWriter_Finish
+
+     0.68%  frankenredis  frankenredis          [.] mi_free
+            |
+             --0.60%--mi_free
+
+     0.66%  python3       libc.so.6             [.] __memchr_avx2
+            |
+            ---__memchr_avx2
+
+     0.64%  frankenredis  frankenredis          [.] <hashbrown::map::HashMap<alloc::vec::Vec<u8>, (u64, u64), std::hash::random::RandomState>>::remove::<[u8]>
+     0.59%  frankenredis  frankenredis          [.] <core::str::iter::Split<core::str::IsWhitespace> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::find::check<&str, &mut core::str::IsNotEmpty>::{closure#0}, core::ops::control_flow::ControlFlow<&str>>
+     0.57%  frankenredis  frankenredis          [.] <fr_store::Store>::internal_entries_insert
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

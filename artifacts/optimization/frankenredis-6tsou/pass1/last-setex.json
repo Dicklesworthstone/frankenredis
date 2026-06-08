@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "hf-setex",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 1500000,
+    "bytes_sent": 17700000,
+    "commands": 300000,
+    "ops_per_sec": 135370.10263319913,
+    "pipeline_latency_us": {
+      "mean": 5599.128012899309,
+      "p50": 5554.1659239679575,
+      "p95": 9659.77692976594,
+      "p99": 14049.635967239738,
+      "samples": 18750
+    },
+    "seconds": 2.216146653983742
+  },
+  "mode": "setex",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 0,
+    "bytes_sent": 0,
+    "commands": 0,
+    "seconds": 0.0
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr:6tsou:tryflushcand",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 2700000,
+    "bytes_sent": 19200000,
+    "commands": 300000,
+    "ops_per_sec": 145881.5737469567,
+    "pipeline_latency_us": {
+      "mean": 5173.912397492677,
+      "p50": 4325.835034251213,
+      "p95": 11791.51691030711,
+      "p99": 16114.274971187115,
+      "samples": 18750
+    },
+    "seconds": 2.0564625969855115
+  },
+  "mode": "getset-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 50000,
+    "bytes_sent": 610000,
+    "commands": 10000,
+    "seconds": 0.06814813194796443
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

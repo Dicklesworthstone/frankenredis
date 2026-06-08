@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /tmp/codex-fr-6tsou-getset-base-target/release-perf/frankenredis --mode getset-hit --port 6414 --json-out artifacts/optimization/frankenredis-6tsou/last-refresh-baseline-getset.json --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:6tsou:refreshbase",
+      "mean": 2.1933764977,
+      "stddev": 0.024204966857563456,
+      "median": 2.1892069595,
+      "user": 2.94988616,
+      "system": 1.8579729,
+      "min": 2.153053966,
+      "max": 2.240372962,
+      "times": [
+        2.240372962,
+        2.20491236,
+        2.170484524,
+        2.183642379,
+        2.193659414,
+        2.207521131,
+        2.2113733989999997,
+        2.153053966,
+        2.183990337,
+        2.184754505
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /tmp/codex-fr-6tsou-refresh-candidate-target/release-perf/frankenredis --mode getset-hit --port 6415 --json-out artifacts/optimization/frankenredis-6tsou/last-refresh-candidate-getset.json --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:6tsou:refreshcand",
+      "mean": 2.1981943687,
+      "stddev": 0.03428655300993391,
+      "median": 2.210390026,
+      "user": 2.90729586,
+      "system": 1.8567243999999998,
+      "min": 2.117812308,
+      "max": 2.229142758,
+      "times": [
+        2.1896587849999998,
+        2.178016622,
+        2.229021479,
+        2.214632833,
+        2.218478878,
+        2.177354557,
+        2.206147219,
+        2.221678248,
+        2.117812308,
+        2.229142758
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

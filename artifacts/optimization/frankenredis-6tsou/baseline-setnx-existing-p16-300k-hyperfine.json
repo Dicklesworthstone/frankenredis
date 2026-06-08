@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_setnx_bench_once.py --server-bin /tmp/codex-fr-6tsou-baseline-target/release-perf/frankenredis --port 16610 --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr:6tsou:base",
+      "mean": 3.5748196475199996,
+      "stddev": 0.24902804923563013,
+      "median": 3.57150619492,
+      "user": 2.3742930400000004,
+      "system": 0.9235095399999999,
+      "min": 3.25088533942,
+      "max": 3.90924124442,
+      "times": [
+        3.90924124442,
+        3.87865545242,
+        3.81959116042,
+        3.70422521342,
+        3.2937955894199997,
+        3.25088533942,
+        3.40720300642,
+        3.34158707942,
+        3.49768497642,
+        3.64532741342
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
