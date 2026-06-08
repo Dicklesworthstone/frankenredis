@@ -58,6 +58,18 @@ fn next_userdata_identity() -> u64 {
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Encode a dotted `major.minor.patch` version as upstream's
+/// `REDIS_VERSION_NUM`: `(major << 16) | (minor << 8) | patch`. Missing or
+/// non-numeric components are treated as 0, mirroring the C macro on a
+/// well-formed version string. (frankenredis-luaver)
+fn redis_version_num(version: &str) -> u32 {
+    let mut parts = version.split('.');
+    let major: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let minor: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let patch: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    (major << 16) | (minor << 8) | patch
+}
+
 impl std::hash::Hash for LuaUserdata {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
@@ -3101,6 +3113,19 @@ impl<'a> LuaState<'a> {
             LuaValue::Number(2.0),
         );
         redis_table.set(LuaValue::Str(b"REPL_ALL".to_vec()), LuaValue::Number(3.0));
+        // (frankenredis-luaver) Upstream script_lua.c exposes the server
+        // version to scripts: redis.REDIS_VERSION (string) and
+        // redis.REDIS_VERSION_NUM ((major<<16)|(minor<<8)|patch). For 7.2.4
+        // that is 0x070204 = 459268. Derived from REDIS_COMPAT_VERSION so the
+        // two stay in lock-step if the compat target ever moves.
+        redis_table.set(
+            LuaValue::Str(b"REDIS_VERSION".to_vec()),
+            LuaValue::Str(fr_store::REDIS_COMPAT_VERSION.as_bytes().to_vec()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"REDIS_VERSION_NUM".to_vec()),
+            LuaValue::Number(f64::from(redis_version_num(fr_store::REDIS_COMPAT_VERSION))),
+        );
         self.globals
             .insert("redis".to_string(), LuaValue::Table(redis_table));
 
@@ -17126,6 +17151,33 @@ mod tests {
         let ok = eval_script(b"return redis.status_reply('OK')", &[], &[], &mut store, 0)
             .expect("status_reply ok");
         assert_eq!(ok, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn redis_version_globals_match_upstream_luaver() {
+        // (frankenredis-luaver) Upstream script_lua.c exposes
+        // redis.REDIS_VERSION (string) and redis.REDIS_VERSION_NUM =
+        // (major<<16)|(minor<<8)|patch. For the 7.2.4 compat target that is
+        // 0x070204 = 459268. fr previously exposed neither (scripts saw nil).
+        let mut store = Store::new();
+        let ver = eval_script(b"return redis.REDIS_VERSION", &[], &[], &mut store, 0)
+            .expect("REDIS_VERSION");
+        assert_eq!(
+            ver,
+            RespFrame::BulkString(Some(fr_store::REDIS_COMPAT_VERSION.as_bytes().to_vec()))
+        );
+        let num = eval_script(b"return redis.REDIS_VERSION_NUM", &[], &[], &mut store, 0)
+            .expect("REDIS_VERSION_NUM");
+        assert_eq!(num, RespFrame::Integer(459_268));
+        let ty = eval_script(
+            b"return type(redis.REDIS_VERSION_NUM)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("type");
+        assert_eq!(ty, RespFrame::BulkString(Some(b"number".to_vec())));
     }
 
     #[test]
