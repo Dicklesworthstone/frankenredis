@@ -1,0 +1,180 @@
+{
+  "schema": "frankenredis_6kecb_setex_psetex_golden_v1",
+  "baseline_bytes": 1372,
+  "baseline_sha256": "369a4f022d386770e2613e902910b21a48d9476428461c1a026da369b9b99e13",
+  "candidate_bytes": 1372,
+  "candidate_sha256": "369a4f022d386770e2613e902910b21a48d9476428461c1a026da369b9b99e13",
+  "equal": true,
+  "commands": [
+    [
+      "PING"
+    ],
+    [
+      "SETEX",
+      "fr6kecb:setex",
+      "600",
+      "v1"
+    ],
+    [
+      "PERSIST",
+      "fr6kecb:setex"
+    ],
+    [
+      "PTTL",
+      "fr6kecb:setex"
+    ],
+    [
+      "GET",
+      "fr6kecb:setex"
+    ],
+    [
+      "PSETEX",
+      "fr6kecb:psetex",
+      "600000",
+      "v2"
+    ],
+    [
+      "PERSIST",
+      "fr6kecb:psetex"
+    ],
+    [
+      "PTTL",
+      "fr6kecb:psetex"
+    ],
+    [
+      "GET",
+      "fr6kecb:psetex"
+    ],
+    [
+      "setex",
+      "fr6kecb:lower",
+      "600",
+      "lo"
+    ],
+    [
+      "PERSIST",
+      "fr6kecb:lower"
+    ],
+    [
+      "PsEtEx",
+      "fr6kecb:mixed",
+      "600000",
+      "mix"
+    ],
+    [
+      "PERSIST",
+      "fr6kecb:mixed"
+    ],
+    [
+      "SETEX",
+      "fr6kecb:badzero",
+      "0",
+      "v"
+    ],
+    [
+      "PSETEX",
+      "fr6kecb:badzero",
+      "0",
+      "v"
+    ],
+    [
+      "SETEX",
+      "fr6kecb:badint",
+      "abc",
+      "v"
+    ],
+    [
+      "SETEX",
+      "fr6kecb:badarity",
+      "600"
+    ],
+    [
+      "SELECT",
+      "1"
+    ],
+    [
+      "SETEX",
+      "fr6kecb:db1",
+      "600",
+      "vdb1"
+    ],
+    [
+      "PERSIST",
+      "fr6kecb:db1"
+    ],
+    [
+      "SELECT",
+      "0"
+    ],
+    [
+      "GET",
+      "fr6kecb:db1"
+    ],
+    [
+      "SELECT",
+      "1"
+    ],
+    [
+      "GET",
+      "fr6kecb:db1"
+    ],
+    [
+      "SELECT",
+      "0"
+    ],
+    [
+      "MULTI"
+    ],
+    [
+      "SETEX",
+      "fr6kecb:tx",
+      "600",
+      "vtx"
+    ],
+    [
+      "PSETEX",
+      "fr6kecb:tx2",
+      "600000",
+      "vtx2"
+    ],
+    [
+      "EXEC"
+    ],
+    [
+      "PERSIST",
+      "fr6kecb:tx"
+    ],
+    [
+      "PERSIST",
+      "fr6kecb:tx2"
+    ],
+    [
+      "HELLO",
+      "3"
+    ],
+    [
+      "SETEX",
+      "fr6kecb:resp3",
+      "600",
+      "v3"
+    ],
+    [
+      "PERSIST",
+      "fr6kecb:resp3"
+    ],
+    [
+      "PTTL",
+      "fr6kecb:resp3"
+    ]
+  ],
+  "coverage": [
+    "valid SETEX/PSETEX",
+    "PERSIST proves expiry existed, then PTTL is deterministic -1",
+    "lower/mixed-case command names",
+    "invalid TTL and wrong arity fallback",
+    "non-DB0 selection and isolation",
+    "MULTI/EXEC queued expiration writes",
+    "RESP3 HELLO path",
+    "dispatch CLIENT REPLY suppression covered by fr-runtime client_reply tests"
+  ]
+}

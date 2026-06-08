@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr6kecb-pass2-pair-candidate-setex",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 5000000,
+    "bytes_sent": 85000000,
+    "commands": 1000000,
+    "ops_per_sec": 148627.80175045624,
+    "pipeline_latency_us": {
+      "mean": 5220.378159182146,
+      "p50": 4381.431033834815,
+      "p95": 11777.904001064599,
+      "p99": 16203.359002247453,
+      "samples": 62500
+    },
+    "seconds": 6.728216310963035
+  },
+  "mode": "setex",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 0,
+    "bytes_sent": 0,
+    "commands": 0,
+    "seconds": 0.0
+  },
+  "requests": 1000000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

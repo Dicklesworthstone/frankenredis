@@ -1,0 +1,135 @@
+> PING
+< +PONG
+
+> SETEX fr6kecb:setex 600 v1
+< +OK
+
+> PERSIST fr6kecb:setex
+< :1
+
+> PTTL fr6kecb:setex
+< :-1
+
+> GET fr6kecb:setex
+< $2
+v1
+
+> PSETEX fr6kecb:psetex 600000 v2
+< +OK
+
+> PERSIST fr6kecb:psetex
+< :1
+
+> PTTL fr6kecb:psetex
+< :-1
+
+> GET fr6kecb:psetex
+< $2
+v2
+
+> setex fr6kecb:lower 600 lo
+< +OK
+
+> PERSIST fr6kecb:lower
+< :1
+
+> PsEtEx fr6kecb:mixed 600000 mix
+< +OK
+
+> PERSIST fr6kecb:mixed
+< :1
+
+> SETEX fr6kecb:badzero 0 v
+< -ERR invalid expire time in 'setex' command
+
+> PSETEX fr6kecb:badzero 0 v
+< -ERR invalid expire time in 'psetex' command
+
+> SETEX fr6kecb:badint abc v
+< -ERR value is not an integer or out of range
+
+> SETEX fr6kecb:badarity 600
+< -ERR wrong number of arguments for 'setex' command
+
+> SELECT 1
+< +OK
+
+> SETEX fr6kecb:db1 600 vdb1
+< +OK
+
+> PERSIST fr6kecb:db1
+< :1
+
+> SELECT 0
+< +OK
+
+> GET fr6kecb:db1
+< $-1
+
+> SELECT 1
+< +OK
+
+> GET fr6kecb:db1
+< $4
+vdb1
+
+> SELECT 0
+< +OK
+
+> MULTI
+< +OK
+
+> SETEX fr6kecb:tx 600 vtx
+< +QUEUED
+
+> PSETEX fr6kecb:tx2 600000 vtx2
+< +QUEUED
+
+> EXEC
+< *2
++OK
++OK
+
+> PERSIST fr6kecb:tx
+< :1
+
+> PERSIST fr6kecb:tx2
+< :1
+
+> HELLO 3
+< %7
+$6
+server
+$5
+redis
+$7
+version
+$5
+7.2.4
+$5
+proto
+:3
+$2
+id
+:3
+$4
+mode
+$10
+standalone
+$4
+role
+$6
+master
+$7
+modules
+*0
+
+> SETEX fr6kecb:resp3 600 v3
+< +OK
+
+> PERSIST fr6kecb:resp3
+< :1
+
+> PTTL fr6kecb:resp3
+< :-1
+
