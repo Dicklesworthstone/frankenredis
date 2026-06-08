@@ -15,11 +15,12 @@ This gate locks that surface in (no other differ covers the command gate — onl
 message delivery, in pubsub_differ.py). Each case uses a fresh subscribed
 connection so subscribe state never couples across cases.
 
-EXCLUDED (frankenredis-7tpx0 — fix validated, blocked on fr-runtime's lock; flip
-these to asserts when it lands): while subscribed, a known container subcommand
-with the WRONG argc (CONFIG GET, OBJECT ENCODING), PING with argc>2, and DEBUG
-(CMD_PROTECTED) must surface their arity/protected error BEFORE the context gate.
-fr still emits the context wording for those until 7tpx0 lands.
+ASSERTED (frankenredis-7tpx0, landed 708db8a17): while subscribed, the upstream
+order is arity(incl. resolved subcommand) -> CMD_PROTECTED -> ... -> context
+gate, so a known container subcommand with the WRONG argc (CONFIG GET, OBJECT
+ENCODING) surfaces its own 'parent|sub' arity error, PING with argc>2 surfaces
+the ping arity error, and DEBUG (CMD_PROTECTED) surfaces the protected error —
+all BEFORE the context gate.
 """
 import argparse
 import os
@@ -167,6 +168,12 @@ RESP2_CASES = [
     ("unknown-cmd", [("NOSUCHCMD", "a")]),
     # wrong-arity at the PARENT level -> its own arity error (gate skipped)
     ("set-wrong-arity", [("SET", "k")]),
+    # (7tpx0) precede the context gate: wrong SUBCOMMAND arity -> own arity
+    # error; PING argc>2 -> ping arity error; DEBUG (protected) -> protected err
+    ("config-get-wrong-arity", [("CONFIG", "GET")]),
+    ("object-encoding-wrong-arity", [("OBJECT", "ENCODING")]),
+    ("ping-argc3", [("PING", "a", "b")]),
+    ("debug-protected", [("DEBUG", "SLEEP", "0")]),
 ]
 
 # Commands a RESP3 subscriber may run freely (no gate) — must behave exactly as
@@ -248,9 +255,8 @@ def main():
             print(f"  - {fl}")
         sys.exit(1)
     print(f"OK: subscribe-mode command gate byte-exact vs redis 7.2.4 "
-          f"({len(RESP2_CASES)} RESP2 cases + {len(RESP3_CASES)} RESP3 no-gate "
-          f"cases; CONFIG GET/OBJECT ENCODING wrong-arity, PING argc>2, DEBUG "
-          f"protected are 7tpx0-excluded)")
+          f"({len(RESP2_CASES)} RESP2 cases incl. 7tpx0 subcommand-arity / PING "
+          f"argc>2 / DEBUG-protected + {len(RESP3_CASES)} RESP3 no-gate cases)")
     sys.exit(0)
 
 
