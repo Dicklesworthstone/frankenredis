@@ -169,8 +169,27 @@ def main():
         lambda: ("ZINTERCARD", "2", rng.choice(keys), rng.choice(keys)) + (("LIMIT", str(rng.randint(0, 3))) if rng.random() < 0.5 else ()),
     ]
 
+    lex_cmds = {"ZRANGEBYLEX", "ZREVRANGEBYLEX", "ZLEXCOUNT", "ZREMRANGEBYLEX"}
+
+    def has_unequal_scores(key):
+        # A lex range is only well-defined when every member shares one score.
+        node = o.cmd("ZRANGE", key, "0", "-1", "WITHSCORES")
+        if node[0] != "array":
+            return False
+        items = node[1]
+        scores = {items[i][1] for i in range(1, len(items), 2)}
+        return len(scores) > 1
+
     for it in range(args.iters):
         op = rng.choice(ops)()
+        # Skip lex-family ops on a zset with unequal scores: redis resolves the
+        # bound with a skiplist-level search (zslFirst/LastInLexRange) that is
+        # unspecified on mixed scores and not reproducible by a linear scan
+        # (frankenredis-vgkly, WONTFIX). Skipping on both servers keeps them in
+        # lockstep — equal-score lex (which IS byte-exact) stays covered. Matches
+        # random_reply_differ, which excludes the whole lex family.
+        if (op[0] in lex_cmds or (op[0] == "ZRANGE" and "BYLEX" in op)) and has_unequal_scores(op[1]):
+            continue
         ro, rf = o.cmd(*op), f.cmd(*op)
         nro, nrf = render(ro), render(rf)
         log.append(" ".join(str(x) for x in op) + "  => O:%s F:%s" % (nro[:50], nrf[:50]))
