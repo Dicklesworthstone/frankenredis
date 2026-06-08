@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /data/projects/frankenredis/target-cod-pe47p-baseline-rch/release-perf/frankenredis --port 26910 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix frpe47pbasepair --json-out artifacts/optimization/frankenredis-pe47p/baseline/last-paired-setex-p16-1m.json",
+      "mean": 4.77884598178,
+      "stddev": 0.12848976550933022,
+      "median": 4.76504916678,
+      "user": 7.0425962,
+      "system": 6.101245831428571,
+      "min": 4.6213285287799994,
+      "max": 4.97053749778,
+      "times": [
+        4.97053749778,
+        4.69800207578,
+        4.92933001678,
+        4.68868623778,
+        4.6213285287799994,
+        4.76504916678,
+        4.77898834878
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-svgvb/run_setex_bench_once.py --server-bin /data/projects/frankenredis/target-cod-pe47p-candidate-rch/release-perf/frankenredis --port 26911 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --mix alternate --key-prefix frpe47pcandpair --json-out artifacts/optimization/frankenredis-pe47p/candidate/last-paired-setex-p16-1m.json",
+      "mean": 4.738717570351428,
+      "stddev": 0.18496808968816303,
+      "median": 4.68650404678,
+      "user": 5.899874771428571,
+      "system": 6.143836688571429,
+      "min": 4.56182264678,
+      "max": 5.1083818997799995,
+      "times": [
+        4.56182264678,
+        4.62731384878,
+        4.61230674678,
+        4.68650404678,
+        4.76005886878,
+        4.81463493478,
+        5.1083818997799995
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
