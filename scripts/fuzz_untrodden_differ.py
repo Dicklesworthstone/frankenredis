@@ -114,6 +114,43 @@ def gen_cmd(rnd):
         lambda: ["HRANDFIELD", k(), rnd.choice(SMALL_INTS+["-2"])] + (["WITHVALUES"] if rnd.random()<0.5 else []),
         lambda: ["EXPIRE", k(), n()] + rnd.choice([[], ["NX"],["XX"],["GT"],["LT"]]),
         lambda: ["BITFIELD", k(), "GET", rnd.choice(["u8","i8","u100","u0"]), n()],
+        # ── string / bit / counter families (validation + type-check order) ──
+        lambda: ["SETBIT", k(), rnd.choice(["0","7","100","-1"]), rnd.choice(["0","1","2"])],
+        lambda: ["GETBIT", k(), rnd.choice(["0","7","100","-1"])],
+        lambda: ["APPEND", k(), rnd.choice(["","x","abc"])],
+        lambda: ["GETDEL", k()],
+        lambda: ["GETSET", k(), m()],
+        lambda: ["INCRBY", k(), rnd.choice(SMALL_INTS+["abc","9223372036854775807"])],
+        lambda: ["DECRBY", k(), rnd.choice(SMALL_INTS+["abc"])],
+        lambda: ["INCRBYFLOAT", k(), rnd.choice(["1.5","-2","nan","inf","abc"])],
+        lambda: ["INCR", k()],
+        lambda: ["STRLEN", k()],
+        lambda: ["SETNX", k(), m()],
+        lambda: ["PSETEX", k(), rnd.choice(["0","-1","1000"]), m()],
+        # ── list move / mutate ──
+        lambda: ["RPOPLPUSH", k(), k()],
+        lambda: ["LMOVE", k(), k(), rnd.choice(["LEFT","RIGHT"]), rnd.choice(["LEFT","RIGHT"])],
+        lambda: ["LREM", k(), rnd.choice(["0","1","-1","2"]), m()],
+        lambda: ["LSET", k(), rnd.choice(["0","-1","5","100"]), m()],
+        lambda: ["LTRIM", k(), n(), rnd.choice(SMALL_INTS+["-1"])],
+        lambda: ["RPUSHX", k(), m()],
+        lambda: ["LPUSHX", k(), m()],
+        # ── hash / zset counter families ──
+        lambda: ["HINCRBY", k(), m(), rnd.choice(SMALL_INTS+["abc"])],
+        lambda: ["HINCRBYFLOAT", k(), m(), rnd.choice(["1.5","nan","abc"])],
+        lambda: ["HSETNX", k(), m(), n()],
+        lambda: ["ZINCRBY", k(), rnd.choice(["1","nan","inf"]), m()],
+        lambda: ["ZADD", k(), "INCR", rnd.choice(["1","nan"]), m()],
+        lambda: ["ZSCORE", k(), m()],
+        lambda: ["ZMSCORE", k(), m(), m()],
+        lambda: ["ZADD", k(), "NX", "INCR", "1", m()],  # NX+INCR may return nil
+        # ── misc type-sensitive ──
+        lambda: ["TYPE", k()],
+        lambda: ["PERSIST", k()],
+        lambda: ["PTTL", k()],
+        lambda: ["OBJECT", "REFCOUNT", k()],
+        lambda: ["SINTERCARD", "1", k(), "LIMIT", "0"],
+        lambda: ["ZRANGEBYSCORE", k(), rnd.choice(["-inf","(1","1"]), rnd.choice(["+inf","(3","3"]), "LIMIT", n(), rnd.choice(["-1","1","2"])],
     ])
     return g()
 
@@ -138,6 +175,17 @@ def run(oport, fport, seed, iters):
             rf = f.cmd(*cmd)
         except Exception as e:
             rf = ('exc', str(e))
+        # time-relative replies: jitter of a few ms between the two servers is
+        # inherent (they execute microseconds apart), not a divergence. Accept
+        # when both are ints within tolerance (or both the same sentinel).
+        if cmd[0] in ("PTTL", "TTL", "PEXPIRETIME", "EXPIRETIME"):
+            if ro[0] == 'int' and rf[0] == 'int':
+                tol = 50 if cmd[0] in ("PTTL", "PEXPIRETIME") else 2
+                if ro[1] == rf[1] or (ro[1] > 0 and rf[1] > 0 and abs(ro[1]-rf[1]) <= tol):
+                    continue
+            if ro == rf:
+                continue
+            divs.append((i, cmd, ro, rf)); continue
         # random-reply commands: compare only reply type + length, not values/order
         RANDOM_CMDS = {"HRANDFIELD", "SRANDMEMBER", "ZRANDMEMBER", "SPOP"}
         if cmd[0] in RANDOM_CMDS:
