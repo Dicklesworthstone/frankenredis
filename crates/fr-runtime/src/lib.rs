@@ -9535,8 +9535,32 @@ impl Runtime {
 
         match result {
             Ok(reply) => {
-                let cmd_keys =
-                    set_command_keys(argv).unwrap_or_else(|| fr_command::command_keys(argv));
+                // (frankenredis-ev067) cmd_keys feeds ONLY four consumers: the
+                // blocked-client ready-set, client-tracking invalidation (write
+                // path), keyspace notifications, and client-tracking record (read
+                // path). When none of those are active — the overwhelmingly common
+                // case, and EVERY redis-benchmark collection-write run (SADD/HSET/
+                // LPUSH/ZADD) — deriving it via command_keys (a command-name
+                // re-scan through ~20 eq_ignore_ascii_case branches + two heap Vecs
+                // + per-key clones) on every command is pure waste, and is exactly
+                // what SET's fast path already skips (the SET-vs-SADD perf gap).
+                // Gate the derivation on its consumers; an empty Vec is a correct
+                // no-op for all of them — each early-outs on empty input or is
+                // itself gated (ready loop gated on blocked_client_ids; the
+                // tracking record/invalidate helpers return on empty; the notify
+                // block is gated on notify_keyspace_events). Profile-backed: the
+                // generic path spent ~4.5% self-time in command_key_indexes under
+                // SADD load that SET never paid.
+                let cmd_keys = if !self.server.blocked_client_ids.is_empty()
+                    || self.server.store.notify_keyspace_events != 0
+                    || !self.server.client_tracking_observed_keys.is_empty()
+                    || !self.server.client_tracking_bcast_clients.is_empty()
+                    || self.should_record_client_tracking_keys()
+                {
+                    set_command_keys(argv).unwrap_or_else(|| fr_command::command_keys(argv))
+                } else {
+                    Vec::new()
+                };
                 // (frankenredis-1d2xf) Propagate any lazy-expiry deletions this
                 // command triggered FIRST, before the command's own record, so a
                 // command that recreates the key (e.g. SET on an expired key)
