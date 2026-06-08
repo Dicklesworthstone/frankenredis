@@ -853,6 +853,11 @@ fn main() -> ExitCode {
     let mut runtime = Runtime::new(policy);
     runtime.set_server_port(port);
     runtime.set_sentinel_mode(sentinel_mode);
+    if sentinel_mode {
+        // (frankenredis-pkdgs) Announce our listening port in hello messages so
+        // peer sentinels discover us at the right address.
+        runtime.set_sentinel_announce_port(port);
+    }
     runtime.set_config_file_path(config_path.map(std::path::PathBuf::from));
     // CLI flag wins over config-file directive; both override the
     // runtime's "no" default which mirrors upstream Redis 7.2's
@@ -2393,6 +2398,7 @@ fn probe_sentinel_master(
     port: u16,
     parser_config: &ParserConfig,
     query_buffer_limit: usize,
+    hello: Option<&str>,
 ) -> io::Result<String> {
     let addr: std::net::SocketAddr = format!("{ip}:{port}")
         .parse()
@@ -2408,6 +2414,17 @@ fn probe_sentinel_master(
         read_frame_from_stream(&mut stream, &mut read_buf, parser_config, query_buffer_limit)?;
     if !matches!(&pong, RespFrame::SimpleString(s) if s.eq_ignore_ascii_case("PONG")) {
         return Err(io::Error::new(ErrorKind::InvalidData, "master did not PONG"));
+    }
+
+    // (frankenredis-pkdgs) Gossip our hello on the master's pub/sub channel so
+    // peer sentinels discover us. Best-effort: the integer reply is drained but
+    // a failure here still lets the INFO below decide link liveness.
+    if let Some(hello) = hello {
+        stream.write_all(
+            &replica_handshake_frame(&[b"PUBLISH", b"__sentinel__:hello", hello.as_bytes()])
+                .to_bytes(),
+        )?;
+        let _ = read_frame_from_stream(&mut stream, &mut read_buf, parser_config, query_buffer_limit)?;
     }
 
     stream.write_all(&replica_handshake_frame(&[b"INFO"]).to_bytes())?;
@@ -2450,7 +2467,13 @@ fn run_sentinel_monitoring_tick(runtime: &mut Runtime, now_ms: u64, last_probe_m
     // sentinel state across the network IO.
     let targets = runtime.sentinel_monitor_targets();
     for (name, ip, port) in targets {
-        let info = probe_sentinel_master(&ip, port, &parser_config, query_buffer_limit).ok();
+        // Gossip a hello on this master's __sentinel__:hello channel when due,
+        // so peer sentinels discover this instance. Decided (and rate-limited)
+        // by the store before the blocking probe sends it.
+        let hello = runtime.sentinel_take_hello_to_publish(&name, now_ms);
+        let info =
+            probe_sentinel_master(&ip, port, &parser_config, query_buffer_limit, hello.as_deref())
+                .ok();
         runtime.apply_sentinel_probe_result(&name, now_ms, info.as_deref());
     }
 }

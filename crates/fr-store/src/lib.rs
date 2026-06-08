@@ -3413,6 +3413,31 @@ impl Store {
         self.sentinel_state.check_tilt(now_ms);
     }
 
+    /// (frankenredis-pkdgs) Announce this sentinel at `port` in its hello
+    /// messages (upstream defaults announce-port to the listening port). Only
+    /// fills it when no explicit announce-port is configured.
+    pub fn set_sentinel_announce_port(&mut self, port: u16) {
+        if self.sentinel_state.announce_port.is_none() {
+            self.sentinel_state.announce_port = Some(port);
+        }
+    }
+
+    /// (frankenredis-pkdgs) If it is time to gossip (every PUBLISH_PERIOD_MS),
+    /// return the encoded hello payload for `PUBLISH __sentinel__:hello` and
+    /// stamp last_pub_time; else None. Lets other sentinels (incl. real
+    /// redis-sentinels) discover this instance via the master's hello channel.
+    pub fn sentinel_take_hello_to_publish(&mut self, name: &str, now_ms: u64) -> Option<String> {
+        let master = self.sentinel_state.masters.get(name)?;
+        if !fr_sentinel::discovery::should_publish_hello(master, now_ms) {
+            return None;
+        }
+        let msg = fr_sentinel::discovery::create_hello_message(&self.sentinel_state, master).encode();
+        if let Some(m) = self.sentinel_state.masters.get_mut(name) {
+            m.last_pub_time = now_ms;
+        }
+        Some(msg)
+    }
+
     /// (frankenredis-pkdgs) The monitored masters' (name, ip, port) for the
     /// fr-server Sentinel monitoring tick to PING/INFO. Snapshotted so the
     /// blocking probes hold no borrow of the sentinel state.

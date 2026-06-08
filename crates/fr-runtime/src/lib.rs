@@ -3958,6 +3958,19 @@ impl Runtime {
         self.server.store.sentinel_begin_tick(now_ms);
     }
 
+    /// (frankenredis-pkdgs) Announce this sentinel at `port` in hello messages.
+    pub fn set_sentinel_announce_port(&mut self, port: u16) {
+        self.server.store.set_sentinel_announce_port(port);
+    }
+
+    /// (frankenredis-pkdgs) Encoded `__sentinel__:hello` payload to publish for
+    /// `name` this tick, or None if not yet time.
+    pub fn sentinel_take_hello_to_publish(&mut self, name: &str, now_ms: u64) -> Option<String> {
+        self.server
+            .store
+            .sentinel_take_hello_to_publish(name, now_ms)
+    }
+
     /// (frankenredis-pkdgs) Monitored masters' (name, ip, port) for the
     /// fr-server Sentinel monitoring tick.
     #[must_use]
