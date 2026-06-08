@@ -262,7 +262,7 @@
     {
       "name": "bulk_length_overflow",
       "now_ms": 0,
-      "raw_request": "$8388609\r\n",
+      "raw_request": "$536870913\r\n",
       "expect": { "kind": "error", "value": "ERR Protocol error: bulk length exceeds limit" },
       "expect_threat": {
         "threat_class": "parser_abuse",
@@ -276,7 +276,7 @@
     {
       "name": "multibulk_length_overflow",
       "now_ms": 0,
-      "raw_request": "*1025\r\n",
+      "raw_request": "*2147483648\r\n",
       "expect": { "kind": "error", "value": "ERR Protocol error: multibulk length exceeds limit" },
       "expect_threat": {
         "threat_class": "parser_abuse",
