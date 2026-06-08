@@ -3327,6 +3327,7 @@ impl ServerState {
         } else {
             b"DEL"
         };
+        let mut expired_logical: Vec<Vec<u8>> = Vec::with_capacity(evicted_db_keys.len());
         for key in evicted_db_keys {
             let (db, logical) = match fr_store::decode_db_key(key) {
                 Some((db, lk)) => (db, lk.to_vec()),
@@ -3339,7 +3340,104 @@ impl ServerState {
                 self.capture_aof_record(&[b"SELECT".to_vec(), db.to_string().into_bytes()]);
                 self.aof_selected_db = db;
             }
-            self.capture_aof_record(&[op.to_vec(), logical]);
+            self.capture_aof_record(&[op.to_vec(), logical.clone()]);
+            expired_logical.push(logical);
+        }
+        // Upstream db.c::expireIfNeeded / activeExpireCycle reach
+        // signalModifiedKey -> trackingInvalidateKey, so a tracked key that
+        // expires pushes an `invalidate` to its tracking clients exactly like an
+        // explicit delete. Every expiry path (the lazy take_lazy_expired_propagation
+        // sites and the active cycle) funnels through here. (frankenredis)
+        self.invalidate_tracking_for_expired_keys(&expired_logical);
+    }
+
+    /// Fire client-tracking invalidations for keys just removed by expiry,
+    /// mirroring the non-bcast (one push per key per owner) and bcast
+    /// (prefix-matched, batched per target) targeting of
+    /// `Runtime::queue_client_tracking_invalidations`. Runs at ServerState level
+    /// because all expiry paths reach `propagate_expired_key_deletions`. The
+    /// client that triggered the expiry is not a target — a client reading or
+    /// writing an already-expired key never recorded it in the tracking table on
+    /// that command, matching upstream trackingRememberKeys ordering. NOLOOP is
+    /// therefore moot on this path. (frankenredis)
+    fn invalidate_tracking_for_expired_keys(&mut self, keys: &[Vec<u8>]) {
+        if keys.is_empty() {
+            return;
+        }
+        // Non-bcast clients: remove each expired key from the tracking table and
+        // remember its observers (upstream deletes the key from the table on
+        // invalidation; a later read re-adds it).
+        let observed: Vec<(Vec<u8>, std::collections::HashSet<u64>)> = keys
+            .iter()
+            .filter_map(|key| {
+                self.client_tracking_observed_keys
+                    .remove(key)
+                    .map(|owners| (key.clone(), owners))
+            })
+            .collect();
+
+        // Bcast clients: one batched invalidate per target for the keys that
+        // match the client's tracked prefixes.
+        let mut bcast: BTreeMap<u64, Vec<Vec<u8>>> = BTreeMap::new();
+        if !self.client_tracking_bcast_clients.is_empty() {
+            let bcast_ids: Vec<u64> = self.client_tracking_bcast_clients.iter().copied().collect();
+            for owner_id in bcast_ids {
+                let Some(session) = self.client_sessions.get(&owner_id) else {
+                    continue;
+                };
+                let tracking = &session.client_tracking;
+                if !tracking.enabled || !tracking.bcast {
+                    continue;
+                }
+                let target_id = tracking.redirect.unwrap_or(owner_id);
+                if !self.client_sessions.contains_key(&target_id) {
+                    continue;
+                }
+                for key in keys {
+                    let matches = tracking.prefixes.is_empty()
+                        || tracking.prefixes.iter().any(|prefix| key.starts_with(prefix));
+                    if matches {
+                        let entry = bcast.entry(target_id).or_default();
+                        if !entry.iter().any(|existing| existing == key) {
+                            entry.push(key.clone());
+                        }
+                    }
+                }
+            }
+        }
+        for (target_id, ks) in bcast {
+            if !ks.is_empty() {
+                self.pubsub_outbox
+                    .entry(target_id)
+                    .or_default()
+                    .push(fr_store::PubSubMessage::Invalidate { keys: ks });
+            }
+        }
+
+        for (key, owner_ids) in observed {
+            let mut targets: Vec<u64> = Vec::new();
+            for owner_id in owner_ids {
+                let Some(session) = self.client_sessions.get(&owner_id) else {
+                    continue;
+                };
+                let tracking = &session.client_tracking;
+                if !tracking.enabled || tracking.bcast {
+                    continue;
+                }
+                let target_id = tracking.redirect.unwrap_or(owner_id);
+                if self.client_sessions.contains_key(&target_id) {
+                    targets.push(target_id);
+                }
+            }
+            targets.sort_unstable();
+            for target_id in targets {
+                self.pubsub_outbox
+                    .entry(target_id)
+                    .or_default()
+                    .push(fr_store::PubSubMessage::Invalidate {
+                        keys: vec![key.clone()],
+                    });
+            }
         }
     }
 
@@ -24241,6 +24339,52 @@ mod tests {
         );
 
         let _writer = rt.swap_session(previous);
+    }
+
+    // (frankenredis) A tracked key that EXPIRES must push an invalidate to its
+    // tracking clients, exactly like an explicit delete — upstream db.c
+    // expireIfNeeded / activeExpireCycle reach trackingInvalidateKey. fr
+    // previously only invalidated on command writes, so expiry silently left a
+    // stale client-side cache. Covers both lazy (on-access) and active-cycle
+    // expiry.
+    #[test]
+    fn expiry_invalidates_client_tracking() {
+        for active in [false, true] {
+            let mut rt = Runtime::default_strict();
+            let tracker = rt.new_session();
+            let writer = rt.new_session();
+
+            let previous = rt.swap_session(tracker);
+            rt.execute_frame(command(&[b"HELLO", b"3"]), 0);
+            assert_eq!(
+                rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON"]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            // Tracked key with a short TTL.
+            rt.execute_frame(command(&[b"SET", b"ek", b"1", b"PX", b"100"]), 2);
+            rt.execute_frame(command(&[b"GET", b"ek"]), 3);
+            let tracker_session = rt.swap_session(writer);
+            rt.record_client_session(&tracker_session);
+
+            // Drive expiry past the deadline.
+            if active {
+                let _ = rt.run_active_expire_cycle(1_000, ActiveExpireCycleKind::Slow);
+            } else {
+                // A read by the writer lazily reaps the expired key.
+                rt.execute_frame(command(&[b"GET", b"ek"]), 1_000);
+            }
+
+            assert_eq!(
+                rt.drain_pubsub_for_client(tracker_session.client_id),
+                vec![fr_store::PubSubMessage::Invalidate {
+                    keys: vec![b"ek".to_vec()],
+                }],
+                "{} expiry of a tracked key must push exactly one invalidate",
+                if active { "active-cycle" } else { "lazy" }
+            );
+
+            let _ = rt.swap_session(previous);
+        }
     }
 
     #[test]
