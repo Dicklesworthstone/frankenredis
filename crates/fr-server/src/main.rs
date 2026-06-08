@@ -2567,10 +2567,14 @@ fn process_argv_frame(
     // (gdb profiling: ~58% of on-CPU samples in the allocator). When a
     // pause IS active, behavior is identical: `is_command_paused`
     // already re-checks `is_client_paused` internally.
-    if runtime.is_client_paused(ts)
-        && runtime.is_command_paused(argv, ts)
-        && !is_client_pause_exempt(argv)
-    {
+    // (frankenredis) Upstream server.c::processCommand defers EVERY non-replica
+    // command while PAUSE_ACTION_CLIENT_ALL is active — there is no exemption for
+    // CLIENT UNPAUSE, so a PAUSE ALL can only be lifted by its own deadline, not
+    // by an UNPAUSE that arrives during the window (verified live: redis ignores
+    // an in-pause UNPAUSE and releases at the original deadline). Under PAUSE
+    // WRITE, non-write commands like UNPAUSE are not paused by is_command_paused
+    // in the first place, so they still pass through. Mirror that exactly.
+    if runtime.is_client_paused(ts) && runtime.is_command_paused(argv, ts) {
         // Don't process the command — leave it in the read buffer.
         // Track paused token so we can re-process when pause expires.
         paused_tokens.insert(token);
@@ -4646,14 +4650,6 @@ fn command_frame_can_move_to_argv(frame: &RespFrame) -> bool {
                 RespFrame::BulkString(Some(_)) | RespFrame::SimpleString(_) | RespFrame::Integer(_)
             )
         })
-}
-
-fn is_client_pause_exempt(argv: &[Vec<u8>]) -> bool {
-    matches!(
-        argv,
-        [cmd, sub, ..]
-            if cmd.eq_ignore_ascii_case(b"CLIENT") && sub.eq_ignore_ascii_case(b"UNPAUSE")
-    )
 }
 
 fn is_quit_frame(argv: &[Vec<u8>]) -> bool {
@@ -7632,8 +7628,13 @@ mod tests {
         assert_eq!(sub_conn.write_buf, expected_bytes);
     }
 
+    // (frankenredis-flbs4) Under CLIENT PAUSE ALL, upstream server.c::processCommand
+    // defers EVERY non-replica command including CLIENT UNPAUSE — there is no
+    // bypass, so a PAUSE ALL is only liftable by its own deadline. fr must defer
+    // the in-pause UNPAUSE (leave it buffered, send no reply, stay paused), not
+    // execute it early.
     #[test]
-    fn client_unpause_bypasses_pause_gate() {
+    fn client_unpause_is_deferred_under_pause_all() {
         use crate::ClientConnection;
         use fr_runtime::Runtime;
         use mio::Token;
@@ -7647,10 +7648,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let stream = TcpStream::connect(addr).unwrap();
-        let (mut server_stream, _server_addr) = listener.accept().unwrap();
-        server_stream
-            .set_read_timeout(Some(std::time::Duration::from_millis(50)))
-            .unwrap();
+        let (_server_stream, _server_addr) = listener.accept().unwrap();
         let mut conn = ClientConnection::new(mio::net::TcpStream::from_std(stream), session, ts);
 
         let pause = RespFrame::Array(Some(vec![
@@ -7663,7 +7661,6 @@ mod tests {
             RespFrame::BulkString(Some(b"CLIENT".to_vec())),
             RespFrame::BulkString(Some(b"UNPAUSE".to_vec())),
         ]));
-
         let unpause_bytes = unpause.to_bytes();
 
         assert_eq!(
@@ -7691,13 +7688,20 @@ mod tests {
             ts + 1,
             (ts + 1).saturating_mul(1000),
         );
-        assert!(conn.try_flush().unwrap());
 
-        let mut response = [0_u8; 5];
-        std::io::Read::read_exact(&mut server_stream, &mut response).unwrap();
-        assert_eq!(response, *b"+OK\r\n");
-        assert!(conn.read_buf.is_empty());
-        assert!(!runtime.is_client_paused(ts + 1));
+        // The UNPAUSE is deferred: token parked, bytes left buffered, no reply,
+        // and the pause is still in effect (only its own deadline lifts it).
+        assert!(paused_tokens.contains(&Token(1)));
+        assert!(
+            !conn.read_buf.is_empty(),
+            "in-pause UNPAUSE must stay buffered, not execute"
+        );
+        assert!(conn.write_buf.is_empty(), "no reply should be produced");
+        assert!(runtime.is_client_paused(ts + 1), "pause must remain active");
+
+        // It only runs once the pause window naturally expires (deadline 2000),
+        // at which point it is a no-op (pause already over).
+        assert!(!runtime.is_client_paused(2_001));
     }
 
     #[test]
