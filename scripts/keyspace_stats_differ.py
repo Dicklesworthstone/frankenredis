@@ -114,11 +114,12 @@ def run(oport, fport):
 # are tracked, not new: the gate passes when ONLY these diverge and fails on any
 # NEW divergence.
 KNOWN_DIVERGENCES = {
+    # Remaining OVER-counts: ZINTER/ZDIFF/ZINTERCARD/ZDIFFSTORE probe each
+    # "other" key once per base member, recording a hit per probe. Suppressing
+    # that needs a no-stat member probe in fr-store (locked). The UNDER-count
+    # half is FIXED (record_source_key_lookups in the fr-command handlers).
     "ZINTERCARD 2 za zb", "ZINTER 2 za zb", "ZINTER 3 za zb zc",
     "ZDIFF 2 za zb", "ZDIFFSTORE d 2 za zb",
-    "ZUNIONSTORE d 2 za zb", "ZINTERSTORE d 2 za zb",
-    "SINTERCARD 2 sa sb", "SINTER sa sb", "SDIFF sa sb", "SUNION sa sb",
-    "SINTERSTORE d sa sb", "SDIFFSTORE d sa sb", "ZMSCORE za a b x",
 }
 
 

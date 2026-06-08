@@ -12474,12 +12474,28 @@ fn incrbyfloat(
     Ok(RespFrame::BulkString(Some(new_val)))
 }
 
+/// (frankenredis-6f2f5) Record one keyspace hit/miss per SOURCE key, matching
+/// upstream's lookupKeyRead-per-key accounting. The Store sinter/sunion/sdiff/
+/// zunionstore/zinterstore/zmscore read methods touch their input keys (LFU/LRU)
+/// but never bump the keyspace_hits/misses counters, so these handlers under-
+/// counted (recorded 0 where redis records numkeys). `exists_no_touch` records
+/// the hit/miss without an LFU touch (the store method's own touch stays single)
+/// and without firing keyspace events. Call BEFORE the store computation so a
+/// later WRONGTYPE/empty result still records the lookups, as upstream does.
+/// Destination keys of the *STORE variants are writes and are NOT counted here.
+fn record_source_key_lookups(store: &mut Store, keys: &[&[u8]], now_ms: u64) {
+    for &key in keys {
+        let _ = store.exists_no_touch(key, now_ms);
+    }
+}
+
 fn sinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("SINTER"));
     }
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let keys: Vec<&[u8]> = argv[1..].iter().map(Vec::as_slice).collect();
+    record_source_key_lookups(store, &keys, now_ms);
     let members = store.sinter(&keys, now_ms)?;
     let frames = members
         .into_iter()
@@ -12498,6 +12514,7 @@ fn sunion(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     }
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let keys: Vec<&[u8]> = argv[1..].iter().map(Vec::as_slice).collect();
+    record_source_key_lookups(store, &keys, now_ms);
     let members = store.sunion(&keys, now_ms)?;
     let frames = members
         .into_iter()
@@ -12516,6 +12533,7 @@ fn sdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     }
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let keys: Vec<&[u8]> = argv[1..].iter().map(Vec::as_slice).collect();
+    record_source_key_lookups(store, &keys, now_ms);
     let members = store.sdiff(&keys, now_ms)?;
     let frames = members
         .into_iter()
@@ -12646,6 +12664,7 @@ fn sinterstore(
         return Err(CommandError::WrongArity("SINTERSTORE"));
     }
     let keys: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
+    record_source_key_lookups(store, &keys, now_ms);
     let count = store.sinterstore(&argv[1], &keys, now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
@@ -12659,6 +12678,7 @@ fn sunionstore(
         return Err(CommandError::WrongArity("SUNIONSTORE"));
     }
     let keys: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
+    record_source_key_lookups(store, &keys, now_ms);
     let count = store.sunionstore(&argv[1], &keys, now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
@@ -12668,6 +12688,7 @@ fn sdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         return Err(CommandError::WrongArity("SDIFFSTORE"));
     }
     let keys: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
+    record_source_key_lookups(store, &keys, now_ms);
     let count = store.sdiffstore(&argv[1], &keys, now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
@@ -12815,6 +12836,7 @@ fn zmscore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     }
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let members: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
     let scores = store.zmscore(&argv[1], &members, now_ms)?;
     let frames = scores
         .into_iter()
@@ -14483,6 +14505,7 @@ fn sintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             return Err(CommandError::SyntaxError);
         }
     }
+    record_source_key_lookups(store, &keys, now_ms);
     let count = store.sintercard(&keys, limit, now_ms)?;
     #[allow(clippy::cast_possible_wrap)]
     Ok(RespFrame::Integer(count as i64))
@@ -15165,6 +15188,11 @@ fn zunionstore(
     // so a wrong-type source key surfaces WRONGTYPE ahead of any option syntax
     // error. (The numkeys-overflow syntax check still precedes the type-check.)
     for &key in &keys {
+        // (frankenredis-6f2f5) Store::zunionstore never records keyspace
+        // hits/misses for its source keys, so the lookupKeyRead per key is
+        // recorded here — before the type check, matching upstream's
+        // lookup-then-checkType order so a wrong-type key still counts as a hit.
+        let _ = store.exists_no_touch(key, now_ms);
         store.ensure_zset_or_set_source(key, now_ms)?;
     }
     let (weights, aggregate) = parse_zstore_args(argv, 3 + numkeys, numkeys)?;
@@ -15198,6 +15226,9 @@ fn zinterstore(
     // (frankenredis-zsetop-wrongtype) Source-key type-check precedes the
     // WEIGHTS/AGGREGATE option parse — see zunionstore().
     for &key in &keys {
+        // (frankenredis-6f2f5) Record the per-key lookupKeyRead before the type
+        // check (Store::zinterstore doesn't), matching upstream's order.
+        let _ = store.exists_no_touch(key, now_ms);
         store.ensure_zset_or_set_source(key, now_ms)?;
     }
     let (weights, aggregate) = parse_zstore_args(argv, 3 + numkeys, numkeys)?;
