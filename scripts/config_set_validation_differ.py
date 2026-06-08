@@ -21,9 +21,9 @@ Both servers are launched fresh & config-less by the gate (compiled-in defaults,
 so e.g. hash-max-listpack-* align at 512/-2 — see config_defaults_gate.py) and
 torn down at exit, so a stray CONFIG SET from another probe can't pollute it.
 
-KNOWN ISSUES (allowlisted, each a separate concern, not a vqmkt regression):
-  - port   redis parses then rejects with a numeric error; fr reports the
-           parameter as immutable. Distinct from the value-validation surface.
+KNOWN ISSUES: none — the full CONFIG SET validation surface is byte-exact,
+including CONFIG SET port (MODIFIABLE_CONFIG with a live listener rebind,
+frankenredis-zyx9q).
 
 Usage: config_set_validation_differ.py [--bin PATH] [--redis-bin PATH] [-v]
 Exit 0 if validation matches (modulo known-issues), else 1.
@@ -108,10 +108,9 @@ class Conn:
 
 
 # Parameters whose validation is host/runtime/format specific or otherwise out
-# of the value-range validation surface this gate covers.
-KNOWN_ISSUES = {
-    "port": "immutable-vs-parse (separate concern)",
-}
+# of the value-range validation surface this gate covers. (Empty: port is now
+# MODIFIABLE with byte-exact range validation + live rebind, frankenredis-zyx9q.)
+KNOWN_ISSUES: "dict[str, str]" = {}
 
 # String/enum/free-form params where an arbitrary token is legitimately accepted
 # by both (or rejected by both with server-specific wording we don't pin here).

@@ -852,6 +852,9 @@ fn main() -> ExitCode {
     };
     let mut runtime = Runtime::new(policy);
     runtime.set_server_port(port);
+    // (frankenredis-zyx9q) Let the runtime's CONFIG SET port handler test-bind
+    // the new port and signal a live listener rebind.
+    runtime.set_bind_addr(bind_addr.clone());
     runtime.set_sentinel_mode(sentinel_mode);
     if sentinel_mode {
         // (frankenredis-pkdgs) Announce our listening port in hello messages so
@@ -1259,6 +1262,41 @@ fn main() -> ExitCode {
             {
                 conn.closing = true;
                 closing_tokens.insert(token);
+            }
+        }
+
+        // (frankenredis-zyx9q) Apply a pending CONFIG SET port change by
+        // rebinding the listening socket. Bind + register the NEW listener
+        // first and only swap it in (and drop the old) on success, so a rare
+        // TOCTOU bind failure after the runtime's test-bind leaves the old
+        // listener intact and the server reachable. Existing client connections
+        // live on separate tokens and are untouched — only the listener moves,
+        // matching upstream config.c::updatePort.
+        if let Some(new_port) = runtime.take_pending_port_change() {
+            match format!("{bind_addr}:{new_port}").parse::<SocketAddr>() {
+                Ok(new_addr) => match TcpListener::bind(new_addr) {
+                    Ok(mut new_listener) => {
+                        if let Err(e) =
+                            poll.registry()
+                                .register(&mut new_listener, LISTENER, Interest::READABLE)
+                        {
+                            eprintln!(
+                                "warn: CONFIG SET port: failed to register listener on {new_addr}: {e}"
+                            );
+                        } else {
+                            let _ = poll.registry().deregister(&mut listener);
+                            listener = new_listener;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("warn: CONFIG SET port: failed to bind {new_addr}: {e}");
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "warn: CONFIG SET port: invalid address '{bind_addr}:{new_port}': {e}"
+                    );
+                }
             }
         }
 

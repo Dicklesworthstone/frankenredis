@@ -2928,6 +2928,15 @@ pub struct ServerState {
     /// Flag set when REPLICAOF/SLAVEOF changes should force the event loop
     /// to reset replica sync state (drop primary connection and reconnect).
     replica_reconfigure_requested: bool,
+    /// Pending CONFIG SET port change for the standalone server event loop to
+    /// rebind the listening socket to. (frankenredis-zyx9q)
+    pending_port_change: Option<u16>,
+    /// Listen bind address, set by the standalone server at startup so the
+    /// CONFIG SET port handler can test-bind the new port (mirroring upstream
+    /// config.c::updatePort -> changeListener). Empty in library/test contexts
+    /// (no event loop), where CONFIG SET port validates + stores without any
+    /// socket side-effect. (frankenredis-zyx9q)
+    bind_addr: String,
 }
 
 impl Default for ServerState {
@@ -3027,6 +3036,8 @@ impl Default for ServerState {
             pending_client_unblocks: Vec::new(),
             pending_client_kills: Vec::new(),
             replica_reconfigure_requested: false,
+            pending_port_change: None,
+            bind_addr: String::new(),
         }
     }
 }
@@ -3935,6 +3946,22 @@ impl Runtime {
     /// Set the server listen port (for INFO server section).
     pub fn set_server_port(&mut self, port: u16) {
         self.server.store.server_port = port;
+    }
+
+    /// Record the listen bind address so the CONFIG SET port handler can
+    /// test-bind a new port the way upstream config.c::updatePort does. The
+    /// standalone server calls this at startup; library/test contexts leave it
+    /// empty (no event loop) and CONFIG SET port then only validates + stores.
+    /// (frankenredis-zyx9q)
+    pub fn set_bind_addr(&mut self, addr: String) {
+        self.server.bind_addr = addr;
+    }
+
+    /// Take a pending CONFIG SET port change for the standalone event loop to
+    /// rebind the listening socket to (None if no change is pending).
+    /// (frankenredis-zyx9q)
+    pub fn take_pending_port_change(&mut self) -> Option<u16> {
+        self.server.pending_port_change.take()
     }
 
     #[must_use]
@@ -14150,6 +14177,36 @@ impl Runtime {
                 ));
                 continue;
             }
+            if parameter.eq_ignore_ascii_case("port") {
+                // (frankenredis-zyx9q) Upstream config.c declares port as
+                // createIntConfig(0, 65535, MODIFIABLE_CONFIG) with the
+                // updatePort apply hook: CONFIG SET rebinds the listening
+                // socket synchronously and returns
+                // "Unable to listen on this port. Check server logs." if the
+                // new port can't be bound. Existing client connections survive
+                // — only the listener moves. We int/range-validate, then (in a
+                // standalone server, i.e. bind_addr set) test-bind the new
+                // address to reproduce the bind-failure error path and hand the
+                // live rebind to the event loop via pending_port_change.
+                let parsed = match parse_int_config_value("port", &pair[1], 0, 65535) {
+                    Ok(value) => value as u16,
+                    Err(resp) => return resp,
+                };
+                if !self.server.bind_addr.is_empty() {
+                    let bind_addr = self.server.bind_addr.clone();
+                    if std::net::TcpListener::bind((bind_addr.as_str(), parsed)).is_err() {
+                        return config_set_failed(
+                            "port",
+                            "Unable to listen on this port. Check server logs.",
+                        );
+                    }
+                    // Test-bind dropped here; the event loop performs the real
+                    // mio rebind (bind-new-before-drop-old) on its next pass.
+                    self.server.pending_port_change = Some(parsed);
+                }
+                self.set_server_port(parsed);
+                continue;
+            }
             if parameter.eq_ignore_ascii_case("appendfilename")
                 || parameter.eq_ignore_ascii_case("appenddirname")
                 || parameter.eq_ignore_ascii_case("always-show-logo")
@@ -14170,7 +14227,6 @@ impl Runtime {
                 || parameter.eq_ignore_ascii_case("io-threads-do-reads")
                 || parameter.eq_ignore_ascii_case("logfile")
                 || parameter.eq_ignore_ascii_case("pidfile")
-                || parameter.eq_ignore_ascii_case("port")
                 || parameter.eq_ignore_ascii_case("rdbchecksum")
                 || parameter.eq_ignore_ascii_case("replicaof")
                 || parameter.eq_ignore_ascii_case("set-proc-title")
@@ -32317,6 +32373,53 @@ mod tests {
                 ok,
             );
         }
+    }
+
+    /// (frankenredis-zyx9q) CONFIG SET port is MODIFIABLE_CONFIG in redis
+    /// 7.2.4 (createIntConfig 0..65535), not immutable. In library/test
+    /// contexts (no event loop / empty bind_addr) it validates the range with
+    /// the INTEGER_CONFIG wording and updates the live port without any socket
+    /// side-effect; the standalone server performs the actual listener rebind.
+    #[test]
+    fn config_set_port_is_modifiable_with_range_validation_zyx9q() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let err = |detail: &str| {
+            RespFrame::Error(format!(
+                "ERR CONFIG SET failed (possibly related to argument 'port') - {detail}"
+            ))
+        };
+        // Valid port: accepted, live value updated, CONFIG GET reflects it.
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"6390"]), 0),
+            ok,
+        );
+        assert_eq!(rt.server_port(), 6390);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"port"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"port".to_vec())),
+                RespFrame::BulkString(Some(b"6390".to_vec())),
+            ])),
+        );
+        // 0 is valid (disable TCP listener); boundary 65535 valid.
+        assert_eq!(rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"0"]), 0), ok);
+        assert_eq!(rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"65535"]), 0), ok);
+        // Out of range and unparseable: INTEGER_CONFIG wording, not "immutable".
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"65536"]), 0),
+            err("argument must be between 0 and 65535 inclusive"),
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"-1"]), 0),
+            err("argument must be between 0 and 65535 inclusive"),
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"abc"]), 0),
+            err("argument couldn't be parsed into an integer"),
+        );
+        // No pending rebind is queued when there is no event loop (bind_addr empty).
+        assert_eq!(rt.take_pending_port_change(), None);
     }
 
     /// (frankenredis-vqmkt) The harder ACCEPT-GAP subset: MEMORY_CONFIG
