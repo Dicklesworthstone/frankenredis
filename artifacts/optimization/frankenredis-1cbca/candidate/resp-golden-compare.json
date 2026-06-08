@@ -1,0 +1,61 @@
+{
+  "baseline_sha256": "cd37cbcdc1c44b04bcd11c2644c6ed0233cbc87eca53c9edfab159e9d8a748f3",
+  "candidate_sha256": "cd37cbcdc1c44b04bcd11c2644c6ed0233cbc87eca53c9edfab159e9d8a748f3",
+  "equal": true,
+  "commands": [
+    [
+      "PING"
+    ],
+    [
+      "SET",
+      "fr6tsou1:plain",
+      "alpha"
+    ],
+    [
+      "GET",
+      "fr6tsou1:plain"
+    ],
+    [
+      "GETSET",
+      "fr6tsou1:plain",
+      "beta"
+    ],
+    [
+      "GET",
+      "fr6tsou1:plain"
+    ],
+    [
+      "DEL",
+      "fr6tsou1:plain"
+    ],
+    [
+      "GET",
+      "fr6tsou1:plain"
+    ],
+    [
+      "MSET",
+      "fr6tsou1:a",
+      "1",
+      "fr6tsou1:b",
+      "2"
+    ],
+    [
+      "MGET",
+      "fr6tsou1:a",
+      "fr6tsou1:b",
+      "fr6tsou1:c"
+    ],
+    [
+      "INCR",
+      "fr6tsou1:counter"
+    ],
+    [
+      "GETDEL",
+      "fr6tsou1:counter"
+    ],
+    [
+      "GET",
+      "fr6tsou1:counter"
+    ]
+  ]
+}
