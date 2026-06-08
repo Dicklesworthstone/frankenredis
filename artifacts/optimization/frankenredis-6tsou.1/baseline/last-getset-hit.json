@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr6tsou1-baseline-getset",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 2700000,
+    "bytes_sent": 20100000,
+    "commands": 300000,
+    "ops_per_sec": 149412.41096468738,
+    "pipeline_latency_us": {
+      "mean": 5043.0620053596795,
+      "p50": 4214.90496955812,
+      "p95": 11381.319025531411,
+      "p99": 15409.81000289321,
+      "samples": 18750
+    },
+    "seconds": 2.007865331019275
+  },
+  "mode": "getset-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 50000,
+    "bytes_sent": 640000,
+    "commands": 10000,
+    "seconds": 0.06830429704859853
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}

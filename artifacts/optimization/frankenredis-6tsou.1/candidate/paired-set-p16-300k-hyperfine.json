@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /tmp/codex-fr-6tsou1-head-baseline-target/release-perf/frankenredis --mode set --port 26442 --json-out artifacts/optimization/frankenredis-6tsou.1/candidate/last-paired-baseline-set.json --requests 300000 --clients 50 --pipeline 16 --keyspace 300000 --datasize 3 --key-prefix fr6tsou1-set-baseline",
+      "mean": 2.1272869909599996,
+      "stddev": 0.023111438540078008,
+      "median": 2.13001274206,
+      "user": 2.64381364,
+      "system": 1.8509202799999998,
+      "min": 2.0827453035600003,
+      "max": 2.1529003485600002,
+      "times": [
+        2.1517714805600003,
+        2.11813727656,
+        2.1253716815600003,
+        2.0827453035600003,
+        2.13176110356,
+        2.1341077695600004,
+        2.12826438056,
+        2.15026811156,
+        2.09754245356,
+        2.1529003485600002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /tmp/codex-fr-6tsou1-candidate-target/release-perf/frankenredis --mode set --port 26443 --json-out artifacts/optimization/frankenredis-6tsou.1/candidate/last-paired-candidate-set.json --requests 300000 --clients 50 --pipeline 16 --keyspace 300000 --datasize 3 --key-prefix fr6tsou1-set-candidate",
+      "mean": 2.16780996586,
+      "stddev": 0.025532691669152934,
+      "median": 2.1743884325600003,
+      "user": 2.70287364,
+      "system": 1.89267938,
+      "min": 2.11869095556,
+      "max": 2.2083627005600004,
+      "times": [
+        2.2083627005600004,
+        2.17331633156,
+        2.15962697956,
+        2.1907380035600004,
+        2.1754605335600004,
+        2.11869095556,
+        2.1461436275600003,
+        2.1806008405600004,
+        2.1477337805600003,
+        2.1774259055600003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

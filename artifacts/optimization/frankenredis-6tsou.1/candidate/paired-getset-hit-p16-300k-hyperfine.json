@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /tmp/codex-fr-6tsou1-head-baseline-target/release-perf/frankenredis --mode getset-hit --port 26440 --json-out artifacts/optimization/frankenredis-6tsou.1/candidate/last-paired-baseline-getset-hit.json --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr6tsou1-paired-baseline",
+      "mean": 2.1586191428,
+      "stddev": 0.014690358367828641,
+      "median": 2.1597137989,
+      "user": 2.8985497,
+      "system": 1.8351922799999998,
+      "min": 2.1354942249,
+      "max": 2.1798404989,
+      "times": [
+        2.1354942249,
+        2.1556294269,
+        2.1733575789,
+        2.1637981709,
+        2.1435177629,
+        2.1496343799,
+        2.1681232839,
+        2.1798404989,
+        2.1707464419,
+        2.1460496589
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-6tsou/run_resp_mode_once.py --server-bin /tmp/codex-fr-6tsou1-candidate-target/release-perf/frankenredis --mode getset-hit --port 26441 --json-out artifacts/optimization/frankenredis-6tsou.1/candidate/last-paired-candidate-getset-hit.json --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix fr6tsou1-paired-candidate",
+      "mean": 2.1594513616000004,
+      "stddev": 0.01995879107124317,
+      "median": 2.1660459429000003,
+      "user": 2.8224777000000003,
+      "system": 1.8260502799999998,
+      "min": 2.1127860169,
+      "max": 2.1767343749,
+      "times": [
+        2.1722808089,
+        2.1622956839,
+        2.1701335109,
+        2.1767343749,
+        2.1730979269,
+        2.1680829569,
+        2.1640089289,
+        2.1588843309,
+        2.1362090769,
+        2.1127860169
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

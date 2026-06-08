@@ -1,0 +1,30 @@
+{
+  "clients": 50,
+  "datasize": 3,
+  "key_prefix": "fr6tsou1-paired-candidate",
+  "keyspace": 10000,
+  "measured": {
+    "bytes_received": 2700000,
+    "bytes_sent": 20400000,
+    "commands": 300000,
+    "ops_per_sec": 153824.42515897503,
+    "pipeline_latency_us": {
+      "mean": 4940.25314801683,
+      "p50": 4143.850062973797,
+      "p95": 11101.439013145864,
+      "p99": 14926.464995369315,
+      "samples": 18750
+    },
+    "seconds": 1.950275450013578
+  },
+  "mode": "getset-hit",
+  "pipeline": 16,
+  "prefill": {
+    "bytes_received": 50000,
+    "bytes_sent": 650000,
+    "commands": 10000,
+    "seconds": 0.07053980301134288
+  },
+  "requests": 300000,
+  "schema": "frankenredis_6tsou_resp_workload_v1"
+}
