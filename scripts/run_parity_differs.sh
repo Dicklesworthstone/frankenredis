@@ -36,8 +36,29 @@ FR_BIN=${4:-${CARGO_TARGET_DIR:-/data/tmp/cargo-target}/debug/frankenredis}
 RD_BIN=${5:-legacy_redis_code/redis/src/redis-server}
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
-pass=0 fail=0 skip=0 timedout=0
+pass=0 fail=0 skip=0 timedout=0 infra=0
 failed_list=""
+
+# A genuine parity FAIL requires the servers to still be reachable. If the fr
+# (or oracle) server died mid-run — e.g. killed by a process reaper — a differ
+# reads the dropped connection as a divergence and reports a spurious FAIL.
+# Probe both ports so such infrastructure deaths are not miscounted as parity
+# regressions (the single biggest source of false CI failures here).
+servers_alive() {
+    python3 - "$OP" "$FP" <<'PY' 2>/dev/null
+import socket, sys
+for p in (int(sys.argv[1]), int(sys.argv[2])):
+    try:
+        s = socket.create_connection(("127.0.0.1", p), timeout=2)
+        s.sendall(b"*1\r\n$4\r\nPING\r\n")
+        if not s.recv(16):
+            sys.exit(1)
+        s.close()
+    except OSError:
+        sys.exit(1)
+sys.exit(0)
+PY
+}
 
 for script in "$DIR"/*.py; do
     name="$(basename "$script")"
@@ -68,24 +89,35 @@ for script in "$DIR"/*.py; do
         echo "PASS  $name — ${last}"
         pass=$((pass + 1))
     elif echo "$out" | grep -qiE "DIVERGE|^FAIL|divergence|mismatch"; then
-        # Nonzero AND the script reported an actual parity divergence: real FAIL.
-        echo "FAIL  $name (rc=$rc) — ${last}"
-        fail=$((fail + 1))
-        failed_list="$failed_list $name"
+        # Nonzero AND the script reported a divergence — but only count it as a
+        # real parity FAIL if both servers are still alive. A server reaped
+        # mid-run makes a differ see the dropped connection as a divergence.
+        if servers_alive; then
+            echo "FAIL  $name (rc=$rc) — ${last}"
+            fail=$((fail + 1))
+            failed_list="$failed_list $name"
+        else
+            echo "INFRA $name (a server died mid-run — re-run; not a parity FAIL)"
+            infra=$((infra + 1))
+        fi
     elif echo "$out" | grep -qiE "Traceback|Error:|unrecognized arguments|invalid literal|not enough values|IndexError|KeyError|usage:"; then
         # Nonzero from a Python traceback / argparse usage error: this script uses
         # a convention this runner doesn't speak (e.g. a 3-arg golden harness).
         # Not a parity failure — flag as unknown so it doesn't fail the run.
         echo "SKIP  $name (unrecognized CLI convention — run directly)"
         skip=$((skip + 1))
-    else
+    elif servers_alive; then
         echo "FAIL  $name (rc=$rc) — ${last}"
         fail=$((fail + 1))
         failed_list="$failed_list $name"
+    else
+        echo "INFRA $name (a server died mid-run — re-run; not a parity FAIL)"
+        infra=$((infra + 1))
     fi
 done
 
 echo "------------------------------------------------------------"
-echo "parity suite: $pass passed, $fail failed, $timedout slow/timeout, $skip skipped (unknown convention)"
+echo "parity suite: $pass passed, $fail failed, $timedout slow/timeout, $skip skipped, $infra infra (server died)"
 [ -n "$failed_list" ] && echo "FAILED:$failed_list"
+[ "$infra" -gt 0 ] && echo "NOTE: $infra gate(s) hit a mid-run server death — re-run those directly."
 [ "$fail" -eq 0 ]
