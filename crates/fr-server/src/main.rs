@@ -1081,6 +1081,7 @@ fn main() -> ExitCode {
                         handle_writable(
                             conn_handle,
                             &mut clients,
+                            &mut runtime,
                             &mut write_tokens,
                             &mut closing_tokens,
                             &mut poll,
@@ -1573,6 +1574,7 @@ fn handle_readable(
     // the connection. (frankenredis-apg7r, reverts the read-side no-drain)
     let drain_until_would_block = true;
     let mut buf = [0u8; 8192];
+    let mut read_any = false;
     loop {
         match conn.stream.read(&mut buf) {
             Ok(0) => {
@@ -1592,6 +1594,7 @@ fn handle_readable(
                     Ok(_) => {
                         conn.read_buf.extend_from_slice(&buf[..n]);
                         runtime.track_net_input_bytes(n as u64);
+                        read_any = true;
                         if !drain_until_would_block {
                             break;
                         }
@@ -1617,6 +1620,14 @@ fn handle_readable(
                 return;
             }
         }
+    }
+
+    // (frankenredis-k96mc) One readable handler invocation that drained data is
+    // a single READ event, mirroring upstream readQueryFromClient — counted
+    // before dispatch (and before the blocked-hold below) so a command reading
+    // this stat (INFO) sees its own read, and a pipelined batch counts once.
+    if read_any {
+        runtime.note_read_event();
     }
 
     // If the client is blocked (BLPOP/BRPOP/etc.), don't process new
@@ -1696,6 +1707,10 @@ fn handle_readable(
         } else {
             match conn.try_flush() {
                 Ok(true) => {
+                    // (frankenredis-k96mc) A completed flush of pending output is
+                    // one WRITE event (upstream writeToClient), counted once per
+                    // flush — not once per reply — so pipelined batches count once.
+                    runtime.note_write_event();
                     write_tokens.remove(&token);
                     if had_write_interest {
                         let _ =
@@ -4760,6 +4775,7 @@ fn frame_matches_suppressed_replication_reply(argv: &[Vec<u8>]) -> bool {
 fn handle_writable(
     token: Token,
     clients: &mut HashMap<Token, ClientConnection>,
+    runtime: &mut Runtime,
     write_tokens: &mut HashSet<Token>,
     closing_tokens: &mut HashSet<Token>,
     poll: &mut Poll,
@@ -4768,8 +4784,17 @@ fn handle_writable(
         return;
     };
 
+    // (frankenredis-k96mc) Only a flush of PENDING output is a write event. A
+    // stray WRITABLE readiness on an already-drained buffer is not a
+    // writeToClient call upstream, so it must not be counted.
+    let had_pending = !conn.write_buf.is_empty();
     match conn.try_flush() {
         Ok(true) => {
+            // (frankenredis-k96mc) Completing a partial flush is the WRITE event
+            // for this client's pending output (upstream writeToClient).
+            if had_pending {
+                runtime.note_write_event();
+            }
             // Write buffer fully drained — only need READABLE now.
             write_tokens.remove(&token);
             let _ = poll

@@ -236,28 +236,6 @@ struct AclLogEntry {
 }
 const DEFAULT_REPL_BACKLOG_SIZE: u64 = 1_048_576;
 
-fn processed_command_counts(argv: &[Vec<u8>]) -> (u64, u64) {
-    let Some(command) = argv.first() else {
-        return (0, 0);
-    };
-    if eq_ascii_token(command, b"SET") {
-        return (0, 1);
-    }
-    let Some(flags) = fr_command::get_command_flags(command) else {
-        return (0, 0);
-    };
-
-    let mut read_count = 0;
-    let mut write_count = 0;
-    for flag in flags.split_whitespace() {
-        if flag == "write" {
-            write_count = 1;
-        } else if flag == "readonly" && write_count == 0 {
-            read_count = 1;
-        }
-    }
-    (read_count, write_count)
-}
 
 fn set_command_arity_ok(argv: &[Vec<u8>]) -> Option<bool> {
     argv.first()
@@ -5117,6 +5095,23 @@ impl Runtime {
         self.server.store.stat_total_net_output_bytes += bytes;
     }
 
+    /// (frankenredis-k96mc) Record one event-loop READ event. Upstream
+    /// server.c::readQueryFromClient bumps server.stat_total_reads_processed once
+    /// per readable handler invocation that read data — NOT once per command — so
+    /// a pipelined batch counts as a single read. The event loop calls this once
+    /// per `handle_readable` that drained ≥1 byte, before dispatching the batch.
+    pub fn note_read_event(&mut self) {
+        self.server.store.stat_total_reads_processed += 1;
+    }
+
+    /// (frankenredis-k96mc) Record one event-loop WRITE event. Upstream
+    /// server.c::writeToClient bumps server.stat_total_writes_processed once per
+    /// flush of a client's pending output — NOT once per reply — so the event loop
+    /// calls this once per successful `try_flush` of a non-empty write buffer.
+    pub fn note_write_event(&mut self) {
+        self.server.store.stat_total_writes_processed += 1;
+    }
+
     /// Record an instantaneous ops/sec sample. Call once per server-hz tick.
     pub fn record_ops_sec_sample(&mut self, elapsed_ms: u64) {
         self.server.store.record_ops_sec_sample(elapsed_ms);
@@ -6280,7 +6275,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_writes_processed += 1;
 
         Some(RespFrame::SimpleString("OK".to_string()))
     }
@@ -6392,7 +6386,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_writes_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -6518,7 +6511,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_writes_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -6662,7 +6654,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_writes_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -6812,7 +6803,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_writes_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -6975,7 +6965,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_writes_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -7135,7 +7124,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_writes_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -7295,7 +7283,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_writes_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -7439,7 +7426,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_writes_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -7575,7 +7561,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_reads_processed += 1;
 
         if let Some(RespFrame::Error(msg)) = &error_reply {
             self.server.store.stat_total_error_replies += 1;
@@ -7629,7 +7614,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_reads_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -7759,7 +7743,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_reads_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -7891,7 +7874,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_reads_processed += 1;
 
         Some(reply)
     }
@@ -8005,7 +7987,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_reads_processed += 1;
 
         Some(reply)
     }
@@ -8110,7 +8091,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_reads_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -8259,7 +8239,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_reads_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -8408,7 +8387,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_reads_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -8546,7 +8524,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_reads_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -8684,7 +8661,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_reads_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -8810,7 +8786,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_reads_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -8936,7 +8911,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_reads_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -9082,7 +9056,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_reads_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -9231,7 +9204,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_reads_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -9375,7 +9347,6 @@ impl Runtime {
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.server.store.stat_total_writes_processed += 1;
 
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -9612,11 +9583,6 @@ impl Runtime {
         // readable batch. CLIENT LIST/INFO include the active session directly,
         // so cloning it into the registry on every command only burns hot-path
         // CPU and allocator traffic without changing observable state.
-        let processed_counts = argv_result
-            .as_ref()
-            .ok()
-            .map(|argv| processed_command_counts(argv))
-            .unwrap_or((0, 0));
         let packet_id = next_packet_id();
         // No eager digest computation here. Threat events compute their own
         // digests on demand inside record_threat_event, so the success path
@@ -9651,8 +9617,6 @@ impl Runtime {
                     .or_insert(0) += 1;
             }
         }
-        self.server.store.stat_total_reads_processed += processed_counts.0;
-        self.server.store.stat_total_writes_processed += processed_counts.1;
         reply
     }
 
@@ -23324,38 +23288,38 @@ mod tests {
     }
 
     #[test]
-    fn total_reads_and_writes_processed_counts_classified_commands() {
+    fn total_reads_and_writes_processed_are_event_loop_driven_k96mc() {
+        // (frankenredis-k96mc) total_reads_processed / total_writes_processed are
+        // event-loop counters (upstream readQueryFromClient / writeToClient): one
+        // read per readable drain, one write per flush — NOT one per command. So
+        // command execution in fr-runtime leaves them untouched, and the fr-server
+        // hooks note_read_event / note_write_event are what advance them. This is
+        // what makes pipelining / MULTI / EVAL count a whole batch as one event.
         let mut rt = Runtime::default_strict();
 
-        assert_eq!(
-            rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0),
-            RespFrame::SimpleString("OK".to_string())
-        );
+        // Executing commands must NOT bump the event counters anymore.
+        rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+        rt.execute_frame(command(&[b"GET", b"k"]), 1);
+        rt.execute_frame(command(&[b"PING"]), 2);
         assert_eq!(rt.server.store.stat_total_reads_processed, 0);
+        assert_eq!(rt.server.store.stat_total_writes_processed, 0);
+
+        // The event-loop hooks drive the counters.
+        rt.note_read_event();
+        rt.note_read_event();
+        rt.note_write_event();
+        assert_eq!(rt.server.store.stat_total_reads_processed, 2);
         assert_eq!(rt.server.store.stat_total_writes_processed, 1);
 
-        assert_eq!(
-            rt.execute_frame(command(&[b"GET", b"k"]), 1),
-            RespFrame::BulkString(Some(b"v".to_vec()))
-        );
-        assert_eq!(rt.server.store.stat_total_reads_processed, 1);
-        assert_eq!(rt.server.store.stat_total_writes_processed, 1);
-
-        assert_eq!(
-            rt.execute_frame(command(&[b"PING"]), 2),
-            RespFrame::SimpleString("PONG".to_string())
-        );
-        assert_eq!(rt.server.store.stat_total_reads_processed, 1);
-        assert_eq!(rt.server.store.stat_total_writes_processed, 1);
-
+        // INFO reports the event-driven values and does not itself bump them.
         let info = rt.execute_frame(command(&[b"INFO", b"stats"]), 3);
         let RespFrame::BulkString(Some(bytes)) = info else {
             unreachable!("expected INFO stats bulk string");
         };
         let info = String::from_utf8(bytes).expect("utf8");
-        assert!(info.contains("total_reads_processed:1\r\n"));
+        assert!(info.contains("total_reads_processed:2\r\n"));
         assert!(info.contains("total_writes_processed:1\r\n"));
-        assert_eq!(rt.server.store.stat_total_reads_processed, 1);
+        assert_eq!(rt.server.store.stat_total_reads_processed, 2);
         assert_eq!(rt.server.store.stat_total_writes_processed, 1);
     }
 

@@ -71,12 +71,13 @@ FIELDS = [
     "watching_clients", "tracking_clients", "total_forks", "evicted_keys",
 ]
 
-KNOWN_DIVERGENCES = {
-    # keyspace_misses FIXED (ljtdo BUG1): XADD/XDEL/XGROUP now resolve last-id via
-    # no-stat lookups (upstream lookupKeyWrite suppresses keyspace hits/misses).
-    "total_reads_processed",    # ljtdo BUG2: command-count vs event-count semantics
-    "total_writes_processed",
-}
+# keyspace_misses FIXED (ljtdo BUG1): XADD/XDEL/XGROUP now resolve last-id via
+# no-stat lookups (upstream lookupKeyWrite suppresses keyspace hits/misses).
+# total_reads_processed / total_writes_processed FIXED (ljtdo BUG2 / k96mc): the
+# fr-server event loop now counts one read event per readable drain and one write
+# event per flush of pending output, matching upstream readQueryFromClient /
+# writeToClient (and so pipelining/MULTI/EVAL batch correctly). No known divergences.
+KNOWN_DIVERGENCES = set()
 
 
 def workload(c):
