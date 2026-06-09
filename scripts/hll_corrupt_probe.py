@@ -63,8 +63,21 @@ def norm(r):
         return ("-", v)
     return (t, v)
 
-R = conn(17380)
-F = conn(17381)
+# Ports: accept the suite conventions (`--oracle P --fr Q` or positional `P Q`),
+# defaulting to the historical 17380/17381 so existing invocations still work.
+# This lets scripts/run_parity_differs.sh drive this probe like its siblings.
+def _ports():
+    a = sys.argv[1:]
+    if "--oracle" in a and "--fr" in a:
+        return int(a[a.index("--oracle") + 1]), int(a[a.index("--fr") + 1])
+    nums = [x for x in a if x.isdigit()]
+    if len(nums) >= 2:
+        return int(nums[0]), int(nums[1])
+    return 17380, 17381
+
+OP, FP = _ports()
+R = conn(OP)
+F = conn(FP)
 
 def both(*args):
     a = cmd(R, *args)
@@ -78,7 +91,7 @@ def show(label, a, b):
     return same
 
 def get_bytes(port, key):
-    s = R if port == 17380 else F
+    s = R if port == OP else F
     t, v = cmd(s, "GET", key)
     return v
 
@@ -87,7 +100,7 @@ diffs = 0
 # Build a valid sparse HLL on the oracle, fetch its raw bytes.
 cmd(R, "FLUSHALL"); cmd(F, "FLUSHALL")
 cmd(R, "PFADD", "src", "a", "b", "c")
-valid_sparse = get_bytes(17380, "src")
+valid_sparse = get_bytes(OP, "src")
 print(f"valid sparse HLL len={len(valid_sparse)} head={valid_sparse[:16]!r}")
 
 # Build a valid dense HLL.
@@ -95,7 +108,7 @@ cmd(R, "DEL", "srcd")
 cmd(R, "PFADD", "srcd", *[str(i) for i in range(2000)])
 # force dense via PFDEBUG TODENSE
 cmd(R, "PFDEBUG", "TODENSE", "srcd")
-valid_dense = get_bytes(17380, "srcd")
+valid_dense = get_bytes(OP, "srcd")
 print(f"valid dense HLL len={len(valid_dense)} encbyte={valid_dense[4]}")
 
 def case(label, raw):
