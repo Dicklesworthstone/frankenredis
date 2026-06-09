@@ -8619,11 +8619,36 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         let cursor = if is_new_entries {
             StreamGroupReadCursor::NewEntries
         } else {
-            let parsed = match parse_xread_id(id_arg) {
-                Ok(id) => id,
-                Err(reply) => return Ok(reply),
-            };
-            StreamGroupReadCursor::Id(parsed)
+            match parse_xread_id(id_arg) {
+                Ok(id) => StreamGroupReadCursor::Id(id),
+                Err(id_reply) => {
+                    // (frankenredis-xrgord) Upstream t_stream.c::xreadCommand
+                    // looks up the key (recording the keyspace hit/miss) and
+                    // checks its type, then the consumer group, BEFORE parsing
+                    // the stream ID. So a wrong-type key surfaces WRONGTYPE and a
+                    // missing key/group surfaces NOGROUP even when the ID is also
+                    // malformed; only a valid stream + existing group lets the
+                    // invalid-ID error stand. The valid-ID path is unchanged
+                    // (store.xreadgroup performs the single keyspace lookup), so
+                    // this branch must itself count the lookup — key_type routes
+                    // through the stat-recording value_type, exactly like the
+                    // XCLAIM early-validation path above. (frankenredis-xrgord)
+                    return match store.key_type(key, now_ms) {
+                        None => Ok(xreadgroup_nogroup_error(key, group)),
+                        Some("stream") => {
+                            let group_exists = store
+                                .stream_consumer_groups(key)
+                                .is_some_and(|groups| groups.contains_key(group.as_slice()));
+                            if group_exists {
+                                Ok(id_reply)
+                            } else {
+                                Ok(xreadgroup_nogroup_error(key, group))
+                            }
+                        }
+                        Some(_) => Err(CommandError::Store(StoreError::WrongType)),
+                    };
+                }
+            }
         };
 
         let read_options = StreamGroupReadOptions {
@@ -37009,6 +37034,64 @@ mod tests {
         assert!(matches!(
             wrongtype,
             CommandError::Store(fr_store::StoreError::WrongType)
+        ));
+    }
+
+    #[test]
+    fn xreadgroup_type_and_group_checks_precede_id_validation_xrgord() {
+        // (frankenredis-xrgord) Upstream checks key type (WRONGTYPE) and consumer
+        // group existence (NOGROUP) BEFORE parsing the stream ID, so a malformed
+        // ID must NOT mask those errors. fr previously parsed the ID first and
+        // returned the generic invalid-ID error.
+        let mut store = Store::new();
+        // s2: a real stream with NO matching group; str1: a string (wrong type);
+        // nostream: absent.
+        dispatch_argv(
+            &[b"XADD".to_vec(), b"s2".to_vec(), b"1-1".to_vec(), b"f".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("xadd s2");
+        store.set(b"str1".to_vec(), b"hello".to_vec(), None, 0);
+
+        let nogroup = |key: &str| {
+            format!("NOGROUP No such key '{key}' or consumer group 'gX' in XREADGROUP with GROUP option")
+        };
+        let rg = |key: &str, id: &str, store: &mut Store| {
+            dispatch_argv(
+                &[
+                    b"XREADGROUP".to_vec(),
+                    b"GROUP".to_vec(),
+                    b"gX".to_vec(),
+                    b"c1".to_vec(),
+                    b"STREAMS".to_vec(),
+                    key.as_bytes().to_vec(),
+                    id.as_bytes().to_vec(),
+                ],
+                store,
+                0,
+            )
+        };
+
+        // Wrong type + malformed id -> WRONGTYPE (not invalid-id).
+        assert!(matches!(
+            rg("str1", "1-1-1", &mut store),
+            Err(CommandError::Store(fr_store::StoreError::WrongType))
+        ));
+        // Existing stream, missing group, malformed id -> NOGROUP.
+        assert_eq!(
+            rg("s2", "abc", &mut store).expect("nogroup reply"),
+            RespFrame::Error(nogroup("s2"))
+        );
+        // Absent key, malformed id -> NOGROUP.
+        assert_eq!(
+            rg("nostream", "1-1-1", &mut store).expect("nogroup reply"),
+            RespFrame::Error(nogroup("nostream"))
+        );
+        // Sanity: wrong type with the '>' sentinel still WRONGTYPE (unchanged path).
+        assert!(matches!(
+            rg("str1", ">", &mut store),
+            Err(CommandError::Store(fr_store::StoreError::WrongType))
         ));
     }
 
