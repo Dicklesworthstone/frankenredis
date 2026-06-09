@@ -3208,6 +3208,20 @@ pub struct ScriptPropagationRecord {
     pub targets: u8,
 }
 
+/// (frankenredis-3e92e) Cached SCAN resume point enabling an O(log N + batch)
+/// in-order continuation instead of an O(cursor) `skip` re-walk.
+#[derive(Debug, Clone)]
+struct ScanResume {
+    /// The cursor value this cache lets the caller resume FROM (i.e. the
+    /// `next_cursor` returned by the previous batch).
+    next_cursor: u64,
+    /// The last key EXAMINED by the previous batch (at position `next_cursor-1`).
+    last_key: Vec<u8>,
+    /// Keyspace generation when the cache was written; the fast path is taken
+    /// only if it still matches (no structural mutation since).
+    generation: u64,
+}
+
 #[derive(Debug)]
 pub struct Store {
     /// The keyspace dict. Uses `foldhash` (a fast, HashDoS-resistant, pure-
@@ -3220,6 +3234,22 @@ pub struct Store {
     /// eviction sampling are already nondeterministic. (frankenredis-8kuy1)
     entries: HashMap<Vec<u8>, Entry, foldhash::quality::RandomState>,
     ordered_keys: BTreeSet<Vec<u8>>,
+    /// (frankenredis-3e92e) Monotonic counter bumped on every STRUCTURAL
+    /// keyspace mutation (key insert / remove / flush). Used to validate the
+    /// SCAN resume cache: a cached resume point is only trusted when the
+    /// generation is unchanged, which guarantees `ordered_keys` is byte-for-byte
+    /// identically ordered (keys are immutable), so resuming after the cached
+    /// last key yields exactly what `iter().skip(cursor)` would.
+    keyspace_generation: u64,
+    /// (frankenredis-3e92e) SCAN resume fast-path cache. Sequential SCAN
+    /// previously re-walked `ordered_keys` from the start every call
+    /// (`iter().skip(cursor)` = O(cursor)), making a full iteration O(N²/batch).
+    /// Caching the last examined key + the cursor + generation lets the next
+    /// in-order call resume via `range((Excluded(last), Unbounded))` in
+    /// O(log N + batch), collapsing a full scan to O(N). Behavior is unchanged:
+    /// on any cursor/generation mismatch (out-of-order resume, concurrent scans,
+    /// or an intervening structural mutation) it falls back to the skip path.
+    scan_cache: Option<ScanResume>,
     /// Physical keys by DB for O(1) RANDOMKEY sampling. `ordered_keys` remains
     /// the deterministic SCAN/KEYS surface; these slots are intentionally
     /// unordered because RANDOMKEY has no ordering contract. (frankenredis-srhju)
@@ -3692,6 +3722,8 @@ impl Default for Store {
         Self {
             entries: HashMap::default(),
             ordered_keys: BTreeSet::new(),
+            keyspace_generation: 0,
+            scan_cache: None,
             random_key_slots: vec![Vec::new(); DEFAULT_NUM_DATABASES],
             random_key_positions: HashMap::default(),
             volatile_keys: BTreeSet::new(),
@@ -6771,6 +6803,9 @@ impl Store {
         if is_new_key {
             self.ordered_keys.insert(key.clone());
             self.random_key_index_insert(db, &key);
+            // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
+            // resume points.
+            self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
         }
         // Keep the volatile-key sampling set in sync lazily: deadline counts
         // remain exact, and the sorted key view is rebuilt only when a due
@@ -6810,6 +6845,9 @@ impl Store {
             self.ordered_keys.remove(key);
             self.random_key_index_remove(key);
             self.forget_volatile_key(key);
+            // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
+            // resume points.
+            self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
             self.update_expiry_deadline(entry.expiry_ms(), None);
             let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
             if db < self.database_count {
@@ -7219,6 +7257,9 @@ impl Store {
         // similarly survived as orphan TTLs without their parent
         // hashes, breaking HTTL/HEXPIRETIME on subsequent re-creates.
         self.ordered_keys.clear();
+        // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
+        // resume points.
+        self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
         self.volatile_keys.clear();
         self.volatile_keys_dirty = false;
         self.expiry_deadline_counts.clear();
@@ -15278,21 +15319,86 @@ impl Store {
     ) -> (u64, Vec<Vec<u8>>) {
         let start = cursor as usize;
         let batch_size = count.max(1);
-        let mut result = Vec::new();
-        let mut pos = start;
 
         let total_keys = self.entries.len();
         if start >= total_keys {
             return (0, Vec::new());
         }
 
+        // (frankenredis-3e92e) Fast resume: if this cursor continues the
+        // previously-returned batch AND the keyspace has not structurally changed
+        // since, position `start` is exactly the key after the cached last key, so
+        // we jump there with `range((Excluded(last), Unbounded))` in O(log N)
+        // rather than re-walking `start` keys from the front. On any mismatch we
+        // fall back to the original `skip(start)` walk (identical output).
+        let resume_key: Option<Vec<u8>> = if start > 0 {
+            self.scan_cache.as_ref().and_then(|c| {
+                (c.next_cursor == cursor && c.generation == self.keyspace_generation)
+                    .then(|| c.last_key.clone())
+            })
+        } else {
+            None
+        };
+
+        let (pos, result, last_examined) = match &resume_key {
+            Some(k) => self.scan_walk(
+                self.ordered_keys.range::<[u8], _>((
+                    std::ops::Bound::Excluded(k.as_slice()),
+                    std::ops::Bound::Unbounded,
+                )),
+                start,
+                batch_size,
+                pattern,
+                now_ms,
+            ),
+            None => self.scan_walk(
+                self.ordered_keys.iter().skip(start),
+                start,
+                batch_size,
+                pattern,
+                now_ms,
+            ),
+        };
+
+        let next_cursor = if pos >= total_keys { 0 } else { pos as u64 };
+        // Cache the resume point for the next in-order call (or drop it when the
+        // scan completes).
+        if next_cursor == 0 {
+            self.scan_cache = None;
+        } else if let Some(last_key) = last_examined {
+            self.scan_cache = Some(ScanResume {
+                next_cursor,
+                last_key,
+                generation: self.keyspace_generation,
+            });
+        }
+        (next_cursor, result)
+    }
+
+    /// (frankenredis-3e92e) Shared SCAN batch walk over a pre-positioned key
+    /// iterator. Returns `(new_pos, matched_keys, last_examined_key)`. The walk
+    /// (expiry skip + glob filter + batch cap) is byte-for-byte the original
+    /// loop; only the iterator's starting point differs between the fast
+    /// `range` resume and the `skip` fallback.
+    fn scan_walk<'a>(
+        &'a self,
+        keys: impl Iterator<Item = &'a Vec<u8>>,
+        start: usize,
+        batch_size: usize,
+        pattern: Option<&[u8]>,
+        now_ms: u64,
+    ) -> (usize, Vec<Vec<u8>>, Option<Vec<u8>>) {
+        let mut pos = start;
         let mut processed = 0;
-        for key in self.ordered_keys.iter().skip(start) {
+        let mut result = Vec::new();
+        let mut last_examined: Option<&'a Vec<u8>> = None;
+        for key in keys {
             let Some(entry) = self.entries.get(key) else {
                 continue;
             };
             pos += 1;
             processed += 1;
+            last_examined = Some(key);
             if evaluate_expiry(now_ms, entry.expiry_ms()).should_evict {
                 if processed >= batch_size {
                     break;
@@ -15312,9 +15418,7 @@ impl Store {
                 break;
             }
         }
-
-        let next_cursor = if pos >= total_keys { 0 } else { pos as u64 };
-        (next_cursor, result)
+        (pos, result, last_examined.cloned())
     }
 
     /// HSCAN: cursor-based iteration over hash fields.
@@ -28011,6 +28115,164 @@ mod tests {
         let skew_score = skew_old as f64 / skew_new as f64;
         eprintln!("SDF2 skewed 20k_diff_2M: old={skew_old}ns new={skew_new}ns score={skew_score:.2}x");
         assert!(skew_score >= 0.85, "adaptive diff regressed skewed case: {skew_score:.2}x");
+    }
+
+    // (frankenredis-3e92e) Frozen fingerprint of the full-SCAN key sequence.
+    const SCANLIN_GOLDEN: u64 = 0x1c26_adeb_28a1_0c87;
+
+    // (frankenredis-3e92e) SCAN resume fast-path: a full scan with the resume
+    // cache enabled must return the EXACT same key sequence as with the cache
+    // disabled (the old O(N²/batch) skip walk) — across COUNT sizes and patterns,
+    // and it must stay correct across an intervening keyspace mutation (the
+    // generation guard forces a fallback). Pinned by a golden fingerprint; plus a
+    // Score microbench of full-scan-to-completion old (cache off) vs new.
+    #[test]
+    fn scan_resume_cache_isomorphic_and_faster_scanlin() {
+        use super::{Store, encode_db_key};
+
+        // Drive a full SCAN to completion; `disable_cache` clears the resume
+        // cache before each call to reproduce the old skip-only behavior.
+        fn full_scan(
+            store: &mut Store,
+            pattern: Option<&[u8]>,
+            count: usize,
+            disable_cache: bool,
+        ) -> Vec<Vec<u8>> {
+            let mut all = Vec::new();
+            let mut cursor = 0u64;
+            for _ in 0..1_000_000 {
+                if disable_cache {
+                    store.scan_cache = None;
+                }
+                let (next, batch) = store.scan(cursor, pattern, count, 0);
+                all.extend(batch);
+                if next == 0 {
+                    break;
+                }
+                cursor = next;
+            }
+            all
+        }
+
+        let mut st: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut next = || {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            st
+        };
+        let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fnv = |g: &mut u64, b: &[u8]| {
+            for &byte in b {
+                *g ^= u64::from(byte);
+                *g = g.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+
+        for _ in 0..120 {
+            let nkeys = (next() % 400) as usize;
+            let mut store = Store::new();
+            for _ in 0..nkeys {
+                let klen = 1 + (next() % 8) as usize;
+                let key: Vec<u8> =
+                    (0..klen).map(|_| b"abc:xyz_0123"[(next() % 12) as usize]).collect();
+                store.set(encode_db_key(0, &key), b"v".to_vec(), None, 0);
+            }
+            let pat: Option<&[u8]> = match next() % 3 {
+                0 => None,
+                1 => Some(b"a*"),
+                _ => Some(b"*1*"),
+            };
+            let count = 1 + (next() % 20) as usize;
+            // Cache-on (new) and cache-off (old) full scans must be identical.
+            let with_cache = full_scan(&mut store, pat, count, false);
+            let without_cache = full_scan(&mut store, pat, count, true);
+            assert_eq!(
+                with_cache, without_cache,
+                "SCAN cache-on vs cache-off diverged (nkeys={nkeys} count={count} pat={pat:?})"
+            );
+            for k in &with_cache {
+                fnv(&mut golden, k);
+            }
+            fnv(&mut golden, &[0xFF]);
+        }
+
+        // Mutation mid-scan: the generation guard forces the fast path to fall
+        // back, so cache-on reproduces cache-off EXACTLY even when the keyspace
+        // changes between calls (fr's position cursor is intentionally not
+        // mutation-stable — the point is that the cache changes nothing).
+        {
+            let build = || {
+                let mut s = Store::new();
+                for i in 0..500u32 {
+                    s.set(encode_db_key(0, format!("k{i:04}").as_bytes()), b"v".to_vec(), None, 0);
+                }
+                s
+            };
+            let run = |store: &mut Store, disable_cache: bool| -> Vec<Vec<u8>> {
+                let mut out = Vec::new();
+                let mut cursor = 0u64;
+                let mut step = 0;
+                loop {
+                    if disable_cache {
+                        store.scan_cache = None;
+                    }
+                    let (nextc, batch) = store.scan(cursor, None, 7, 0);
+                    out.extend(batch);
+                    step += 1;
+                    if step == 3 {
+                        store.set(encode_db_key(0, b"zzz_new"), b"v".to_vec(), None, 0);
+                        store.del(&[encode_db_key(0, b"k0001")], 0);
+                    }
+                    if nextc == 0 || step > 100_000 {
+                        break;
+                    }
+                    cursor = nextc;
+                }
+                out
+            };
+            let mut s_on = build();
+            let mut s_off = build();
+            assert_eq!(
+                run(&mut s_on, false),
+                run(&mut s_off, true),
+                "scan-under-mutation: cache-on diverged from cache-off"
+            );
+        }
+
+        assert_eq!(
+            golden, SCANLIN_GOLDEN,
+            "SCAN sequence fingerprint changed: {golden:#018x} (golden {SCANLIN_GOLDEN:#018x})"
+        );
+
+        if cfg!(debug_assertions) {
+            return;
+        }
+        // Score: full SCAN to completion of a 20k keyspace at COUNT 10 — the
+        // O(N²/batch) skip walk vs the O(N) resume cache.
+        let mut store = Store::new();
+        for i in 0..20_000u32 {
+            store.set(encode_db_key(0, format!("key:{i:06}").as_bytes()), b"v".to_vec(), None, 0);
+        }
+        let reps = 6;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc.wrapping_add(full_scan(&mut store, None, 10, true).len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 = acc2.wrapping_add(full_scan(&mut store, None, 10, false).len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(acc, acc2, "old/new returned different totals");
+        let score = old_ns as f64 / new_ns as f64;
+        eprintln!("SCANLIN full scan 20k @ COUNT 10: old={old_ns}ns new={new_ns}ns score={score:.2}x");
+        assert!(score >= 2.0, "resume-cache SCAN must be >=2.0x; got {score:.2}x");
     }
 
     // (frankenredis-377jl) Frozen fingerprint of the grouped PEL AOF corpus.
