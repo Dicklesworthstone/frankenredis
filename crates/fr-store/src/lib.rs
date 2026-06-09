@@ -262,6 +262,42 @@ pub struct SlowlogEntry {
     pub client_name: Vec<u8>,
 }
 
+/// Max number of arguments retained per slowlog entry (slowlog.c
+/// `SLOWLOG_ENTRY_MAX_ARGC`). When a command has more, the last retained slot
+/// is replaced by a `... (N more arguments)` summary.
+const SLOWLOG_ENTRY_MAX_ARGC: usize = 32;
+/// Max byte length of any single retained argument (slowlog.c
+/// `SLOWLOG_ENTRY_MAX_STRING`). Longer args are trimmed and suffixed with
+/// `... (M more bytes)`.
+const SLOWLOG_ENTRY_MAX_STRING: usize = 128;
+
+/// Build the argv stored in a slowlog entry, mirroring slowlog.c
+/// `slowlogCreateEntry`: cap at `SLOWLOG_ENTRY_MAX_ARGC` arguments (the last
+/// retained slot becomes a `... (N more arguments)` summary) and trim any single
+/// argument longer than `SLOWLOG_ENTRY_MAX_STRING` bytes to a
+/// `<128 bytes>... (M more bytes)` form.
+fn slowlog_build_argv(argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let argc = argv.len();
+    let slargc = argc.min(SLOWLOG_ENTRY_MAX_ARGC);
+    let mut out = Vec::with_capacity(slargc);
+    for (j, arg) in argv.iter().take(slargc).enumerate() {
+        if slargc != argc && j == slargc - 1 {
+            // Last slot summarises the arguments that were dropped. Upstream
+            // counts the displaced last real arg too: argc - slargc + 1.
+            out.push(format!("... ({} more arguments)", argc - slargc + 1).into_bytes());
+        } else if arg.len() > SLOWLOG_ENTRY_MAX_STRING {
+            let mut s = arg[..SLOWLOG_ENTRY_MAX_STRING].to_vec();
+            s.extend_from_slice(
+                format!("... ({} more bytes)", arg.len() - SLOWLOG_ENTRY_MAX_STRING).as_bytes(),
+            );
+            out.push(s);
+        } else {
+            out.push(arg.clone());
+        }
+    }
+    out
+}
+
 /// Score bound for sorted set range queries (ZRANGEBYSCORE, ZCOUNT, etc.).
 /// Supports inclusive (default), exclusive (`(` prefix), and infinity (`-inf`/`+inf`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -4110,7 +4146,7 @@ impl Store {
             id: self.slowlog_id_counter,
             timestamp_sec: now_ms / 1000,
             duration_us,
-            argv: argv.to_vec(),
+            argv: slowlog_build_argv(argv),
             client_address,
             client_name,
         };
@@ -21694,6 +21730,53 @@ mod tests {
         store.record_slowlog(&[b"SET".to_vec(), b"d".to_vec(), b"4".to_vec()], 80, 5_000);
         let after = store.get_slowlog(1);
         assert_eq!(after[0].id, 3);
+    }
+
+    #[test]
+    fn slowlog_truncates_argc_and_long_strings() {
+        // Mirrors slowlog.c::slowlogCreateEntry: >32 args collapse to 31 real
+        // args + a "... (N more arguments)" summary, and any arg >128 bytes is
+        // trimmed to 128 bytes + "... (M more bytes)".
+        let mut store = Store::new();
+        store.slowlog_log_slower_than_us = 0;
+
+        // 40-arg command: RPUSH biglist v0..v38 (40 total).
+        let mut big: Vec<Vec<u8>> = vec![b"RPUSH".to_vec(), b"biglist".to_vec()];
+        for i in 0..38 {
+            big.push(format!("v{i}").into_bytes());
+        }
+        assert_eq!(big.len(), 40);
+        store.record_slowlog(&big, 100, 1_000);
+        let e = store.get_slowlog(1);
+        // 32 retained slots: 31 real args + summary in slot 31.
+        assert_eq!(e[0].argv.len(), 32);
+        assert_eq!(e[0].argv[0], b"RPUSH".to_vec());
+        // argc=40, slargc=32 -> 40 - 32 + 1 = 9 more arguments.
+        assert_eq!(e[0].argv[31], b"... (9 more arguments)".to_vec());
+
+        // Long single argument: 200 'A's -> 128 'A's + "... (72 more bytes)".
+        store.reset_slowlog();
+        let long = vec![b"SET".to_vec(), b"k".to_vec(), vec![b'A'; 200]];
+        store.record_slowlog(&long, 100, 2_000);
+        let e2 = store.get_slowlog(1);
+        assert_eq!(e2[0].argv.len(), 3);
+        let mut expected = vec![b'A'; 128];
+        expected.extend_from_slice(b"... (72 more bytes)");
+        assert_eq!(e2[0].argv[2], expected);
+
+        // Exactly 128 bytes is NOT trimmed (strictly-greater threshold).
+        store.reset_slowlog();
+        store.record_slowlog(&[b"SET".to_vec(), b"k".to_vec(), vec![b'B'; 128]], 100, 3_000);
+        let e3 = store.get_slowlog(1);
+        assert_eq!(e3[0].argv[2], vec![b'B'; 128]);
+
+        // Exactly 32 args is NOT collapsed (no summary slot).
+        store.reset_slowlog();
+        let exact: Vec<Vec<u8>> = (0..32).map(|i| format!("a{i}").into_bytes()).collect();
+        store.record_slowlog(&exact, 100, 4_000);
+        let e4 = store.get_slowlog(1);
+        assert_eq!(e4[0].argv.len(), 32);
+        assert_eq!(e4[0].argv[31], b"a31".to_vec());
     }
 
     #[test]
