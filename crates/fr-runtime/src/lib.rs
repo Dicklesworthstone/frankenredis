@@ -3399,15 +3399,16 @@ impl ServerState {
                             .iter()
                             .any(|prefix| key.starts_with(prefix));
                     if matches {
-                        let entry = bcast.entry(target_id).or_default();
-                        if !entry.iter().any(|existing| existing == key) {
-                            entry.push(key.clone());
-                        }
+                        // (frankenredis-b8z6y) Push unconditionally; dedup once
+                        // (O(K)) at the consume below instead of an O(K) linear
+                        // rescan per push (which made a K-key write O(K^2)).
+                        bcast.entry(target_id).or_default().push(key.clone());
                     }
                 }
             }
         }
         for (target_id, ks) in bcast {
+            let ks = dedup_keys_preserve_order(ks);
             if !ks.is_empty() {
                 self.pubsub_outbox
                     .entry(target_id)
@@ -5618,10 +5619,10 @@ impl Runtime {
         target_id: u64,
         key: &[u8],
     ) {
-        let target_keys = invalidations.entry(target_id).or_default();
-        if !target_keys.iter().any(|existing| existing == key) {
-            target_keys.push(key.to_vec());
-        }
+        // (frankenredis-b8z6y) Push unconditionally; the caller dedups once
+        // (O(K)) at flush time. The old per-add `iter().any(== key)` rescan made
+        // building a K-key invalidation list O(K^2).
+        invalidations.entry(target_id).or_default().push(key.to_vec());
     }
 
     fn refresh_client_tracking_bcast_membership(
@@ -5688,6 +5689,7 @@ impl Runtime {
             }
         }
         for (target_id, keys) in bcast_invalidations {
+            let keys = dedup_keys_preserve_order(keys);
             if !keys.is_empty() {
                 self.server
                     .pubsub_outbox
@@ -20014,6 +20016,21 @@ fn hello_simple(value: &str) -> RespFrame {
     RespFrame::SimpleString(value.to_string())
 }
 
+/// (frankenredis-b8z6y) Deduplicate keys preserving first-seen order in O(K) via
+/// a foldhash set, replacing the old O(K) per-add linear `iter().any(== key)`
+/// rescan that made building a client-tracking invalidation list for a K-key
+/// write O(K^2). Output is identical: each distinct key once, in insertion order.
+fn dedup_keys_preserve_order(keys: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    if keys.len() < 2 {
+        return keys;
+    }
+    let mut seen = std::collections::HashSet::with_capacity_and_hasher(
+        keys.len(),
+        foldhash::quality::RandomState::default(),
+    );
+    keys.into_iter().filter(|k| seen.insert(k.clone())).collect()
+}
+
 fn build_hello_response(protocol_version: i64, client_id: u64) -> RespFrame {
     let fields = vec![
         (hello_bulk("server"), hello_bulk("redis")),
@@ -20444,6 +20461,89 @@ pub mod ecosystem {
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
+
+    // (frankenredis-b8z6y) Client-tracking invalidation dedup: the new
+    // push-all-then-dedup-once (O(K)) helper must produce a byte-identical list to
+    // the old per-add O(K) linear-rescan dedup (each distinct key once, in
+    // first-seen order), across randomized inputs with duplicates; pinned by a
+    // golden fingerprint. Plus a Score microbench (old O(K^2) vs new O(K)) on a
+    // large all-distinct list (the worst case the quadratic hit).
+    #[test]
+    fn dedup_keys_preserve_order_isomorphic_and_faster_b8z6y() {
+        use super::dedup_keys_preserve_order;
+
+        // The old behavior: O(K) linear `iter().any(== key)` rescan per push.
+        fn old_inline_dedup(keys: &[Vec<u8>]) -> Vec<Vec<u8>> {
+            let mut out: Vec<Vec<u8>> = Vec::new();
+            for k in keys {
+                if !out.iter().any(|existing| existing == k) {
+                    out.push(k.clone());
+                }
+            }
+            out
+        }
+
+        let mut st: u64 = 0x0CAFE1234BEEF567;
+        let mut next = || {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            st
+        };
+        let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fnv = |g: &mut u64, b: &[u8]| {
+            for &byte in b {
+                *g ^= u64::from(byte);
+                *g = g.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        for _ in 0..3000 {
+            // Small alphabet of keys forces frequent duplicates.
+            let n = (next() % 40) as usize;
+            let keys: Vec<Vec<u8>> = (0..n)
+                .map(|_| format!("k{}", next() % 12).into_bytes())
+                .collect();
+            let got = dedup_keys_preserve_order(keys.clone());
+            assert_eq!(got, old_inline_dedup(&keys), "dedup mismatch keys={keys:?}");
+            for k in &got {
+                fnv(&mut golden, k);
+            }
+            fnv(&mut golden, &[0xFF]);
+        }
+        // Edge cases.
+        assert_eq!(dedup_keys_preserve_order(vec![]), Vec::<Vec<u8>>::new());
+        assert_eq!(dedup_keys_preserve_order(vec![b"a".to_vec()]), vec![b"a".to_vec()]);
+        assert_eq!(
+            dedup_keys_preserve_order(vec![b"a".to_vec(), b"a".to_vec(), b"b".to_vec(), b"a".to_vec()]),
+            vec![b"a".to_vec(), b"b".to_vec()]
+        );
+        assert_eq!(golden, 0x11f7_6ac9_0a1f_4b31, "dedup output fingerprint changed: {golden:#018x}");
+
+        if cfg!(debug_assertions) {
+            return;
+        }
+        // Score: all-distinct K-key list — old O(K^2) linear dedup vs new O(K).
+        let big: Vec<Vec<u8>> = (0..20_000u32).map(|i| format!("key:{i:06}").into_bytes()).collect();
+        let reps = 20;
+        let t0 = Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc.wrapping_add(old_inline_dedup(&big).len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 = acc2.wrapping_add(dedup_keys_preserve_order(big.clone()).len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(acc, acc2, "old/new disagree on deduped count");
+        let score = old_ns as f64 / new_ns as f64;
+        eprintln!("B8Z6Y dedup 20k distinct keys: old={old_ns}ns new={new_ns}ns score={score:.2}x");
+        assert!(score >= 2.0, "O(K) dedup must be >=2.0x vs O(K^2); got {score:.2}x");
+    }
 
     use fr_command::{
         CLIENT_PAUSE_MODE_INVALID, CLIENT_PAUSE_TIMEOUT_INVALID, CommandError, dispatch_argv,
