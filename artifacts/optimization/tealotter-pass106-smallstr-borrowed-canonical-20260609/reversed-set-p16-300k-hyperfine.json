@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "/tmp/tealotter-fr-pass106-current-target/release-perf/fr-bench --port 6397 --clients 50 --requests 300000 --pipeline 16 --workload set --key-prefix pass106smallcand2 --json-out artifacts/optimization/tealotter-pass106-smallstr-borrowed-canonical-20260609/reversed-candidate-last.json",
+      "mean": 0.35898996868000005,
+      "stddev": 0.014640510105508946,
+      "median": 0.35373026258000007,
+      "user": 0.24127569999999995,
+      "system": 0.44698408,
+      "min": 0.34098310708000007,
+      "max": 0.38237080608000007,
+      "times": [
+        0.34098310708000007,
+        0.36782485208000004,
+        0.34641605308000006,
+        0.35538472708,
+        0.37444316308000003,
+        0.38237080608000007,
+        0.37515425108000006,
+        0.35207579808000006,
+        0.34879566108000004,
+        0.34645126808000004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/tmp/tealotter-fr-pass106-current-target/release-perf/fr-bench --port 6396 --clients 50 --requests 300000 --pipeline 16 --workload set --key-prefix pass106smallbase2 --json-out artifacts/optimization/tealotter-pass106-smallstr-borrowed-canonical-20260609/reversed-baseline-last.json",
+      "mean": 0.35518336188000005,
+      "stddev": 0.008398369980645786,
+      "median": 0.35832580608000003,
+      "user": 0.2493658,
+      "system": 0.42690428,
+      "min": 0.33776698308,
+      "max": 0.36363325808,
+      "times": [
+        0.36169812108000005,
+        0.33776698308,
+        0.34754233608000007,
+        0.35490275408000005,
+        0.35895175708000004,
+        0.35769985508,
+        0.35928714208000007,
+        0.36363325808,
+        0.36297896808,
+        0.34737244408000006
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

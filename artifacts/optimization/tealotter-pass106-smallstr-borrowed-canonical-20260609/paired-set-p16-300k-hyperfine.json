@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "/tmp/tealotter-fr-pass106-current-target/release-perf/fr-bench --port 6396 --clients 50 --requests 300000 --pipeline 16 --workload set --key-prefix pass106smallbase --json-out artifacts/optimization/tealotter-pass106-smallstr-borrowed-canonical-20260609/paired-baseline-last.json",
+      "mean": 0.36515823865999997,
+      "stddev": 0.013977963716168967,
+      "median": 0.36087528606,
+      "user": 0.24017125999999997,
+      "system": 0.44269422,
+      "min": 0.34646432306,
+      "max": 0.38398797006,
+      "times": [
+        0.38115921906,
+        0.37425628906,
+        0.36479975806000003,
+        0.38174240506,
+        0.34646432306,
+        0.35695081406,
+        0.35522624606000003,
+        0.35237574506,
+        0.35461961706,
+        0.38398797006
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/tmp/tealotter-fr-pass106-current-target/release-perf/fr-bench --port 6397 --clients 50 --requests 300000 --pipeline 16 --workload set --key-prefix pass106smallcand --json-out artifacts/optimization/tealotter-pass106-smallstr-borrowed-canonical-20260609/paired-candidate-last.json",
+      "mean": 0.36976291876,
+      "stddev": 0.011470292673238198,
+      "median": 0.37228633456000004,
+      "user": 0.24078786000000002,
+      "system": 0.45043872000000007,
+      "min": 0.34913394106,
+      "max": 0.38354735406,
+      "times": [
+        0.37246119606,
+        0.36680136106,
+        0.35856709706,
+        0.38354735406,
+        0.37631208306,
+        0.34913394106,
+        0.38343773606000003,
+        0.37211147306000003,
+        0.35807270006,
+        0.37718424606
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

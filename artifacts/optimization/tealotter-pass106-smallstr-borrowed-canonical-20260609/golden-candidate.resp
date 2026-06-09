@@ -1,0 +1,72 @@
+>>> PING
++PONG
+>>> FLUSHDB
++OK
+>>> SET k:int 42
++OK
+>>> OBJECT ENCODING k:int
+$3
+int
+>>> GET k:int
+$2
+42
+>>> INCR k:int
+:43
+>>> GET k:int
+$2
+43
+>>> SET k:small x42
++OK
+>>> OBJECT ENCODING k:small
+$6
+embstr
+>>> GET k:small
+$3
+x42
+>>> INCR k:small
+-ERR value is not an integer or out of range
+>>> SET k:lead 00
++OK
+>>> OBJECT ENCODING k:lead
+$6
+embstr
+>>> GET k:lead
+$2
+00
+>>> SET k:minus_zero -0
++OK
+>>> OBJECT ENCODING k:minus_zero
+$6
+embstr
+>>> GET k:minus_zero
+$2
+-0
+>>> SET k:temp 123
++OK
+>>> EXPIRE k:temp 100
+:1
+>>> TTL k:temp
+:100
+>>> SET k:temp x99
++OK
+>>> OBJECT ENCODING k:temp
+$6
+embstr
+>>> TTL k:temp
+:-1
+>>> MGET k:int k:small k:lead k:minus_zero k:temp
+*5
+$2
+43
+$3
+x42
+$2
+00
+$2
+-0
+$3
+x99
+>>> DEL k:int k:small k:lead k:minus_zero k:temp
+:5
+>>> QUIT
++OK

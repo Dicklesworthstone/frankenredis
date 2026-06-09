@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "/tmp/tealotter-fr-pass106-current-target/release-perf/fr-bench --port 6395 --clients 50 --requests 300000 --pipeline 16 --workload get --key-prefix pass106get --json-out artifacts/optimization/tealotter-pass106-current-output-profile-20260609/current-get-p16-300k-last.json",
+      "mean": 0.5249694671199999,
+      "stddev": 0.14746494323989193,
+      "median": 0.46694453912,
+      "user": 0.28340276,
+      "system": 0.5411142200000001,
+      "min": 0.40385002712,
+      "max": 0.84132640912,
+      "times": [
+        0.47583652712,
+        0.45805255112,
+        0.42604354512,
+        0.40601192712,
+        0.41205804912,
+        0.40385002712,
+        0.50909070012,
+        0.84132640912,
+        0.63266545112,
+        0.68475948412
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
