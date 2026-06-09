@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781017372007,
+  "host": "127.0.0.1",
+  "port": 21252,
+  "workload": "set",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "gnwuw-pass102-baseline-set",
+  "total_time_ms": 413,
+  "ops_per_sec": 725712.1488306731,
+  "bytes_sent": 20316791,
+  "bytes_received": 1500000,
+  "latency_us": {
+    "min": 82,
+    "p50": 1004,
+    "p95": 1526,
+    "p99": 2085,
+    "p999": 3253,
+    "max": 4199,
+    "mean": 1073.9566766666667,
+    "samples": 300000
+  }
+}

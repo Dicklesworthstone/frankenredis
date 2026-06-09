@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-11a0n/run_frbench_once.py --server-bin /tmp/tealotter-fr-gnwuw-pass102-baseline-target/release-perf/frankenredis --bench-bin /tmp/tealotter-fr-gnwuw-pass102-baseline-target/release-perf/fr-bench --port 21259 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --json-out artifacts/optimization/frankenredis-gnwuw/pass102-current/plain-set-borrowed-baseline-1m-last.json --key-prefix gnwuw-pass102-baseline-1m-set",
+      "mean": 1.3859914717342858,
+      "stddev": 0.013581338072796077,
+      "median": 1.3831399640200002,
+      "user": 1.4344630771428568,
+      "system": 2.1031437685714285,
+      "min": 1.36735431502,
+      "max": 1.4072130100200002,
+      "times": [
+        1.4072130100200002,
+        1.37878166902,
+        1.37691259802,
+        1.39043312702,
+        1.36735431502,
+        1.39810561902,
+        1.3831399640200002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-11a0n/run_frbench_once.py --server-bin /tmp/tealotter-fr-gnwuw-pass102-candidate-target/release-perf/frankenredis --bench-bin /tmp/tealotter-fr-gnwuw-pass102-candidate-target/release-perf/fr-bench --port 21260 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --json-out artifacts/optimization/frankenredis-gnwuw/pass102-current/plain-set-borrowed-candidate-1m-last.json --key-prefix gnwuw-pass102-candidate-1m-set",
+      "mean": 1.2583484954485713,
+      "stddev": 0.034571338069078444,
+      "median": 1.2487647400200002,
+      "user": 1.3285583628571425,
+      "system": 2.040783054285714,
+      "min": 1.21575223402,
+      "max": 1.32747320802,
+      "times": [
+        1.32747320802,
+        1.21575223402,
+        1.25992288402,
+        1.2675088330200002,
+        1.2474313750200001,
+        1.2415861940200001,
+        1.2487647400200002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

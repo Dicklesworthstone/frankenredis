@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-11a0n/run_frbench_once.py --server-bin /tmp/tealotter-fr-gnwuw-pass102-baseline-target/release-perf/frankenredis --bench-bin /tmp/tealotter-fr-gnwuw-pass102-baseline-target/release-perf/fr-bench --port 21252 --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --json-out artifacts/optimization/frankenredis-gnwuw/pass102-current/set-p16-300k-baseline-last.json --key-prefix gnwuw-pass102-baseline-set",
+      "mean": 0.47392939320000005,
+      "stddev": 0.01906019936278451,
+      "median": 0.47672685670000003,
+      "user": 0.4582276599999999,
+      "system": 0.65834984,
+      "min": 0.4357883322,
+      "max": 0.5006208282000001,
+      "times": [
+        0.5006208282000001,
+        0.48688729620000004,
+        0.4860555502,
+        0.4357883322,
+        0.46148236820000005,
+        0.4802367402,
+        0.4611129982,
+        0.46263186520000005,
+        0.49126098020000003,
+        0.47321697320000006
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

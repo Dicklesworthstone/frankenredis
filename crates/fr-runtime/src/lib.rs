@@ -236,7 +236,6 @@ struct AclLogEntry {
 }
 const DEFAULT_REPL_BACKLOG_SIZE: u64 = 1_048_576;
 
-
 fn set_command_arity_ok(argv: &[Vec<u8>]) -> Option<bool> {
     argv.first()
         .is_some_and(|command| eq_ascii_token(command, b"SET"))
@@ -6287,9 +6286,7 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = Instant::now();
-        self.server
-            .store
-            .set(key.to_vec(), value.to_vec(), None, now_ms);
+        self.server.store.set_plain_borrowed(key, value, now_ms);
         let elapsed_us = start.elapsed().as_micros() as u64;
 
         self.record_plain_set_borrowed_metrics(key, value, elapsed_us, now_ms, packet_id);

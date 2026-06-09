@@ -4365,6 +4365,63 @@ impl Store {
         self.dirty = self.dirty.saturating_add(1);
     }
 
+    pub fn set_plain_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) {
+        if !self.drop_if_expired(key, now_ms) {
+            self.set(key.to_vec(), value.to_vec(), None, now_ms);
+            return;
+        }
+
+        let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay_time = self.lfu_decay_time;
+        let (old_expiry, old_was_stream) = {
+            let Some(entry) = self.entries.get_mut(key) else {
+                self.set(key.to_vec(), value.to_vec(), None, now_ms);
+                return;
+            };
+            let old_expiry = entry.expiry_ms();
+            let old_was_stream = matches!(&entry.value, Value::Stream(_));
+            let next_lfu_freq = if lfu_tracking_enabled {
+                entry
+                    .current_lfu_freq(now_ms, lfu_decay_time)
+                    .saturating_add(1)
+            } else {
+                0
+            };
+            entry.value = canonical_string_value(value.to_vec());
+            entry.set_expiry_ms(None);
+            entry.last_access_ms = now_ms;
+            entry.lfu_freq = next_lfu_freq;
+            entry.lfu_last_touch_min = now_ms / 60_000;
+            entry.modification_count = entry.modification_count.wrapping_add(1);
+            entry.force_raw_encoding = false;
+            entry.force_string_encoding = false;
+            entry.force_set_listpack_encoding = false;
+            entry.force_set_hashtable_encoding = false;
+            entry.force_hash_hashtable_encoding = false;
+            entry.force_zset_skiplist_encoding = false;
+            entry.int_copy_not_shared = false;
+            (old_expiry, old_was_stream)
+        };
+
+        self.forget_volatile_key(key);
+        self.update_expiry_deadline(old_expiry, None);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        if old_was_stream {
+            self.stream_groups.remove(key);
+            self.stream_last_ids.remove(key);
+            self.stream_entries_added.remove(key);
+            self.stream_max_deleted_ids.remove(key);
+        }
+        if old_expiry.is_some() {
+            self.expires_count = self.expires_count.saturating_sub(1);
+            if db < self.database_count {
+                self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
+            }
+        }
+        self.dirty = self.dirty.saturating_add(1);
+    }
+
     /// SET variant that takes an absolute expiry timestamp (for EXAT/PXAT/KEEPTTL).
     pub fn set_with_abs_expiry(
         &mut self,
@@ -23007,6 +23064,37 @@ mod tests {
         let replaced_digest = format!("{:016x}", store.state_digest_full_scan());
         assert_eq!(store.state_digest(), replaced_digest);
         assert!(!store.digest_stale);
+    }
+
+    #[test]
+    fn set_plain_borrowed_matches_set_for_existing_volatile_lfu_string() {
+        let mut expected = Store::new();
+        let mut actual = Store::new();
+        for store in [&mut expected, &mut actual] {
+            store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            store.set(b"k".to_vec(), b"v1".to_vec(), Some(5_000), 100);
+            assert_eq!(store.get(b"k", 200).unwrap(), Some(b"v1".to_vec()));
+        }
+
+        expected.set(b"k".to_vec(), b"42".to_vec(), None, 400);
+        actual.set_plain_borrowed(b"k", b"42", 400);
+
+        assert_eq!(
+            actual.get(b"k", 401).unwrap(),
+            expected.get(b"k", 401).unwrap()
+        );
+        assert_eq!(
+            actual.get_expires_at_ms(b"k", 401),
+            expected.get_expires_at_ms(b"k", 401)
+        );
+        assert_eq!(
+            actual.object_freq(b"k", 401),
+            expected.object_freq(b"k", 401)
+        );
+        assert_eq!(actual.expires_count, expected.expires_count);
+        assert_eq!(actual.db_expires_counts, expected.db_expires_counts);
+        assert_eq!(actual.dirty, expected.dirty);
+        assert_eq!(actual.state_digest(), expected.state_digest());
     }
 
     #[test]

@@ -1,0 +1,3 @@
+| Command | Mean [ms] | Min [ms] | Max [ms] | Relative |
+|:---|---:|---:|---:|---:|
+| `python3 artifacts/optimization/frankenredis-11a0n/run_frbench_once.py --server-bin /tmp/tealotter-fr-gnwuw-pass102-baseline-target/release-perf/frankenredis --bench-bin /tmp/tealotter-fr-gnwuw-pass102-baseline-target/release-perf/fr-bench --port 21252 --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --json-out artifacts/optimization/frankenredis-gnwuw/pass102-current/set-p16-300k-baseline-last.json --key-prefix gnwuw-pass102-baseline-set` | 473.9 ± 19.1 | 435.8 | 500.6 | 1.00 |
