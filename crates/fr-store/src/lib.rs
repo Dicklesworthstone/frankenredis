@@ -11778,12 +11778,21 @@ impl Store {
         }
     }
 
-    pub fn xlast_id_with_existence(
+    fn xlast_id_with_existence_inner(
         &mut self,
         key: &[u8],
         now_ms: u64,
+        record_stat: bool,
     ) -> Result<(bool, Option<StreamId>), StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        // The stat variant records a keyspace hit/miss (lookupKeyRead); the
+        // no-stat variant only applies lazy expiry (lookupKeyWrite suppresses
+        // keyspace_hits/misses via LOOKUP_WRITE). (frankenredis-ljtdo)
+        let exists = if record_stat {
+            self.record_keyspace_lookup(key, now_ms)
+        } else {
+            self.drop_if_expired(key, now_ms)
+        };
+        if !exists {
             return Ok((false, None));
         }
         match self.entries.get_mut(key) {
@@ -11806,8 +11815,40 @@ impl Store {
         }
     }
 
+    pub fn xlast_id_with_existence(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<(bool, Option<StreamId>), StoreError> {
+        self.xlast_id_with_existence_inner(key, now_ms, true)
+    }
+
+    /// Like [`xlast_id_with_existence`] but does NOT record a keyspace
+    /// hit/miss, for stream WRITE commands (XADD/XDEL/XGROUP) that upstream
+    /// resolves via `lookupKeyWrite` — `LOOKUP_WRITE` suppresses
+    /// `keyspace_hits`/`keyspace_misses`. Lazy expiry still applies.
+    /// (frankenredis-ljtdo)
+    pub fn xlast_id_with_existence_no_stat(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<(bool, Option<StreamId>), StoreError> {
+        self.xlast_id_with_existence_inner(key, now_ms, false)
+    }
+
     pub fn xlast_id(&mut self, key: &[u8], now_ms: u64) -> Result<Option<StreamId>, StoreError> {
-        let (_, last_id) = self.xlast_id_with_existence(key, now_ms)?;
+        let (_, last_id) = self.xlast_id_with_existence_inner(key, now_ms, true)?;
+        Ok(last_id)
+    }
+
+    /// No-stat counterpart of [`xlast_id`] for stream WRITE paths resolving a
+    /// `$` id (XADD / XGROUP CREATE|SETID). (frankenredis-ljtdo)
+    pub fn xlast_id_no_stat(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<StreamId>, StoreError> {
+        let (_, last_id) = self.xlast_id_with_existence_inner(key, now_ms, false)?;
         Ok(last_id)
     }
 
@@ -29049,6 +29090,43 @@ mod tests {
             store.xlast_id_with_existence(b"s", 0).unwrap(),
             (true, Some((1000, 0)))
         );
+    }
+
+    // (frankenredis-ljtdo) The no-stat last-id resolvers used by stream WRITE
+    // commands (XADD/XDEL/XGROUP) must return the same existence/id as the stat
+    // variants but leave keyspace_hits/misses untouched (upstream lookupKeyWrite
+    // suppresses the stat via LOOKUP_WRITE), while the stat variants still count.
+    #[test]
+    fn xlast_id_no_stat_does_not_touch_keyspace_counters() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+
+        let (h0, m0) = (store.stat_keyspace_hits, store.stat_keyspace_misses);
+
+        // Hit (existing) + miss (absent) via the no-stat variants: counters frozen.
+        assert_eq!(
+            store.xlast_id_with_existence_no_stat(b"s", 0).unwrap(),
+            (true, Some((1000, 0)))
+        );
+        assert_eq!(store.xlast_id_no_stat(b"s", 0).unwrap(), Some((1000, 0)));
+        assert_eq!(
+            store.xlast_id_with_existence_no_stat(b"absent", 0).unwrap(),
+            (false, None)
+        );
+        assert_eq!(store.xlast_id_no_stat(b"absent", 0).unwrap(), None);
+        assert_eq!(
+            (store.stat_keyspace_hits, store.stat_keyspace_misses),
+            (h0, m0),
+            "no-stat stream last-id resolution must not bump keyspace counters"
+        );
+
+        // The stat variants still count (read paths like XREAD rely on this).
+        assert_eq!(store.xlast_id(b"s", 0).unwrap(), Some((1000, 0)));
+        assert_eq!(store.xlast_id(b"absent", 0).unwrap(), None);
+        assert_eq!(store.stat_keyspace_hits, h0 + 1);
+        assert_eq!(store.stat_keyspace_misses, m0 + 1);
     }
 
     #[test]

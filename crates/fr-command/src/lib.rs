@@ -7586,10 +7586,13 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         idx += 2;
     }
 
+    // XADD is a write (upstream streamTypeLookupWriteOrCreate -> lookupKeyWrite),
+    // so resolving the auto-id / existence must NOT bump keyspace_hits/misses.
+    // (frankenredis-ljtdo)
     let (stream_exists, last_id) = if nomkstream {
-        store.xlast_id_with_existence(&argv[1], now_ms)?
+        store.xlast_id_with_existence_no_stat(&argv[1], now_ms)?
     } else {
-        (true, store.xlast_id(&argv[1], now_ms)?)
+        (true, store.xlast_id_no_stat(&argv[1], now_ms)?)
     };
     // NOMKSTREAM: if key doesn't exist, return nil (but proceed if key exists, even empty)
     if nomkstream && !stream_exists {
@@ -7740,7 +7743,9 @@ fn xdel(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         return Err(CommandError::WrongArity("XDEL"));
     }
 
-    let (stream_exists, _) = store.xlast_id_with_existence(&argv[1], now_ms)?;
+    // XDEL is a write (upstream lookupKeyWriteOrReply) — no keyspace hit/miss.
+    // (frankenredis-ljtdo)
+    let (stream_exists, _) = store.xlast_id_with_existence_no_stat(&argv[1], now_ms)?;
     if !stream_exists {
         return Ok(RespFrame::Integer(0));
     }
@@ -9140,8 +9145,10 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             _ => {}
         }
 
+        // XGROUP CREATE is a write (upstream lookupKeyWrite) — resolving a `$`
+        // start id must NOT bump keyspace_hits/misses. (frankenredis-ljtdo)
         let start_id = if eq_ascii_command(&argv[4], b"$") {
-            store.xlast_id(&argv[2], now_ms)?.unwrap_or((0, 0))
+            store.xlast_id_no_stat(&argv[2], now_ms)?.unwrap_or((0, 0))
         } else {
             // Upstream xgroupCommand CREATE uses streamParseStrictIDOrReply
             // (rejects `-`/`+`/`(N`); only `$` and a strict id are valid.
@@ -9262,8 +9269,10 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         // NON-strict parser (t_stream.c:2694) — so `-` (0-0) and `+` (the
         // maximum id) are valid, as is `$` (the stream's last id). Only the
         // `(N` interval syntax is rejected.
+        // XGROUP SETID is a write (upstream lookupKeyWrite) — resolving a `$`
+        // id must NOT bump keyspace_hits/misses. (frankenredis-ljtdo)
         let last_delivered_id = if eq_ascii_command(&argv[4], b"$") {
-            store.xlast_id(&argv[2], now_ms)?.unwrap_or((0, 0))
+            store.xlast_id_no_stat(&argv[2], now_ms)?.unwrap_or((0, 0))
         } else if argv[4].starts_with(b"(") {
             return Ok(RespFrame::Error(
                 "ERR Invalid stream ID specified as stream command argument".to_string(),

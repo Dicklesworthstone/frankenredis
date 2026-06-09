@@ -5,13 +5,13 @@ Runs an identical mixed workload (writes of every type, reads, hits/misses,
 errors, expiry, multi-key ops) on fr and on vendored redis after CONFIG
 RESETSTAT, then compares the deterministic logical INFO stat fields.
 
-Known divergences (frankenredis-ljtdo), tracked not new — the gate passes while
-ONLY these differ and fails on any NEW divergence:
-  * keyspace_misses        — XADD resolves its auto-id via a recording existence
-                             check, so a stream write spuriously bumps a miss
-                             (on create) / hit (on append). Real bug; the fix
-                             (no-stat existence check on the XADD write path)
-                             lives in fr-store + fr-command, currently locked.
+keyspace_misses FIXED (ljtdo BUG1): XADD/XDEL/XGROUP CREATE|SETID resolved their
+last-id / existence via a recording lookup, spuriously bumping keyspace_hits/misses
+on a write path. Upstream resolves them via lookupKeyWrite, where LOOKUP_WRITE
+suppresses the stat. fr now uses no-stat variants (Store::xlast_id_no_stat).
+
+Known divergences (frankenredis-ljtdo BUG2), tracked not new — the gate passes
+while ONLY these differ and fails on any NEW divergence:
   * total_reads_processed  — redis counts event-loop read/write EVENTS; fr counts
   * total_writes_processed   read- vs write-classified COMMANDS in fr-runtime.
                              Matching needs per-socket-event counting in the
@@ -72,8 +72,9 @@ FIELDS = [
 ]
 
 KNOWN_DIVERGENCES = {
-    "keyspace_misses",          # ljtdo: XADD auto-id existence check bumps a miss
-    "total_reads_processed",    # ljtdo: command-count vs event-count semantics
+    # keyspace_misses FIXED (ljtdo BUG1): XADD/XDEL/XGROUP now resolve last-id via
+    # no-stat lookups (upstream lookupKeyWrite suppresses keyspace hits/misses).
+    "total_reads_processed",    # ljtdo BUG2: command-count vs event-count semantics
     "total_writes_processed",
 }
 
