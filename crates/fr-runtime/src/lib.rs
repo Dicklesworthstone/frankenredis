@@ -10790,7 +10790,27 @@ impl Runtime {
                 }
                 reply
             }
-            Err(err) => (err).to_resp(),
+            Err(err) => {
+                // (frankenredis-prz8f) A read command that accessed a key but
+                // errored with WRONGTYPE still records the key in upstream's
+                // client-tracking table — trackingRememberKeys runs in
+                // afterCommand off the command's key specs regardless of the error
+                // reply — so a later write to that key invalidates the client.
+                // Validation errors (wrong arity, syntax, bad integer) are
+                // rejected before any key is accessed, so ONLY the post-access
+                // WrongType error registers. Read commands only: writes invalidate,
+                // they never register read-tracking interest.
+                if matches!(err, CommandError::Store(fr_store::StoreError::WrongType))
+                    && !argv
+                        .first()
+                        .is_some_and(|command| fr_command::is_write_command(command))
+                {
+                    let keys =
+                        set_command_keys(argv).unwrap_or_else(|| fr_command::command_keys(argv));
+                    self.record_client_tracking_keys(&keys);
+                }
+                (err).to_resp()
+            }
         }
     }
 
@@ -24348,6 +24368,54 @@ mod tests {
                 },
             ],
             "non-BCAST tracking must emit one single-key invalidate push per modified key, in key order"
+        );
+
+        let _writer = rt.swap_session(previous);
+    }
+
+    // (frankenredis-prz8f) A read that accessed a key but returned WRONGTYPE must
+    // still register the key for client-tracking — upstream trackingRememberKeys
+    // runs in afterCommand regardless of the error reply — so a later write
+    // invalidates the client. Validation errors (wrong arity) access no key and
+    // must NOT register.
+    #[test]
+    fn wrongtype_read_registers_client_tracking_key() {
+        let mut rt = Runtime::default_strict();
+        let tracker = rt.new_session();
+        let writer = rt.new_session();
+
+        let previous = rt.swap_session(tracker);
+        assert!(matches!(
+            rt.execute_frame(command(&[b"HELLO", b"3"]), 0),
+            RespFrame::Map(Some(_))
+        ));
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // The hash key `h` is read by GET, which returns WRONGTYPE; the key was
+        // still accessed and must be tracked.
+        rt.execute_frame(command(&[b"HSET", b"h", b"f", b"1"]), 2);
+        assert!(matches!(
+            rt.execute_frame(command(&[b"GET", b"h"]), 3),
+            RespFrame::Error(_)
+        ));
+        // A wrong-arity GET accesses no key and must NOT register `unused`.
+        assert!(matches!(
+            rt.execute_frame(command(&[b"GET"]), 4),
+            RespFrame::Error(_)
+        ));
+        let tracker_session = rt.swap_session(writer);
+        rt.record_client_session(&tracker_session);
+
+        // Writing the tracked (WRONGTYPE-read) key invalidates the client.
+        rt.execute_frame(command(&[b"HSET", b"h", b"f", b"2"]), 5);
+        assert_eq!(
+            rt.drain_pubsub_for_client(tracker_session.client_id),
+            vec![fr_store::PubSubMessage::Invalidate {
+                keys: vec![b"h".to_vec()],
+            }],
+            "a WRONGTYPE read must register the key so a later write invalidates it"
         );
 
         let _writer = rt.swap_session(previous);
