@@ -6576,7 +6576,16 @@ fn geo_store_results(
 fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     // GEORADIUS key longitude latitude radius m|km|ft|mi [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count [ANY]] [ASC|DESC] [STORE key] [STOREDIST key]
     if argv.len() < 6 {
-        return Err(CommandError::WrongArity("GEORADIUS"));
+        // GEORADIUS_RO shares this handler; the arity error must name the
+        // command the client actually invoked, not the base GEORADIUS, matching
+        // upstream where each registered fullname owns its error.
+        // (frankenredis-aliasarity)
+        let name = if argv.first().is_some_and(|c| c.eq_ignore_ascii_case(b"GEORADIUS_RO")) {
+            "GEORADIUS_RO"
+        } else {
+            "GEORADIUS"
+        };
+        return Err(CommandError::WrongArity(name));
     }
     // (frankenredis-geowrongtype) Upstream geo.c::georadiusGeneric runs
     // lookupKeyRead + checkType(OBJ_ZSET) BEFORE extracting the coords/radius/
@@ -6673,7 +6682,17 @@ fn georadiusbymember(
 ) -> Result<RespFrame, CommandError> {
     // GEORADIUSBYMEMBER key member radius m|km|ft|mi [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count [ANY]] [ASC|DESC] [STORE key] [STOREDIST key]
     if argv.len() < 5 {
-        return Err(CommandError::WrongArity("GEORADIUSBYMEMBER"));
+        // GEORADIUSBYMEMBER_RO shares this handler; report the invoked name.
+        // (frankenredis-aliasarity)
+        let name = if argv
+            .first()
+            .is_some_and(|c| c.eq_ignore_ascii_case(b"GEORADIUSBYMEMBER_RO"))
+        {
+            "GEORADIUSBYMEMBER_RO"
+        } else {
+            "GEORADIUSBYMEMBER"
+        };
+        return Err(CommandError::WrongArity(name));
     }
     // Upstream geo.c::georadiusbymemberCommand only emits 'could
     // not decode requested zset member' when the source key exists
@@ -26515,7 +26534,14 @@ fn restore_cmd(
     now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
     if argv.len() < 4 {
-        return Err(CommandError::WrongArity("RESTORE"));
+        // RESTORE-ASKING (cluster slot-migration alias) shares this handler;
+        // report the invoked name. (frankenredis-aliasarity)
+        let name = if argv.first().is_some_and(|c| c.eq_ignore_ascii_case(b"RESTORE-ASKING")) {
+            "RESTORE-ASKING"
+        } else {
+            "RESTORE"
+        };
+        return Err(CommandError::WrongArity(name));
     }
     let key = &argv[1];
     let payload = &argv[3];
@@ -33851,6 +33877,33 @@ mod tests {
         )
         .expect_err("wrong arity");
         assert!(matches!(err, CommandError::WrongArity("ZADD")));
+    }
+
+    #[test]
+    fn aliased_commands_arity_error_names_the_invoked_alias() {
+        // (frankenredis-aliasarity) GEORADIUS_RO / GEORADIUSBYMEMBER_RO /
+        // RESTORE-ASKING share a handler with their base command, but their
+        // wrong-arity error must name the command the client actually invoked
+        // (the registered fullname), not the base — matching redis 7.2.4.
+        // Regression for the differential finding where fr reported 'georadius'
+        // for GEORADIUS_RO, etc.
+        let mut store = Store::new();
+        for (invoked, expected) in [
+            ("GEORADIUS_RO", "georadius_ro"),
+            ("GEORADIUSBYMEMBER_RO", "georadiusbymember_ro"),
+            ("RESTORE-ASKING", "restore-asking"),
+        ] {
+            let err = dispatch_argv(&[invoked.as_bytes().to_vec()], &mut store, 0)
+                .expect_err("wrong arity");
+            let CommandError::WrongArity(name) = err else {
+                panic!("{invoked}: expected WrongArity, got {err:?}"); // ubs:ignore — AI triage
+            };
+            assert_eq!(
+                name.to_ascii_lowercase(),
+                expected,
+                "{invoked} arity error must name the invoked alias"
+            );
+        }
     }
 
     #[test]
