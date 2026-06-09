@@ -1025,6 +1025,48 @@ impl SortedSet {
         }
     }
 
+    /// (frankenredis-7st86) Count members whose bytes lie in the lex range
+    /// `[min, max]` (ZLEXCOUNT). When the set is single-score `Full`, count the
+    /// `BTreeMap` range `actual(s,min)..=actual(s,max)` directly — `O(log n + k)`
+    /// — matching `score_bound_count`'s pattern; multi-score sets and the
+    /// `Packed` encoding fall back to the exact `iter_asc().filter().count()`, so
+    /// the count is byte-for-byte identical (incl. the unequal-score handling).
+    fn lex_count(&self, min: &[u8], max: &[u8]) -> usize {
+        if let SortedSetInner::Full(full) = &self.inner
+            && let (Some((first, _)), Some((last, _))) =
+                (full.ordered.first_key_value(), full.ordered.last_key_value())
+            && first.score == last.score
+        {
+            let s = first.score;
+            let lower = if min == b"-" {
+                ScoreMember::min_for_score(s)
+            } else if min == b"+" {
+                return 0;
+            } else {
+                ScoreMember::actual(s, min[1..].to_vec())
+            };
+            let upper = if max == b"+" {
+                ScoreMember::max_for_score(s)
+            } else if max == b"-" {
+                return 0;
+            } else {
+                ScoreMember::actual(s, max[1..].to_vec())
+            };
+            if lower > upper {
+                return 0;
+            }
+            return full
+                .ordered
+                .range(lower..=upper)
+                .filter_map(|(sm, _)| sm.member.as_actual())
+                .filter(|m| lex_in_range(m, min, max))
+                .count();
+        }
+        self.iter_asc()
+            .filter(|(m, _)| lex_in_range(m, min, max))
+            .count()
+    }
+
     /// `count` (member, score) pairs starting at ascending index `start_idx`.
     fn index_slice_asc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
         match &self.inner {
@@ -11877,10 +11919,8 @@ impl Store {
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        let result = zs
-                            .iter_asc()
-                            .filter(|(m, _)| lex_in_range(m, min, max))
-                            .count();
+                        // (frankenredis-7st86) Range-count the single-score band.
+                        let result = zs.lex_count(min, max);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -27938,6 +27978,126 @@ mod tests {
         let skew_score = skew_old as f64 / skew_new as f64;
         eprintln!("SDF2 skewed 20k_diff_2M: old={skew_old}ns new={skew_new}ns score={skew_score:.2}x");
         assert!(skew_score >= 0.85, "adaptive diff regressed skewed case: {skew_score:.2}x");
+    }
+
+    // (frankenredis-7st86) Frozen fingerprint of the ZLEXCOUNT result corpus.
+    const ZLXC_GOLDEN: u64 = 0xd2ae_9203_bf45_8094;
+
+    // (frankenredis-7st86) ZLEXCOUNT single-score range-count: isomorphism of
+    // lex_count vs the brute-force iter_asc().filter().count() reference across
+    // score-modes and encodings + every bound family, pinned by a golden
+    // fingerprint; plus a Score microbench of old full-scan count vs new
+    // range-count for a selective lex window over a large single-score zset.
+    #[test]
+    fn lex_count_single_score_range_count_isomorphic_and_faster_zlxc() {
+        use super::{SortedSet, lex_in_range};
+
+        fn brute(zs: &SortedSet, min: &[u8], max: &[u8]) -> usize {
+            zs.iter_asc().filter(|(m, _)| lex_in_range(m, min, max)).count()
+        }
+
+        let mut s: u64 = 0x3243F6A8885A308D;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fnv = |g: &mut u64, n: u64| {
+            for byte in n.to_le_bytes() {
+                *g ^= u64::from(byte);
+                *g = g.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        let bound = |meta: u64, body: &[u8]| -> Vec<u8> {
+            match meta % 4 {
+                0 => b"-".to_vec(),
+                1 => b"+".to_vec(),
+                2 => [b"[".as_slice(), body].concat(),
+                _ => [b"(".as_slice(), body].concat(),
+            }
+        };
+
+        for _ in 0..700 {
+            let mode = next() % 3;
+            let n = if next() % 2 == 0 {
+                1 + (next() % 18) as usize
+            } else {
+                160 + (next() % 70) as usize
+            };
+            let mut zs = SortedSet::new();
+            for _ in 0..n {
+                let klen = 1 + (next() % 4) as usize;
+                let member: Vec<u8> = (0..klen).map(|_| b"abcde"[(next() % 5) as usize]).collect();
+                let score = match mode {
+                    0 => 0.0,
+                    1 => 7.0,
+                    _ => (next() % 4) as f64,
+                };
+                zs.insert(member, score);
+            }
+            for _ in 0..8 {
+                let mn = bound(next(), &[b"abcde"[(next() % 5) as usize]]);
+                let mx = bound(next(), &[b"abcde"[(next() % 5) as usize]]);
+                let got = zs.lex_count(&mn, &mx);
+                assert_eq!(got, brute(&zs, &mn, &mx), "lex_count mismatch mn={mn:?} mx={mx:?} mode={mode} n={n}");
+                fnv(&mut golden, got as u64);
+            }
+        }
+        // Explicit edge bounds on a single-score Full set.
+        {
+            let mut zs = SortedSet::new();
+            for i in 0..300u32 {
+                zs.insert(format!("m{i:04}").into_bytes(), 0.0);
+            }
+            let cases: &[(&[u8], &[u8])] = &[
+                (b"-", b"+"),
+                (b"+", b"-"),
+                (b"[m0100", b"[m0200"),
+                (b"(m0100", b"(m0200"),
+                (b"[m0100", b"(m0100"),
+                (b"[m0100", b"[m0100"),
+                (b"(m9999", b"+"),
+                (b"-", b"[m0000"),
+                (b"[zzzz", b"[aaaa"),
+            ];
+            for (mn, mx) in cases {
+                assert_eq!(zs.lex_count(mn, mx), brute(&zs, mn, mx), "edge mn={mn:?} mx={mx:?}");
+            }
+        }
+        assert_eq!(
+            golden, ZLXC_GOLDEN,
+            "lex count fingerprint changed: {golden:#018x} (golden {ZLXC_GOLDEN:#018x})"
+        );
+
+        if cfg!(debug_assertions) {
+            return;
+        }
+        let mut big = SortedSet::new();
+        for i in 0..100_000u32 {
+            big.insert(format!("m{i:06}").into_bytes(), 0.0);
+        }
+        let (mn, mx): (&[u8], &[u8]) = (b"[m050000", b"[m050050");
+        let reps = 2000;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc.wrapping_add(brute(&big, mn, mx));
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 = acc2.wrapping_add(big.lex_count(mn, mx));
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(acc, acc2, "old/new disagree on lex count");
+        let score = old_ns as f64 / new_ns as f64;
+        eprintln!("ZLXC selective ZLEXCOUNT over 100k single-score: old={old_ns}ns new={new_ns}ns score={score:.2}x");
+        assert!(score >= 2.0, "lex range-count must be >=2.0x; got {score:.2}x");
     }
 
     // (frankenredis-sp1qh) Frozen fingerprint of the windowed lex-range corpus.
