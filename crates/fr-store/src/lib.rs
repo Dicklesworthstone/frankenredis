@@ -943,6 +943,26 @@ impl SortedSet {
     /// — including the deliberately-more-correct unequal-score lex handling
     /// (vgkly) — is byte-for-byte unchanged.
     fn lex_range_asc(&self, min: &[u8], max: &[u8]) -> Vec<(Vec<u8>, f64)> {
+        self.lex_range_window(min, max, false, 0, usize::MAX)
+    }
+
+    /// (frankenredis-zlex1/zlx2) Windowed lex range: the `[min, max]` members in
+    /// ascending order (`rev=false`) or descending (`rev=true`), after `offset`
+    /// and capped at `take`, with their scores. Powers ZRANGEBYLEX /
+    /// ZREVRANGEBYLEX (± LIMIT). Single-score `Full` sets RANGE-SCAN the lex band
+    /// — `O(log n + offset + take)` — descending via `.rev()` on the BTreeMap
+    /// range (a double-ended iterator, so no full materialization), with the
+    /// `skip`/`take` window applied before cloning. Multi-score sets and the
+    /// `Packed` encoding fall back to the exact linear `iter_*().filter()` so
+    /// behavior (incl. the unequal-score handling, vgkly) is byte-for-byte equal.
+    fn lex_range_window(
+        &self,
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        offset: usize,
+        take: usize,
+    ) -> Vec<(Vec<u8>, f64)> {
         if let SortedSetInner::Full(full) = &self.inner
             && let (Some((first, _)), Some((last, _))) =
                 (full.ordered.first_key_value(), full.ordered.last_key_value())
@@ -967,18 +987,42 @@ impl SortedSet {
             if lower > upper {
                 return Vec::new();
             }
-            return full
+            let scanned = full
                 .ordered
                 .range(lower..=upper)
                 .filter_map(|(sm, _)| sm.member.as_actual())
-                .filter(|m| lex_in_range(m, min, max))
-                .map(|m| (m.clone(), s))
-                .collect();
+                .filter(|m| lex_in_range(m, min, max));
+            return if rev {
+                scanned
+                    .rev()
+                    .skip(offset)
+                    .take(take)
+                    .map(|m| (m.clone(), s))
+                    .collect()
+            } else {
+                scanned
+                    .skip(offset)
+                    .take(take)
+                    .map(|m| (m.clone(), s))
+                    .collect()
+            };
         }
-        self.iter_asc()
-            .filter(|(m, _)| lex_in_range(m, min, max))
-            .map(|(m, score)| (m.to_vec(), score))
-            .collect()
+        // Fallback: exact linear scan, matching the pre-existing behavior.
+        if rev {
+            self.iter_desc()
+                .filter(|(m, _)| lex_in_range(m, min, max))
+                .skip(offset)
+                .take(take)
+                .map(|(m, score)| (m.to_vec(), score))
+                .collect()
+        } else {
+            self.iter_asc()
+                .filter(|(m, _)| lex_in_range(m, min, max))
+                .skip(offset)
+                .take(take)
+                .map(|(m, score)| (m.to_vec(), score))
+                .collect()
+        }
     }
 
     /// `count` (member, score) pairs starting at ascending index `start_idx`.
@@ -11661,23 +11705,13 @@ impl Store {
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        // `filter` (lex membership) and the `skip/take` window are
-                        // applied before `clone`, so only the window allocates.
-                        let result: Vec<Vec<u8>> = if rev {
-                            zs.iter_desc()
-                                .filter(|(m, _)| lex_in_range(m, min, max))
-                                .skip(offset)
-                                .take(take)
-                                .map(|(m, _)| m.to_vec())
-                                .collect()
-                        } else {
-                            zs.iter_asc()
-                                .filter(|(m, _)| lex_in_range(m, min, max))
-                                .skip(offset)
-                                .take(take)
-                                .map(|(m, _)| m.to_vec())
-                                .collect()
-                        };
+                        // (frankenredis-sp1qh) Range-prune the single-score band;
+                        // the skip/take window is applied before cloning.
+                        let result: Vec<Vec<u8>> = zs
+                            .lex_range_window(min, max, rev, offset, take)
+                            .into_iter()
+                            .map(|(m, _)| m)
+                            .collect();
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -11721,21 +11755,9 @@ impl Store {
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        let result: Vec<(Vec<u8>, f64)> = if rev {
-                            zs.iter_desc()
-                                .filter(|(m, _)| lex_in_range(m, min, max))
-                                .skip(offset)
-                                .take(take)
-                                .map(|(m, s)| (m.to_vec(), s))
-                                .collect()
-                        } else {
-                            zs.iter_asc()
-                                .filter(|(m, _)| lex_in_range(m, min, max))
-                                .skip(offset)
-                                .take(take)
-                                .map(|(m, s)| (m.to_vec(), s))
-                                .collect()
-                        };
+                        // (frankenredis-sp1qh) Range-prune the single-score band.
+                        let result: Vec<(Vec<u8>, f64)> =
+                            zs.lex_range_window(min, max, rev, offset, take);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -11814,10 +11836,12 @@ impl Store {
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {
+                        // (frankenredis-sp1qh) Range-prune the single-score band,
+                        // descending via .rev() on the BTreeMap range.
                         let result: Vec<Vec<u8>> = zs
-                            .iter_desc()
-                            .filter(|(m, _)| lex_in_range(m, min, max))
-                            .map(|(m, _)| m.to_vec())
+                            .lex_range_window(min, max, true, 0, usize::MAX)
+                            .into_iter()
+                            .map(|(m, _)| m)
                             .collect();
                         entry.touch(now_ms);
                         Ok(result)
@@ -27914,6 +27938,147 @@ mod tests {
         let skew_score = skew_old as f64 / skew_new as f64;
         eprintln!("SDF2 skewed 20k_diff_2M: old={skew_old}ns new={skew_new}ns score={skew_score:.2}x");
         assert!(skew_score >= 0.85, "adaptive diff regressed skewed case: {skew_score:.2}x");
+    }
+
+    // (frankenredis-sp1qh) Frozen fingerprint of the windowed lex-range corpus.
+    const ZLX2_GOLDEN: u64 = 0xe2fd_e5dc_4e5b_e285;
+
+    // (frankenredis-sp1qh) Windowed lex range (ZREVRANGEBYLEX + ZRANGEBYLEX LIMIT):
+    // isomorphism of lex_range_window vs the brute-force iter_*().filter().skip()
+    // .take() reference across rev × offset × count × score-modes × encodings,
+    // pinned by a golden fingerprint; plus a Score microbench (old full-scan
+    // filter vs new range-window) for a deep reverse/limit window over a large
+    // single-score zset.
+    #[test]
+    fn lex_range_window_isomorphic_and_faster_zlx2() {
+        use super::{SortedSet, lex_in_range};
+
+        // Reference == the old behavior for any case.
+        fn brute(
+            zs: &SortedSet,
+            min: &[u8],
+            max: &[u8],
+            rev: bool,
+            offset: usize,
+            take: usize,
+        ) -> Vec<(Vec<u8>, f64)> {
+            if rev {
+                zs.iter_desc()
+                    .filter(|(m, _)| lex_in_range(m, min, max))
+                    .skip(offset)
+                    .take(take)
+                    .map(|(m, s)| (m.to_vec(), s))
+                    .collect()
+            } else {
+                zs.iter_asc()
+                    .filter(|(m, _)| lex_in_range(m, min, max))
+                    .skip(offset)
+                    .take(take)
+                    .map(|(m, s)| (m.to_vec(), s))
+                    .collect()
+            }
+        }
+
+        let mut s: u64 = 0x2B7E151628AED2A6;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fnv = |g: &mut u64, b: &[u8]| {
+            for &byte in b {
+                *g ^= u64::from(byte);
+                *g = g.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        let bound = |meta: u64, body: &[u8]| -> Vec<u8> {
+            match meta % 4 {
+                0 => b"-".to_vec(),
+                1 => b"+".to_vec(),
+                2 => [b"[".as_slice(), body].concat(),
+                _ => [b"(".as_slice(), body].concat(),
+            }
+        };
+
+        for _ in 0..700 {
+            let mode = next() % 3;
+            let n = if next() % 2 == 0 {
+                1 + (next() % 18) as usize
+            } else {
+                160 + (next() % 70) as usize
+            };
+            let mut zs = SortedSet::new();
+            for _ in 0..n {
+                let klen = 1 + (next() % 4) as usize;
+                let member: Vec<u8> = (0..klen).map(|_| b"abcde"[(next() % 5) as usize]).collect();
+                let score = match mode {
+                    0 => 0.0,
+                    1 => 3.0,
+                    _ => (next() % 4) as f64,
+                };
+                zs.insert(member, score);
+            }
+            for _ in 0..8 {
+                let mn = bound(next(), &[b"abcde"[(next() % 5) as usize]]);
+                let mx = bound(next(), &[b"abcde"[(next() % 5) as usize]]);
+                let rev = next() % 2 == 0;
+                let offset = (next() % 6) as usize;
+                let take = match next() % 4 {
+                    0 => usize::MAX,
+                    k => k as usize,
+                };
+                let got = zs.lex_range_window(&mn, &mx, rev, offset, take);
+                assert_eq!(
+                    got,
+                    brute(&zs, &mn, &mx, rev, offset, take),
+                    "lex_range_window mismatch mn={mn:?} mx={mx:?} rev={rev} off={offset} take={take} mode={mode} n={n}"
+                );
+                for (m, sc) in &got {
+                    fnv(&mut golden, m);
+                    fnv(&mut golden, &sc.to_bits().to_le_bytes());
+                }
+                fnv(&mut golden, &[if rev { 1 } else { 0 }]);
+                fnv(&mut golden, &[0xFF]);
+            }
+        }
+        assert_eq!(
+            golden, ZLX2_GOLDEN,
+            "windowed lex output fingerprint changed: {golden:#018x} (golden {ZLX2_GOLDEN:#018x})"
+        );
+
+        if cfg!(debug_assertions) {
+            return;
+        }
+        // Score: deep reverse window over a 100k single-score zset.
+        let mut big = SortedSet::new();
+        for i in 0..100_000u32 {
+            big.insert(format!("m{i:06}").into_bytes(), 0.0);
+        }
+        // ZREVRANGEBYLEX [m000020 [m000000 LIMIT 0 10 — a small reverse window
+        // near the LOW end, which the old descending filter only reaches after
+        // scanning the whole set from the high end.
+        let (mn, mx): (&[u8], &[u8]) = (b"[m000000", b"[m000020");
+        let reps = 2000;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc.wrapping_add(brute(&big, mn, mx, true, 0, 10).len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 = acc2.wrapping_add(big.lex_range_window(mn, mx, true, 0, 10).len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(acc, acc2, "old/new disagree on windowed count");
+        let score = old_ns as f64 / new_ns as f64;
+        eprintln!("ZLX2 deep reverse BYLEX window over 100k: old={old_ns}ns new={new_ns}ns score={score:.2}x");
+        assert!(score >= 2.0, "windowed lex range-prune must be >=2.0x; got {score:.2}x");
     }
 
     // (frankenredis-yawte) Frozen fingerprint of the lex-range output corpus.
