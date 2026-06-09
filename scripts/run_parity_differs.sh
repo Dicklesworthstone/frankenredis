@@ -15,18 +15,25 @@
 # error) and runs each with a per-script timeout so the slow drain-bounded ones
 # (keyspace_notif, client_tracking) can't wedge the whole run.
 #
+# Self-launching gates (those taking --bin/--redis-bin) build/manage their own
+# short-lived servers, so they are driven with the binary paths rather than the
+# port pair — meaning this runs the WHOLE suite, port-pair differs and
+# self-launching gates alike, in one command.
+#
 # Usage:
 #   ORACLE=legacy_redis_code/redis/src
 #   $ORACLE/redis-server --port 16399 --daemonize yes --save '' --appendonly no
 #   $CARGO_TARGET_DIR/debug/frankenredis --port 16400 --mode strict &
-#   scripts/run_parity_differs.sh 16399 16400 [per_script_timeout_secs]
+#   scripts/run_parity_differs.sh 16399 16400 [timeout] [fr_bin] [redis_bin]
 #
-# Exit status: 0 iff every executed differ passed (timeouts/skips are reported
+# Exit status: 0 iff every executed gate passed (timeouts/skips are reported
 # but do not by themselves fail the run — slow gates need a bigger budget).
 set -u
 OP=${1:-16399}
 FP=${2:-16400}
 TIMEOUT=${3:-120}
+FR_BIN=${4:-${CARGO_TARGET_DIR:-/data/tmp/cargo-target}/debug/frankenredis}
+RD_BIN=${5:-legacy_redis_code/redis/src/redis-server}
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 pass=0 fail=0 skip=0 timedout=0
@@ -34,19 +41,24 @@ failed_list=""
 
 for script in "$DIR"/*.py; do
     name="$(basename "$script")"
-    # Self-launching gates manage their own servers — skip (run directly).
-    if grep -qE -- "--redis-bin|add_argument\\(\"--bin\"" "$script"; then
-        echo "SKIP  $name (self-launching; run directly with --bin)"
-        skip=$((skip + 1))
-        continue
-    fi
-    # Detect convention: prefer the flag form; fall back to positional if
-    # argparse rejects the flags.
-    out="$(timeout "$TIMEOUT" python3 "$script" --oracle "$OP" --fr "$FP" 2>&1)"
-    rc=$?
-    if echo "$out" | grep -qiE "unrecognized arguments|invalid literal|no such option|error: argument"; then
-        out="$(timeout "$TIMEOUT" python3 "$script" "$OP" "$FP" 2>&1)"
+    if grep -qE -- "--redis-bin|add_argument\\(.--bin.\\)" "$script"; then
+        # Self-launching gate: drive it with the binary paths. Fall back to
+        # --bin-only for gates that don't take --redis-bin (e.g. fr<->fr ones).
+        out="$(timeout "$TIMEOUT" python3 "$script" --bin "$FR_BIN" --redis-bin "$RD_BIN" 2>&1)"
         rc=$?
+        if echo "$out" | grep -qiE "unrecognized arguments|no such option|error: argument"; then
+            out="$(timeout "$TIMEOUT" python3 "$script" --bin "$FR_BIN" 2>&1)"
+            rc=$?
+        fi
+    else
+        # Port-pair differ: prefer the flag form; fall back to positional if
+        # argparse rejects the flags.
+        out="$(timeout "$TIMEOUT" python3 "$script" --oracle "$OP" --fr "$FP" 2>&1)"
+        rc=$?
+        if echo "$out" | grep -qiE "unrecognized arguments|invalid literal|no such option|error: argument"; then
+            out="$(timeout "$TIMEOUT" python3 "$script" "$OP" "$FP" 2>&1)"
+            rc=$?
+        fi
     fi
     last="$(echo "$out" | grep -vE '^\s*$' | tail -1)"
     if [ "$rc" -eq 124 ]; then
@@ -74,6 +86,6 @@ for script in "$DIR"/*.py; do
 done
 
 echo "------------------------------------------------------------"
-echo "parity differs: $pass passed, $fail failed, $timedout slow/timeout, $skip skipped (self-launching)"
+echo "parity suite: $pass passed, $fail failed, $timedout slow/timeout, $skip skipped (unknown convention)"
 [ -n "$failed_list" ] && echo "FAILED:$failed_list"
 [ "$fail" -eq 0 ]
