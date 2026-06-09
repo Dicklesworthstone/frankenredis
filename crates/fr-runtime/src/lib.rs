@@ -3245,6 +3245,28 @@ impl ServerState {
             self.last_active_expire_cycle = Some(stats);
             return stats;
         }
+        // (frankenredis-bk7pi) When no key anywhere carries a TTL the cycle would
+        // sample 0 and evict 0 — a guaranteed no-op. It runs on the per-command
+        // fast path, so skipping it here avoids both Instant::now reads and the
+        // sampling call on every command for the (very common) no-volatile-keys
+        // workload. Upstream activeExpireCycle likewise does no work when every
+        // db's expires dict is empty. count_expiring_keys() is an O(1) maintained
+        // counter. Behavior-identical: 0 sampled, 0 evicted, no propagation/events.
+        if self.store.count_expiring_keys() == 0 {
+            let stats = ActiveExpireCycleStats {
+                plan: plan_active_expire_cycle(
+                    cycle_kind,
+                    0,
+                    self.active_expire_db_cursor,
+                    1,
+                    self.active_expire_budget,
+                ),
+                sampled_keys: 0,
+                evicted_keys: 0,
+            };
+            self.last_active_expire_cycle = Some(stats);
+            return stats;
+        }
         let start = Instant::now();
         let plan = plan_active_expire_cycle(
             cycle_kind,
