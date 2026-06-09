@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+foldhash = "0.1"
 hex.workspace = true
 fr-command = { version = "0.1.0", path = "../fr-command" }
 fr-config = { version = "0.1.0", path = "../fr-config" }

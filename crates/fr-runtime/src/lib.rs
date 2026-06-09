@@ -2963,7 +2963,7 @@ pub struct ServerState {
     /// Shard channel → set of subscribed client IDs.
     pubsub_shard_subs: HashMap<Vec<u8>, HashSet<u64>>,
     /// Per-client outbox: client_id → pending messages for delivery.
-    pubsub_outbox: HashMap<u64, Vec<fr_store::PubSubMessage>>,
+    pubsub_outbox: HashMap<u64, Vec<fr_store::PubSubMessage>, foldhash::quality::RandomState>,
     /// Key → client IDs that should receive client-tracking invalidations.
     client_tracking_observed_keys: HashMap<Vec<u8>, HashSet<u64>>,
     /// Client IDs with CLIENT TRACKING enabled in BCAST mode.
@@ -2977,7 +2977,7 @@ pub struct ServerState {
     /// Keys that were modified in the current tick and may unblock clients.
     pub ready_keys: HashSet<Vec<u8>>,
     /// Set of client IDs that are in MONITOR mode.
-    pub monitor_clients: HashSet<u64>,
+    pub monitor_clients: HashSet<u64, foldhash::quality::RandomState>,
     /// Pending monitor output lines to deliver to monitor clients.
     pub monitor_output: Vec<(u64, Vec<u8>)>,
     /// CLIENT PAUSE: deadline in ms when pause expires. 0 = not paused.
@@ -2985,7 +2985,7 @@ pub struct ServerState {
     /// CLIENT PAUSE mode: true = ALL (block all commands), false = WRITE only.
     pub client_pause_all: bool,
     /// Client IDs currently blocked in the standalone server event loop.
-    pub blocked_client_ids: HashSet<u64>,
+    pub blocked_client_ids: HashSet<u64, foldhash::quality::RandomState>,
     /// Snapshot of active TCP client sessions for multi-client CLIENT LIST output.
     client_sessions: BTreeMap<u64, ClientSession>,
     /// Pending CLIENT UNBLOCK requests to be applied by the standalone server.
@@ -3096,18 +3096,18 @@ impl Default for ServerState {
             pubsub_channel_subs: HashMap::new(),
             pubsub_pattern_subs: HashMap::new(),
             pubsub_shard_subs: HashMap::new(),
-            pubsub_outbox: HashMap::new(),
+            pubsub_outbox: HashMap::default(),
             client_tracking_observed_keys: HashMap::new(),
             client_tracking_bcast_clients: BTreeSet::new(),
             pubsub_client_channels: HashMap::new(),
             pubsub_client_patterns: HashMap::new(),
             pubsub_client_shard_channels: HashMap::new(),
             ready_keys: HashSet::new(),
-            monitor_clients: HashSet::new(),
+            monitor_clients: HashSet::default(),
             monitor_output: Vec::new(),
             client_pause_deadline_ms: 0,
             client_pause_all: false,
-            blocked_client_ids: HashSet::new(),
+            blocked_client_ids: HashSet::default(),
             client_sessions: BTreeMap::new(),
             pending_client_unblocks: Vec::new(),
             pending_client_kills: Vec::new(),
