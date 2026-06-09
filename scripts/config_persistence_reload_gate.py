@@ -9,9 +9,8 @@ does not carry the encoding thresholds / maxmemory-policy over. That reset is wh
 makes large collections re-encode to listpack after reload (the visible symptom).
 
 For each tracked param: CONFIG SET a non-default value, DEBUG RELOAD, CONFIG GET,
-and confirm the value is unchanged — on BOTH fr and redis. The gate passes while
-ONLY the hpfey-known params reset on fr (and they must NOT reset on redis), and
-FAILS if a NEW param starts resetting (regression) or a known one is fixed (prune).
+and confirm the value is unchanged — on BOTH fr and redis. The gate fails if any
+tracked parameter resets on fr or if the Redis oracle stops preserving it.
 
 Self-launches a clean fr + redis pair. Usage: [--bin FR] [--redis-bin REDIS]
 """
@@ -69,13 +68,7 @@ PARAMS = [
     ("proto-max-bulk-len", "1234567"),
 ]
 
-# (frankenredis-hpfey) fr resets these STORE-level params to compiled defaults on
-# DEBUG RELOAD / RDB load (preserve_store_load_context drops them). redis keeps all.
-KNOWN_RESET_ON_FR = {
-    "list-max-listpack-size", "hash-max-listpack-entries", "hash-max-listpack-value",
-    "set-max-listpack-entries", "set-max-intset-entries", "zset-max-listpack-entries",
-    "zset-max-listpack-value", "maxmemory-policy",
-}
+KNOWN_RESET_ON_FR = set()
 
 
 def probe(port):
@@ -158,7 +151,7 @@ def main():
               f"{len(redis_reset)} oracle anomaly(ies)")
         return 1
     print(f"PASS — CONFIG SET reload-persistence parity vs redis 7.2.4 "
-          f"({len(PARAMS)} params; {len(KNOWN_RESET_ON_FR)} known hpfey store-config resets tracked)")
+          f"({len(PARAMS)} params)")
     return 0
 
 

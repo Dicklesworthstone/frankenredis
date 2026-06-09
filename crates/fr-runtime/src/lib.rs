@@ -4140,6 +4140,26 @@ fn preserve_store_load_context(replacement: &mut Store, original: &Store) {
     replacement.server_pid = original.server_pid;
     replacement.server_port = original.server_port;
     replacement.sentinel_mode = original.sentinel_mode;
+    // (frankenredis-hpfey) An RDB load swaps in a fresh `Store::new()`, but the
+    // store also holds runtime CONFIG SET state that is NOT part of the RDB and
+    // must survive the reload — upstream never resets config on DEBUG RELOAD /
+    // restart-from-RDB / replica full-sync. Without this, a full-synced replica
+    // (or a DEBUG RELOAD) silently reverts every encoding threshold and the
+    // eviction policy to compiled defaults, which then re-encodes large
+    // collections to listpack. Carry the config-only store fields over.
+    replacement.maxmemory_policy = original.maxmemory_policy;
+    replacement.lfu_decay_time = original.lfu_decay_time;
+    replacement.lfu_log_factor = original.lfu_log_factor;
+    replacement.hash_max_listpack_entries = original.hash_max_listpack_entries;
+    replacement.hash_max_listpack_value = original.hash_max_listpack_value;
+    replacement.list_max_listpack_size = original.list_max_listpack_size;
+    replacement.set_max_intset_entries = original.set_max_intset_entries;
+    replacement.set_max_listpack_entries = original.set_max_listpack_entries;
+    replacement.set_max_listpack_value = original.set_max_listpack_value;
+    replacement.zset_max_listpack_entries = original.zset_max_listpack_entries;
+    replacement.zset_max_listpack_value = original.zset_max_listpack_value;
+    replacement.hll_sparse_max_bytes = original.hll_sparse_max_bytes;
+    replacement.notify_keyspace_events = original.notify_keyspace_events;
 }
 
 const MAX_COMMAND_ARITY: usize = 1024 * 1024;
@@ -4446,6 +4466,10 @@ impl Runtime {
                         u64::try_from(counts.expired).unwrap_or(u64::MAX);
                     store.stat_rdb_last_load_keys_loaded =
                         u64::try_from(counts.loaded).unwrap_or(u64::MAX);
+                    // (frankenredis-hpfey) Carry CONFIG SET state (encoding
+                    // thresholds, eviction policy, keyspace notifications) and
+                    // server identity across the reload — the RDB holds only data.
+                    preserve_store_load_context(&mut store, &self.server.store);
                     self.server.store = store;
                     self.session.selected_db = 0;
                     RespFrame::SimpleString("OK".to_string())
@@ -4504,6 +4528,9 @@ impl Runtime {
         }
         store.stat_rdb_last_load_keys_expired = u64::try_from(counts.expired).unwrap_or(u64::MAX);
         store.stat_rdb_last_load_keys_loaded = u64::try_from(counts.loaded).unwrap_or(u64::MAX);
+        // (frankenredis-hpfey) Carry CONFIG SET state + server identity across the
+        // in-memory reload — the RDB round-trip holds only data.
+        preserve_store_load_context(&mut store, &self.server.store);
         self.server.store = store;
         self.session.selected_db = 0;
         RespFrame::SimpleString("OK".to_string())
@@ -20363,7 +20390,7 @@ mod tests {
         write_rdb_file,
     };
     use fr_protocol::{RespFrame, parse_frame};
-    use fr_store::sha1_hex_public;
+    use fr_store::{MaxmemoryPolicy, sha1_hex_public};
 
     use super::{
         ACL_FILE_NOT_CONFIGURED_ERR, AOF_DISK_ERROR_WRITE_DENIED, AclPubsubDefault, ClientSession,
@@ -32831,6 +32858,59 @@ mod tests {
         }
     }
 
+    // (frankenredis-hpfey) DEBUG RELOAD / RDB load must preserve runtime CONFIG SET
+    // state — the encoding thresholds + eviction policy live in the Store, which
+    // the reload swaps for a fresh one. Upstream never resets config on reload; a
+    // full-synced replica or DEBUG RELOAD must keep its configured thresholds (else
+    // large collections silently re-encode under the compiled-default config).
+    #[test]
+    fn debug_reload_preserves_store_runtime_config_hpfey() {
+        let mut rt = Runtime::default_strict();
+        rt.set_enable_debug_command("yes");
+
+        for (name, val) in [
+            ("list-max-listpack-size", "64"),
+            ("hash-max-listpack-entries", "200"),
+            ("hash-max-listpack-value", "99"),
+            ("set-max-listpack-entries", "99"),
+            ("set-max-intset-entries", "999"),
+            ("zset-max-listpack-entries", "99"),
+            ("zset-max-listpack-value", "99"),
+            ("set-max-listpack-value", "77"),
+            ("hll-sparse-max-bytes", "1234"),
+            ("maxmemory-policy", "allkeys-lru"),
+        ] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", name.as_bytes(), val.as_bytes()]),
+                    0
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+                "CONFIG SET {name} failed"
+            );
+        }
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEBUG", b"RELOAD"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // Every configured store-level threshold survives the reload.
+        assert_eq!(rt.server.store.list_max_listpack_size, 64);
+        assert_eq!(rt.server.store.hash_max_listpack_entries, 200);
+        assert_eq!(rt.server.store.hash_max_listpack_value, 99);
+        assert_eq!(rt.server.store.set_max_listpack_entries, 99);
+        assert_eq!(rt.server.store.set_max_intset_entries, 999);
+        assert_eq!(rt.server.store.zset_max_listpack_entries, 99);
+        assert_eq!(rt.server.store.zset_max_listpack_value, 99);
+        assert_eq!(rt.server.store.set_max_listpack_value, 77);
+        assert_eq!(rt.server.store.hll_sparse_max_bytes, 1234);
+        assert!(matches!(
+            rt.server.store.maxmemory_policy,
+            fr_store::MaxmemoryPolicy::AllkeysLru
+        ));
+    }
+
     #[test]
     fn config_set_lfu_decay_time_uses_i32_max_bound_per_upstream() {
         // (frankenredis-qqt06) Upstream config.c declares lfu-decay-time
@@ -35686,6 +35766,80 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&rdb_path);
+    }
+
+    #[test]
+    fn debug_reload_preserves_store_backed_config() {
+        let mut rt = Runtime::default_strict();
+        rt.set_enable_debug_command("yes");
+
+        let settings: &[(&[u8], &[u8])] = &[
+            (b"list-max-listpack-size", b"64"),
+            (b"hash-max-listpack-entries", b"200"),
+            (b"hash-max-listpack-value", b"99"),
+            (b"set-max-listpack-entries", b"99"),
+            (b"set-max-intset-entries", b"999"),
+            (b"zset-max-listpack-entries", b"99"),
+            (b"zset-max-listpack-value", b"99"),
+            (b"maxmemory-policy", b"allkeys-lru"),
+            (b"hll-sparse-max-bytes", b"64"),
+            (b"lfu-log-factor", b"12"),
+            (b"lfu-decay-time", b"3"),
+            (b"notify-keyspace-events", b"KEA"),
+        ];
+        for (name, value) in settings {
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", name, value]), 1),
+                RespFrame::SimpleString("OK".to_string()),
+                "CONFIG SET {}",
+                String::from_utf8_lossy(name)
+            );
+        }
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"reload:key", b"two"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEBUG", b"RELOAD"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(rt.server.store.list_max_listpack_size, 64);
+        assert_eq!(rt.server.store.hash_max_listpack_entries, 200);
+        assert_eq!(rt.server.store.hash_max_listpack_value, 99);
+        assert_eq!(rt.server.store.set_max_listpack_entries, 99);
+        assert_eq!(rt.server.store.set_max_intset_entries, 999);
+        assert_eq!(rt.server.store.zset_max_listpack_entries, 99);
+        assert_eq!(rt.server.store.zset_max_listpack_value, 99);
+        assert_eq!(
+            rt.server.store.maxmemory_policy,
+            MaxmemoryPolicy::AllkeysLru
+        );
+        assert_eq!(rt.server.store.hll_sparse_max_bytes, 64);
+        assert_eq!(rt.server.store.lfu_log_factor, 12);
+        assert_eq!(rt.server.store.lfu_decay_time, 3);
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"reload:key"]), 4),
+            RespFrame::BulkString(Some(b"two".to_vec()))
+        );
+
+        for (name, value) in settings {
+            let expected = if *name == b"notify-keyspace-events" {
+                b"AKE".as_slice()
+            } else {
+                *value
+            };
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"GET", name]), 5),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some((*name).to_vec())),
+                    RespFrame::BulkString(Some(expected.to_vec())),
+                ])),
+                "CONFIG GET {}",
+                String::from_utf8_lossy(name)
+            );
+        }
     }
 
     #[test]
