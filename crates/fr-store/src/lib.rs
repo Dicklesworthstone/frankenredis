@@ -421,6 +421,65 @@ pub struct StreamGroup {
     pub pending: StreamPendingEntries,
 }
 
+/// (frankenredis-377jl) Append the AOF/RDB rewrite commands that reconstruct a
+/// consumer group's pending-entries-list: an `XCLAIM ... JUSTID FORCE` per
+/// pending entry (per owning consumer, in entry-id order) and an
+/// `XGROUP CREATECONSUMER` for each consumer that owns none.
+///
+/// The PEL is grouped by owning consumer in a SINGLE pass over `group.pending`
+/// (which is entry-id ordered, so each consumer's slice stays id-ordered) —
+/// `O(P + C log C)` — replacing the old nested `for consumer { pending.filter
+/// (== consumer) }` which re-scanned all `P` pending entries for each of the `C`
+/// consumers (`O(C·P)`). Output is byte-for-byte identical: same consumer order
+/// (`group.consumers` is a `BTreeSet`), same per-consumer id order, and each
+/// pending entry's owning consumer equals the grouping key.
+fn append_group_consumer_aof_commands(
+    group: &StreamGroup,
+    logical_key: &[u8],
+    group_name: &[u8],
+    commands: &mut Vec<Vec<Vec<u8>>>,
+) {
+    let mut by_consumer: BTreeMap<&[u8], Vec<(StreamId, u64, u64)>> = BTreeMap::new();
+    for (id, pending) in &group.pending {
+        by_consumer
+            .entry(pending.consumer.as_slice())
+            .or_default()
+            .push((*id, pending.last_delivered_ms, pending.deliveries));
+    }
+    for consumer in &group.consumers {
+        match by_consumer.get(consumer.as_slice()) {
+            Some(entries) if !entries.is_empty() => {
+                for &((pending_ms, pending_seq), last_delivered_ms, deliveries) in entries {
+                    let pending_id = format!("{pending_ms}-{pending_seq}");
+                    commands.push(vec![
+                        b"XCLAIM".to_vec(),
+                        logical_key.to_vec(),
+                        group_name.to_vec(),
+                        consumer.clone(),
+                        b"0".to_vec(),
+                        pending_id.into_bytes(),
+                        b"TIME".to_vec(),
+                        last_delivered_ms.to_string().into_bytes(),
+                        b"RETRYCOUNT".to_vec(),
+                        deliveries.to_string().into_bytes(),
+                        b"JUSTID".to_vec(),
+                        b"FORCE".to_vec(),
+                    ]);
+                }
+            }
+            _ => {
+                commands.push(vec![
+                    b"XGROUP".to_vec(),
+                    b"CREATECONSUMER".to_vec(),
+                    logical_key.to_vec(),
+                    group_name.to_vec(),
+                    consumer.clone(),
+                ]);
+            }
+        }
+    }
+}
+
 pub type StreamGroupState = BTreeMap<Vec<u8>, StreamGroup>;
 pub type StreamGroupInfo = (Vec<u8>, usize, usize, StreamId, Option<u64>);
 /// (frankenredis-p4dpj) Extended XINFO CONSUMERS row: name, pending,
@@ -17726,40 +17785,14 @@ impl Store {
                             ));
                             commands.push(create);
 
-                            for consumer in &group.consumers {
-                                let mut emitted_pending = false;
-                                for ((pending_ms, pending_seq), pending_entry) in
-                                    group.pending.iter().filter(|(_, pending)| {
-                                        pending.consumer.as_slice().cmp(consumer.as_slice()).is_eq()
-                                    })
-                                {
-                                    emitted_pending = true;
-                                    let pending_id = format!("{pending_ms}-{pending_seq}");
-                                    commands.push(vec![
-                                        b"XCLAIM".to_vec(),
-                                        logical_key.clone(),
-                                        group_name.clone(),
-                                        pending_entry.consumer.clone(),
-                                        b"0".to_vec(),
-                                        pending_id.into_bytes(),
-                                        b"TIME".to_vec(),
-                                        pending_entry.last_delivered_ms.to_string().into_bytes(),
-                                        b"RETRYCOUNT".to_vec(),
-                                        pending_entry.deliveries.to_string().into_bytes(),
-                                        b"JUSTID".to_vec(),
-                                        b"FORCE".to_vec(),
-                                    ]);
-                                }
-                                if !emitted_pending {
-                                    commands.push(vec![
-                                        b"XGROUP".to_vec(),
-                                        b"CREATECONSUMER".to_vec(),
-                                        logical_key.clone(),
-                                        group_name.clone(),
-                                        consumer.clone(),
-                                    ]);
-                                }
-                            }
+                            // (frankenredis-377jl) O(P + C log C) grouped emit,
+                            // replacing the old O(C·P) per-consumer PEL rescan.
+                            append_group_consumer_aof_commands(
+                                group,
+                                &logical_key,
+                                group_name,
+                                &mut commands,
+                            );
                         }
                     }
                 }
@@ -27978,6 +28011,176 @@ mod tests {
         let skew_score = skew_old as f64 / skew_new as f64;
         eprintln!("SDF2 skewed 20k_diff_2M: old={skew_old}ns new={skew_new}ns score={skew_score:.2}x");
         assert!(skew_score >= 0.85, "adaptive diff regressed skewed case: {skew_score:.2}x");
+    }
+
+    // (frankenredis-377jl) Frozen fingerprint of the grouped PEL AOF corpus.
+    const AOFPEL_GOLDEN: u64 = 0xa82a_4b22_ca56_1dc1;
+
+    // (frankenredis-377jl) Stream consumer-group PEL AOF serialization: the
+    // O(P+C) grouped emit must be byte-for-byte identical to the old O(C·P)
+    // per-consumer rescan, across randomized consumer/pending assignments and
+    // edge shapes; plus a Score microbench on a many-consumer / large-PEL group.
+    #[test]
+    fn append_group_consumer_aof_commands_isomorphic_and_faster_aofpel() {
+        use super::{StreamGroup, StreamPendingEntry, append_group_consumer_aof_commands};
+        use std::collections::{BTreeMap, BTreeSet};
+
+        // Old behavior: nested per-consumer filter over the whole PEL.
+        fn old_ref(group: &StreamGroup, logical_key: &[u8], group_name: &[u8]) -> Vec<Vec<Vec<u8>>> {
+            let mut commands = Vec::new();
+            for consumer in &group.consumers {
+                let mut emitted = false;
+                for ((ms, seq), p) in group
+                    .pending
+                    .iter()
+                    .filter(|(_, p)| p.consumer.as_slice() == consumer.as_slice())
+                {
+                    emitted = true;
+                    commands.push(vec![
+                        b"XCLAIM".to_vec(),
+                        logical_key.to_vec(),
+                        group_name.to_vec(),
+                        p.consumer.clone(),
+                        b"0".to_vec(),
+                        format!("{ms}-{seq}").into_bytes(),
+                        b"TIME".to_vec(),
+                        p.last_delivered_ms.to_string().into_bytes(),
+                        b"RETRYCOUNT".to_vec(),
+                        p.deliveries.to_string().into_bytes(),
+                        b"JUSTID".to_vec(),
+                        b"FORCE".to_vec(),
+                    ]);
+                }
+                if !emitted {
+                    commands.push(vec![
+                        b"XGROUP".to_vec(),
+                        b"CREATECONSUMER".to_vec(),
+                        logical_key.to_vec(),
+                        group_name.to_vec(),
+                        consumer.clone(),
+                    ]);
+                }
+            }
+            commands
+        }
+
+        let mut st: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            st
+        };
+        let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fnv = |g: &mut u64, b: &[u8]| {
+            for &byte in b {
+                *g ^= u64::from(byte);
+                *g = g.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+
+        for _ in 0..600 {
+            let nc = (next() % 8) as usize; // consumers (incl. 0)
+            let consumers: Vec<Vec<u8>> =
+                (0..nc).map(|i| format!("c{}", i % 6).into_bytes()).collect();
+            let mut cset: BTreeSet<Vec<u8>> = BTreeSet::new();
+            for c in &consumers {
+                cset.insert(c.clone());
+            }
+            let mut pending: BTreeMap<(u64, u64), StreamPendingEntry> = BTreeMap::new();
+            let np = (next() % 30) as usize;
+            for _ in 0..np {
+                // Owner is a consumer (when any exist) OR an orphan name (covers
+                // pending whose consumer is not in the consumer set).
+                let owner = if !cset.is_empty() && next() % 5 != 0 {
+                    let v: Vec<_> = cset.iter().cloned().collect();
+                    v[(next() as usize) % v.len()].clone()
+                } else {
+                    format!("orphan{}", next() % 3).into_bytes()
+                };
+                let id = (next() % 50, next() % 4);
+                pending.insert(
+                    id,
+                    StreamPendingEntry {
+                        consumer: owner,
+                        deliveries: 1 + next() % 5,
+                        last_delivered_ms: next() % 1_000_000,
+                    },
+                );
+            }
+            let group = StreamGroup {
+                last_delivered_id: (0, 0),
+                entries_read: None,
+                consumers: cset,
+                consumer_metadata: BTreeMap::new(),
+                pending,
+            };
+            let mut got = Vec::new();
+            append_group_consumer_aof_commands(&group, b"mystream", b"g1", &mut got);
+            assert_eq!(got, old_ref(&group, b"mystream", b"g1"), "PEL AOF mismatch");
+            for cmd in &got {
+                for arg in cmd {
+                    fnv(&mut golden, arg);
+                }
+                fnv(&mut golden, &[0xFE]);
+            }
+            fnv(&mut golden, &[0xFF]);
+        }
+        assert_eq!(
+            golden, AOFPEL_GOLDEN,
+            "PEL AOF fingerprint changed: {golden:#018x} (golden {AOFPEL_GOLDEN:#018x})"
+        );
+
+        if cfg!(debug_assertions) {
+            return;
+        }
+        // Score: a large fan-out group — 1000 consumers, 5000 pending entries.
+        // The win scales with consumer count (old re-scans all P per consumer);
+        // at small C it's construction-dominated, this exercises the quadratic.
+        let mut cset: BTreeSet<Vec<u8>> = BTreeSet::new();
+        for i in 0..1000u32 {
+            cset.insert(format!("consumer-{i:04}").into_bytes());
+        }
+        let cvec: Vec<Vec<u8>> = cset.iter().cloned().collect();
+        let mut pending: BTreeMap<(u64, u64), StreamPendingEntry> = BTreeMap::new();
+        for i in 0..5000u64 {
+            pending.insert(
+                (i, 0),
+                StreamPendingEntry {
+                    consumer: cvec[(i as usize) % cvec.len()].clone(),
+                    deliveries: 1,
+                    last_delivered_ms: i,
+                },
+            );
+        }
+        let group = StreamGroup {
+            last_delivered_id: (0, 0),
+            entries_read: None,
+            consumers: cset,
+            consumer_metadata: BTreeMap::new(),
+            pending,
+        };
+        let reps = 200;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc.wrapping_add(old_ref(&group, b"s", b"g").len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            let mut c = Vec::new();
+            append_group_consumer_aof_commands(&group, b"s", b"g", &mut c);
+            acc2 = acc2.wrapping_add(c.len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(acc, acc2, "old/new disagree on command count");
+        let score = old_ns as f64 / new_ns as f64;
+        eprintln!("AOFPEL 1000 consumers x 5000 PEL: old={old_ns}ns new={new_ns}ns score={score:.2}x");
+        assert!(score >= 2.0, "grouped PEL emit must be >=2.0x; got {score:.2}x");
     }
 
     // (frankenredis-7st86) Frozen fingerprint of the ZLEXCOUNT result corpus.
