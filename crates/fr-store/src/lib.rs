@@ -3210,6 +3210,11 @@ pub struct ScriptPropagationRecord {
     pub targets: u8,
 }
 
+/// (frankenredis-4kuqc) Number of distinct in-flight SCAN cursors whose resume
+/// points are cached. Bounds the per-call linear probe (tiny) and the memory;
+/// scans beyond this many interleaved cursors fall back to the skip walk.
+const SCAN_CACHE_LRU_CAP: usize = 8;
+
 /// (frankenredis-3e92e) Cached SCAN resume point enabling an O(log N + batch)
 /// in-order continuation instead of an O(cursor) `skip` re-walk.
 #[derive(Debug, Clone)]
@@ -3243,15 +3248,19 @@ pub struct Store {
     /// identically ordered (keys are immutable), so resuming after the cached
     /// last key yields exactly what `iter().skip(cursor)` would.
     keyspace_generation: u64,
-    /// (frankenredis-3e92e) SCAN resume fast-path cache. Sequential SCAN
+    /// (frankenredis-3e92e/scanlru) SCAN resume fast-path cache. Sequential SCAN
     /// previously re-walked `ordered_keys` from the start every call
     /// (`iter().skip(cursor)` = O(cursor)), making a full iteration O(N²/batch).
     /// Caching the last examined key + the cursor + generation lets the next
     /// in-order call resume via `range((Excluded(last), Unbounded))` in
-    /// O(log N + batch), collapsing a full scan to O(N). Behavior is unchanged:
-    /// on any cursor/generation mismatch (out-of-order resume, concurrent scans,
-    /// or an intervening structural mutation) it falls back to the skip path.
-    scan_cache: Option<ScanResume>,
+    /// O(log N + batch), collapsing a full scan to O(N). This is a small LRU (not
+    /// a single slot) so that several CONCURRENT scans — distinct cursors from
+    /// different clients interleaved — each keep their own resume point and stay
+    /// O(N); a single slot would thrash and drop every interleaved scan back to
+    /// the O(N²/batch) skip. Behavior is unchanged: on any cursor/generation
+    /// mismatch (out-of-order resume, >cap concurrent scans, or an intervening
+    /// structural mutation) it falls back to the skip path.
+    scan_cache: Vec<ScanResume>,
     /// Physical keys by DB for O(1) RANDOMKEY sampling. `ordered_keys` remains
     /// the deterministic SCAN/KEYS surface; these slots are intentionally
     /// unordered because RANDOMKEY has no ordering contract. (frankenredis-srhju)
@@ -3725,7 +3734,7 @@ impl Default for Store {
             entries: HashMap::default(),
             ordered_keys: BTreeSet::new(),
             keyspace_generation: 0,
-            scan_cache: None,
+            scan_cache: Vec::new(),
             random_key_slots: vec![Vec::new(); DEFAULT_NUM_DATABASES],
             random_key_positions: HashMap::default(),
             volatile_keys: BTreeSet::new(),
@@ -15333,11 +15342,15 @@ impl Store {
         // we jump there with `range((Excluded(last), Unbounded))` in O(log N)
         // rather than re-walking `start` keys from the front. On any mismatch we
         // fall back to the original `skip(start)` walk (identical output).
+        // Find this scan's own cached resume point (matched by cursor +
+        // generation) among the interleaved scans, and TAKE it — the scan is
+        // about to advance past it, and a fresh point is re-inserted below.
         let resume_key: Option<Vec<u8>> = if start > 0 {
-            self.scan_cache.as_ref().and_then(|c| {
-                (c.next_cursor == cursor && c.generation == self.keyspace_generation)
-                    .then(|| c.last_key.clone())
-            })
+            let cur_gen = self.keyspace_generation;
+            self.scan_cache
+                .iter()
+                .position(|c| c.next_cursor == cursor && c.generation == cur_gen)
+                .map(|idx| self.scan_cache.remove(idx).last_key)
         } else {
             None
         };
@@ -15363,16 +15376,20 @@ impl Store {
         };
 
         let next_cursor = if pos >= total_keys { 0 } else { pos as u64 };
-        // Cache the resume point for the next in-order call (or drop it when the
-        // scan completes).
-        if next_cursor == 0 {
-            self.scan_cache = None;
-        } else if let Some(last_key) = last_examined {
-            self.scan_cache = Some(ScanResume {
+        // Re-insert this scan's advanced resume point for its next in-order call.
+        // (When the scan completes, next_cursor == 0 and the consumed entry was
+        // already removed above, so nothing is re-added.)
+        if next_cursor != 0
+            && let Some(last_key) = last_examined
+        {
+            self.scan_cache.push(ScanResume {
                 next_cursor,
                 last_key,
                 generation: self.keyspace_generation,
             });
+            if self.scan_cache.len() > SCAN_CACHE_LRU_CAP {
+                self.scan_cache.remove(0); // evict the oldest in-flight scan
+            }
         }
         (next_cursor, result)
     }
@@ -28268,7 +28285,7 @@ mod tests {
             let mut cursor = 0u64;
             for _ in 0..1_000_000 {
                 if disable_cache {
-                    store.scan_cache = None;
+                    store.scan_cache.clear();
                 }
                 let (next, batch) = store.scan(cursor, pattern, count, 0);
                 all.extend(batch);
@@ -28341,7 +28358,7 @@ mod tests {
                 let mut step = 0;
                 loop {
                     if disable_cache {
-                        store.scan_cache = None;
+                        store.scan_cache.clear();
                     }
                     let (nextc, batch) = store.scan(cursor, None, 7, 0);
                     out.extend(batch);
@@ -28440,7 +28457,7 @@ mod tests {
             let mut step = 0;
             loop {
                 if disable_cache {
-                    store.scan_cache = None;
+                    store.scan_cache.clear();
                 }
                 let (next, batch) = store.scan(cursor, None, 7, 0);
                 out.extend(batch);
@@ -28459,6 +28476,106 @@ mod tests {
             out
         };
         assert_eq!(run(false), run(true), "flush+readd mid-scan: cache-on diverged from cache-off");
+    }
+
+    // (frankenredis-4kuqc) The SCAN resume cache is a small LRU, not a single
+    // slot, so several CONCURRENT (interleaved) scans each keep their own resume
+    // point and stay O(N). Correctness gate: K interleaved full scans return the
+    // exact same keys under the LRU, a single-slot, and no cache. Plus a Score
+    // microbench: K interleaved full scans with the LRU vs a single slot (which
+    // thrashes back to the O(N^2/batch) skip when scans interleave).
+    #[test]
+    fn scan_cache_lru_concurrent_isomorphic_and_faster_scanlru() {
+        use super::Store;
+        use super::encode_db_key;
+
+        // mode: 0 = LRU (cap 8), 1 = single-slot (cap 1), 2 = no cache.
+        fn interleaved(store: &mut Store, k: usize, count: usize, mode: u8) -> Vec<Vec<Vec<u8>>> {
+            let mut cursors = vec![0u64; k];
+            let mut done = vec![false; k];
+            let mut results = vec![Vec::new(); k];
+            let mut guard = 0;
+            loop {
+                let mut all_done = true;
+                for i in 0..k {
+                    if done[i] {
+                        continue;
+                    }
+                    all_done = false;
+                    match mode {
+                        2 => store.scan_cache.clear(),
+                        1 => {
+                            while store.scan_cache.len() > 1 {
+                                store.scan_cache.remove(0);
+                            }
+                        }
+                        _ => {}
+                    }
+                    let (next, batch) = store.scan(cursors[i], None, count, 0);
+                    results[i].extend(batch);
+                    if next == 0 {
+                        done[i] = true;
+                    } else {
+                        cursors[i] = next;
+                    }
+                }
+                guard += 1;
+                if all_done || guard > 10_000_000 {
+                    break;
+                }
+            }
+            results
+        }
+
+        // Correctness: every mode returns identical per-scan results, and each
+        // scan returns the full keyspace exactly once (sorted order).
+        {
+            let mut store = Store::new();
+            for i in 0..500u32 {
+                store.set(encode_db_key(0, format!("k{i:04}").as_bytes()), b"v".to_vec(), None, 0);
+            }
+            let all: Vec<Vec<u8>> = store.ordered_keys.iter().cloned().collect();
+            for &count in &[1usize, 3, 7, 16] {
+                let lru = interleaved(&mut store, 5, count, 0);
+                let single = interleaved(&mut store, 5, count, 1);
+                let off = interleaved(&mut store, 5, count, 2);
+                for i in 0..5 {
+                    assert_eq!(lru[i], single[i], "LRU vs single-slot diverged scan={i} count={count}");
+                    assert_eq!(lru[i], off[i], "LRU vs no-cache diverged scan={i} count={count}");
+                    assert_eq!(lru[i], all, "scan {i} did not return the full keyspace count={count}");
+                }
+            }
+        }
+
+        if cfg!(debug_assertions) {
+            return;
+        }
+        // Score: 4 interleaved full scans of a 12k keyspace at COUNT 10 — a single
+        // slot thrashes (every interleaved call mismatches, falling back to the
+        // O(N^2/batch) skip), the LRU keeps all four O(N).
+        let mut store = Store::new();
+        for i in 0..12_000u32 {
+            store.set(encode_db_key(0, format!("key:{i:06}").as_bytes()), b"v".to_vec(), None, 0);
+        }
+        let reps = 4;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc.wrapping_add(interleaved(&mut store, 4, 10, 1).iter().map(Vec::len).sum::<usize>());
+        }
+        let single_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 = acc2.wrapping_add(interleaved(&mut store, 4, 10, 0).iter().map(Vec::len).sum::<usize>());
+        }
+        let lru_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(acc, acc2, "single-slot vs LRU returned different totals");
+        let score = single_ns as f64 / lru_ns as f64;
+        eprintln!("SCANLRU 4 interleaved scans of 12k @ COUNT 10: single-slot={single_ns}ns lru={lru_ns}ns score={score:.2}x");
+        assert!(score >= 2.0, "LRU must be >=2.0x vs single-slot for concurrent scans; got {score:.2}x");
     }
 
     // (frankenredis-377jl) Frozen fingerprint of the grouped PEL AOF corpus.
