@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-ohsk5.4 SERVER=target-orangemouse-ohsk5-array-reject-clean/release-perf/frankenredis BENCH=target-orangemouse-ohsk5-array-reject-clean/release-perf/fr-bench PORT=49332 PREFIX=om-ohsk5-4-pair-base LABEL=paired-baseline bash -c 'log=\"$OUT/$LABEL-server-$PORT-$$.log\"; \"$SERVER\" --bind 127.0.0.1 --port \"$PORT\" --mode strict >\"$log\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for i in {1..100}; do grep -q ready \"$log\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$log\" || exit 1; \"$BENCH\" --host 127.0.0.1 --port \"$PORT\" --clients 50 --requests 300000 --pipeline 16 --workload hset --keyspace 10000 --datasize 3 --json-out \"$OUT/$LABEL-hset-p16-300k-last.json\" --key-prefix \"$PREFIX\" >/dev/null; cleanup; trap - EXIT'",
+      "mean": 0.5880823821657143,
+      "stddev": 0.029021824025007626,
+      "median": 0.59568292388,
+      "user": 0.5829174028571428,
+      "system": 0.6907639628571428,
+      "min": 0.53343605688,
+      "max": 0.61975163288,
+      "times": [
+        0.57253663388,
+        0.60674447088,
+        0.61975163288,
+        0.59568292388,
+        0.58114406088,
+        0.53343605688,
+        0.60728089588
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-ohsk5.4 SERVER=target-orangemouse-ohsk5-4-candidate/release-perf/frankenredis BENCH=target-orangemouse-ohsk5-4-candidate/release-perf/fr-bench PORT=49333 PREFIX=om-ohsk5-4-pair-cand LABEL=paired-candidate bash -c 'log=\"$OUT/$LABEL-server-$PORT-$$.log\"; \"$SERVER\" --bind 127.0.0.1 --port \"$PORT\" --mode strict >\"$log\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for i in {1..100}; do grep -q ready \"$log\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$log\" || exit 1; \"$BENCH\" --host 127.0.0.1 --port \"$PORT\" --clients 50 --requests 300000 --pipeline 16 --workload hset --keyspace 10000 --datasize 3 --json-out \"$OUT/$LABEL-hset-p16-300k-last.json\" --key-prefix \"$PREFIX\" >/dev/null; cleanup; trap - EXIT'",
+      "mean": 0.55082603188,
+      "stddev": 0.028495807676839156,
+      "median": 0.56075695588,
+      "user": 0.5433785457142857,
+      "system": 0.6922346771428572,
+      "min": 0.50883241588,
+      "max": 0.58193861488,
+      "times": [
+        0.51265411588,
+        0.58193861488,
+        0.56327711088,
+        0.56075695588,
+        0.57025216388,
+        0.50883241588,
+        0.55807084588
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

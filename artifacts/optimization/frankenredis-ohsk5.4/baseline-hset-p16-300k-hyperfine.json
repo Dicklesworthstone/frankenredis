@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-ohsk5.4 SERVER=target-orangemouse-ohsk5-array-reject-clean/release-perf/frankenredis BENCH=target-orangemouse-ohsk5-array-reject-clean/release-perf/fr-bench PORT=49331 bash -c 'log=\"$OUT/baseline-server-$PORT-$$.log\"; \"$SERVER\" --bind 127.0.0.1 --port \"$PORT\" --mode strict >\"$log\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for i in {1..100}; do grep -q ready \"$log\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$log\" || exit 1; \"$BENCH\" --host 127.0.0.1 --port \"$PORT\" --clients 50 --requests 300000 --pipeline 16 --workload hset --keyspace 10000 --datasize 3 --json-out \"$OUT/baseline-hset-p16-300k-last.json\" --key-prefix om-ohsk5-4-base >/dev/null; cleanup; trap - EXIT'",
+      "mean": 0.5983109632542858,
+      "stddev": 0.014310300824686411,
+      "median": 0.59546110654,
+      "user": 0.5643327142857142,
+      "system": 0.6968703028571428,
+      "min": 0.58143072954,
+      "max": 0.61521061554,
+      "times": [
+        0.6132438905400001,
+        0.59546110654,
+        0.58143072954,
+        0.59070927554,
+        0.60946092554,
+        0.61521061554,
+        0.58266019954
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
