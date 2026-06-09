@@ -10502,7 +10502,19 @@ impl Runtime {
                                 self.server.ready_keys.insert(key.clone());
                             }
                         }
-                        self.queue_client_tracking_invalidations(&cmd_keys);
+                        // Invalidate only the keys the command actually WROTE —
+                        // upstream signalModifiedKey fires per modified key, so a
+                        // command's read-only source keys (COPY source, *STORE
+                        // source sets, etc.) must not invalidate even though they
+                        // are in cmd_keys. Gated on tracking being active so the
+                        // keyspec walk stays off the no-tracking write hot path.
+                        // (frankenredis)
+                        if !self.server.client_tracking_observed_keys.is_empty()
+                            || !self.server.client_tracking_bcast_clients.is_empty()
+                        {
+                            let write_keys = fr_command::command_write_keys(argv);
+                            self.queue_client_tracking_invalidations(&write_keys);
+                        }
                         // Keyspace notifications: publish events for modified keys.
                         if self.server.store.notify_keyspace_events != 0 {
                             let event = Self::command_to_keyspace_event(argv);

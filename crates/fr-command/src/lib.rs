@@ -1229,6 +1229,20 @@ pub fn command_acl_key_access(argv: &[Vec<u8>]) -> Vec<AclKeyAccess> {
     }
 }
 
+/// The keys a command MODIFIES (its write keys), in argv order. Used to target
+/// client-tracking invalidations: upstream `signalModifiedKey` fires per
+/// modified key, so a command's READ-ONLY source keys (COPY's source,
+/// SINTERSTORE / ZRANGESTORE / SORT...STORE / BITOP / GEORADIUS...STORE source
+/// keys) must NOT invalidate, even though they appear in `command_keys`.
+/// (frankenredis)
+pub fn command_write_keys(argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    command_acl_key_access(argv)
+        .into_iter()
+        .filter(|access| access.write)
+        .filter_map(|access| argv.get(access.index).cloned())
+        .collect()
+}
+
 fn command_key_references_with_exact_flags(
     cmd_name: &str,
     argv: &[Vec<u8>],
@@ -26954,7 +26968,8 @@ mod tests {
         client_wrong_subcommand_arity,
         cluster_disabled_error, cluster_reset_with_keys_error, cluster_wrong_subcommand_arity,
         command_acl_categories, command_acl_key_access, command_has_acl_subcommands,
-        command_key_indexes, commands_in_acl_category, dispatch_argv, drain_pubsub_messages,
+        command_key_indexes, command_write_keys, commands_in_acl_category, dispatch_argv,
+        drain_pubsub_messages,
         eq_ascii_command, eval_script, execute_migrate, format_coord_human,
         format_eval_read_only_script_error, frame_to_argv, geo_coord_frame, get_command_flags,
         hello_bulk, hello_simple, is_known_acl_command_selector, is_write_command,
@@ -61872,6 +61887,31 @@ mod tests {
         let argv = vec![b"HGET".to_vec(), b"hash".to_vec()];
 
         assert!(command_acl_key_access(&argv).is_empty());
+    }
+
+    // (frankenredis) command_write_keys returns ONLY the modified keys, so
+    // client-tracking invalidation never fires for read-only source keys of
+    // COPY / *STORE / SORT...STORE / BITOP, while *MOVE (both modified) and
+    // plain writes keep all their keys.
+    #[test]
+    fn command_write_keys_excludes_read_only_source_keys() {
+        let wk = |parts: &[&str]| {
+            command_write_keys(&parts.iter().map(|p| p.as_bytes().to_vec()).collect::<Vec<_>>())
+        };
+        let k = |s: &str| s.as_bytes().to_vec();
+        // Read-only sources excluded; only the destination is a write key.
+        assert_eq!(wk(&["COPY", "src", "dst", "REPLACE"]), vec![k("dst")]);
+        assert_eq!(wk(&["SINTERSTORE", "dest", "s1", "s2"]), vec![k("dest")]);
+        assert_eq!(wk(&["ZRANGESTORE", "zd", "zsrc", "0", "-1"]), vec![k("zd")]);
+        assert_eq!(wk(&["BITOP", "AND", "bd", "b1", "b2"]), vec![k("bd")]);
+        // Both keys modified -> both are write keys.
+        assert_eq!(wk(&["SMOVE", "ms1", "ms2", "m"]), vec![k("ms1"), k("ms2")]);
+        assert_eq!(wk(&["RENAME", "a", "b"]), vec![k("a"), k("b")]);
+        // Plain single-key writes keep their key; reads have no write keys.
+        assert_eq!(wk(&["SET", "k", "v"]), vec![k("k")]);
+        assert_eq!(wk(&["HSET", "h", "f", "v"]), vec![k("h")]);
+        assert!(wk(&["GET", "k"]).is_empty());
+        assert!(wk(&["SINTERCARD", "2", "s1", "s2"]).is_empty());
     }
 
     #[test]
