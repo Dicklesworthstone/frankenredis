@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "bash -lc 'log=\"$OUT/baseline-server-$PORT-$$.log\"; \"$SERVER\" --bind 127.0.0.1 --port \"$PORT\" --mode strict >\"$log\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for i in {1..100}; do grep -q ready \"$log\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$log\" || exit 1; \"$BENCH\" --host 127.0.0.1 --port \"$PORT\" --clients 50 --requests 300000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"$OUT/baseline-current-set-p16-300k-last.json\" --key-prefix om-ohsk5-3-base >/dev/null; cleanup; trap - EXIT' ",
+      "mean": 0.6044477477057144,
+      "stddev": 0.06947988819458835,
+      "median": 0.58963812642,
+      "user": 0.5148600742857143,
+      "system": 0.7422791628571428,
+      "min": 0.5052074014200001,
+      "max": 0.70829629642,
+      "times": [
+        0.5933257394200001,
+        0.5724495984200001,
+        0.58963812642,
+        0.70829629642,
+        0.6837538634200001,
+        0.5784632084200001,
+        0.5052074014200001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

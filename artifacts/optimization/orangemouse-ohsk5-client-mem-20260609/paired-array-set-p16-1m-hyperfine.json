@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "bash -lc 'log=\"$OUT/paired-baseline-server-$BASE_PORT-$$.log\"; \"$BASE_SERVER\" --bind 127.0.0.1 --port \"$BASE_PORT\" --mode strict >\"$log\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for i in {1..100}; do grep -q ready \"$log\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$log\" || exit 1; \"$BASE_BENCH\" --host 127.0.0.1 --port \"$BASE_PORT\" --clients 50 --requests 1000000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"$OUT/paired-baseline-set-p16-1m-last.json\" --key-prefix om-ohsk5-3-pair-base >/dev/null; cleanup; trap - EXIT' ",
+      "mean": 1.68970743506,
+      "stddev": 0.06734387764353598,
+      "median": 1.66772056286,
+      "user": 1.63006216,
+      "system": 2.2521227200000005,
+      "min": 1.63717993886,
+      "max": 1.8077811638599999,
+      "times": [
+        1.66772056286,
+        1.66994228286,
+        1.63717993886,
+        1.66591322686,
+        1.8077811638599999
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "bash -lc 'log=\"$OUT/paired-candidate-server-$CAND_PORT-$$.log\"; \"$CAND_SERVER\" --bind 127.0.0.1 --port \"$CAND_PORT\" --mode strict >\"$log\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for i in {1..100}; do grep -q ready \"$log\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$log\" || exit 1; \"$CAND_BENCH\" --host 127.0.0.1 --port \"$CAND_PORT\" --clients 50 --requests 1000000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"$OUT/paired-candidate-set-p16-1m-last.json\" --key-prefix om-ohsk5-3-pair-cand >/dev/null; cleanup; trap - EXIT' ",
+      "mean": 2.29289954506,
+      "stddev": 0.5250344363672536,
+      "median": 2.2171270718600002,
+      "user": 2.1462707599999993,
+      "system": 2.75307332,
+      "min": 1.79093276386,
+      "max": 2.9420111918600003,
+      "times": [
+        1.79838899186,
+        1.79093276386,
+        2.2171270718600002,
+        2.7160377058600003,
+        2.9420111918600003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

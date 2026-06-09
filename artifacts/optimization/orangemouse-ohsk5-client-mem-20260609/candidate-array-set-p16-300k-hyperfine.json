@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "bash -lc 'log=\"$OUT/candidate-array-server-$PORT-$$.log\"; \"$SERVER\" --bind 127.0.0.1 --port \"$PORT\" --mode strict >\"$log\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for i in {1..100}; do grep -q ready \"$log\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$log\" || exit 1; \"$BENCH\" --host 127.0.0.1 --port \"$PORT\" --clients 50 --requests 300000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out \"$OUT/candidate-array-set-p16-300k-last.json\" --key-prefix om-ohsk5-3-cand >/dev/null; cleanup; trap - EXIT' ",
+      "mean": 0.5875140491714286,
+      "stddev": 0.03602361555192104,
+      "median": 0.6027157926,
+      "user": 0.5255318828571428,
+      "system": 0.7330826971428571,
+      "min": 0.5191870656,
+      "max": 0.6228963706,
+      "times": [
+        0.6027157926,
+        0.6116490596,
+        0.5676449656,
+        0.6228963706,
+        0.6110830686000001,
+        0.5774220216,
+        0.5191870656
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
