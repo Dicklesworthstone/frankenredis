@@ -17049,7 +17049,14 @@ impl Runtime {
                     // Forked child: RDB only — see persist_snapshot_to_disk's
                     // write_aof note (frankenredis-ol9tz).
                     let result = self.persist_snapshot_to_disk(now_ms, true, false);
-                    std::process::exit(if result.is_ok() { 0 } else { 1 });
+                    // Exit via _exit, NOT std::process::exit: the child must not
+                    // run the parent's atexit handlers or flush the inherited
+                    // Rust/C stdio buffers (which would duplicate any buffered
+                    // parent log output). The RDB is already fully written +
+                    // flushed inside persist_snapshot_to_disk (its File drops
+                    // before return), so an immediate _exit is safe. Mirrors
+                    // upstream redis server.c::exitFromChild. (frankenredis-bgforkexit)
+                    libc::_exit(if result.is_ok() { 0 } else { 1 });
                 }
                 pid => {
                     self.server.rdb_bgsave_pid = Some(pid);
