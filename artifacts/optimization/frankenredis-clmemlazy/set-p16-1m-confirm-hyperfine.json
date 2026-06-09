@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-11a0n/run_frbench_once.py --server-bin /tmp/tealotter-fr-clmemlazy-baseline-target/release-perf/frankenredis --bench-bin /tmp/tealotter-fr-clmemlazy-baseline-target/release-perf/fr-bench --port 21315 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --json-out artifacts/optimization/frankenredis-clmemlazy/confirm-baseline-set-p16-1m-last.json --key-prefix clmemlazy-confirm-baseline-set",
+      "mean": 1.3753455992799999,
+      "stddev": 0.022153976304490217,
+      "median": 1.36569890708,
+      "user": 1.4611193599999999,
+      "system": 2.2031579,
+      "min": 1.3550156310800001,
+      "max": 1.4067429330799999,
+      "times": [
+        1.4067429330799999,
+        1.38996540708,
+        1.3550156310800001,
+        1.36569890708,
+        1.35930511808
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-11a0n/run_frbench_once.py --server-bin /tmp/tealotter-fr-clmemlazy-candidate-target/release-perf/frankenredis --bench-bin /tmp/tealotter-fr-clmemlazy-candidate-target/release-perf/fr-bench --port 21316 --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --json-out artifacts/optimization/frankenredis-clmemlazy/confirm-candidate-set-p16-1m-last.json --key-prefix clmemlazy-confirm-candidate-set",
+      "mean": 1.4219042918799998,
+      "stddev": 0.06645894238842924,
+      "median": 1.39512731608,
+      "user": 1.48993236,
+      "system": 2.3209703,
+      "min": 1.35945567408,
+      "max": 1.52127787208,
+      "times": [
+        1.45635072708,
+        1.39512731608,
+        1.37730987008,
+        1.35945567408,
+        1.52127787208
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

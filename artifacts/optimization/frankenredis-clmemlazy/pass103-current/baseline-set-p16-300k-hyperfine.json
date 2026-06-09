@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "bash -lc 'set -euo pipefail\nport=17431\nbin=/tmp/tealotter-fr-clmemlazy-baseline-target/release-perf/frankenredis\nbench=/tmp/tealotter-fr-clmemlazy-baseline-target/release-perf/fr-bench\nlog=/data/projects/frankenredis/artifacts/optimization/frankenredis-clmemlazy/pass103-current/baseline-server.log\n\"$bin\" --port \"$port\" --bind 127.0.0.1 --mode strict >>\"$log\" 2>&1 &\npid=$!\ntrap \"kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true\" EXIT\nready=0\nfor _ in $(seq 1 100); do\n  if /data/projects/frankenredis/legacy_redis_code/redis/src/redis-cli -p \"$port\" PING >/dev/null 2>&1; then\n    ready=1\n    break\n  fi\n  sleep 0.05\ndone\ntest \"$ready\" = 1\n\"$bench\" --port \"$port\" --workload set --clients 50 --requests 300000 --pipeline 16 --keyspace 10000 --datasize 3 --json-out /data/projects/frankenredis/artifacts/optimization/frankenredis-clmemlazy/pass103-current/baseline-set-p16-300k-last.json\n/data/projects/frankenredis/legacy_redis_code/redis/src/redis-cli -p \"$port\" SHUTDOWN NOSAVE >/dev/null 2>&1 || true\nwait \"$pid\" 2>/dev/null || true'",
+      "mean": 0.4873489118171429,
+      "stddev": 0.027176615059978863,
+      "median": 0.47929850196,
+      "user": 0.45983246285714285,
+      "system": 0.7317254857142856,
+      "min": 0.46541603596000003,
+      "max": 0.5428641549600001,
+      "times": [
+        0.48849367896,
+        0.47929850196,
+        0.46861963396,
+        0.46888500596000005,
+        0.5428641549600001,
+        0.49786537096000005,
+        0.46541603596000003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

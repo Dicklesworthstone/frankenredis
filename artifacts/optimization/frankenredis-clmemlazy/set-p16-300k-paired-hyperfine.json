@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-11a0n/run_frbench_once.py --server-bin /tmp/tealotter-fr-clmemlazy-baseline-target/release-perf/frankenredis --bench-bin /tmp/tealotter-fr-clmemlazy-baseline-target/release-perf/fr-bench --port 21311 --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --json-out artifacts/optimization/frankenredis-clmemlazy/paired-baseline-set-p16-300k-last.json --key-prefix clmemlazy-paired-baseline-set",
+      "mean": 0.4876961598599999,
+      "stddev": 0.02028625597576386,
+      "median": 0.48018858385999996,
+      "user": 0.48199159999999985,
+      "system": 0.7269176199999998,
+      "min": 0.47018809736,
+      "max": 0.5382197923600001,
+      "times": [
+        0.47741976436,
+        0.47064005436,
+        0.48193248136,
+        0.48572391336,
+        0.47844468636,
+        0.47018809736,
+        0.5382197923600001,
+        0.50161586336,
+        0.49439556836,
+        0.47838137736
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-11a0n/run_frbench_once.py --server-bin /tmp/tealotter-fr-clmemlazy-candidate-target/release-perf/frankenredis --bench-bin /tmp/tealotter-fr-clmemlazy-candidate-target/release-perf/fr-bench --port 21312 --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --json-out artifacts/optimization/frankenredis-clmemlazy/paired-candidate-set-p16-300k-last.json --key-prefix clmemlazy-paired-candidate-set",
+      "mean": 0.47911806486,
+      "stddev": 0.024180788708964333,
+      "median": 0.47468848036,
+      "user": 0.4741745,
+      "system": 0.7007653199999999,
+      "min": 0.44376784136,
+      "max": 0.52468316636,
+      "times": [
+        0.50054861336,
+        0.48209586436,
+        0.45825622136,
+        0.50071206436,
+        0.52468316636,
+        0.48397495336,
+        0.46549742736,
+        0.44376784136,
+        0.46728109636,
+        0.46436340036
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

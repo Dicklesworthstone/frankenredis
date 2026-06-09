@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781021472382,
+  "host": "127.0.0.1",
+  "port": 21312,
+  "workload": "set",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "clmemlazy-paired-candidate-set",
+  "total_time_ms": 422,
+  "ops_per_sec": 710092.5148530229,
+  "bytes_sent": 21516538,
+  "bytes_received": 1500000,
+  "latency_us": {
+    "min": 35,
+    "p50": 1011,
+    "p95": 1583,
+    "p99": 2081,
+    "p999": 4081,
+    "max": 4659,
+    "mean": 1093.4728000000036,
+    "samples": 300000
+  }
+}

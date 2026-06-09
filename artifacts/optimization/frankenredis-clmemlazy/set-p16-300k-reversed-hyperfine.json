@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-11a0n/run_frbench_once.py --server-bin /tmp/tealotter-fr-clmemlazy-candidate-target/release-perf/frankenredis --bench-bin /tmp/tealotter-fr-clmemlazy-candidate-target/release-perf/fr-bench --port 21313 --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --json-out artifacts/optimization/frankenredis-clmemlazy/reversed-candidate-set-p16-300k-last.json --key-prefix clmemlazy-reversed-candidate-set",
+      "mean": 0.51755688428,
+      "stddev": 0.05696316679462302,
+      "median": 0.50871816638,
+      "user": 0.4905767000000001,
+      "system": 0.7430502999999999,
+      "min": 0.45650478238000003,
+      "max": 0.6462562823800001,
+      "times": [
+        0.5048224973800001,
+        0.5782964813800001,
+        0.5218846043800001,
+        0.5238556983800001,
+        0.51261383538,
+        0.45650478238000003,
+        0.48193219438,
+        0.6462562823800001,
+        0.47892578938,
+        0.47047667738000004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-11a0n/run_frbench_once.py --server-bin /tmp/tealotter-fr-clmemlazy-baseline-target/release-perf/frankenredis --bench-bin /tmp/tealotter-fr-clmemlazy-baseline-target/release-perf/fr-bench --port 21314 --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --json-out artifacts/optimization/frankenredis-clmemlazy/reversed-baseline-set-p16-300k-last.json --key-prefix clmemlazy-reversed-baseline-set",
+      "mean": 0.6854916234800001,
+      "stddev": 0.10801636034999752,
+      "median": 0.7244823813800001,
+      "user": 0.4889481,
+      "system": 0.7329448999999999,
+      "min": 0.5023599903800001,
+      "max": 0.8041586623800001,
+      "times": [
+        0.7709048753800001,
+        0.7784996213800001,
+        0.7408705203800001,
+        0.8041586623800001,
+        0.6775947443800001,
+        0.73456194238,
+        0.7144028203800001,
+        0.6223893223800001,
+        0.5023599903800001,
+        0.5091737353800001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-11a0n/run_frbench_once.py --server-bin /tmp/tealotter-fr-clmemlazy-baseline-target/release-perf/frankenredis --bench-bin /tmp/tealotter-fr-clmemlazy-baseline-target/release-perf/fr-bench --port 21310 --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --workload set --json-out artifacts/optimization/frankenredis-clmemlazy/baseline-set-p16-300k-last.json --key-prefix clmemlazy-baseline-set",
+      "mean": 0.4835986804,
+      "stddev": 0.043117938340302156,
+      "median": 0.4643704495,
+      "user": 0.48090984,
+      "system": 0.72011362,
+      "min": 0.453120036,
+      "max": 0.586972004,
+      "times": [
+        0.453120036,
+        0.483552074,
+        0.462468252,
+        0.466272647,
+        0.456511059,
+        0.474200373,
+        0.46171866300000003,
+        0.45828610200000003,
+        0.532885594,
+        0.586972004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
