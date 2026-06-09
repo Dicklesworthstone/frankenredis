@@ -12272,6 +12272,65 @@ impl Store {
         }
     }
 
+    /// XTRIM key MINID ~ threshold [LIMIT n] — approximate (node-boundary) MINID
+    /// trim. Mirrors upstream t_stream.c::streamTrim's whole-node eviction: walk
+    /// the stream's rax/listpack nodes from the head (each holds up to
+    /// `REDIS_STREAM_NODE_MAX_ENTRIES` entries — head nodes are full and the tail
+    /// node may be partial) and remove a whole node only while its LAST entry ID
+    /// is `< min_id` AND removing it would not push the running deleted count past
+    /// `limit` (`(deleted + entries) > limit`). It stops at the first node it
+    /// cannot remove wholly — approximate trimming never splits a node — so a
+    /// node straddling `min_id` is kept intact (entries below the threshold may
+    /// survive, exactly like Redis). `limit == None` means no cap (an explicit
+    /// `LIMIT 0`, or the unbounded default the command layer maps to a finite
+    /// cap). Unlike the exact path this can also drop the partial tail node when
+    /// its last ID is below the threshold. (frankenredis-8t4vl)
+    pub fn xtrim_minid_approx(
+        &mut self,
+        key: &[u8],
+        min_id: StreamId,
+        limit: Option<usize>,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &mut entry.value {
+                Value::Stream(entries) => {
+                    let ids: Vec<StreamId> = entries.keys().copied().collect();
+                    let len = ids.len();
+                    let mut removed = 0usize;
+                    while removed < len {
+                        let node = REDIS_STREAM_NODE_MAX_ENTRIES.min(len - removed);
+                        // Upstream: `if (limit && (deleted + entries) > limit) break;`
+                        if limit.is_some_and(|lim| removed + node > lim) {
+                            break;
+                        }
+                        // Whole-node removal requires the node's LAST id < min_id.
+                        if ids[removed + node - 1] < min_id {
+                            removed += node;
+                        } else {
+                            break;
+                        }
+                    }
+                    if removed > 0 {
+                        for id in &ids[..removed] {
+                            entries.remove(id);
+                        }
+                        Self::mark_digest_stale_fields(
+                            &mut self.digest_stale,
+                            &mut self.digest_mutations,
+                        );
+                        entry.touch_write(now_ms);
+                        self.dirty = self.dirty.saturating_add(removed as u64);
+                    }
+                    Ok(removed)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(0),
+        }
+    }
+
     pub fn xread(
         &mut self,
         key: &[u8],
@@ -28406,6 +28465,83 @@ mod tests {
             .xrange(b"s", (0, 0), (u64::MAX, u64::MAX), None, 0)
             .unwrap();
         assert_eq!(remaining[0].0, (1002, 0));
+    }
+
+    /// MINID approximate (~) trim is node-boundary aware: it evicts whole
+    /// REDIS_STREAM_NODE_MAX_ENTRIES-sized head nodes only while the node's last
+    /// id < threshold, leaving a node that straddles the threshold intact.
+    /// (frankenredis-8t4vl)
+    #[test]
+    fn stream_xtrim_minid_approx_evicts_whole_nodes_8t4vl() {
+        let mut store = Store::new();
+        // 250 entries -> nodes [1..=100], [101..=200], [201..=250].
+        for i in 1..=250u64 {
+            store
+                .xadd(b"s", (i, 0), &[(b"f".to_vec(), vec![0u8])], 0)
+                .unwrap();
+        }
+        // The command layer maps an un-LIMITed `~` to this default cap
+        // (100 * stream-node-max-entries, the node size being 100).
+        let cap = Some(100 * 100);
+
+        // Threshold inside the first node: node0 last id = 100 NOT < 100 -> keep.
+        assert_eq!(store.xtrim_minid_approx(b"s", (100, 0), cap, 0).unwrap(), 0);
+        // Threshold just past node0: last id 100 < 101 -> drop the whole node.
+        // node1 last id 200 NOT < 150 -> stop. Removes exactly 100.
+        assert_eq!(
+            store.xtrim_minid_approx(b"s", (150, 0), cap, 0).unwrap(),
+            100
+        );
+        assert_eq!(store.xlen(b"s", 0).unwrap(), 150);
+        assert_eq!(
+            store
+                .xrange(b"s", (0, 0), (u64::MAX, u64::MAX), Some(1), 0)
+                .unwrap()[0]
+                .0,
+            (101, 0)
+        );
+
+        // A threshold above every id removes all remaining nodes (incl. the
+        // partial tail node) — unlike MAXLEN approx which keeps the tail.
+        assert_eq!(
+            store.xtrim_minid_approx(b"s", (10_000, 0), cap, 0).unwrap(),
+            150
+        );
+        assert_eq!(store.xlen(b"s", 0).unwrap(), 0);
+    }
+
+    /// A LIMIT smaller than a node evicts nothing (whole-node granularity), and
+    /// the cap follows upstream's `(deleted + entries) > limit` break.
+    #[test]
+    fn stream_xtrim_minid_approx_limit_is_whole_node_8t4vl() {
+        let mut store = Store::new();
+        for i in 1..=250u64 {
+            store
+                .xadd(b"s", (i, 0), &[(b"f".to_vec(), vec![0u8])], 0)
+                .unwrap();
+        }
+        // All three nodes qualify (threshold 10000), but LIMIT 150 only allows
+        // the first node (0+100<=150); the second would make 200>150 -> stop.
+        assert_eq!(
+            store
+                .xtrim_minid_approx(b"s", (10_000, 0), Some(150), 0)
+                .unwrap(),
+            100
+        );
+        // LIMIT 50 < node size -> evict nothing.
+        assert_eq!(
+            store
+                .xtrim_minid_approx(b"s", (10_000, 0), Some(50), 0)
+                .unwrap(),
+            0
+        );
+        // limit == None (the LIMIT 0 / unbounded form) -> evict everything.
+        assert_eq!(
+            store
+                .xtrim_minid_approx(b"s", (10_000, 0), None, 0)
+                .unwrap(),
+            150
+        );
     }
 
     /// LIMIT=0 must be a true no-op even when entries exceed

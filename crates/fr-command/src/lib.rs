@@ -7946,11 +7946,11 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     // gets the upstream default cap of 100 * stream-node-max-entries; an
     // explicit LIMIT 0 (limit == None below) means no cap. (frankenredis-c6j11)
     //
-    // MINID retains the previous "approx-without-LIMIT → no-op" shortcut;
-    // modeling MINID node-boundary trimming is left to a follow-up because the
-    // entry distribution required to compute an effective threshold isn't
-    // exposed by fr's store today.
-    let approx_noop_minid = approx && !limit_given;
+    // MINID approximate (~) trimming is node-boundary aware too, via
+    // store.xtrim_minid_approx — whole head nodes are evicted while the node's
+    // last id < threshold (and within LIMIT), mirroring streamTrim. An un-LIMITed
+    // `~` gets the upstream default cap; an explicit LIMIT 0 means no cap.
+    // (frankenredis-8t4vl)
 
     if is_maxlen {
         let max_len = maxlen_value.expect("maxlen_value set when strategy = MaxLen");
@@ -7975,11 +7975,16 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         ))
     } else {
         let min_id = minid_value.expect("minid_value set when strategy = MinId");
-        if approx_noop_minid {
-            store.xlen(&argv[1], now_ms)?;
-            return Ok(RespFrame::Integer(0));
-        }
-        let removed = store.xtrim_minid(&argv[1], min_id, limit, now_ms)?;
+        let removed = if approx {
+            let approx_limit = if limit_given {
+                limit
+            } else {
+                Some(STREAM_APPROX_TRIM_DEFAULT_LIMIT)
+            };
+            store.xtrim_minid_approx(&argv[1], min_id, approx_limit, now_ms)?
+        } else {
+            store.xtrim_minid(&argv[1], min_id, limit, now_ms)?
+        };
         Ok(RespFrame::Integer(
             i64::try_from(removed).unwrap_or(i64::MAX),
         ))
@@ -35597,6 +35602,88 @@ mod tests {
             dispatch_argv(&[b"XLEN".to_vec(), b"s".to_vec()], &mut store, 0).unwrap(),
             RespFrame::Integer(51),
             "XADD ~5 must trim a whole node without LIMIT"
+        );
+    }
+
+    /// (frankenredis-8t4vl) XTRIM MINID ~ N [LIMIT M] follows upstream's
+    /// approximate whole-node model: it drops only full head nodes whose last id
+    /// is still below the MINID threshold, and a sub-node LIMIT drops nothing.
+    #[test]
+    fn xtrim_minid_approximate_respects_node_boundary_8t4vl() {
+        let mut store = Store::new();
+
+        let add_n = |store: &mut Store, n: usize| {
+            dispatch_argv(&[b"DEL".to_vec(), b"s".to_vec()], store, 0).expect("del");
+            for i in 1..=n {
+                dispatch_argv(
+                    &[
+                        b"XADD".to_vec(),
+                        b"s".to_vec(),
+                        format!("{i}-0").into_bytes(),
+                        b"f".to_vec(),
+                        b"v".to_vec(),
+                    ],
+                    store,
+                    0,
+                )
+                .expect("xadd");
+            }
+        };
+        let xtrim = |store: &mut Store, args: &[&[u8]]| -> i64 {
+            let mut argv = vec![b"XTRIM".to_vec(), b"s".to_vec()];
+            for a in args {
+                argv.push(a.to_vec());
+            }
+            match dispatch_argv(&argv, store, 0).expect("xtrim") {
+                RespFrame::Integer(n) => n,
+                other => panic!("expected integer, got {other:?}"),
+            }
+        };
+
+        add_n(&mut store, 250);
+        assert_eq!(xtrim(&mut store, &[b"MINID", b"~", b"100-0"]), 0);
+        assert_eq!(xtrim(&mut store, &[b"MINID", b"~", b"150-0"]), 100);
+        assert_eq!(
+            dispatch_argv(&[b"XLEN".to_vec(), b"s".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::Integer(150)
+        );
+        let remaining = dispatch_argv(
+            &[
+                b"XRANGE".to_vec(),
+                b"s".to_vec(),
+                b"-".to_vec(),
+                b"+".to_vec(),
+                b"COUNT".to_vec(),
+                b"1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xrange");
+        assert!(matches!(
+            remaining,
+            RespFrame::Array(Some(ref rows))
+                if matches!(
+                    rows.first(),
+                    Some(RespFrame::Array(Some(first)))
+                        if first.first()
+                            == Some(&RespFrame::BulkString(Some(b"101-0".to_vec())))
+                )
+        ));
+
+        add_n(&mut store, 250);
+        assert_eq!(
+            xtrim(&mut store, &[b"MINID", b"~", b"10000-0", b"LIMIT", b"50"]),
+            0
+        );
+        assert_eq!(
+            xtrim(&mut store, &[b"MINID", b"~", b"10000-0", b"LIMIT", b"150"]),
+            100
+        );
+        add_n(&mut store, 250);
+        assert_eq!(
+            xtrim(&mut store, &[b"MINID", b"~", b"10000-0", b"LIMIT", b"0"]),
+            250
         );
     }
 

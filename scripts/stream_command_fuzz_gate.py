@@ -9,9 +9,9 @@ error CLASS (first error word), masking auto-generated stream IDs/timestamps.
 
 This is the harness that surfaced frankenredis-5r89s (XREADGROUP returned generic
 ERR instead of WRONGTYPE/NOGROUP when the ID was also malformed — validation
-order). Approximate (`~`) XADD/XTRIM trims are intentionally excluded: their exact
-trimmed-count is implementation-defined per node boundaries and the residual
-multi-node MINID~ edge is tracked separately in frankenredis-8t4vl.
+order) and frankenredis-8t4vl (XTRIM MINID ~ approximate node-boundary trim was a
+no-op). Approximate (`~`) MAXLEN/MINID trims are exercised: fr models whole-node
+(stream-node-max-entries = 100) eviction to match streamTrim's count exactly.
 
 Self-launches a clean fr + redis pair and sweeps several seeds.
 Usage: [--bin FR] [--redis-bin REDIS] [--seeds N] [--iters N]
@@ -86,7 +86,7 @@ def gen(r):
     if c == "XADD":
         args = ["XADD", k]
         if r.random() < 0.3: args += ["NOMKSTREAM"]
-        if r.random() < 0.3: args += ["MAXLEN", "=", str(r.randint(0, 5))]  # exact only (8t4vl)
+        if r.random() < 0.3: args += ["MAXLEN", r.choice(["=", "~"]), str(r.randint(0, 5))]
         return args + [r.choice(IDS)] + rnd_fields(r)
     if c == "XLEN": return ["XLEN", k]
     if c in ("XRANGE", "XREVRANGE"):
@@ -98,8 +98,8 @@ def gen(r):
         if r.random() < 0.5: a += ["COUNT", str(r.randint(0, 3))]
         return a + ["STREAMS", r.choice(KEYS), r.choice(IDS)]
     if c == "XDEL": return ["XDEL", k, r.choice(IDS)]
-    if c == "XTRIM":  # exact only; approximate ~ multi-node edge tracked in 8t4vl
-        return ["XTRIM", k, r.choice(["MAXLEN", "MINID"]), "=",
+    if c == "XTRIM":
+        return ["XTRIM", k, r.choice(["MAXLEN", "MINID"]), r.choice(["=", "~"]),
                 r.choice([str(r.randint(0, 5)), r.choice(IDS)])]
     if c == "XSETID":
         a = ["XSETID", k, r.choice(IDS)]
