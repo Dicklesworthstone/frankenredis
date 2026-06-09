@@ -25734,62 +25734,101 @@ fn bitfield_ro_cmd(
         return Err(CommandError::WrongArity("BITFIELD_RO"));
     }
     let key = &argv[1];
-    let mut results: Vec<RespFrame> = Vec::new();
-    let mut i = 2;
 
-    while i < argv.len() {
-        let sub = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if sub.eq_ignore_ascii_case("GET") {
-            if i + 2 >= argv.len() {
-                return Ok(RespFrame::Error("ERR syntax error".to_string()));
-            }
-            let (signed, bits) = match bitfield_parse_encoding(&argv[i + 1]) {
-                Some(v) => v,
-                None => {
+    // (frankenredis-bfro-order) Upstream bitops.c::bitfieldGeneric validates
+    // EVERY operation's args (encoding / offset / value / OVERFLOW keyword) in a
+    // full pass BEFORE rejecting BITFIELD_RO for a write subcommand, and it
+    // type-checks the key in the read-only branch even with no GET op. So a SET/
+    // INCRBY with a malformed type/offset/value — or a bad OVERFLOW keyword
+    // anywhere — surfaces that arg error rather than the "only supports GET"
+    // error, and `BITFIELD_RO wrongtypekey` replies WRONGTYPE. fr previously
+    // short-circuited on the first SET/INCRBY and skipped the no-op type check.
+    let mut has_write = false;
+    {
+        let mut j = 2;
+        while j < argv.len() {
+            let sub =
+                std::str::from_utf8(&argv[j]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            if sub.eq_ignore_ascii_case("GET")
+                || sub.eq_ignore_ascii_case("SET")
+                || sub.eq_ignore_ascii_case("INCRBY")
+            {
+                let needs_value = !sub.eq_ignore_ascii_case("GET");
+                let last = if needs_value { j + 3 } else { j + 2 };
+                if last >= argv.len() {
+                    return Ok(RespFrame::Error("ERR syntax error".to_string()));
+                }
+                let Some((_signed, bits)) = bitfield_parse_encoding(&argv[j + 1]) else {
                     return Ok(RespFrame::Error(
                         "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
                             .to_string(),
                     ));
-                }
-            };
-            let bit_offset = match bitfield_parse_offset(&argv[i + 2], bits) {
-                Some(v) => v,
-                None => {
+                };
+                if bitfield_parse_offset(&argv[j + 2], bits).is_none() {
                     return Ok(RespFrame::Error(
                         "ERR bit offset is not an integer or out of range".to_string(),
                     ));
                 }
-            };
+                if needs_value {
+                    has_write = true;
+                    parse_i64_arg(&argv[j + 3])?;
+                }
+                j += if needs_value { 4 } else { 3 };
+            } else if sub.eq_ignore_ascii_case("OVERFLOW") {
+                // OVERFLOW is a per-op modifier valid in BITFIELD_RO too (ineffective
+                // without a following SET/INCRBY). (br-frankenredis-bitfieldroovrflw)
+                if j + 1 >= argv.len() {
+                    return Ok(RespFrame::Error("ERR syntax error".to_string()));
+                }
+                let mode = std::str::from_utf8(&argv[j + 1])
+                    .map_err(|_| CommandError::InvalidUtf8Argument)?;
+                if !(mode.eq_ignore_ascii_case("WRAP")
+                    || mode.eq_ignore_ascii_case("SAT")
+                    || mode.eq_ignore_ascii_case("FAIL"))
+                {
+                    return Ok(RespFrame::Error(
+                        "ERR Invalid OVERFLOW type specified".to_string(),
+                    ));
+                }
+                j += 2;
+            } else {
+                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            }
+        }
+    }
+    // All args validated: a write subcommand is rejected here (upstream returns
+    // this BEFORE the read-only key lookup/type-check).
+    if has_write {
+        return Ok(RespFrame::Error(
+            "ERR BITFIELD_RO only supports the GET subcommand".to_string(),
+        ));
+    }
+    // Read-only branch: type-check the key once (WRONGTYPE for a non-string
+    // present key, even with no GET op). No-stat peek leaves keyspace accounting
+    // to the per-GET store access below.
+    match store.peek_value_type(key, now_ms) {
+        None | Some(ValueType::String) => {}
+        Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
+    }
+
+    let mut results: Vec<RespFrame> = Vec::new();
+    let mut i = 2;
+    while i < argv.len() {
+        let sub = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if sub.eq_ignore_ascii_case("GET") {
+            // Args already validated above.
+            let (signed, bits) =
+                bitfield_parse_encoding(&argv[i + 1]).expect("GET encoding validated");
+            let bit_offset =
+                bitfield_parse_offset(&argv[i + 2], bits).expect("GET offset validated");
             let val = store
                 .bitfield_get(key, bit_offset, bits, signed, now_ms)
                 .map_err(CommandError::Store)?;
             results.push(RespFrame::Integer(val));
             i += 3;
-        } else if sub.eq_ignore_ascii_case("OVERFLOW") {
-            // Upstream bitops.c::bitfieldGeneric processes OVERFLOW
-            // for both BITFIELD and BITFIELD_RO (it's a per-operation
-            // modifier; ineffective when no SET/INCRBY follows).
-            // (br-frankenredis-bitfieldroovrflw)
-            if i + 1 >= argv.len() {
-                return Ok(RespFrame::Error("ERR syntax error".to_string()));
-            }
-            let owtype =
-                std::str::from_utf8(&argv[i + 1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-            if !owtype.eq_ignore_ascii_case("WRAP")
-                && !owtype.eq_ignore_ascii_case("SAT")
-                && !owtype.eq_ignore_ascii_case("FAIL")
-            {
-                return Ok(RespFrame::Error(
-                    "ERR Invalid OVERFLOW type specified".to_string(),
-                ));
-            }
-            i += 2;
-        } else if sub.eq_ignore_ascii_case("SET") || sub.eq_ignore_ascii_case("INCRBY") {
-            return Ok(RespFrame::Error(
-                "ERR BITFIELD_RO only supports the GET subcommand".to_string(),
-            ));
         } else {
-            return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            // OVERFLOW (no-op for read-only); SET/INCRBY already returned above.
+            i += 2;
         }
     }
     Ok(RespFrame::Array(Some(results)))
@@ -57136,6 +57175,61 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+    }
+
+    #[test]
+    fn bitfield_ro_validates_args_before_write_rejection_bfro_order() {
+        // (frankenredis-bfro-order) Upstream validates EVERY op's args before
+        // rejecting BITFIELD_RO for a write subcommand, and type-checks the key in
+        // the read-only branch even with no GET op. fr used to short-circuit on
+        // the first SET/INCRBY and skip the no-op type check.
+        let mut store = Store::new();
+        let err = |store: &mut Store, args: &[&[u8]]| -> String {
+            let mut argv = vec![b"BITFIELD_RO".to_vec(), b"bf".to_vec()];
+            for a in args {
+                argv.push(a.to_vec());
+            }
+            match dispatch_argv(&argv, store, 0).unwrap() {
+                RespFrame::Error(m) => m,
+                other => panic!("expected error, got {other:?}"), // ubs:ignore — AI triage
+            }
+        };
+        // Invalid type on the write op wins over the read-only rejection.
+        assert!(err(&mut store, &[b"SET", b"i0", b"0", b"1"]).contains("Invalid bitfield type"));
+        // Invalid type on a later op also precedes the read-only rejection.
+        assert!(err(&mut store, &[b"GET", b"u8", b"0", b"SET", b"i-1", b"0", b"2"])
+            .contains("Invalid bitfield type"));
+        // Out-of-range value on the write op precedes the rejection (surfaces as a
+        // CommandError mapped to "value is not an integer or out of range").
+        assert!(matches!(
+            dispatch_argv(
+                &[
+                    b"BITFIELD_RO".to_vec(),
+                    b"bf".to_vec(),
+                    b"SET".to_vec(),
+                    b"u2".to_vec(),
+                    b"0".to_vec(),
+                    b"9223372036854775808".to_vec(),
+                ],
+                &mut store,
+                0,
+            ),
+            Err(CommandError::InvalidInteger)
+        ));
+        // Bad OVERFLOW keyword precedes the rejection.
+        assert!(err(&mut store, &[b"SET", b"i8", b"0", b"1", b"OVERFLOW", b"BAD"])
+            .contains("Invalid OVERFLOW type"));
+        // All args valid + a write op => the read-only rejection stands.
+        assert!(err(&mut store, &[b"SET", b"u8", b"0", b"1", b"INCRBY", b"u8", b"8", b"2"])
+            .contains("BITFIELD_RO only supports the GET subcommand"));
+
+        // Read-only branch type-checks the key even with NO op (WRONGTYPE).
+        dispatch_argv(&[b"RPUSH".to_vec(), b"lk".to_vec(), b"a".to_vec()], &mut store, 0)
+            .expect("rpush");
+        assert!(matches!(
+            dispatch_argv(&[b"BITFIELD_RO".to_vec(), b"lk".to_vec()], &mut store, 0),
+            Err(CommandError::Store(fr_store::StoreError::WrongType))
+        ));
     }
 
     // ── XACK tests ──────────────────────────────────────────────────
