@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "/tmp/tealotter-fr-pass104-current-target/release-perf/fr-bench --port 6391 --clients 50 --requests 300000 --pipeline 16 --workload set --key-prefix pass104set --json-out /data/projects/frankenredis/artifacts/optimization/tealotter-pass104-current-io-profile-20260609/current-set-p16-300k-last.json",
+      "mean": 0.39257689052,
+      "stddev": 0.018226976355220022,
+      "median": 0.39282619242000005,
+      "user": 0.25743995999999997,
+      "system": 0.47691511999999997,
+      "min": 0.36897534242,
+      "max": 0.42516032742000004,
+      "times": [
+        0.36956443742000006,
+        0.38149560042,
+        0.38818563942000006,
+        0.36897534242,
+        0.37990033042000004,
+        0.39746674542000004,
+        0.41043935142000004,
+        0.40038594342000006,
+        0.40419518742000005,
+        0.42516032742000004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

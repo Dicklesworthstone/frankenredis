@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "/tmp/tealotter-fr-pass104-current-target/release-perf/fr-bench --port 6393 --clients 50 --requests 300000 --pipeline 16 --workload set --key-prefix pass105base --json-out artifacts/optimization/tealotter-pass105-string-canonical-fastgate-20260609/paired-baseline-last.json",
+      "mean": 0.3646327595400001,
+      "stddev": 0.014509965136228042,
+      "median": 0.36224255644000003,
+      "user": 0.23975148000000002,
+      "system": 0.4571446,
+      "min": 0.33872545544,
+      "max": 0.39606967444,
+      "times": [
+        0.36145176044,
+        0.39606967444,
+        0.35937851244,
+        0.36797943244000003,
+        0.36413843644,
+        0.36282068444,
+        0.36166442844,
+        0.33872545544,
+        0.35803749044,
+        0.37606172044
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/tmp/tealotter-fr-pass104-current-target/release-perf/fr-bench --port 6394 --clients 50 --requests 300000 --pipeline 16 --workload set --key-prefix pass105cand --json-out artifacts/optimization/tealotter-pass105-string-canonical-fastgate-20260609/paired-candidate-last.json",
+      "mean": 0.36328082393999994,
+      "stddev": 0.013815739703636554,
+      "median": 0.36460747944,
+      "user": 0.25176048,
+      "system": 0.44566359999999994,
+      "min": 0.34322116144,
+      "max": 0.38053725244000003,
+      "times": [
+        0.37039947644,
+        0.35881548244,
+        0.38053725244000003,
+        0.35589510544,
+        0.37611136744,
+        0.35440898244,
+        0.34398045244000003,
+        0.34322116144,
+        0.37745917144,
+        0.37197978744
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

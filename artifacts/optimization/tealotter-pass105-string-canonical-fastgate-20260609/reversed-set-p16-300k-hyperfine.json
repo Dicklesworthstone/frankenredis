@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "/tmp/tealotter-fr-pass104-current-target/release-perf/fr-bench --port 6394 --clients 50 --requests 300000 --pipeline 16 --workload set --key-prefix pass105cand2 --json-out artifacts/optimization/tealotter-pass105-string-canonical-fastgate-20260609/reversed-candidate-last.json",
+      "mean": 0.37689884812,
+      "stddev": 0.023386623820693255,
+      "median": 0.37538454842,
+      "user": 0.23437462,
+      "system": 0.45725146,
+      "min": 0.34502946442000004,
+      "max": 0.41566112742000005,
+      "times": [
+        0.34657412742000004,
+        0.34502946442000004,
+        0.36439231242000003,
+        0.36822218342,
+        0.37169270042,
+        0.37907639642,
+        0.41030304842000004,
+        0.41566112742000005,
+        0.38541178042,
+        0.38262534042
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/tmp/tealotter-fr-pass104-current-target/release-perf/fr-bench --port 6393 --clients 50 --requests 300000 --pipeline 16 --workload set --key-prefix pass105base2 --json-out artifacts/optimization/tealotter-pass105-string-canonical-fastgate-20260609/reversed-baseline-last.json",
+      "mean": 0.37387176322000004,
+      "stddev": 0.010877396100117013,
+      "median": 0.37688920392,
+      "user": 0.22949412000000002,
+      "system": 0.45699335999999996,
+      "min": 0.35339065542000003,
+      "max": 0.38614199942000005,
+      "times": [
+        0.37715034242000006,
+        0.35339065542000003,
+        0.37227153942,
+        0.38614199942000005,
+        0.37077692042000004,
+        0.38101460342000004,
+        0.37662806542000005,
+        0.35722966942,
+        0.38096898342,
+        0.38314485342000004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

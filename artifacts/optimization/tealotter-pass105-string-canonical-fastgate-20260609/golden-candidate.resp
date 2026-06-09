@@ -1,0 +1,75 @@
+>>> PING
++PONG
+>>> FLUSHDB
++OK
+>>> SET k:int 42
++OK
+>>> GET k:int
+$2
+42
+>>> INCR k:int
+:43
+>>> GET k:int
+$2
+43
+>>> SET k:neg -42
++OK
+>>> INCRBY k:neg 2
+:-40
+>>> GET k:neg
+$3
+-40
+>>> SET k:zero 0
++OK
+>>> INCR k:zero
+:1
+>>> GET k:zero
+$1
+1
+>>> SET k:lead 00
++OK
+>>> GET k:lead
+$2
+00
+>>> SET k:minus_zero -0
++OK
+>>> GET k:minus_zero
+$2
+-0
+>>> SET k:x x42
++OK
+>>> GET k:x
+$3
+x42
+>>> INCR k:x
+-ERR value is not an integer or out of range
+>>> SET k:temp 123
++OK
+>>> EXPIRE k:temp 100
+:1
+>>> TTL k:temp
+:100
+>>> SET k:temp x99
++OK
+>>> TTL k:temp
+:-1
+>>> MGET k:int k:neg k:zero k:lead k:minus_zero k:x k:temp
+*7
+$2
+43
+$3
+-40
+$1
+1
+$2
+00
+$2
+-0
+$3
+x42
+$3
+x99
+>>> DEL k:int k:neg k:zero k:lead k:minus_zero k:x k:temp
+:7
+>>> QUIT
++OK
