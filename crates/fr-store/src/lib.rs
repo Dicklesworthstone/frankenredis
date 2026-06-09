@@ -15646,33 +15646,34 @@ impl Store {
                             return Ok((0, result));
                         }
                         let start = cursor as usize;
-                        if start >= zs.len() {
+                        let total = zs.len();
+                        if start >= total {
                             return Ok((0, Vec::new()));
                         }
 
                         let batch_size = count.max(1);
-                        let mut result = Vec::new();
-                        let mut pos = start;
-                        let mut processed = 0;
+                        // (frankenredis-zkkn4) Take the next `batch_size` members
+                        // via index_slice_asc, which jumps to `start` through the
+                        // order-statistic treap in O(log N + batch) when the tree
+                        // is built (the common case for ranked zsets) — versus
+                        // iter_asc().skip(start) = O(start), which makes a full
+                        // ZSCAN O(N²/batch). Cold zsets fall back to the same skip,
+                        // so behavior and the position cursor are unchanged. The
+                        // examined window (== examined count) drives `pos` exactly
+                        // as the old per-member loop did; only matching members are
+                        // returned.
+                        let window = zs.index_slice_asc(start, batch_size);
+                        let examined = window.len();
+                        let result: Vec<(Vec<u8>, f64)> = match pattern {
+                            Some(pat) => window
+                                .into_iter()
+                                .filter(|(member, _)| glob_match(pat, member))
+                                .collect(),
+                            None => window,
+                        };
+                        let pos = start + examined;
 
-                        for (member, score) in zs.iter_asc().skip(start) {
-                            pos += 1;
-                            processed += 1;
-                            if let Some(pat) = pattern
-                                && !glob_match(pat, member)
-                            {
-                                if processed >= batch_size {
-                                    break;
-                                }
-                                continue;
-                            }
-                            result.push((member.to_vec(), score));
-                            if processed >= batch_size {
-                                break;
-                            }
-                        }
-
-                        let next = if pos >= zs.len() { 0 } else { pos as u64 };
+                        let next = if pos >= total { 0 } else { pos as u64 };
                         // SCAN-family commands are read-only: do NOT touch LRU
                         Ok((next, result))
                     }
@@ -28115,6 +28116,129 @@ mod tests {
         let skew_score = skew_old as f64 / skew_new as f64;
         eprintln!("SDF2 skewed 20k_diff_2M: old={skew_old}ns new={skew_new}ns score={skew_score:.2}x");
         assert!(skew_score >= 0.85, "adaptive diff regressed skewed case: {skew_score:.2}x");
+    }
+
+    // (frankenredis-zkkn4) Frozen fingerprint of the full-ZSCAN sequence.
+    const ZSCANRT_GOLDEN: u64 = 0xbc1a_8d4b_00ab_b681;
+
+    // (frankenredis-zkkn4) ZSCAN treap-resume: a full ZSCAN returns exactly the
+    // zset's members in iter_asc order filtered by pattern (the old skip walk's
+    // output) — identical whether or not the order-statistic treap is built —
+    // across COUNT sizes and patterns; pinned by a golden. Plus a Score microbench
+    // of a full ZSCAN with the treap built (O(log N + batch) resume via
+    // index_slice_asc) vs not built (the O(start) skip fallback = old behavior).
+    #[test]
+    fn zscan_treap_resume_isomorphic_and_faster_zscanrt() {
+        use super::{Store, encode_db_key};
+
+        fn full_zscan(store: &mut Store, key: &[u8], pat: Option<&[u8]>, count: usize) -> Vec<(Vec<u8>, f64)> {
+            let mut all = Vec::new();
+            let mut cursor = 0u64;
+            for _ in 0..1_000_000 {
+                let (next, batch) = store.zscan(key, cursor, pat, count, 0).unwrap();
+                all.extend(batch);
+                if next == 0 {
+                    break;
+                }
+                cursor = next;
+            }
+            all
+        }
+
+        let mut st: u64 = 0xA5A5_5A5A_1234_9876;
+        let mut next = || {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            st
+        };
+        let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fnv = |g: &mut u64, b: &[u8]| {
+            for &byte in b {
+                *g ^= u64::from(byte);
+                *g = g.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+
+        for _ in 0..60 {
+            // >128 members forces the skiplist/hashtable encoding (this path).
+            let n = 130 + (next() % 140) as usize;
+            // Distinct ascending scores => iter_asc order == insertion (i) order.
+            let members: Vec<(Vec<u8>, f64)> =
+                (0..n).map(|i| (format!("m{i:05}_{}", next() % 7).into_bytes(), i as f64)).collect();
+            let pat: Option<&[u8]> = match next() % 3 {
+                0 => None,
+                1 => Some(b"*_4"),
+                _ => Some(b"m000*"),
+            };
+            let count = 1 + (next() % 16) as usize;
+            let reference: Vec<(Vec<u8>, f64)> = members
+                .iter()
+                .filter(|(m, _)| pat.is_none_or(|p| super::glob_match(p, m)))
+                .cloned()
+                .collect();
+
+            // Without the treap (fresh zset -> index_slice_asc falls back to skip).
+            let mut s_cold = Store::new();
+            for (m, sc) in &members {
+                s_cold.zadd(b"z", &[(*sc, m.clone())], 0).unwrap();
+            }
+            assert_eq!(full_zscan(&mut s_cold, b"z", pat, count), reference, "ZSCAN cold diverged n={n} count={count}");
+
+            // With the treap built (zrank triggers the build -> O(log N) resume).
+            let mut s_hot = Store::new();
+            for (m, sc) in &members {
+                s_hot.zadd(b"z", &[(*sc, m.clone())], 0).unwrap();
+            }
+            s_hot.zrank(b"z", &members[0].0, 0).unwrap();
+            assert_eq!(full_zscan(&mut s_hot, b"z", pat, count), reference, "ZSCAN hot diverged n={n} count={count}");
+
+            for (m, sc) in &reference {
+                fnv(&mut golden, m);
+                fnv(&mut golden, &sc.to_bits().to_le_bytes());
+            }
+            fnv(&mut golden, &[0xFF]);
+            let _ = encode_db_key;
+        }
+        assert_eq!(
+            golden, ZSCANRT_GOLDEN,
+            "ZSCAN sequence fingerprint changed: {golden:#018x} (golden {ZSCANRT_GOLDEN:#018x})"
+        );
+
+        if cfg!(debug_assertions) {
+            return;
+        }
+        // Score: full ZSCAN of a 20k-member zset at COUNT 10 — treap not built
+        // (skip fallback = old O(N²/batch)) vs treap built (O(N)).
+        let build = || {
+            let mut s = Store::new();
+            for i in 0..20_000u32 {
+                s.zadd(b"z", &[(i as f64, format!("m{i:06}").into_bytes())], 0).unwrap();
+            }
+            s
+        };
+        let mut s_old = build();
+        let mut s_new = build();
+        s_new.zrank(b"z", b"m000000", 0).unwrap(); // build the order-statistic treap
+        let reps = 4;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc.wrapping_add(full_zscan(&mut s_old, b"z", None, 10).len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 = acc2.wrapping_add(full_zscan(&mut s_new, b"z", None, 10).len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(acc, acc2, "old/new returned different totals");
+        let score = old_ns as f64 / new_ns as f64;
+        eprintln!("ZSCANRT full ZSCAN 20k @ COUNT 10: cold(skip)={old_ns}ns hot(treap)={new_ns}ns score={score:.2}x");
+        assert!(score >= 2.0, "treap-resume ZSCAN must be >=2.0x; got {score:.2}x");
     }
 
     // (frankenredis-3e92e) Frozen fingerprint of the full-SCAN key sequence.
