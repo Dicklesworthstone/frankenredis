@@ -6,22 +6,25 @@ Command:
 python3 artifacts/optimization/frankenredis-5srqd-pass67/profile_fr_bench_once.py --workload set --requests 1000000 --pipeline 16 ...
 ```
 
+Exact head: `707abfd5a` (includes the peer `950112bf9` stats-event fix on top
+of pass100).
+
 Result:
 
-- Throughput: `722946.97 ops/sec`
-- Latency: p50 `1060us`, p95 `1328us`, p99 `1680us`
-- Perf samples: `817`, lost samples: `0`
+- Throughput: `686031.30 ops/sec`
+- Latency: p50 `1074us`, p95 `1596us`, p99 `2145us`
+- Perf samples: `886`, lost samples: `0`
 
 Top flat rows:
 
-- `Store::internal_entries_insert`: `8.86%` self / `10.75%` children
-- `[vdso]`: `7.01%` self
-- `Runtime::refresh_store_runtime_info_context`: `5.75%` self /
-  `15.58%` children
-- `foldhash::quality::RandomState::hash_one::<&Vec<u8>>`: `5.40%` self /
-  `6.50%` children
-- `Store::drop_if_expired`: `0.16%` self / `7.26%` children
-- `parse_command_args_borrowed_into`: `1.33%` self / `2.87%` children
+- `Store::internal_entries_insert`: `9.61%` self / `11.05%` children
+- `[vdso]`: `5.26%` self
+- `Runtime::refresh_store_runtime_info_context`: `5.17%` self /
+  `11.06%` children
+- `foldhash::quality::RandomState::hash_one::<&Vec<u8>>`: `4.34%` self /
+  `5.01%` children
+- `Store::drop_if_expired`: `0.16%` self / `4.67%` children
+- `parse_command_args_borrowed_into`: `2.19%` self / `3.51%` children
 
 The pre-pass std-hash stream sidecar removals are no longer a visible target.
 The next profile-backed primitive should attack `internal_entries_insert` /
