@@ -5641,6 +5641,11 @@ impl Runtime {
         if keys.is_empty() {
             return;
         }
+        if self.server.client_tracking_observed_keys.is_empty()
+            && self.server.client_tracking_bcast_clients.is_empty()
+        {
+            return;
+        }
 
         let observed_keys: Vec<(Vec<u8>, HashSet<u64>)> = keys
             .iter()
