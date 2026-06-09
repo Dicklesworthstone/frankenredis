@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use fr_protocol::{ParserConfig, RespFrame, parse_frame, parse_frame_with_config};
+use fr_protocol::{ParserConfig, RespFrame, parse_frame_with_config};
 use fr_runtime::Runtime;
 use libfuzzer_sys::fuzz_target;
 
@@ -156,11 +156,27 @@ fn default_runtime_parser_config() -> ParserConfig {
     }
 }
 
+/// Config for decoding the runtime's OUTPUT. Unlike the input parser
+/// (`default_runtime_parser_config`, fail-closed on RESP3 from untrusted client
+/// bytes), the runtime legitimately EMITS RESP3 frames once a command switches
+/// the reply protocol (e.g. `HELLO 3` → a RESP3 `%` map), so output decoding
+/// must accept RESP3 types. Decoding output with the RESP2-only config tripped
+/// `UnsupportedResp3Type` on the first protocol switch, masking everything a
+/// RESP3-mode session would exercise. (frankenredis-fuzzresp3out)
+fn output_parser_config() -> ParserConfig {
+    ParserConfig {
+        allow_resp3: true,
+        ..default_runtime_parser_config()
+    }
+}
+
 fn decode_all_frames(bytes: &[u8]) -> Vec<RespFrame> {
+    let cfg = output_parser_config();
     let mut frames = Vec::new();
     let mut offset = 0;
     while offset < bytes.len() {
-        let parsed = parse_frame(&bytes[offset..]).expect("runtime output must remain valid RESP");
+        let parsed = parse_frame_with_config(&bytes[offset..], &cfg)
+            .expect("runtime output must remain valid RESP (RESP3 allowed)");
         assert!(
             parsed.consumed > 0,
             "runtime output parser must make progress"
