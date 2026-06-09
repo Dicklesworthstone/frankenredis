@@ -1,0 +1,64 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-ohsk5-2-baseline-target/release-perf/frankenredis --bench-bin /tmp/codex-fr-ohsk5-2-baseline-target/release-perf/fr-bench --port 49048 --workload hset --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix ohsk5_2:paired1m:baseline --json-out artifacts/optimization/frankenredis-ohsk5.2/baseline/last-paired-hset-p16-1m.json",
+      "mean": 1.7809843621700001,
+      "stddev": 0.019655513654671348,
+      "median": 1.78175516592,
+      "user": 1.9024597449999998,
+      "system": 2.16159251,
+      "min": 1.75359723092,
+      "max": 1.80761449792,
+      "times": [
+        1.77992453092,
+        1.7701355479199998,
+        1.7574814239199998,
+        1.80761449792,
+        1.78358580092,
+        1.79638891692,
+        1.79914694792,
+        1.75359723092
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-ohsk5-2-candidate-target/release-perf/frankenredis --bench-bin /tmp/codex-fr-ohsk5-2-baseline-target/release-perf/fr-bench --port 49049 --workload hset --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix ohsk5_2:paired1m:candidate --json-out artifacts/optimization/frankenredis-ohsk5.2/candidate/last-paired-hset-p16-1m.json",
+      "mean": 1.7543096089199997,
+      "stddev": 0.042859135068909635,
+      "median": 1.7382930449199998,
+      "user": 1.899350245,
+      "system": 2.174587135,
+      "min": 1.70152780392,
+      "max": 1.81762768592,
+      "times": [
+        1.81417552892,
+        1.73549337892,
+        1.77118812392,
+        1.81762768592,
+        1.7384846249199999,
+        1.73810146492,
+        1.71787825992,
+        1.70152780392
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

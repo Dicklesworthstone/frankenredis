@@ -1,0 +1,64 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-ohsk5-2-candidate-target/release-perf/frankenredis --bench-bin /tmp/codex-fr-ohsk5-2-baseline-target/release-perf/fr-bench --port 49046 --workload hset --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix ohsk5_2:reverse:candidate --json-out artifacts/optimization/frankenredis-ohsk5.2/candidate/last-reversed-hset-p16-1m.json",
+      "mean": 1.73510668626,
+      "stddev": 0.023866332216318432,
+      "median": 1.73474547526,
+      "user": 1.8408328699999998,
+      "system": 2.1239924199999995,
+      "min": 1.70482817776,
+      "max": 1.76375058076,
+      "times": [
+        1.76184229376,
+        1.73311811576,
+        1.7099395677600002,
+        1.73637283476,
+        1.7143360487600001,
+        1.70482817776,
+        1.76375058076,
+        1.75666587076
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-ohsk5-2-baseline-target/release-perf/frankenredis --bench-bin /tmp/codex-fr-ohsk5-2-baseline-target/release-perf/fr-bench --port 49047 --workload hset --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix ohsk5_2:reverse:baseline --json-out artifacts/optimization/frankenredis-ohsk5.2/baseline/last-reversed-hset-p16-1m.json",
+      "mean": 1.8043301090100001,
+      "stddev": 0.03351858216091114,
+      "median": 1.8040353657600001,
+      "user": 1.893836495,
+      "system": 2.1501564199999996,
+      "min": 1.75335090876,
+      "max": 1.85885709176,
+      "times": [
+        1.80158912476,
+        1.75335090876,
+        1.7794040237600002,
+        1.8268162547600002,
+        1.8280832607600002,
+        1.85885709176,
+        1.8064816067600002,
+        1.78005860076
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

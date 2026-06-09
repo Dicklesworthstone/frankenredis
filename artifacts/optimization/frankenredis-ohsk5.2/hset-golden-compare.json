@@ -1,0 +1,107 @@
+{
+  "baseline_sha256": "5bfc6446d8456bf1a2610a02eda03a88a3786b58bb11606bf9f98346931fa773",
+  "candidate_sha256": "5bfc6446d8456bf1a2610a02eda03a88a3786b58bb11606bf9f98346931fa773",
+  "equal": true,
+  "commands": [
+    [
+      "FLUSHALL"
+    ],
+    [
+      "HSET",
+      "ohsk5:hash",
+      "field:1",
+      "value:1"
+    ],
+    [
+      "HSET",
+      "ohsk5:hash",
+      "field:2",
+      "value:2"
+    ],
+    [
+      "HSET",
+      "ohsk5:hash",
+      "field:1",
+      "value:1b"
+    ],
+    [
+      "HGET",
+      "ohsk5:hash",
+      "field:1"
+    ],
+    [
+      "HGET",
+      "ohsk5:hash",
+      "field:2"
+    ],
+    [
+      "HGETALL",
+      "ohsk5:hash"
+    ],
+    [
+      "HLEN",
+      "ohsk5:hash"
+    ],
+    [
+      "HEXISTS",
+      "ohsk5:hash",
+      "field:1"
+    ],
+    [
+      "HSETNX",
+      "ohsk5:hash",
+      "field:1",
+      "blocked"
+    ],
+    [
+      "HSETNX",
+      "ohsk5:hash",
+      "field:3",
+      "value:3"
+    ],
+    [
+      "HGETALL",
+      "ohsk5:hash"
+    ],
+    [
+      "HDEL",
+      "ohsk5:hash",
+      "field:2"
+    ],
+    [
+      "HGETALL",
+      "ohsk5:hash"
+    ],
+    [
+      "OBJECT",
+      "ENCODING",
+      "ohsk5:hash"
+    ],
+    [
+      "DEBUG",
+      "DIGEST"
+    ],
+    [
+      "SET",
+      "ohsk5:string",
+      "plain"
+    ],
+    [
+      "HSET",
+      "ohsk5:string",
+      "field",
+      "value"
+    ],
+    [
+      "HGETALL",
+      "ohsk5:missing"
+    ]
+  ],
+  "proof_obligations": {
+    "hset_new_vs_overwrite_counts": "raw integer replies are byte-compared",
+    "hash_field_order": "HGETALL transcripts are byte-compared",
+    "encoding_promotion": "OBJECT ENCODING reply is byte-compared",
+    "global_digest": "DEBUG DIGEST reply is byte-compared",
+    "wrongtype_ordering": "string-key HSET error reply is byte-compared"
+  }
+}

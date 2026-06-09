@@ -1,0 +1,88 @@
+> FLUSHALL
+< +OK
+
+> HSET ohsk5:hash field:1 value:1
+< :1
+
+> HSET ohsk5:hash field:2 value:2
+< :1
+
+> HSET ohsk5:hash field:1 value:1b
+< :0
+
+> HGET ohsk5:hash field:1
+< $8
+value:1b
+
+> HGET ohsk5:hash field:2
+< $7
+value:2
+
+> HGETALL ohsk5:hash
+< *4
+$7
+field:1
+$8
+value:1b
+$7
+field:2
+$7
+value:2
+
+> HLEN ohsk5:hash
+< :2
+
+> HEXISTS ohsk5:hash field:1
+< :1
+
+> HSETNX ohsk5:hash field:1 blocked
+< :0
+
+> HSETNX ohsk5:hash field:3 value:3
+< :1
+
+> HGETALL ohsk5:hash
+< *6
+$7
+field:1
+$8
+value:1b
+$7
+field:2
+$7
+value:2
+$7
+field:3
+$7
+value:3
+
+> HDEL ohsk5:hash field:2
+< :1
+
+> HGETALL ohsk5:hash
+< *4
+$7
+field:1
+$8
+value:1b
+$7
+field:3
+$7
+value:3
+
+> OBJECT ENCODING ohsk5:hash
+< $8
+listpack
+
+> DEBUG DIGEST
+< -ERR DEBUG command not allowed. If the enable-debug-command option is set to "local", you can run it from a local connection, otherwise you need to set this option in the configuration file, and then restart the server.
+
+> SET ohsk5:string plain
+< +OK
+
+> HSET ohsk5:string field value
+< -WRONGTYPE Operation against a key holding the wrong kind of value
+
+> HGETALL ohsk5:missing
+< *0
+
