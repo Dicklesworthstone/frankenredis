@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781041496488,
+  "host": "127.0.0.1",
+  "port": 26940,
+  "workload": "set",
+  "clients": 50,
+  "requests": 1000000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "zhphm-p108-rebase-base",
+  "total_time_ms": 1199,
+  "ops_per_sec": 833420.269485194,
+  "bytes_sent": 64338603,
+  "bytes_received": 5000000,
+  "latency_us": {
+    "min": 90,
+    "p50": 892,
+    "p95": 1293,
+    "p99": 1798,
+    "p999": 3359,
+    "max": 4303,
+    "mean": 945.380921000002,
+    "samples": 1000000
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781038826319,
+  "host": "127.0.0.1",
+  "port": 26911,
+  "workload": "set",
+  "clients": 50,
+  "requests": 3000000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "zhphm-p108-profile",
+  "total_time_ms": 3720,
+  "ops_per_sec": 806380.8456138757,
+  "bytes_sent": 182117233,
+  "bytes_received": 15000000,
+  "latency_us": {
+    "min": 59,
+    "p50": 939,
+    "p95": 1272,
+    "p99": 1582,
+    "p999": 2299,
+    "max": 4085,
+    "mean": 980.6975030000015,
+    "samples": 3000000
+  }
+}

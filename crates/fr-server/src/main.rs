@@ -22,8 +22,13 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream as StdTcpStream};
 #[cfg(unix)]
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::process::ExitCode;
+use std::sync::{
+    Arc,
+    mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
+};
+use std::thread;
 use std::time::Duration;
 
 use fr_command::pubsub_message_to_frame_for_protocol;
@@ -37,7 +42,7 @@ use fr_runtime::{
     ClientSession, ClientUnblockMode, PlainKeyedPopCmd, PlainKeyedValuesCmd, Runtime,
 };
 use mio::net::{TcpListener, TcpStream};
-use mio::{Events, Interest, Poll, Token};
+use mio::{Events, Interest, Poll, Token, Waker};
 
 /// Default port matching Redis convention.
 const DEFAULT_PORT: u16 = 6379;
@@ -52,6 +57,9 @@ const MAX_LISTENERS: usize = 16;
 const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
 const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
 const MAX_FRAMES_PER_CLIENT_TICK: usize = 4096;
+const CLIENT_WRITER_QUEUE_CAPACITY: usize = 1024;
+const CLIENT_WRITER_BACKOFF_MICROS: u64 = 25;
+const WRITER_WAKE_TOKEN: Token = Token(usize::MAX - 1);
 
 /// Describes a blocked-on-list operation.
 #[derive(Debug, Clone)]
@@ -305,12 +313,115 @@ impl BlockedWakeIndex {
     }
 }
 
+enum ClientWriterEvent {
+    Flushed(usize),
+    Failed,
+}
+
+struct ClientWriter {
+    sender: SyncSender<Vec<u8>>,
+    events: Receiver<ClientWriterEvent>,
+    pending_bytes: usize,
+    failed: bool,
+}
+
+impl ClientWriter {
+    fn new(stream: &TcpStream, waker: Arc<Waker>) -> io::Result<Self> {
+        let mut writer_stream = clone_writer_stream(stream)?;
+        let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(CLIENT_WRITER_QUEUE_CAPACITY);
+        let (event_sender, events) = mpsc::channel();
+        let _writer_thread = thread::Builder::new()
+            .name("fr-client-writer".to_string())
+            .spawn(move || {
+                while let Ok(bytes) = receiver.recv() {
+                    let len = bytes.len();
+                    let mut written = 0usize;
+                    while written < len {
+                        match writer_stream.write(&bytes[written..]) {
+                            Ok(0) => {
+                                let _ = event_sender.send(ClientWriterEvent::Failed);
+                                let _ = waker.wake();
+                                return;
+                            }
+                            Ok(n) => {
+                                written += n;
+                            }
+                            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_micros(CLIENT_WRITER_BACKOFF_MICROS));
+                            }
+                            Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
+                            Err(_) => {
+                                let _ = event_sender.send(ClientWriterEvent::Failed);
+                                let _ = waker.wake();
+                                return;
+                            }
+                        }
+                    }
+                    let _ = event_sender.send(ClientWriterEvent::Flushed(len));
+                    let _ = waker.wake();
+                }
+            })?;
+        Ok(Self {
+            sender,
+            events,
+            pending_bytes: 0,
+            failed: false,
+        })
+    }
+
+    fn drain_events(&mut self) -> usize {
+        let mut flushed = 0usize;
+        loop {
+            match self.events.try_recv() {
+                Ok(ClientWriterEvent::Flushed(bytes)) => {
+                    self.pending_bytes = self.pending_bytes.saturating_sub(bytes);
+                    flushed = flushed.saturating_add(1);
+                }
+                Ok(ClientWriterEvent::Failed) => {
+                    self.pending_bytes = 0;
+                    self.failed = true;
+                    break;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.pending_bytes = 0;
+                    self.failed = true;
+                    break;
+                }
+            }
+        }
+        flushed
+    }
+
+    fn try_enqueue(&mut self, bytes: Vec<u8>) -> Result<(), TrySendError<Vec<u8>>> {
+        let len = bytes.len();
+        self.sender.try_send(bytes)?;
+        self.pending_bytes = self.pending_bytes.saturating_add(len);
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn clone_writer_stream(stream: &TcpStream) -> io::Result<StdTcpStream> {
+    let owned_fd = stream.as_fd().try_clone_to_owned()?;
+    Ok(StdTcpStream::from(owned_fd))
+}
+
+#[cfg(not(unix))]
+fn clone_writer_stream(_stream: &TcpStream) -> io::Result<StdTcpStream> {
+    Err(io::Error::new(
+        ErrorKind::Unsupported,
+        "client writer stream cloning requires unix file descriptors",
+    ))
+}
+
 /// Per-client connection state.
 struct ClientConnection {
     stream: TcpStream,
     session: ClientSession,
     read_buf: Vec<u8>,
     write_buf: Vec<u8>,
+    writer: Option<ClientWriter>,
     /// True if the client sent QUIT or must be disconnected.
     closing: bool,
     /// If set, the client is blocked waiting for data.
@@ -358,17 +469,87 @@ impl Drop for ClientConnection {
 }
 
 impl ClientConnection {
-    fn new(stream: TcpStream, mut session: ClientSession, now_ms: u64) -> Self {
+    fn new(stream: TcpStream, session: ClientSession, now_ms: u64) -> Self {
+        Self::new_inner(stream, session, now_ms, None)
+    }
+
+    fn new_with_writer(
+        stream: TcpStream,
+        session: ClientSession,
+        now_ms: u64,
+        writer_waker: Arc<Waker>,
+    ) -> Self {
+        Self::new_inner(stream, session, now_ms, Some(writer_waker))
+    }
+
+    fn new_inner(
+        stream: TcpStream,
+        mut session: ClientSession,
+        now_ms: u64,
+        writer_waker: Option<Arc<Waker>>,
+    ) -> Self {
         session.connected_at_ms = now_ms;
         session.last_interaction_ms = now_ms;
+        let writer = writer_waker.and_then(|waker| ClientWriter::new(&stream, waker).ok());
         Self {
             stream,
             session,
             read_buf: Vec::with_capacity(4096),
             write_buf: Vec::new(),
+            writer,
             closing: false,
             blocked: None,
             replication_sent_offset: None,
+        }
+    }
+
+    fn pending_output_bytes(&self) -> usize {
+        self.write_buf.len()
+            + self
+                .writer
+                .as_ref()
+                .map_or(0, |writer| writer.pending_bytes)
+    }
+
+    fn has_pending_output(&self) -> bool {
+        self.pending_output_bytes() > 0
+    }
+
+    fn drain_writer_events(&mut self) -> usize {
+        self.writer.as_mut().map_or(0, ClientWriter::drain_events)
+    }
+
+    fn writer_failed(&self) -> bool {
+        self.writer.as_ref().is_some_and(|writer| writer.failed)
+    }
+
+    fn queue_output_to_writer(&mut self) -> io::Result<bool> {
+        let Some(writer) = self.writer.as_mut() else {
+            return Ok(false);
+        };
+        if writer.failed {
+            return Err(io::Error::new(
+                ErrorKind::BrokenPipe,
+                "client writer failed",
+            ));
+        }
+        if self.write_buf.is_empty() {
+            return Ok(true);
+        }
+        let bytes = std::mem::take(&mut self.write_buf);
+        match writer.try_enqueue(bytes) {
+            Ok(()) => Ok(true),
+            Err(TrySendError::Full(bytes)) => {
+                self.write_buf = bytes;
+                Ok(false)
+            }
+            Err(TrySendError::Disconnected(bytes)) => {
+                self.write_buf = bytes;
+                Err(io::Error::new(
+                    ErrorKind::BrokenPipe,
+                    "client writer channel closed",
+                ))
+            }
         }
     }
 
@@ -968,6 +1149,13 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    let writer_waker = match Waker::new(poll.registry(), WRITER_WAKE_TOKEN) {
+        Ok(waker) => Arc::new(waker),
+        Err(e) => {
+            eprintln!("error: failed to create client writer waker: {e}");
+            return ExitCode::from(1);
+        }
+    };
 
     // (frankenredis-jd75g) Bind one listener per configured address. Startup
     // binds the single configured bind address; CONFIG SET bind can later grow
@@ -1051,15 +1239,17 @@ fn main() -> ExitCode {
                 // (frankenredis-jd75g) Tokens 0..listeners.len() are listening
                 // sockets; accept from the one that signalled readiness.
                 listener_tok if listener_tok.0 < listeners.len() => {
-                    accept_connections(
+                    accept_connections_with_writer(
                         &listeners[listener_tok.0],
                         &mut poll,
                         &mut clients,
                         &mut client_id_to_token,
                         &mut next_handle,
                         &mut runtime,
+                        &writer_waker,
                     );
                 }
+                WRITER_WAKE_TOKEN => {}
                 conn_handle => {
                     if event.is_readable() {
                         handle_readable(
@@ -1090,6 +1280,13 @@ fn main() -> ExitCode {
                 }
             }
         }
+        drain_client_writer_events(
+            &mut clients,
+            &mut runtime,
+            &mut write_tokens,
+            &mut closing_tokens,
+            &mut poll,
+        );
 
         // Run active expiry cycle once per tick (fast cycle).
         let _ = runtime.run_active_expire_cycle(ts, fr_eventloop::ActiveExpireCycleKind::Fast);
@@ -1207,6 +1404,13 @@ fn main() -> ExitCode {
             &mut write_tokens,
             &mut closing_tokens,
         );
+        drain_client_writer_events(
+            &mut clients,
+            &mut runtime,
+            &mut write_tokens,
+            &mut closing_tokens,
+            &mut poll,
+        );
 
         // Clean up clients marked for closing whose write buffers are drained.
         let to_remove: Vec<Token> = closing_tokens
@@ -1214,7 +1418,7 @@ fn main() -> ExitCode {
             .filter(|&t| {
                 clients
                     .get(t)
-                    .map(|c| c.write_buf.is_empty())
+                    .map(|c| !c.has_pending_output())
                     .unwrap_or(true)
             })
             .copied()
@@ -1401,6 +1605,7 @@ fn rebind_listeners(
     }
 }
 
+#[cfg(test)]
 fn accept_connections(
     listener: &TcpListener,
     poll: &mut Poll,
@@ -1408,6 +1613,46 @@ fn accept_connections(
     client_id_to_token: &mut HashMap<u64, Token>,
     next_handle: &mut usize,
     runtime: &mut Runtime,
+) {
+    accept_connections_inner(
+        listener,
+        poll,
+        clients,
+        client_id_to_token,
+        next_handle,
+        runtime,
+        None,
+    );
+}
+
+fn accept_connections_with_writer(
+    listener: &TcpListener,
+    poll: &mut Poll,
+    clients: &mut HashMap<Token, ClientConnection>,
+    client_id_to_token: &mut HashMap<u64, Token>,
+    next_handle: &mut usize,
+    runtime: &mut Runtime,
+    writer_waker: &Arc<Waker>,
+) {
+    accept_connections_inner(
+        listener,
+        poll,
+        clients,
+        client_id_to_token,
+        next_handle,
+        runtime,
+        Some(writer_waker),
+    );
+}
+
+fn accept_connections_inner(
+    listener: &TcpListener,
+    poll: &mut Poll,
+    clients: &mut HashMap<Token, ClientConnection>,
+    client_id_to_token: &mut HashMap<u64, Token>,
+    next_handle: &mut usize,
+    runtime: &mut Runtime,
+    writer_waker: Option<&Arc<Waker>>,
 ) {
     loop {
         // Check maxclients gate via fr-eventloop before accepting.
@@ -1476,7 +1721,15 @@ fn accept_connections(
                     session.socket_fd = Some(stream.as_raw_fd());
                 }
                 let client_id = session.client_id;
-                let conn = ClientConnection::new(stream, session, now_ms());
+                let conn = match writer_waker {
+                    Some(waker) => ClientConnection::new_with_writer(
+                        stream,
+                        session,
+                        now_ms(),
+                        Arc::clone(waker),
+                    ),
+                    None => ClientConnection::new(stream, session, now_ms()),
+                };
                 runtime.record_client_session(&conn.session);
                 clients.insert(conn_handle, conn);
                 client_id_to_token.insert(client_id, conn_handle);
@@ -1653,19 +1906,19 @@ fn handle_readable(
     // values that diff cleanly against vendored 7.2.
     conn.session.qbuf_bytes = conn.read_buf.len();
     conn.session.qbuf_free_bytes = conn.read_buf.capacity().saturating_sub(conn.read_buf.len());
-    conn.session.output_buffer_bytes = conn.write_buf.len();
+    conn.session.output_buffer_bytes = conn.pending_output_bytes();
     // (frankenredis-jrqgd) Sample the *pre-dispatch* read/write buffer
     // sizes into the server-wide recent-max accumulators. We must do
     // this BEFORE the dispatch drains read_buf — by the time we get
     // to record_client_session below, qbuf_bytes is back to 0 because
     // the parser consumed every byte.
-    runtime.observe_client_buffer_sizes(conn.read_buf.len(), conn.write_buf.len());
+    runtime.observe_client_buffer_sizes(conn.read_buf.len(), conn.pending_output_bytes());
 
     // Swap in this client's session, process frames, swap back.
     let session = std::mem::take(&mut conn.session);
     let prev = runtime.swap_session(session);
 
-    let write_buf_before = conn.write_buf.len();
+    let write_buf_before = conn.pending_output_bytes();
     let had_write_interest = write_tokens.contains(&token);
     let budget_exhausted = process_buffered_frames(
         token,
@@ -1681,7 +1934,7 @@ fn handle_readable(
     );
     record_deferred_buffered_token(token, conn, deferred_tokens, budget_exhausted);
     // Track output bytes generated by command processing.
-    let output_delta = conn.write_buf.len().saturating_sub(write_buf_before);
+    let output_delta = conn.pending_output_bytes().saturating_sub(write_buf_before);
     runtime.track_net_output_bytes(output_delta as u64);
 
     // Swap session back.
@@ -1692,13 +1945,13 @@ fn handle_readable(
     // have consumed bytes off read_buf and appended replies to write_buf.
     conn.session.qbuf_bytes = conn.read_buf.len();
     conn.session.qbuf_free_bytes = conn.read_buf.capacity().saturating_sub(conn.read_buf.len());
-    conn.session.output_buffer_bytes = conn.write_buf.len();
+    conn.session.output_buffer_bytes = conn.pending_output_bytes();
     // (frankenredis-jrqgd) Observe the *post-dispatch* write buffer
     // here as well: handle_writable may drain it before the next
     // handle_readable runs, so this is the only moment we see the
     // reply's pre-flush size. We rely on observe_client_buffer_sizes
     // taking the running max -- passing 0 for qbuf is fine.
-    runtime.observe_client_buffer_sizes(0, conn.write_buf.len());
+    runtime.observe_client_buffer_sizes(0, conn.pending_output_bytes());
     runtime.record_client_session(&conn.session);
 
     // `process_buffered_frames` has already coalesced all currently
@@ -1706,7 +1959,12 @@ fn handle_readable(
     // flush now and only arm WRITABLE for the rare partial/WouldBlock
     // case; this avoids an epoll_ctl add/remove pair on the hot path.
     if !conn.write_buf.is_empty() {
-        if budget_exhausted {
+        if conn.writer.is_some() {
+            if arm_write_interest(token, conn, poll, write_tokens).is_err() {
+                conn.closing = true;
+                closing_tokens.insert(token);
+            }
+        } else if budget_exhausted {
             write_tokens.insert(token);
             let _ = poll.registry().reregister(
                 &mut conn.stream,
@@ -1740,7 +1998,7 @@ fn handle_readable(
                     closing_tokens.insert(token);
                 }
             }
-            conn.session.output_buffer_bytes = conn.write_buf.len();
+            conn.session.output_buffer_bytes = conn.pending_output_bytes();
         }
     }
 }
@@ -1787,7 +2045,8 @@ fn process_buffered_frames(
         }
 
         // Check write buffer limit before processing more frames.
-        if conn.write_buf.len() > runtime.effective_output_hard_limit(conn.session.client_id) {
+        if conn.pending_output_bytes() > runtime.effective_output_hard_limit(conn.session.client_id)
+        {
             eprintln!("warn: client write buffer exceeded limit, disconnecting");
             conn.closing = true;
             closing_tokens.insert(token);
@@ -2259,7 +2518,7 @@ fn process_buffered_frames(
                     ProcessArgvAction::BreakWithoutConsume => break,
                 }
 
-                if conn.write_buf.len()
+                if conn.pending_output_bytes()
                     > runtime.effective_output_hard_limit(conn.session.client_id)
                 {
                     eprintln!("warn: client write buffer exceeded limit, disconnecting");
@@ -2732,7 +2991,7 @@ fn disconnect_if_output_limit_exceeded(
     closing_tokens: &mut HashSet<Token>,
     token: Token,
 ) -> bool {
-    if conn.write_buf.len() > output_buffer_limit {
+    if conn.pending_output_bytes() > output_buffer_limit {
         eprintln!("warn: client write buffer exceeded limit, disconnecting");
         conn.closing = true;
         closing_tokens.insert(token);
@@ -4270,7 +4529,7 @@ fn process_deferred_buffered_clients(ctx: DeferredBufferedClientsContext<'_>) {
 
         let session = std::mem::take(&mut conn.session);
         let prev = runtime.swap_session(session);
-        let write_buf_before = conn.write_buf.len();
+        let write_buf_before = conn.pending_output_bytes();
         let budget_exhausted = process_buffered_frames(
             token,
             conn,
@@ -4283,14 +4542,52 @@ fn process_deferred_buffered_clients(ctx: DeferredBufferedClientsContext<'_>) {
             ts,
             ts_us,
         );
-        let output_delta = conn.write_buf.len().saturating_sub(write_buf_before);
+        let output_delta = conn.pending_output_bytes().saturating_sub(write_buf_before);
         runtime.track_net_output_bytes(output_delta as u64);
         let updated_session = runtime.swap_session(prev);
         conn.session = updated_session;
+        conn.session.output_buffer_bytes = conn.pending_output_bytes();
         runtime.record_client_session(&conn.session);
 
         record_deferred_buffered_token(token, conn, deferred_tokens, budget_exhausted);
         let _ = arm_write_interest(token, conn, poll, write_tokens);
+    }
+}
+
+fn drain_client_writer_events(
+    clients: &mut HashMap<Token, ClientConnection>,
+    runtime: &mut Runtime,
+    write_tokens: &mut HashSet<Token>,
+    closing_tokens: &mut HashSet<Token>,
+    poll: &mut Poll,
+) {
+    let tokens: Vec<Token> = clients.keys().copied().collect();
+    for token in tokens {
+        let Some(conn) = clients.get_mut(&token) else {
+            continue;
+        };
+        let flushed_events = conn.drain_writer_events();
+        for _ in 0..flushed_events {
+            runtime.note_write_event();
+        }
+        let writer_error = if conn.writer_failed() {
+            true
+        } else if conn.writer.is_some() && !conn.write_buf.is_empty() {
+            arm_write_interest(token, conn, poll, write_tokens).is_err()
+        } else {
+            false
+        };
+        if writer_error {
+            conn.closing = true;
+            closing_tokens.insert(token);
+        } else if conn.writer.is_some() && !conn.has_pending_output() {
+            write_tokens.remove(&token);
+            let _ = poll
+                .registry()
+                .reregister(&mut conn.stream, token, Interest::READABLE);
+        }
+        conn.session.output_buffer_bytes = conn.pending_output_bytes();
+        runtime.record_client_session(&conn.session);
     }
 }
 
@@ -4300,6 +4597,22 @@ fn arm_write_interest(
     poll: &mut Poll,
     write_tokens: &mut HashSet<Token>,
 ) -> io::Result<()> {
+    if conn.writer.is_some() {
+        match conn.queue_output_to_writer()? {
+            true => {
+                write_tokens.remove(&token);
+                poll.registry()
+                    .reregister(&mut conn.stream, token, Interest::READABLE)?;
+            }
+            false => {
+                write_tokens.insert(token);
+                poll.registry()
+                    .reregister(&mut conn.stream, token, Interest::READABLE)?;
+            }
+        }
+        return Ok(());
+    }
+
     if conn.write_buf.is_empty() {
         write_tokens.remove(&token);
         poll.registry()
@@ -4549,12 +4862,7 @@ fn propagate_writes_to_replicas(
             let bytes = stream.get(start..).unwrap_or(&[]);
             if !bytes.is_empty() {
                 conn.write_buf.extend_from_slice(bytes);
-                write_tokens.insert(token);
-                let _ = poll.registry().reregister(
-                    &mut conn.stream,
-                    token,
-                    Interest::READABLE | Interest::WRITABLE,
-                );
+                let _ = arm_write_interest(token, conn, poll, write_tokens);
             }
             conn.replication_sent_offset = Some(primary_offset);
         }
@@ -4583,7 +4891,8 @@ fn deliver_monitor_output(
             continue; // don't buffer output for dying connections
         }
         conn.write_buf.extend_from_slice(&line);
-        if conn.write_buf.len() > runtime.effective_output_hard_limit(conn.session.client_id) {
+        if conn.pending_output_bytes() > runtime.effective_output_hard_limit(conn.session.client_id)
+        {
             eprintln!(
                 "warn: client write buffer exceeded limit during monitor delivery, disconnecting"
             );
@@ -4591,12 +4900,10 @@ fn deliver_monitor_output(
             closing_tokens.insert(token);
             continue;
         }
-        write_tokens.insert(token);
-        let _ = poll.registry().reregister(
-            &mut conn.stream,
-            token,
-            Interest::READABLE | Interest::WRITABLE,
-        );
+        if arm_write_interest(token, conn, poll, write_tokens).is_err() {
+            conn.closing = true;
+            closing_tokens.insert(token);
+        }
     }
 }
 
@@ -4646,7 +4953,8 @@ fn deliver_pubsub_messages(
             }
         }
 
-        if conn.write_buf.len() > runtime.effective_output_hard_limit(conn.session.client_id) {
+        if conn.pending_output_bytes() > runtime.effective_output_hard_limit(conn.session.client_id)
+        {
             eprintln!(
                 "warn: client write buffer exceeded limit during pubsub delivery, disconnecting"
             );
@@ -4655,12 +4963,10 @@ fn deliver_pubsub_messages(
             continue;
         }
 
-        write_tokens.insert(token);
-        let _ = poll.registry().reregister(
-            &mut conn.stream,
-            token,
-            Interest::READABLE | Interest::WRITABLE,
-        );
+        if arm_write_interest(token, conn, poll, write_tokens).is_err() {
+            conn.closing = true;
+            closing_tokens.insert(token);
+        }
     }
 }
 
@@ -4793,6 +5099,15 @@ fn handle_writable(
         return;
     };
 
+    if conn.writer.is_some() {
+        if arm_write_interest(token, conn, poll, write_tokens).is_err() {
+            conn.closing = true;
+            closing_tokens.insert(token);
+        }
+        conn.session.output_buffer_bytes = conn.pending_output_bytes();
+        return;
+    }
+
     // (frankenredis-k96mc) Only a flush of PENDING output is a write event. A
     // stray WRITABLE readiness on an already-drained buffer is not a
     // writeToClient call upstream, so it must not be counted.
@@ -4821,7 +5136,7 @@ fn handle_writable(
     // (frankenredis-tepuj) Refresh output buffer accounting on the
     // session so a CLIENT LIST issued between writable events reflects
     // the post-flush state rather than the pre-dispatch snapshot.
-    conn.session.output_buffer_bytes = conn.write_buf.len();
+    conn.session.output_buffer_bytes = conn.pending_output_bytes();
 }
 
 #[cfg(test)]
