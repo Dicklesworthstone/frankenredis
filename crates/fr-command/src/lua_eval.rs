@@ -7,13 +7,110 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::time::Instant;
 
 use fr_protocol::RespFrame;
 use fr_store::{SCRIPT_PROPAGATE_ALL, SCRIPT_PROPAGATE_AOF, SCRIPT_PROPAGATE_REPLICA, Store};
 
 use crate::{CommandError, SCRIPT_NOSCRIPT_ERROR, dispatch_argv, parse_i64_arg};
+
+// ── Lua cycle-breaking GC (frankenredis-qqq17) ──────────────────────────────
+//
+// Our Lua values are reference-counted (`Rc<RefCell<..>>`) with no tracing
+// collector, so any value CYCLE leaks: the strong counts never reach zero even
+// after the owning `LuaState` drops. Two shapes occur in practice and were both
+// surfaced by `fuzz_lua_eval` under LeakSanitizer:
+//   (a) a recursive `local function f() ... f ... end` — the closure's
+//       `captured_env` upvalue cell holds an `Rc` to a `LuaValue::Function`
+//       whose `captured_env` holds that same cell;
+//   (b) a self-referential table `local t = {}; t.x = t` — the table inner
+//       holds an `Rc` (via a contained `LuaValue::Table`) back to itself.
+// Real Redis's Lua has a mark-sweep collector; we emulate the teardown half.
+// Every allocation that can participate in a cycle — table inners and local
+// upvalue cells — registers a `Weak` handle in a thread-local registry. At the
+// end of each `eval_script` (success, error, OR panic-unwind, via the
+// `LuaGcScope` Drop guard) we sweep the slice of the registry allocated by that
+// eval and CLEAR each still-live object's contents: emptying a table inner /
+// setting a cell to `Nil` severs the internal back-edge, the strong counts
+// collapse to zero, and the memory is reclaimed. The sweep runs only after the
+// script's return value has been serialized to an owned `RespFrame` and the
+// `LuaState` has dropped, so live results and non-cyclic data are unaffected
+// (their `Weak`s simply fail to upgrade). The registry holds only `Weak`s, so
+// it never itself keeps a Lua object alive.
+
+enum LuaGcHandle {
+    Table(Weak<RefCell<LuaTableInner>>),
+    Cell(Weak<RefCell<LuaValue>>),
+}
+
+thread_local! {
+    static LUA_GC_REGISTRY: RefCell<Vec<LuaGcHandle>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Register a freshly-created table inner so the next eval-end sweep can break
+/// any cycle it participates in.
+fn lua_gc_register_table(inner: &Rc<RefCell<LuaTableInner>>) {
+    LUA_GC_REGISTRY.with(|reg| reg.borrow_mut().push(LuaGcHandle::Table(Rc::downgrade(inner))));
+}
+
+/// Register a freshly-created local/upvalue cell (the carrier of recursive
+/// closure self-references).
+fn lua_gc_register_cell(cell: &Rc<RefCell<LuaValue>>) {
+    LUA_GC_REGISTRY.with(|reg| reg.borrow_mut().push(LuaGcHandle::Cell(Rc::downgrade(cell))));
+}
+
+/// RAII guard scoping one `eval_script` invocation. Records the registry
+/// high-water mark on entry; on drop (incl. panic unwind) it breaks every cycle
+/// allocated since then and truncates the registry back to the mark, so the
+/// registry length returns to its pre-eval baseline. Declared BEFORE the
+/// `LuaState` in `eval_script` so the state (and its `Env`) drop first, leaving
+/// only genuinely-leaked cycle islands for the sweep to clear. Nested/reentrant
+/// evals each sweep only their own `[mark..]` range.
+struct LuaGcScope {
+    mark: usize,
+}
+
+impl LuaGcScope {
+    fn enter() -> Self {
+        let mark = LUA_GC_REGISTRY.with(|reg| reg.borrow().len());
+        Self { mark }
+    }
+}
+
+impl Drop for LuaGcScope {
+    fn drop(&mut self) {
+        LUA_GC_REGISTRY.with(|reg| {
+            let mut reg = reg.borrow_mut();
+            for handle in reg.iter().skip(self.mark) {
+                match handle {
+                    LuaGcHandle::Table(weak) => {
+                        if let Some(inner) = weak.upgrade() {
+                            // try_borrow_mut is defensive: post-teardown nothing
+                            // should hold a live borrow, and a contended borrow
+                            // must never panic during cleanup.
+                            if let Ok(mut inner) = inner.try_borrow_mut() {
+                                inner.array.clear();
+                                inner.string_hash.clear();
+                                inner.other_hash.clear();
+                                inner.other_keys.clear();
+                                inner.metatable = None;
+                            }
+                        }
+                    }
+                    LuaGcHandle::Cell(weak) => {
+                        if let Some(cell) = weak.upgrade() {
+                            if let Ok(mut slot) = cell.try_borrow_mut() {
+                                *slot = LuaValue::Nil;
+                            }
+                        }
+                    }
+                }
+            }
+            reg.truncate(self.mark);
+        });
+    }
+}
 
 // ── Value type ──────────────────────────────────────────────────────────
 
@@ -243,15 +340,16 @@ impl LuaCoroutine {
 
 impl LuaTable {
     fn new() -> Self {
-        Self {
-            inner: Rc::new(RefCell::new(LuaTableInner {
-                array: Vec::new(),
-                string_hash: HashMap::new(),
-                other_hash: Vec::new(),
-                other_keys: HashSet::new(),
-                metatable: None,
-            })),
-        }
+        let inner = Rc::new(RefCell::new(LuaTableInner {
+            array: Vec::new(),
+            string_hash: HashMap::new(),
+            other_hash: Vec::new(),
+            other_keys: HashSet::new(),
+            metatable: None,
+        }));
+        // (frankenredis-qqq17) Track for cycle-breaking at eval end.
+        lua_gc_register_table(&inner);
+        Self { inner }
     }
     fn get(&self, key: &LuaValue) -> LuaValue {
         self.inner.borrow().get(key)
@@ -2716,9 +2814,11 @@ impl Env {
 
     fn set_local(&mut self, name: &str, value: LuaValue) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope
-                .locals
-                .insert(name.to_string(), Rc::new(RefCell::new(value)));
+            let cell = Rc::new(RefCell::new(value));
+            // (frankenredis-qqq17) Track upvalue cells: a recursive closure's
+            // captured_env can hold an Rc back to this cell, forming a leak.
+            lua_gc_register_cell(&cell);
+            scope.locals.insert(name.to_string(), cell);
         }
     }
 
@@ -11719,6 +11819,10 @@ pub fn eval_script(
 ) -> Result<RespFrame, String> {
     store.clear_script_propagation_state();
     store.script_propagation_mode = SCRIPT_PROPAGATE_ALL;
+    // (frankenredis-qqq17) Break any Rc cycles this script allocates when it
+    // returns. Declared before `state` so the LuaState/Env drop first (reverse
+    // declaration order), leaving only leaked cycle islands for the sweep.
+    let _lua_gc = LuaGcScope::enter();
     let mut state = LuaState::new(store, now_ms);
 
     let keys_vals: Vec<LuaValue> = keys.iter().map(|k| LuaValue::Str(k.clone())).collect();
