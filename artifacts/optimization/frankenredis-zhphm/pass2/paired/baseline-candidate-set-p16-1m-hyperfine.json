@@ -1,0 +1,64 @@
+{
+  "results": [
+    {
+      "command": "env OUT=artifacts/optimization/frankenredis-zhphm/pass2/paired/baseline SERVER=/tmp/rch_target_fr_zhphm_base/release-perf/frankenredis BENCH=/tmp/rch_target_fr_zhphm_base/release-perf/fr-bench PORT=26823 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-zhphm/pass2/paired/baseline-set-p16-1m-last.json KEY_PREFIX=zhphm-p2-pair-base artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 1.2905464265150002,
+      "stddev": 0.04148275467841115,
+      "median": 1.28136772664,
+      "user": 1.3412430149999999,
+      "system": 2.1422843149999995,
+      "min": 1.23620368814,
+      "max": 1.3706262751400002,
+      "times": [
+        1.27737624414,
+        1.3227246791400002,
+        1.23620368814,
+        1.2853592091400001,
+        1.2644674871400001,
+        1.3706262751400002,
+        1.3021517121400001,
+        1.2654621171400002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "env OUT=artifacts/optimization/frankenredis-zhphm/pass2/paired/candidate SERVER=/tmp/rch_target_fr_zhphm_p2_candidate_remote/release-perf/frankenredis BENCH=/tmp/rch_target_fr_zhphm_p2_candidate_remote/release-perf/fr-bench PORT=26824 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-zhphm/pass2/paired/candidate-set-p16-1m-last.json KEY_PREFIX=zhphm-p2-pair-cand artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 1.224995184515,
+      "stddev": 0.028099518646867726,
+      "median": 1.22310215764,
+      "user": 1.2763692649999998,
+      "system": 2.07724969,
+      "min": 1.18614831814,
+      "max": 1.2702782671400001,
+      "times": [
+        1.1952351701400001,
+        1.2119252131400002,
+        1.23856377314,
+        1.22070112414,
+        1.18614831814,
+        1.25160641914,
+        1.22550319114,
+        1.2702782671400001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

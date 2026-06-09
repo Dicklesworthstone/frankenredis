@@ -1751,6 +1751,19 @@ impl SmallStr {
         }
     }
 
+    fn from_slice(value: &[u8]) -> Self {
+        if value.len() <= SMALL_STR_INLINE_CAP {
+            let mut bytes = [0; SMALL_STR_INLINE_CAP];
+            bytes[..value.len()].copy_from_slice(value);
+            Self::Inline {
+                len: value.len() as u8,
+                bytes,
+            }
+        } else {
+            Self::Heap(value.to_vec())
+        }
+    }
+
     fn as_slice(&self) -> &[u8] {
         match self {
             Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
@@ -1799,7 +1812,7 @@ impl From<Vec<u8>> for SmallStr {
 
 impl From<&[u8]> for SmallStr {
     fn from(value: &[u8]) -> Self {
-        Self::from_vec(value.to_vec())
+        Self::from_slice(value)
     }
 }
 
@@ -1912,6 +1925,13 @@ fn canonical_string_value(value: Vec<u8>) -> Value {
     match parse_i64(value.as_slice()) {
         Ok(integer) => Value::Integer(integer),
         Err(_) => Value::String(value.into()),
+    }
+}
+
+fn canonical_string_value_from_slice(value: &[u8]) -> Value {
+    match parse_i64(value) {
+        Ok(integer) => Value::Integer(integer),
+        Err(_) => Value::String(SmallStr::from_slice(value)),
     }
 }
 
@@ -4367,7 +4387,15 @@ impl Store {
 
     pub fn set_plain_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) {
         if !self.drop_if_expired(key, now_ms) {
-            self.set(key.to_vec(), value.to_vec(), None, now_ms);
+            let mut entry = Entry::new(canonical_string_value_from_slice(value), None, now_ms);
+            entry.lfu_freq = if self.lfu_tracking_enabled() {
+                LFU_INIT_VAL
+            } else {
+                0
+            };
+            entry.lfu_last_touch_min = now_ms / 60_000;
+            self.internal_entries_insert(key.to_vec(), entry);
+            self.dirty = self.dirty.saturating_add(1);
             return;
         }
 
@@ -4388,7 +4416,7 @@ impl Store {
             } else {
                 0
             };
-            entry.value = canonical_string_value(value.to_vec());
+            entry.value = canonical_string_value_from_slice(value);
             entry.set_expiry_ms(None);
             entry.last_access_ms = now_ms;
             entry.lfu_freq = next_lfu_freq;
@@ -23095,6 +23123,42 @@ mod tests {
         assert_eq!(actual.db_expires_counts, expected.db_expires_counts);
         assert_eq!(actual.dirty, expected.dirty);
         assert_eq!(actual.state_digest(), expected.state_digest());
+    }
+
+    #[test]
+    fn set_plain_borrowed_matches_set_for_new_integer_and_string_values() {
+        for value in [
+            b"123".as_slice(),
+            b"abc".as_slice(),
+            b"".as_slice(),
+            b"007".as_slice(),
+            b"-42".as_slice(),
+            b"0123456789abcdef".as_slice(),
+        ] {
+            let mut expected = Store::new();
+            let mut actual = Store::new();
+
+            expected.set(b"k".to_vec(), value.to_vec(), None, 100);
+            actual.set_plain_borrowed(b"k", value, 100);
+
+            assert_eq!(actual.get(b"k", 101), expected.get(b"k", 101));
+            assert_eq!(
+                actual.object_encoding(b"k", 101),
+                expected.object_encoding(b"k", 101),
+                "encoding mismatch for {value:?}"
+            );
+            assert_eq!(
+                actual.memory_usage_for_key(b"k", 101),
+                expected.memory_usage_for_key(b"k", 101),
+                "memory usage mismatch for {value:?}"
+            );
+            assert_eq!(actual.dirty, expected.dirty, "dirty mismatch for {value:?}");
+            assert_eq!(
+                actual.state_digest(),
+                expected.state_digest(),
+                "digest mismatch for {value:?}"
+            );
+        }
     }
 
     #[test]

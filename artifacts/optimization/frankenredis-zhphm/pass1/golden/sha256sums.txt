@@ -1,0 +1,3 @@
+f7ef2a780c30693f8d0d20ab53edc0f13d153a155247e670ac7589bad9a40bbb  artifacts/optimization/frankenredis-zhphm/pass1/golden/transcript.resp
+ca0696628ddfcf87289e11464b35f3c64362240a72c57ff0e87bc352f40f019c  artifacts/optimization/frankenredis-zhphm/pass1/golden/baseline.resp
+ca0696628ddfcf87289e11464b35f3c64362240a72c57ff0e87bc352f40f019c  artifacts/optimization/frankenredis-zhphm/pass1/golden/candidate.resp

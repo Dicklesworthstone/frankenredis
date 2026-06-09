@@ -69,7 +69,10 @@ fn assert_iso_set() {
         let mut borrowed_store = Store::new();
         let added_owned = owned_store.sadd(&key, &batch, 0).unwrap();
         let added_borrowed = borrowed_store.sadd(&key, &borrowed, 0).unwrap();
-        assert_eq!(added_owned, added_borrowed, "sadd count batch {bi} diverged");
+        assert_eq!(
+            added_owned, added_borrowed,
+            "sadd count batch {bi} diverged"
+        );
 
         let mut a = owned_store.smembers(&key, 0).unwrap();
         let mut b = borrowed_store.smembers(&key, 0).unwrap();

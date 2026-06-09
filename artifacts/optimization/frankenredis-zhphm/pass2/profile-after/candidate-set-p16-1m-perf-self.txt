@@ -1,0 +1,1252 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 297  of event 'cycles:P'
+# Event count (approx.): 5314862454
+#
+# Overhead  Symbol                                                                                                                                                                                                  IPC   [IPC Coverage]
+# ........  ......................................................................................................................................................................................................  ....................
+#
+    20.49%  [.] <fr_store::Store>::set_plain_borrowed                                                                                                                                                               -      -            
+            |          
+            |--5.94%--frankenredis::drain_pending_pubsub_to_connection
+            |          
+            |--5.32%--<fr_runtime::ServerState>::propagate_expired_key_deletions
+            |          
+            |--4.13%--frankenredis::process_buffered_frames
+            |          
+            |--0.74%--__memmove_avx_unaligned_erms
+            |          
+            |--0.73%--<fr_runtime::Runtime>::plain_borrowed_default_key_write_allows
+            |          
+            |--0.73%--<fr_store::CommandHistogramTracker>::record_canonical_with_kind
+            |          
+            |--0.72%--__memcmp_avx2_movbe
+            |          
+            |--0.72%--0x7980da78d969
+            |          clock_gettime@@GLIBC_2.17
+            |          <std::sys::pal::unix::time::Timespec>::now
+            |          <fr_runtime::Runtime>::execute_plain_set_borrowed
+            |          
+            |--0.72%--0x7980da78d986
+            |          clock_gettime@@GLIBC_2.17
+            |          <std::sys::pal::unix::time::Timespec>::now
+            |          <fr_runtime::Runtime>::execute_plain_set_borrowed
+            |          
+             --0.69%--<fr_store::Store>::drop_if_expired
+
+     7.57%  [k] 0xffffffff86011916                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffffc0fd771f
+               0xffffffffc0fdb758
+               0xffffffff85ffba18
+               0xffffffff860114df
+               0xffffffff86011a1b
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     6.36%  [k] 0xffffffffc0f92225                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff8604c8b1
+               0xffffffff86009f06
+               0xffffffff8600a176
+               0xffffffff8600a275
+               0xffffffff8600a886
+               0xffffffff85f2df9d
+               0xffffffff85f2e026
+               0xffffffff85f2e2b0
+               0xffffffff85f2e985
+               0xffffffff85f2f11b
+               0xffffffff8502171f
+               0xffffffff8623b890
+               0xffffffff850210af
+               0xffffffff85021b1a
+               0xffffffff85f2b96f
+               0xffffffff8600dd5f
+               0xffffffff86010bf8
+               0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     5.66%  [k] 0xffffffff8519660e                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff85f0db23
+               0xffffffff86026096
+               0xffffffff86027511
+               0xffffffff86071a1f
+               0xffffffff85eec316
+               0xffffffff85eefd13
+               0xffffffff85eefdf4
+               0xffffffff84f25587
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __libc_recv
+               frankenredis::handle_readable
+               0
+
+     5.56%  [k] 0xffffffff86225217                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff850bfde0
+               0xffffffff85ef4062
+               0xffffffff86035e4f
+               0xffffffff86036e97
+               0xffffffff8604ab81
+               0xffffffff8604cf4d
+               0xffffffff86009f06
+               0xffffffff8600a176
+               0xffffffff8600a275
+               0xffffffff8600a886
+               0xffffffff85f2df9d
+               0xffffffff85f2e026
+               0xffffffff85f2e2b0
+               0xffffffff85f2e985
+               0xffffffff85f2f11b
+               0xffffffff8502171f
+               0xffffffff8623b890
+               0xffffffff850210af
+               0xffffffff85021b1a
+               0xffffffff85f2b96f
+               0xffffffff8600dd5f
+               0xffffffff86010bf8
+               0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     4.87%  [.] <fr_runtime::Runtime>::refresh_client_memory_aggregates                                                                                                                                             -      -            
+            |          
+            |--4.14%--0xffffffff860733a9
+            |          0xffffffff85eefaba
+            |          0xffffffff85eefb24
+            |          0xffffffff84f24d8f
+            |          0xffffffff86220551
+            |          0xffffffff84c0012b
+            |          __syscall_cancel
+            |          __send
+            |          <frankenredis::ClientConnection>::try_flush
+            |          0x3
+            |          
+             --0.73%--0xffffffff8602365b
+                       0xffffffff860248f0
+                       0xffffffff860733b6
+                       0xffffffff85eefaba
+                       0xffffffff85eefb24
+                       0xffffffff84f24d8f
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __syscall_cancel
+                       __send
+                       <frankenredis::ClientConnection>::try_flush
+                       0x3
+
+     3.72%  [k] 0xffffffff8519f4a1                                                                                                                                                                                  -      -            
+            |
+            ---0
+
+     3.58%  [k] 0xffffffff84c001bd                                                                                                                                                                                  -      -            
+            |          
+             --3.45%--__memmove_avx_unaligned_erms
+                       0
+
+     2.90%  [k] 0xffffffff84d04109                                                                                                                                                                                  -      -            
+            |          
+            |--1.44%--0xffffffff854fe2fe
+            |          0xffffffff854fe4fa
+            |          0xffffffff854fe8ad
+            |          0xffffffff854feb78
+            |          0xffffffff854ff5bc
+            |          0xffffffff84f24855
+            |          0xffffffff86220551
+            |          0xffffffff84c0012b
+            |          __syscall_cancel
+            |          epoll_wait
+            |          frankenredis::main
+            |          
+            |--0.74%--0xffffffff8604c54a
+            |          0xffffffff86009f06
+            |          0xffffffff8600a176
+            |          0xffffffff8600a275
+            |          0xffffffff8600a886
+            |          0xffffffff85f2df9d
+            |          0xffffffff85f2e026
+            |          0xffffffff85f2e2b0
+            |          0xffffffff85f2e985
+            |          0xffffffff85f2f11b
+            |          0xffffffff8502171f
+            |          0xffffffff8623b890
+            |          0xffffffff850210af
+            |          0xffffffff85021b1a
+            |          0xffffffff85f2b96f
+            |          0xffffffff8600dd5f
+            |          0xffffffff86010bf8
+            |          0xffffffff86010f85
+            |          0xffffffff860110d6
+            |          0xffffffff86011271
+            |          0xffffffff86011c1d
+            |          0xffffffff86011dd5
+            |          0xffffffff8603d9fa
+            |          0xffffffff8603f912
+            |          0xffffffff86040239
+            |          0xffffffff86022e1d
+            |          0xffffffff86023c23
+            |          0xffffffff860248f0
+            |          0xffffffff860733b6
+            |          0xffffffff85eefaba
+            |          0xffffffff85eefb24
+            |          0xffffffff84f24d8f
+            |          0xffffffff86220551
+            |          0xffffffff84c0012b
+            |          __syscall_cancel
+            |          __send
+            |          <frankenredis::ClientConnection>::try_flush
+            |          0x3
+            |          
+             --0.73%--0xffffffff85f2b5ae
+                       0xffffffff8600dd5f
+                       0xffffffff86010bf8
+                       0xffffffff86010f85
+                       0xffffffff860110d6
+                       0xffffffff86011271
+                       0xffffffff86011c1d
+                       0xffffffff86011dd5
+                       0xffffffff8603d9fa
+                       0xffffffff8603f912
+                       0xffffffff86040239
+                       0xffffffff86022e1d
+                       0xffffffff86023c23
+                       0xffffffff860248f0
+                       0xffffffff860733b6
+                       0xffffffff85eefaba
+                       0xffffffff85eefb24
+                       0xffffffff84f24d8f
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __syscall_cancel
+                       __send
+                       <frankenredis::ClientConnection>::try_flush
+                       0x3
+
+     2.34%  [.] fr_protocol::parse_command_args_borrowed_into                                                                                                                                                       -      -            
+            |          
+            |--1.52%--__memcmp_avx2_movbe
+            |          
+             --0.73%--_mi_page_malloc_zero
+                       0x415d415c415b0000
+
+     2.18%  [.] frankenredis::process_buffered_frames                                                                                                                                                               -      -            
+            |          
+            |--0.73%--__memcmp_avx2_movbe
+            |          
+            |--0.73%--<fr_protocol::RespFrame>::encode_into
+            |          
+             --0.72%--mi_free
+
+     1.68%  [.] fr_store::canonical_string_value_from_slice                                                                                                                                                         -      -            
+            |          
+            |--0.85%--<fr_store::Store>::drop_if_expired
+            |          
+             --0.76%--__memcmp_avx2_movbe
+
+     1.47%  [k] 0xffffffff85f02a0c                                                                                                                                                                                  -      -            
+            |          
+            |--0.73%--0xffffffffc0fdb405
+            |          0xffffffff8600a80a
+            |          0xffffffff85f2df9d
+            |          0xffffffff85f2e026
+            |          0xffffffff85f2e2b0
+            |          0xffffffff85f2e985
+            |          0xffffffff85f2f11b
+            |          0xffffffff8502171f
+            |          0xffffffff8623b890
+            |          0xffffffff850210af
+            |          0xffffffff85021b1a
+            |          0xffffffff85f2b96f
+            |          0xffffffff8600dd5f
+            |          0xffffffff86010bf8
+            |          0xffffffff86010f85
+            |          0xffffffff860110d6
+            |          0xffffffff86011271
+            |          0xffffffff86011c1d
+            |          0xffffffff86011dd5
+            |          0xffffffff8603d9fa
+            |          0xffffffff8603f912
+            |          0xffffffff86040239
+            |          0xffffffff86022e1d
+            |          0xffffffff86023c23
+            |          0xffffffff860248f0
+            |          0xffffffff860733b6
+            |          0xffffffff85eefaba
+            |          0xffffffff85eefb24
+            |          0xffffffff84f24d8f
+            |          0xffffffff86220551
+            |          0xffffffff84c0012b
+            |          __syscall_cancel
+            |          __send
+            |          <frankenredis::ClientConnection>::try_flush
+            |          0x3
+            |          
+             --0.73%--0xffffffffc0fee74c
+                       0xffffffffc0f92026
+                       0xffffffffc0f92477
+                       0xffffffffc0fb087e
+                       0xffffffff85ffba18
+                       0xffffffff8600a80a
+                       0xffffffff85f2df9d
+                       0xffffffff85f2e026
+                       0xffffffff85f2e2b0
+                       0xffffffff85f2e985
+                       0xffffffff85f2f11b
+                       0xffffffff8502171f
+                       0xffffffff8623b890
+                       0xffffffff850210af
+                       0xffffffff85021b1a
+                       0xffffffff85f2b96f
+                       0xffffffff8600dd5f
+                       0xffffffff86010bf8
+                       0xffffffff86010f85
+                       0xffffffff860110d6
+                       0xffffffff86011271
+                       0xffffffff86011c1d
+                       0xffffffff86011dd5
+                       0xffffffff8603d9fa
+                       0xffffffff8603f912
+                       0xffffffff86040239
+                       0xffffffff86022e1d
+                       0xffffffff86023c23
+                       0xffffffff860248f0
+                       0xffffffff860733b6
+                       0xffffffff85eefaba
+                       0xffffffff85eefb24
+                       0xffffffff84f24d8f
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __syscall_cancel
+                       __send
+                       <frankenredis::ClientConnection>::try_flush
+                       0x3
+
+     1.45%  [.] <fr_runtime::Runtime>::plain_borrowed_default_key_write_allows                                                                                                                                      -      -            
+     0.80%  [k] 0xffffffff8507e5d4                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff8507e746
+               0xffffffff85089c35
+               0xffffffff85079cb1
+               0xffffffff85137e40
+               0xffffffff851524f6
+               0xffffffff85139003
+               0xffffffff85139f5d
+               0xffffffff84fc4bc8
+               0xffffffff86227724
+               0xffffffff84c00f0b
+               0xffffffffc0fd778b
+               0xffffffffc0fdb414
+               0xffffffff85ffba18
+               0xffffffff8600a80a
+               0xffffffff85f2df9d
+               0xffffffff85f2e026
+               0xffffffff85f2e2b0
+               0xffffffff85f2e985
+               0xffffffff85f2f11b
+               0xffffffff8502171f
+               0xffffffff8623b890
+               0xffffffff850210af
+               0xffffffff85021b1a
+               0xffffffff85f2b96f
+               0xffffffff8600dd5f
+               0xffffffff86010bf8
+               0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.79%  [.] core::str::converts::from_utf8                                                                                                                                                                      -      -            
+            |          
+             --0.73%--<hashbrown::map::HashMap<u64, alloc::vec::Vec<fr_store::PubSubMessage>, foldhash::quality::RandomState>>::remove::<u64>
+
+     0.78%  [k] 0xffffffff85f2a87a                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffffc0f92026
+               0xffffffffc0f92477
+               0xffffffffc0fb087e
+               0xffffffff85ffba18
+               0xffffffff8600a80a
+               0xffffffff85f2df9d
+               0xffffffff85f2e026
+               0xffffffff85f2e2b0
+               0xffffffff85f2e985
+               0xffffffff85f2f11b
+               0xffffffff8502171f
+               0xffffffff8623b890
+               0xffffffff850210af
+               0xffffffff85021b1a
+               0xffffffff85f2b96f
+               0xffffffff8600dd5f
+               0xffffffff86010bf8
+               0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [.] <fr_runtime::ClientSession as core::clone::Clone>::clone                                                                                                                                            -      -            
+            |
+            ---0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [.] <fr_runtime::Runtime>::is_pubsub_client                                                                                                                                                             -      -            
+     0.73%  [k] 0xffffffff84f87bc0                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffffc0fdb758
+               0xffffffff85ffba18
+               0xffffffff860114df
+               0xffffffff86011a1b
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [k] 0xffffffff85021ef3                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff85f0b73a
+               0xffffffff85f2f091
+               0xffffffff8502171f
+               0xffffffff8623b890
+               0xffffffff850210af
+               0xffffffff85021b1a
+               0xffffffff85f2b96f
+               0xffffffff8600dd5f
+               0xffffffff86010bf8
+               0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [.] <fr_runtime::Runtime>::drain_pending_pubsub                                                                                                                                                         -      -            
+     0.73%  [k] 0xffffffff8603c843                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff86023a39
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [.] <fr_store::CommandHistogramTracker>::record_with_kind                                                                                                                                               -      -            
+            |          
+             --0.73%--0x7980da78d986
+                       clock_gettime@@GLIBC_2.17
+                       <std::sys::pal::unix::time::Timespec>::now
+                       <fr_runtime::Runtime>::execute_plain_set_borrowed
+
+     0.73%  [k] 0xffffffff8602f2c9                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff850bfde0
+               0xffffffff85ef4062
+               0xffffffff86035e4f
+               0xffffffff86036e97
+               0xffffffff8604ab81
+               0xffffffff8604cf4d
+               0xffffffff86009f06
+               0xffffffff8600a176
+               0xffffffff8600a275
+               0xffffffff8600a886
+               0xffffffff85f2df9d
+               0xffffffff85f2e026
+               0xffffffff85f2e2b0
+               0xffffffff85f2e985
+               0xffffffff85f2f11b
+               0xffffffff8502171f
+               0xffffffff8623b890
+               0xffffffff850210af
+               0xffffffff85021b1a
+               0xffffffff85f2b96f
+               0xffffffff8600dd5f
+               0xffffffff86010bf8
+               0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [k] 0xffffffff85f2b702                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff860248fb
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [k] 0xffffffff85f2e2b5                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [k] 0xffffffff850bc717                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff8502171f
+               0xffffffff8623b890
+               0xffffffff850210af
+               0xffffffff85021b1a
+               0xffffffff85f2b96f
+               0xffffffff8600dd5f
+               0xffffffff86010bf8
+               0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [k] 0xffffffff8600a7a3                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff8604ce77
+               0xffffffff86009f06
+               0xffffffff8600a176
+               0xffffffff8600a275
+               0xffffffff8600a886
+               0xffffffff85f2df9d
+               0xffffffff85f2e026
+               0xffffffff85f2e2b0
+               0xffffffff85f2e985
+               0xffffffff85f2f11b
+               0xffffffff8502171f
+               0xffffffff8623b890
+               0xffffffff850210af
+               0xffffffff85021b1a
+               0xffffffff85f2b96f
+               0xffffffff8600dd5f
+               0xffffffff86010bf8
+               0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [k] 0xffffffff84c00005                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff85eff157
+               0xffffffff86022e9a
+               0xffffffff860239fb
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [k] 0xffffffff860222e6                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff85eeb894
+               0xffffffff854fe32e
+               0xffffffff854fe4fa
+               0xffffffff854fe8ad
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               epoll_wait
+               frankenredis::main
+
+     0.73%  [k] 0xffffffff862251d0                                                                                                                                                                                  -      -            
+            |          
+             --0.73%--0xffffffff850c03a0
+                       0xffffffff85089c45
+                       0xffffffff85079cb1
+                       0xffffffff85137e40
+                       0xffffffff851524f6
+                       0xffffffff85139003
+                       0xffffffff85139f5d
+                       0xffffffff84fc4bc8
+                       0xffffffff8622777a
+                       0xffffffff84c00f0b
+                       0xffffffff851a0013
+                       0xffffffff851a0563
+                       0xffffffff851a2b6a
+                       0xffffffff85124d3c
+                       0xffffffff862206af
+                       0xffffffff84c0012b
+                       __syscall_cancel
+                       __send
+                       <frankenredis::ClientConnection>::try_flush
+                       0x3
+
+     0.73%  [k] 0xffffffff85088541                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff8507e4cb
+               0xffffffff8507e5d4
+               0xffffffff8508995a
+               0xffffffff85090754
+               0xffffffff8506ca13
+               0xffffffff8506fd7b
+               0xffffffff8622f2bd
+               0xffffffff8622f947
+               0xffffffff86228929
+               0xffffffff86228a43
+               0xffffffff86227734
+               0xffffffff84c00f0b
+               <fr_store::Store>::drop_if_expired
+
+     0.73%  [k] 0xffffffff8604c3c4                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff860248fb
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [k] 0xffffffff86010f8b                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff851a2b20
+               0xffffffff85124d3c
+               0xffffffff862206af
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [k] 0xffffffffc0fddc8b                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff8600dd5f
+               0xffffffff86010bf8
+               0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [k] 0xffffffff8602f82a                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff8603476a
+               0xffffffff86036e19
+               0xffffffff8604ab81
+               0xffffffff8604cf4d
+               0xffffffff86009f06
+               0xffffffff8600a176
+               0xffffffff8600a275
+               0xffffffff8600a886
+               0xffffffff85f2df9d
+               0xffffffff85f2e026
+               0xffffffff85f2e2b0
+               0xffffffff85f2e985
+               0xffffffff85f2f11b
+               0xffffffff8502171f
+               0xffffffff8623b890
+               0xffffffff850210af
+               0xffffffff85021b1a
+               0xffffffff85f2b96f
+               0xffffffff8600dd5f
+               0xffffffff86010bf8
+               0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [.] 0x000000000000093b                                                                                                                                                                                  -      -            
+     0.73%  [k] 0xffffffffc0fd4727                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff860114df
+               0xffffffff86011a1b
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [k] 0xffffffffc0fbe400                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff86239b8e
+               0xffffffff85f270b3
+               0xffffffff85f27539
+               0xffffffff85f276aa
+               0xffffffff85d0744b
+               0xffffffff85f2b285
+               0xffffffff85f2bc4b
+               0xffffffff8600dd5f
+               0xffffffff86010bf8
+               0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [k] 0xffffffff851a0563                                                                                                                                                                                  -      -            
+            |
+            ---0
+
+     0.73%  [k] 0xffffffff862252e9                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.73%  [k] 0xffffffff85835fd1                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff86025d20
+               0xffffffff86027511
+               0xffffffff86071a1f
+               0xffffffff85eec316
+               0xffffffff85eefd13
+               0xffffffff85eefdf4
+               0xffffffff84f25587
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __libc_recv
+               frankenredis::handle_readable
+               0
+
+     0.72%  [k] 0xffffffff8603f67b                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.72%  [k] 0xffffffff850bc59c                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff8600a886
+               0xffffffff85f2df9d
+               0xffffffff85f2e026
+               0xffffffff85f2e2b0
+               0xffffffff85f2e985
+               0xffffffff85f2f11b
+               0xffffffff8502171f
+               0xffffffff8623b890
+               0xffffffff850210af
+               0xffffffff85021b1a
+               0xffffffff85f2b96f
+               0xffffffff8600dd5f
+               0xffffffff86010bf8
+               0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.72%  [.] __syscall_cancel                                                                                                                                                                                    -      -            
+            |
+            ---0xffffffff85eefdf4
+               0xffffffff84f25587
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __libc_recv
+               frankenredis::handle_readable
+               0
+
+     0.72%  [.] __memset_avx2_unaligned_erms                                                                                                                                                                        -      -            
+            |          
+             --0.72%--0xffffffff85021ad9
+                       0xffffffff8623a4cd
+                       0xffffffff85ef6b00
+                       0xffffffff860274f8
+                       0xffffffff86071a1f
+                       0xffffffff85eec316
+                       0xffffffff85eefd13
+                       0xffffffff85eefdf4
+                       0xffffffff84f25587
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __syscall_cancel
+                       __libc_recv
+                       frankenredis::handle_readable
+                       0
+
+     0.72%  [k] 0xffffffff85f9f5ce                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff85f2df4b
+               0xffffffff85f2e026
+               0xffffffff85f2e2b0
+               0xffffffff85f2e985
+               0xffffffff85f2f11b
+               0xffffffff8502171f
+               0xffffffff8623b890
+               0xffffffff850210af
+               0xffffffff85021b1a
+               0xffffffff85f2b96f
+               0xffffffff8600dd5f
+               0xffffffff86010bf8
+               0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.72%  [.] mi_free                                                                                                                                                                                             -      -            
+            |          
+             --0.72%--0x7980da78d986
+                       clock_gettime@@GLIBC_2.17
+                       <std::sys::pal::unix::time::Timespec>::now
+                       <fr_runtime::Runtime>::execute_plain_set_borrowed
+
+     0.72%  [k] 0xffffffff8623a54f                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff8603fc74
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.72%  [.] mi_theap_malloc_aligned                                                                                                                                                                             -      -            
+     0.70%  [k] 0xffffffff85f2b5e5                                                                                                                                                                                  -      -            
+            |
+            ---0xffffffff8502171f
+               0xffffffff8623b890
+               0xffffffff850210af
+               0xffffffff85021b1a
+               0xffffffff85f2b96f
+               0xffffffff8600dd5f
+               0xffffffff86010bf8
+               0xffffffff86010f85
+               0xffffffff860110d6
+               0xffffffff86011271
+               0xffffffff86011c1d
+               0xffffffff86011dd5
+               0xffffffff8603d9fa
+               0xffffffff8603f912
+               0xffffffff86040239
+               0xffffffff86022e1d
+               0xffffffff86023c23
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0x3
+
+     0.68%  [.] __memcmp_avx2_movbe                                                                                                                                                                                 -      -            
+     0.08%  [.] <alloc::collections::btree::map::BTreeMap<alloc::vec::Vec<u8>, alloc::collections::btree::set_val::SetValZST>>::insert                                                                              -      -            
+     0.08%  [.] <hashbrown::raw::RawTable<(alloc::vec::Vec<u8>, (usize, usize))>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::vec::Vec<u8>, (usize, usize), foldhash::quality::RandomState>::{closure#0}>  -      -            
+     0.07%  [k] 0xffffffff86001824                                                                                                                                                                                  -      -            
+     0.07%  [.] <fr_runtime::ClientSession>::refresh_authentication_for_server                                                                                                                                      -      -            
+     0.07%  [k] 0xffffffff86035e20                                                                                                                                                                                  -      -            
+     0.07%  [k] 0xffffffffc0fd74ed                                                                                                                                                                                  -      -            
+     0.06%  [k] 0xffffffff85eff147                                                                                                                                                                                  -      -            
+     0.06%  [k] 0xffffffff8603a151                                                                                                                                                                                  -      -            
+     0.06%  [k] 0xffffffff85ef6e5d                                                                                                                                                                                  -      -            
+     0.06%  [k] 0xffffffff86034185                                                                                                                                                                                  -      -            
+     0.06%  [k] 0xffffffff8603a9d2                                                                                                                                                                                  -      -            
+     0.06%  [k] 0xffffffff85f2e332                                                                                                                                                                                  -      -            
+     0.05%  [.] <fr_store::Store>::drop_if_expired                                                                                                                                                                  -      -            
+     0.05%  [k] 0xffffffff8507e4fb                                                                                                                                                                                  -      -            
+     0.05%  [k] 0xffffffff84f8c38f                                                                                                                                                                                  -      -            
+     0.05%  [k] 0xffffffff85089bf6                                                                                                                                                                                  -      -            
+     0.05%  [.] <alloc::collections::btree::map::IntoIter<alloc::vec::Vec<u8>, alloc::collections::btree::set_val::SetValZST>>::dying_next                                                                          -      -            
+     0.05%  [k] 0xffffffff86024ae9                                                                                                                                                                                  -      -            
+     0.05%  [k] 0xffffffff8604ced4                                                                                                                                                                                  -      -            
+     0.05%  [k] 0xffffffff85f1f3c9                                                                                                                                                                                  -      -            
+     0.04%  [k] 0xffffffff84c00080                                                                                                                                                                                  -      -            
+     0.04%  [.] <fr_runtime::Runtime>::execute_plain_set_borrowed                                                                                                                                                   -      -            
+     0.04%  [k] 0xffffffff84d0410b                                                                                                                                                                                  -      -            
+     0.04%  [k] 0xffffffff862287df                                                                                                                                                                                  -      -            
+     0.04%  [.] <fr_store::Store>::update_expiry_deadline                                                                                                                                                           -      -            
+     0.04%  [k] 0xffffffff85079199                                                                                                                                                                                  -      -            
+     0.04%  [k] 0xffffffffc0fdb417                                                                                                                                                                                  -      -            
+     0.04%  [k] 0xffffffff8507b52c                                                                                                                                                                                  -      -            
+     0.04%  [k] 0xffffffff86036cda                                                                                                                                                                                  -      -            
+     0.04%  [k] 0xffffffff86040205                                                                                                                                                                                  -      -            
+     0.04%  [k] 0xffffffff8603b826                                                                                                                                                                                  -      -            
+     0.04%  [k] 0xffffffff86047608                                                                                                                                                                                  -      -            
+     0.00%  [.] frankenredis::handle_readable                                                                                                                                                                       -      -            
+     0.00%  [.] frankenredis::main                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8603a5de                                                                                                                                                                                  -      -            
+     0.00%  [.] epoll_wait                                                                                                                                                                                          -      -            
+     0.00%  [.] <alloc::collections::btree::map::BTreeMap<alloc::vec::Vec<u8>, alloc::collections::btree::set_val::SetValZST>>::remove::<[u8]>                                                                      -      -            
+     0.00%  [k] 0xffffffff860411b9                                                                                                                                                                                  -      -            
+     0.00%  [.] 0x0000000000000936                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff850b2bfb                                                                                                                                                                                  -      -            
+     0.00%  [.] clock_gettime@@GLIBC_2.17                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff86025968                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff851a2235                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff857bfc46                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff853d912c                                                                                                                                                                                  -      -            
+     0.00%  [.] __memmove_avx_unaligned_erms                                                                                                                                                                        -      -            
+     0.00%  [k] 0xffffffff85021989                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff85f0cd09                                                                                                                                                                                  -      -            
+     0.00%  [.] <hashbrown::map::HashMap<mio::token::Token, (), std::hash::random::RandomState>>::remove::<mio::token::Token>                                                                                       -      -            
+     0.00%  [k] 0xffffffff85f0cbb9                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff85021985                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff850c03ab                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff850c9b9b                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8572925f                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff850bc635                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff85838ed6                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8622fb75                                                                                                                                                                                  -      -            
+     0.00%  [.] <frankenredis::ClientConnection>::try_flush                                                                                                                                                         -      -            
+     0.00%  [k] 0xffffffff851a2ac8                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff85069bc6                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff851a2adb                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8507e410                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8621c6a9                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff84fdedcb                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8530d2bc                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8530d2c3                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8530d2cc                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff84fdedcd                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff85300b65                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff85300b66                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff85300b60                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff85300b80                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff84f337e9                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff85300b70                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8530d280                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8530d285                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8530d2d0                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8530d2d4                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff84f32f8e                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff84f337e5                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff850c2910                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff85104b20                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff85104b2d                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff85104b43                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff85300b69                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff85300b6e                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff85300b7c                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8530d286                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8530d28b                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8530d290                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8530d29c                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff8530d2b7                                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff862252e0                                                                                                                                                                                  -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
