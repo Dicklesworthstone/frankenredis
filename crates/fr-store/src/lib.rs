@@ -17413,7 +17413,19 @@ fn quicklist_packed_node_allows_append(
 
 fn quicklist_packed_node_fits(entries: &[&[u8]], list_max_listpack_size: i64) -> Option<bool> {
     if list_max_listpack_size >= 0 {
-        return Some(entries.len() <= list_max_listpack_size as usize);
+        // Upstream quicklist.c::quicklistNodeExceedsLimit: with a positive
+        // (entry-count) fill the node must ALSO satisfy SIZE_SAFETY_LIMIT (8192
+        // bytes) — `if (!sizeMeetsSafetyLimit(new_sz)) return 1` runs before the
+        // count check. So a single >=8192-byte element (or many small elements
+        // whose listpack tops 8192) converts to quicklist even when the element
+        // count is under the limit. The byte length is the exact listpack
+        // serialization (same encoder as the negative-fill branch and DUMP).
+        // (frankenredis-listpacksafe)
+        if entries.len() > list_max_listpack_size as usize {
+            return Some(false);
+        }
+        const SIZE_SAFETY_LIMIT: usize = 8192;
+        return Some(encode_listpack_strings(entries)?.len() <= SIZE_SAFETY_LIMIT);
     }
 
     let max_bytes = match list_max_listpack_size {
@@ -22109,6 +22121,32 @@ mod tests {
             Some("listpack"),
             "shrink below half-budget reverts to listpack (AUTO hysteresis)"
         );
+    }
+
+    // (frankenredis-listpacksafe) With a POSITIVE (entry-count) list-max-listpack-size,
+    // upstream quicklistNodeExceedsLimit still converts to quicklist once the listpack
+    // tops the 8192-byte SIZE_SAFETY_LIMIT, regardless of element count.
+    #[test]
+    fn list_listpack_size_safety_limit_with_positive_fill() {
+        let mut store = Store::new();
+        store.list_max_listpack_size = 128;
+
+        // 8100-byte element: 1 entry (<=128) and listpack < 8192 -> listpack.
+        let _ = store.rpush(b"a", &[vec![b'x'; 8100]], 0).unwrap();
+        assert_eq!(store.object_encoding(b"a", 0), Some("listpack"));
+
+        // 8192-byte element: listpack tops 8192 -> quicklist despite 1 entry.
+        let _ = store.rpush(b"b", &[vec![b'x'; 8192]], 0).unwrap();
+        assert_eq!(store.object_encoding(b"b", 0), Some("quicklist"));
+
+        // 100 x 100-byte: under the 128-entry count but listpack > 8192 -> quicklist.
+        let many: Vec<Vec<u8>> = (0..100).map(|_| vec![b'y'; 100]).collect();
+        let _ = store.rpush(b"c", &many, 0).unwrap();
+        assert_eq!(store.object_encoding(b"c", 0), Some("quicklist"));
+
+        // Small list under both limits stays listpack.
+        let _ = store.rpush(b"d", &[b"x".to_vec(), b"y".to_vec()], 0).unwrap();
+        assert_eq!(store.object_encoding(b"d", 0), Some("listpack"));
     }
 
     #[test]
