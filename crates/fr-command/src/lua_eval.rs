@@ -48,6 +48,27 @@ thread_local! {
     static LUA_GC_REGISTRY: RefCell<Vec<LuaGcHandle>> = const { RefCell::new(Vec::new()) };
 }
 
+// (frankenredis-qqq17) Test-only live-`LuaTableInner` counter, used by the
+// cycle-leak regression test to prove that a self-referential table is
+// ACTUALLY reclaimed (count returns to baseline) rather than merely that the
+// registry was truncated. Zero cost in non-test builds (cfg-gated out).
+#[cfg(test)]
+thread_local! {
+    static LUA_TEST_LIVE_TABLES: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn lua_test_live_tables() -> i64 {
+    LUA_TEST_LIVE_TABLES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+impl Drop for LuaTableInner {
+    fn drop(&mut self) {
+        LUA_TEST_LIVE_TABLES.with(|c| c.set(c.get() - 1));
+    }
+}
+
 /// Register a freshly-created table inner so the next eval-end sweep can break
 /// any cycle it participates in.
 fn lua_gc_register_table(inner: &Rc<RefCell<LuaTableInner>>) {
@@ -349,6 +370,8 @@ impl LuaTable {
         }));
         // (frankenredis-qqq17) Track for cycle-breaking at eval end.
         lua_gc_register_table(&inner);
+        #[cfg(test)]
+        LUA_TEST_LIVE_TABLES.with(|c| c.set(c.get() + 1));
         Self { inner }
     }
     fn get(&self, key: &LuaValue) -> LuaValue {
@@ -11967,8 +11990,65 @@ mod tests {
 
     use super::{
         Env, LuaState, LuaTable, LuaValue, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script,
-        json_to_lua_value, lua_raw_equal, lua_value_to_json,
+        json_to_lua_value, lua_raw_equal, lua_test_live_tables, lua_value_to_json,
     };
+
+    /// (frankenredis-qqq17) Regression gate for the Lua Rc-cycle leak DoS.
+    /// Cyclic scripts — a self-referential table and a recursive closure that
+    /// captures its own upvalue cell — used to leak on every EVAL because the
+    /// GC-less `Rc<RefCell<..>>` graph never reached refcount 0. The
+    /// `LuaGcScope` sweep at `eval_script` end must break those cycles so the
+    /// objects are actually reclaimed. We prove reclamation directly via the
+    /// test-only live-`LuaTableInner` counter (returns to baseline), not just
+    /// registry truncation — and confirm behavior parity is untouched (the
+    /// sweep runs post-serialization, so the scripts still return correctly).
+    #[test]
+    fn lua_cyclic_scripts_do_not_leak_qqq17() {
+        let mut store = Store::new();
+        let bulk = |s: &str| RespFrame::BulkString(Some(s.as_bytes().to_vec()));
+
+        let baseline = lua_test_live_tables();
+
+        // (b) self-referential table: `t.x = t`.
+        for _ in 0..200 {
+            let r = eval_script(b"local t={}; t.x=t; return type(t.x)", &[], &[], &mut store, 0)
+                .unwrap();
+            assert_eq!(r, bulk("table"), "self-referential table output must be intact");
+        }
+        // (a) recursive closure capturing its own binding.
+        for _ in 0..200 {
+            let r = eval_script(
+                b"local function f(n) if n<=0 then return 0 else return f(n-1) end end return f(5)",
+                &[],
+                &[],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            assert_eq!(r, RespFrame::Integer(0), "recursive closure must still compute");
+        }
+        // A deeper nested cycle: table holding a closure that captures the table.
+        for _ in 0..200 {
+            let r = eval_script(
+                b"local t={}; t.f=function() return t end; return type(t.f().f)",
+                &[],
+                &[],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            assert_eq!(r, bulk("function"));
+        }
+
+        // The live-table count must return to its baseline: every cyclic table
+        // allocated across the 600 evals has been reclaimed. Before the fix this
+        // grew without bound (one leaked inner per cyclic eval).
+        let after = lua_test_live_tables();
+        assert_eq!(
+            after, baseline,
+            "Lua table inners leaked: {after} live vs baseline {baseline} (qqq17 cycle sweep regressed)"
+        );
+    }
 
     #[test]
     fn redis_setresp3_drives_resp3_call_reply_conversion_vr8rg() {
