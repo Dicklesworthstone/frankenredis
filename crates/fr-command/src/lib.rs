@@ -22501,13 +22501,20 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         // Guard against divide-by-zero by falling back to 0.0 — matches
         // upstream's behavior on a freshly-started server before the
         // first cron sample.
-        let total_minus_startup = (used - startup_allocated).max(0);
-        let dataset_percentage = if total_minus_startup > 0 {
-            100.0 * (total_minus_startup - (overhead_total - startup_allocated).max(0)) as f64
-                / total_minus_startup as f64
-        } else {
-            0.0
-        };
+        // `used` (== dataset.bytes) is data-only: estimate_memory_usage_bytes
+        // sums per-entry keyspace bytes and EXCLUDES overhead (clients, repl
+        // backlog, lua/functions, hashtable). The implied total memory is
+        // therefore data + overhead, so dataset.percentage = dataset / net_usage
+        // with net_usage = (data + overhead) - startup. The previous formula
+        // treated `used` as the grand total and subtracted overhead FROM it,
+        // underflowing to a NEGATIVE percentage whenever overhead_total exceeded
+        // the (small) dataset estimate — e.g. an almost-empty keyspace returned
+        // dataset.percentage = -2.65. Mirrors upstream object.c
+        // getMemoryOverheadData: dataset_perc = dataset_bytes*100/net_usage,
+        // non-negative by construction (overhead_total >= startup_allocated, so
+        // net_usage >= used and the result lands in [0, 100]).
+        let net_usage = (used + overhead_total - startup_allocated).max(1);
+        let dataset_percentage = 100.0 * used as f64 / net_usage as f64;
         let peak_percentage = if peak_allocated > 0 {
             100.0 * used as f64 / peak_allocated as f64
         } else {
@@ -46315,6 +46322,55 @@ mod tests {
                 items[pos + 1]
             );
         }
+    }
+
+    #[test]
+    fn memory_stats_dataset_percentage_is_non_negative() {
+        // (frankenredis-memdsperc) dataset.percentage must lie in [0, 100] — a
+        // percentage is non-negative by construction. fr's `used`
+        // (== dataset.bytes) is data-only and EXCLUDES overhead, so on a small
+        // keyspace overhead_total can exceed it; the old formula treated `used`
+        // as the grand total and subtracted overhead from it, underflowing to a
+        // negative percentage (observed -2.65 vs redis 7.2.4 differential).
+        // Helper: pull a ratio field's numeric value from the RESP2 flat array.
+        fn ratio(store: &mut Store, field: &[u8]) -> f64 {
+            let out = dispatch_argv(&[b"MEMORY".to_vec(), b"STATS".to_vec()], store, 0)
+                .expect("memory stats");
+            let RespFrame::Array(Some(items)) = out else {
+                panic!("RESP2 MEMORY STATS must be a flat Array"); // ubs:ignore — AI triage
+            };
+            let pos = items
+                .iter()
+                .position(|f| matches!(f, RespFrame::BulkString(Some(b)) if b.as_slice() == field))
+                .unwrap_or_else(|| panic!("missing {:?}", String::from_utf8_lossy(field)));
+            let RespFrame::BulkString(Some(v)) = &items[pos + 1] else {
+                panic!("ratio value must be a bulk string"); // ubs:ignore — AI triage
+            };
+            std::str::from_utf8(v).unwrap().parse::<f64>().unwrap()
+        }
+
+        // Tiny keyspace (one small key): the exact regime where data-only `used`
+        // is dwarfed by overhead — the trigger for the old negative result.
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
+        let p = ratio(&mut store, b"dataset.percentage");
+        assert!(
+            (0.0..=100.0).contains(&p),
+            "dataset.percentage must be in [0,100], got {p}"
+        );
+
+        // Larger keyspace: still bounded, and data now dominates so the value
+        // should be a healthy positive fraction.
+        let mut store2 = Store::new();
+        for i in 0..2000u32 {
+            store2.set(format!("key:{i:08}").into_bytes(), vec![b'x'; 256], None, 0);
+        }
+        let p2 = ratio(&mut store2, b"dataset.percentage");
+        assert!(
+            (0.0..=100.0).contains(&p2),
+            "dataset.percentage must be in [0,100], got {p2}"
+        );
+        assert!(p2 > 0.0, "non-empty dataset should have positive percentage");
     }
 
     #[test]
