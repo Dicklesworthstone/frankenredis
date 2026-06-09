@@ -4358,8 +4358,6 @@ impl Store {
         } else {
             0
         };
-        self.stream_groups.remove(key.as_slice());
-        self.stream_last_ids.remove(key.as_slice());
         let mut entry = Entry::new(canonical_string_value(value), expires_at_ms, now_ms);
         entry.lfu_freq = next_lfu_freq;
         entry.lfu_last_touch_min = now_ms / 60_000;
@@ -23894,6 +23892,26 @@ mod tests {
             !store.stream_groups.contains_key(b"s".as_slice()),
             "stream groups should be removed when key is overwritten"
         );
+    }
+
+    #[test]
+    fn set_stream_key_clears_stream_sidecars_on_overwrite() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+        store.xgroup_create(b"s", b"g1", (0, 0), false, 0).unwrap();
+        store.stream_last_ids.insert(b"s".to_vec(), (1, 0));
+        store.stream_entries_added.insert(b"s".to_vec(), 1);
+        store.stream_max_deleted_ids.insert(b"s".to_vec(), (1, 0));
+
+        store.set(b"s".to_vec(), b"string".to_vec(), None, 1);
+
+        assert_eq!(store.get(b"s", 1).unwrap(), Some(b"string".to_vec()));
+        assert!(!store.stream_groups.contains_key(b"s".as_slice()));
+        assert!(!store.stream_last_ids.contains_key(b"s".as_slice()));
+        assert!(!store.stream_entries_added.contains_key(b"s".as_slice()));
+        assert!(!store.stream_max_deleted_ids.contains_key(b"s".as_slice()));
     }
 
     #[test]

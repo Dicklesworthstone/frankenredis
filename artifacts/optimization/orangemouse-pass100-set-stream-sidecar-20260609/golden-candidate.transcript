@@ -1,0 +1,45 @@
+> PING
+< +PONG
+
+> SET fr6tsou1:plain alpha
+< +OK
+
+> GET fr6tsou1:plain
+< $5
+alpha
+
+> GETSET fr6tsou1:plain beta
+< $5
+alpha
+
+> GET fr6tsou1:plain
+< $4
+beta
+
+> DEL fr6tsou1:plain
+< :1
+
+> GET fr6tsou1:plain
+< $-1
+
+> MSET fr6tsou1:a 1 fr6tsou1:b 2
+< +OK
+
+> MGET fr6tsou1:a fr6tsou1:b fr6tsou1:c
+< *3
+$1
+1
+$1
+2
+$-1
+
+> INCR fr6tsou1:counter
+< :1
+
+> GETDEL fr6tsou1:counter
+< $1
+1
+
+> GET fr6tsou1:counter
+< $-1
+
