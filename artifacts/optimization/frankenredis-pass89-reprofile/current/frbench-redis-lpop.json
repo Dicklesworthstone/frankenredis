@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780969795882,
+  "host": "127.0.0.1",
+  "port": 48912,
+  "workload": "lpop",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "pass89:redis:lpop",
+  "total_time_ms": 375,
+  "ops_per_sec": 799302.5797242976,
+  "bytes_sent": 14366870,
+  "bytes_received": 2699700,
+  "latency_us": {
+    "min": 101,
+    "p50": 904,
+    "p95": 1418,
+    "p99": 1822,
+    "p999": 2401,
+    "max": 3117,
+    "mean": 971.0484333333335,
+    "samples": 300000
+  }
+}

@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:48912
+workload: incr
+clients: 50  requests: 300000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 367 ms  throughput: 816174.00 ops/sec
+latency(us): min=57 p50=861 p95=1483 p99=1897 p999=2573 max=3391 mean=951.04
+bytes: sent=15266662 received=1410000 key_prefix=pass89:redis:incr

@@ -1,0 +1,4 @@
+Benchmark 1: python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-pass89-candidate-target/release-perf/frankenredis --bench-bin /tmp/codex-fr-pass89-candidate-target/release-perf/fr-bench --port 48931 --workload hset --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix ohsk5_1:candidate --json-out artifacts/optimization/frankenredis-ohsk5.1/candidate/last-hset-p16-300k.json
+  Time (mean ± σ):     614.1 ms ±  37.7 ms    [User: 604.8 ms, System: 704.4 ms]
+  Range (min … max):   558.6 ms … 700.0 ms    10 runs
+ 

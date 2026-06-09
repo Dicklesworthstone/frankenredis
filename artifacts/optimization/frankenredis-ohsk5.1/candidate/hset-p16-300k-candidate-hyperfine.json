@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-pass89-candidate-target/release-perf/frankenredis --bench-bin /tmp/codex-fr-pass89-candidate-target/release-perf/fr-bench --port 48931 --workload hset --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix ohsk5_1:candidate --json-out artifacts/optimization/frankenredis-ohsk5.1/candidate/last-hset-p16-300k.json",
+      "mean": 0.61408972346,
+      "stddev": 0.0376794245868815,
+      "median": 0.60939263396,
+      "user": 0.60475992,
+      "system": 0.7044324599999999,
+      "min": 0.55861251796,
+      "max": 0.7000128429600001,
+      "times": [
+        0.63526268196,
+        0.7000128429600001,
+        0.6334876369600001,
+        0.61061696996,
+        0.6079327639600001,
+        0.60816829796,
+        0.59249983896,
+        0.55861251796,
+        0.6107098119600001,
+        0.58359387196
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

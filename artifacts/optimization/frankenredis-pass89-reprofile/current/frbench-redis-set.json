@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780969791195,
+  "host": "127.0.0.1",
+  "port": 48912,
+  "workload": "set",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "pass89:redis:set",
+  "total_time_ms": 404,
+  "ops_per_sec": 741583.263557352,
+  "bytes_sent": 17316669,
+  "bytes_received": 1500000,
+  "latency_us": {
+    "min": 86,
+    "p50": 909,
+    "p95": 1690,
+    "p99": 2205,
+    "p999": 2855,
+    "max": 3459,
+    "mean": 1052.9451299999996,
+    "samples": 300000
+  }
+}
