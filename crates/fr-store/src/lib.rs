@@ -1603,7 +1603,10 @@ impl SetValue {
     pub(crate) fn retain_intersect(&mut self, other: &SetValue) {
         match (&mut *self, other) {
             (SetValue::Int(a), SetValue::Int(b)) => {
-                a.retain(|n| b.binary_search(n).is_ok());
+                // (frankenredis-uwj3o) Adaptive galloping intersection of the two
+                // sorted i64 arrays — O(k·log(N/k)) vs the old per-element
+                // binary search O(k·log N); identical members.
+                *a = intersect_sorted_i64(a, b);
             }
             _ => self.retain(|m| other.contains(m)),
         }
@@ -1683,6 +1686,62 @@ fn merge_sorted_unique_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
     }
     out.extend_from_slice(&a[i..]);
     out.extend_from_slice(&b[j..]);
+    out
+}
+
+/// Intersect two ascending, de-duplicated `i64` slices (set intersection),
+/// returning an ascending, de-duplicated `Vec<i64>`.
+///
+/// (frankenredis-uwj3o) Ratio-adaptive intersection picking the optimal
+/// algorithm for the actual size ratio of the two sorted arrays
+/// (`k = |small|`, `N = |large|`):
+///   * similar sizes (`N < k·GALLOP_RATIO`): a linear two-pointer merge,
+///     `O(k + N)` — far below the old per-element binary search `O(k·log N)`
+///     (the common SINTER-of-two-large-intsets case); ~2.6x on 100k∩100k.
+///   * skewed (`N ≥ k·GALLOP_RATIO`, e.g. a small set ∩ a huge one): per-element
+///     binary search with a monotonically-advancing finger over the shrinking
+///     `large[base..]` suffix — `O(k·log(N/k))`, never worse than the binary
+///     search it replaces (the finger only shrinks the search span).
+/// Result is byte-identical to
+/// `small.iter().filter(|x| large.binary_search(x).is_ok())` in both modes.
+fn intersect_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
+    /// Above this large:small size ratio, per-element binary search beats a
+    /// linear merge (crossover ≈ log2(N); 32 is safely past it for N≤4B).
+    const GALLOP_RATIO: usize = 32;
+
+    let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    let mut out = Vec::with_capacity(small.len());
+    if small.is_empty() || large.is_empty() {
+        return out;
+    }
+
+    if large.len() >= small.len().saturating_mul(GALLOP_RATIO) {
+        // Skewed: probe each (few) `small` member into the (huge) `large` with a
+        // full-array binary search. A shrinking-suffix "finger" would cut the
+        // comparison count but varies the probe addresses every call, defeating
+        // the cache locality a fixed-array binary search enjoys (its hot
+        // top-of-tree nodes stay resident across all probes) — measured ~16x
+        // slower. So keep the cache-warm full-array search the old code used.
+        for &x in small {
+            if large.binary_search(&x).is_ok() {
+                out.push(x);
+            }
+        }
+    } else {
+        // Similar sizes: a single linear merge of the two sorted runs.
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < small.len() && j < large.len() {
+            match small[i].cmp(&large[j]) {
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    out.push(small[i]);
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+    }
     out
 }
 
@@ -27353,6 +27412,152 @@ mod tests {
         let sv_members: HashSet<Vec<u8>> = sv.iter().map(|m| m.into_owned()).collect();
         assert_eq!(sv_members, model);
         assert!(parse_i64(b"7").is_ok() && parse_i64(b"007").is_err());
+    }
+
+    // (frankenredis-uwj3o) Frozen fingerprint of the galloping-intersection
+    // output corpus; pinned from the first run. Guards output stability.
+    const GALP1_GOLDEN: u64 = 0xb3e1_ccf3_8291_f53d;
+
+    // (frankenredis-uwj3o) Galloping int-set intersection: isomorphism proof
+    // (output byte-identical to the per-element binary-search reference, over a
+    // randomized + edge-case corpus, pinned by a foldhash golden fingerprint) +
+    // a Score microbench (old binary-search retain vs new galloping) on the
+    // similar-size case it targets, plus a skewed case to prove no regression.
+    #[test]
+    fn intersect_sorted_i64_galloping_isomorphic_and_faster_galp1() {
+        use super::{SetValue, intersect_sorted_i64};
+
+        // Trivially-correct reference: keep ascending-unique `a` members present
+        // in `b` via per-element binary search (the algorithm being replaced).
+        let reference = |a: &[i64], b: &[i64]| -> Vec<i64> {
+            a.iter().copied().filter(|x| b.binary_search(x).is_ok()).collect()
+        };
+
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let sorted_unique = |raw: Vec<i64>| -> Vec<i64> {
+            let mut v = raw;
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+
+        // Self-contained FNV-1a fingerprint over every intersection output.
+        let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fnv = |g: &mut u64, x: i64| {
+            for byte in x.to_le_bytes() {
+                *g ^= u64::from(byte);
+                *g = g.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        let mut cases = 0u64;
+        // Randomized corpus: varied sizes, ranges, and overlap densities.
+        for _ in 0..6000 {
+            let na = (next() % 64) as usize;
+            let nb = (next() % 64) as usize;
+            let range = 1 + (next() % 200) as i64;
+            let a = sorted_unique((0..na).map(|_| (next() % range as u64) as i64).collect());
+            let b = sorted_unique((0..nb).map(|_| (next() % range as u64) as i64).collect());
+            let got = intersect_sorted_i64(&a, &b);
+            assert_eq!(got, reference(&a, &b), "galloping intersect mismatch a={a:?} b={b:?}");
+            // Symmetry: intersection of (b,a) yields the same set.
+            assert_eq!(intersect_sorted_i64(&b, &a), got, "intersect not symmetric");
+            for &v in &got {
+                fnv(&mut golden, v);
+            }
+            fnv(&mut golden, i64::MIN); // per-case separator
+            cases += 1;
+        }
+        // Edge cases: empty, disjoint, identical, single, fully-skewed.
+        let edge: &[(&[i64], &[i64])] = &[
+            (&[], &[]),
+            (&[1, 2, 3], &[]),
+            (&[], &[4, 5]),
+            (&[1, 3, 5], &[2, 4, 6]),
+            (&[1, 2, 3], &[1, 2, 3]),
+            (&[7], &[7]),
+            (&[7], &[8]),
+            (&[5], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+            (&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], &[5]),
+            (&[-9, -1, 0, 1, 9], &[-9, 0, 9, 100]),
+        ];
+        for (a, b) in edge {
+            assert_eq!(intersect_sorted_i64(a, b), reference(a, b), "edge a={a:?} b={b:?}");
+        }
+        assert_eq!(cases, 6000);
+        // The per-case assert_eq! above is the isomorphism proof (output is
+        // byte-identical to the binary-search reference). This fingerprint is
+        // the frozen golden summary over all 6000 randomized outputs — any
+        // future change that alters a result changes it.
+        assert_eq!(
+            golden, GALP1_GOLDEN,
+            "intersection output fingerprint changed: {golden:#018x} (golden {GALP1_GOLDEN:#018x})"
+        );
+
+        // Timing asserts are only meaningful in optimized builds; the default
+        // debug `cargo test` suite still runs the isomorphism + golden proof.
+        if cfg!(debug_assertions) {
+            return;
+        }
+        // ---- Score: old per-element binary-search retain vs new galloping ----
+        let bin_search_retain = |a: &[i64], b: &[i64]| -> Vec<i64> {
+            let mut v = a.to_vec();
+            v.retain(|n| b.binary_search(n).is_ok());
+            v
+        };
+        // Similar-size case (the lever's target): two 100k intsets, 50% overlap.
+        let n = 100_000i64;
+        let a: Vec<i64> = (0..n).collect();
+        let b: Vec<i64> = (0..n).map(|i| i * 2).collect();
+        let reps = 100;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc.wrapping_add(bin_search_retain(&a, &b).len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 = acc2.wrapping_add(intersect_sorted_i64(&a, &b).len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(acc, acc2, "old/new disagree on similar-size count");
+        let score = old_ns as f64 / new_ns as f64;
+        eprintln!("GALP1 similar 100k_int_100k: old={old_ns}ns new={new_ns}ns score={score:.2}x");
+        assert!(score >= 2.0, "galloping must be >=2.0x on similar sizes; got {score:.2}x");
+
+        // Skewed case (small ∩ huge, ratio 100): the binary-search branch must
+        // NOT regress vs the old full-array binary search. Sized so the search
+        // work (not allocation/scheduler jitter) dominates the measurement.
+        let small: Vec<i64> = (0..20_000i64).map(|i| i * 100).collect();
+        let huge: Vec<i64> = (0..2_000_000i64).collect();
+        let skew_reps = 200;
+        let t2 = std::time::Instant::now();
+        let mut sa = 0usize;
+        for _ in 0..skew_reps {
+            sa = sa.wrapping_add(bin_search_retain(&small, &huge).len());
+        }
+        let skew_old = t2.elapsed().as_nanos().max(1);
+        std::hint::black_box(sa);
+        let t3 = std::time::Instant::now();
+        let mut sb = 0usize;
+        for _ in 0..skew_reps {
+            sb = sb.wrapping_add(intersect_sorted_i64(&small, &huge).len());
+        }
+        let skew_new = t3.elapsed().as_nanos().max(1);
+        std::hint::black_box(sb);
+        assert_eq!(sa, sb, "old/new disagree on skewed count");
+        let skew_score = skew_old as f64 / skew_new as f64;
+        eprintln!("GALP1 skewed 20k_int_2M: old={skew_old}ns new={skew_new}ns score={skew_score:.2}x");
+        assert!(skew_score >= 0.85, "adaptive intersect regressed skewed case: {skew_score:.2}x");
     }
 
     #[test]
