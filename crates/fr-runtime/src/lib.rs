@@ -6123,21 +6123,37 @@ impl Runtime {
             if let Some(pid) = self.server.rdb_bgsave_pid {
                 let mut status = 0;
                 let res = libc::waitpid(pid, &mut status, libc::WNOHANG);
-                if res == pid {
+                // res == pid: child exited (success = exited cleanly with code 0;
+                // a signal-killed child is WIFEXITED-false → failure). res == 0:
+                // still running, leave state. res < 0 with ECHILD: the child is
+                // gone/unwaitable — e.g. auto-reaped because SIGCHLD was inherited
+                // as SIG_IGN — so clear the pid (treating it as a failed save) to
+                // avoid a permanently stuck "Background save already in progress".
+                // (frankenredis-bgreap) EINTR/other -1 is left to retry next tick.
+                let child_gone = res < 0
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
+                if res == pid || child_gone {
                     self.server.rdb_bgsave_pid = None;
                     self.server.rdb_bgsave_start_time_sec = None;
-                    let success = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
+                    let success = res == pid
+                        && libc::WIFEXITED(status)
+                        && libc::WEXITSTATUS(status) == 0;
                     self.server.store.record_bgsave_status(success);
                 }
             }
             if let Some(pid) = self.server.aof_rewrite_pid {
                 let mut status = 0;
                 let res = libc::waitpid(pid, &mut status, libc::WNOHANG);
-                if res == pid {
+                // (frankenredis-bgreap) Same ECHILD-clears-stuck-state handling as
+                // the bgsave branch above.
+                let child_gone = res < 0
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
+                if res == pid || child_gone {
                     self.server.aof_rewrite_pid = None;
                     self.server.aof_rewrite_start_time_sec = None;
-                    let success = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
-                    // For now, AOF rewrite CoW is just tracked, but let's record status generically
+                    let success = res == pid
+                        && libc::WIFEXITED(status)
+                        && libc::WEXITSTATUS(status) == 0;
                     self.server.store.record_aof_bgrewrite_status(success);
                 }
             }
