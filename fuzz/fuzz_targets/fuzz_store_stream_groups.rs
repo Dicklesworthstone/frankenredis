@@ -525,7 +525,7 @@ fn assert_stream_group_invariants(store: &mut Store, key: &[u8], now_ms: u64) {
             "pending entries must belong to known consumers",
         );
 
-        for (consumer, pending_count, idle_ms, _active_time) in &snapshot.consumers {
+        for (consumer, pending_count, _idle_ms, _active_time) in &snapshot.consumers {
             let pending_entries = pending_by_consumer
                 .get(consumer)
                 .map(Vec::as_slice)
@@ -602,7 +602,10 @@ fn assert_dump_restore_round_trip(store: &mut Store, now_ms: u64) {
             group_name,
             group.last_delivered_id,
             group.entries_read,
-            group.consumers,
+            // (frankenredis-sq4ov) restore_stream_group now takes the
+            // consumer_metadata map (names + seen/active timestamps), not the
+            // bare consumer-name set; pass the metadata so the target builds.
+            group.consumer_metadata,
             group.pending,
         );
     }
