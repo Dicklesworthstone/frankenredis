@@ -1,0 +1,64 @@
+{
+  "results": [
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-zhphm/pass5/reversed/candidate SERVER=/tmp/rch_target_fr_zhphm_p5_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_zhphm_p5_candidate/release-perf/fr-bench PORT=26877 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-zhphm/pass5/reversed/candidate-set-p16-1m-last.json KEY_PREFIX=zhphm-p5-rev-cand artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 1.2818711688450002,
+      "stddev": 0.03740523376848125,
+      "median": 1.29763579222,
+      "user": 1.244502385,
+      "system": 2.0030624599999998,
+      "min": 1.23747063972,
+      "max": 1.33038680972,
+      "times": [
+        1.23747063972,
+        1.23856325072,
+        1.33038680972,
+        1.30763550072,
+        1.3056471037200001,
+        1.23999446172,
+        1.29010222572,
+        1.30516935872
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-zhphm/pass5/reversed/baseline SERVER=/tmp/rch_target_fr_zhphm_p5_baseline/release-perf/frankenredis BENCH=/tmp/rch_target_fr_zhphm_p5_baseline/release-perf/fr-bench PORT=26878 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-zhphm/pass5/reversed/baseline-set-p16-1m-last.json KEY_PREFIX=zhphm-p5-rev-base artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 1.089070163595,
+      "stddev": 0.03882920212538736,
+      "median": 1.0861890332200002,
+      "user": 1.1392196350000001,
+      "system": 1.8851405849999998,
+      "min": 1.02531318972,
+      "max": 1.15633997772,
+      "times": [
+        1.08669006272,
+        1.07070317572,
+        1.08568800372,
+        1.15633997772,
+        1.02531318972,
+        1.12335973872,
+        1.06919390772,
+        1.09527325272
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
