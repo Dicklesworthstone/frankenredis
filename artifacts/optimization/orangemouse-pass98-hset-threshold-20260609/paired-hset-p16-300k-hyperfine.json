@@ -1,0 +1,92 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-pass98-current-target/release-perf/frankenredis --bench-bin /tmp/codex-fr-pass98-current-target/release-perf/fr-bench --port 49581 --workload hset --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix om-pass98:paired:baseline --json-out artifacts/optimization/orangemouse-pass98-hset-threshold-20260609/baseline/last-paired-hset-p16-300k.json",
+      "mean": 0.6399540769200002,
+      "stddev": 0.0356892365127894,
+      "median": 0.64091498812,
+      "user": 0.63887358,
+      "system": 0.7087243133333334,
+      "min": 0.5831607021199999,
+      "max": 0.71114864812,
+      "times": [
+        0.64229282412,
+        0.71114864812,
+        0.66823837012,
+        0.60114623812,
+        0.64239838212,
+        0.70127787012,
+        0.6359729951199999,
+        0.63808014812,
+        0.65092973812,
+        0.59884777012,
+        0.5831607021199999,
+        0.64091498812,
+        0.65056389312,
+        0.60170145612,
+        0.63263713012
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-pass98-candidate-target/release-perf/frankenredis --bench-bin /tmp/codex-fr-pass98-current-target/release-perf/fr-bench --port 49582 --workload hset --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix om-pass98:paired:candidate --json-out artifacts/optimization/orangemouse-pass98-hset-threshold-20260609/candidate/last-paired-hset-p16-300k.json",
+      "mean": 0.6087800275866667,
+      "stddev": 0.0315559011642859,
+      "median": 0.61046449712,
+      "user": 0.6048317133333333,
+      "system": 0.7112668466666665,
+      "min": 0.55272568012,
+      "max": 0.68957562912,
+      "times": [
+        0.6285435511199999,
+        0.60555340412,
+        0.68957562912,
+        0.62238308712,
+        0.60715901512,
+        0.6229804181199999,
+        0.62866946812,
+        0.61905822412,
+        0.5952831401199999,
+        0.61215198612,
+        0.57410162912,
+        0.57464538012,
+        0.61046449712,
+        0.58840530412,
+        0.55272568012
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

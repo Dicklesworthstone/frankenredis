@@ -1,0 +1,3 @@
+55db02bb1a42ef6b7aa294fb5f19fea5347a663073cf510726c41c97caefabb4  artifacts/optimization/orangemouse-pass98-hset-threshold-20260609/hset-golden-compare.json
+b8fe5869f3dd56c6e630ea6cc546cbf151c6ed71c40d970a2f6bf752bace41b7  artifacts/optimization/orangemouse-pass98-hset-threshold-20260609/baseline/hset-golden.transcript
+b8fe5869f3dd56c6e630ea6cc546cbf151c6ed71c40d970a2f6bf752bace41b7  artifacts/optimization/orangemouse-pass98-hset-threshold-20260609/candidate/hset-golden.transcript

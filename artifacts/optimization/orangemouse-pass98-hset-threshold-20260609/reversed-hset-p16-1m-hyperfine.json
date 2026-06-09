@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-pass98-candidate-target/release-perf/frankenredis --bench-bin /tmp/codex-fr-pass98-current-target/release-perf/fr-bench --port 49583 --workload hset --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix om-pass98:reversed:candidate --json-out artifacts/optimization/orangemouse-pass98-hset-threshold-20260609/candidate/last-reversed-hset-p16-1m.json",
+      "mean": 1.7763036376200003,
+      "stddev": 0.08945802809226677,
+      "median": 1.79932186072,
+      "user": 1.88154088,
+      "system": 2.2591502999999995,
+      "min": 1.65139707322,
+      "max": 1.89865138922,
+      "times": [
+        1.83076407422,
+        1.79171743822,
+        1.85406972322,
+        1.8069262832200002,
+        1.89865138922,
+        1.8611753692200002,
+        1.7141981652200002,
+        1.6930314932200001,
+        1.65139707322,
+        1.66110536722
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-pass98-current-target/release-perf/frankenredis --bench-bin /tmp/codex-fr-pass98-current-target/release-perf/fr-bench --port 49584 --workload hset --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix om-pass98:reversed:baseline --json-out artifacts/optimization/orangemouse-pass98-hset-threshold-20260609/baseline/last-reversed-hset-p16-1m.json",
+      "mean": 1.8035858123200001,
+      "stddev": 0.06406059624390108,
+      "median": 1.77918865822,
+      "user": 1.9205058799999999,
+      "system": 2.2257295999999998,
+      "min": 1.7546593142200002,
+      "max": 1.97051913122,
+      "times": [
+        1.77778677222,
+        1.7546593142200002,
+        1.80591017122,
+        1.7689727722200002,
+        1.7656915422200001,
+        1.79606664022,
+        1.7707704212200002,
+        1.84489081422,
+        1.78059054422,
+        1.97051913122
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

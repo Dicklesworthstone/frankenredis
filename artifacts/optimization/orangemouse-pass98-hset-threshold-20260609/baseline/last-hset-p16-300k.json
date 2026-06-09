@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780983224457,
+  "host": "127.0.0.1",
+  "port": 49580,
+  "workload": "hset",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "om-pass98:baseline",
+  "total_time_ms": 520,
+  "ops_per_sec": 575909.7846997551,
+  "bytes_sent": 20916359,
+  "bytes_received": 1200000,
+  "latency_us": {
+    "min": 108,
+    "p50": 1235,
+    "p95": 2031,
+    "p99": 2781,
+    "p999": 4351,
+    "max": 4735,
+    "mean": 1361.2085233333305,
+    "samples": 300000
+  }
+}
