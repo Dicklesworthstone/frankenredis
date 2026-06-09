@@ -472,13 +472,20 @@ fn frame_sort_key(frame: &RespFrame) -> Vec<u8> {
         RespFrame::SimpleString(s) => s.as_bytes().to_vec(),
         RespFrame::Integer(n) => n.to_string().into_bytes(),
         RespFrame::Error(s) => s.as_bytes().to_vec(),
-        // Composite frames (Array / Sequence / RESP3 Map / Push)
-        // sort by their full-encoded byte form; that's stable and
-        // captures both shape and contents.
+        // Composite frames (Array / Sequence / RESP3 Map / Set / Push /
+        // Attribute) and the RESP3 scalar leaves (Double / Verbatim /
+        // BigNumber / Bool) sort by their full-encoded byte form; that's
+        // stable and captures both shape and contents. (frankenredis-resp3sortkey)
         RespFrame::Array(_)
         | RespFrame::Sequence(_)
         | RespFrame::Map(_)
-        | RespFrame::Push(_) => frame.to_bytes(),
+        | RespFrame::Set(_)
+        | RespFrame::Push(_)
+        | RespFrame::Attribute(_)
+        | RespFrame::Double(_)
+        | RespFrame::Verbatim(_)
+        | RespFrame::BigNumber(_)
+        | RespFrame::Bool(_) => frame.to_bytes(),
     }
 }
 

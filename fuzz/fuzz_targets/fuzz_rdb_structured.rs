@@ -4,7 +4,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use fr_persist::{
-    RdbStreamConsumerGroup, RdbStreamPendingEntry, StreamEntry, crc64_redis, decode_rdb,
+    RdbStreamConsumer, RdbStreamConsumerGroup, RdbStreamPendingEntry, StreamEntry, crc64_redis,
+    decode_rdb,
     encode_upstream_stream_listpacks3_payload,
 };
 
@@ -228,7 +229,8 @@ impl RdbEntryFuzz {
                     &stream_entries,
                     watermark,
                     &groups,
-                    None,
+                    None, // entries_added
+                    None, // max_deleted-entry-id watermark
                 )
                 else {
                     return;
@@ -312,7 +314,7 @@ fn build_stream_groups(
         last_delivered_id_ms: pending_entry.0,
         last_delivered_id_seq: pending_entry.1,
         entries_read: None,
-        consumers: vec![consumer.clone()],
+        consumers: vec![RdbStreamConsumer::named(consumer.clone())],
         pending: vec![RdbStreamPendingEntry {
             entry_id_ms: pending_entry.0,
             entry_id_seq: pending_entry.1,

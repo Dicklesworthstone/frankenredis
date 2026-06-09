@@ -192,11 +192,19 @@ fn profile_for_frame(frame: &RespFrame) -> FrameProfile {
             max_bulk_len: bytes.len(),
             ..FrameProfile::default()
         },
-        RespFrame::Array(None) | RespFrame::Map(None) => FrameProfile {
+        RespFrame::Array(None) | RespFrame::Map(None) | RespFrame::Set(None) => FrameProfile {
             max_depth: 1,
             ..FrameProfile::default()
         },
-        RespFrame::Array(Some(items)) | RespFrame::Push(items) => {
+        // RESP3 scalar leaves (Double `,` / Verbatim `=` / BigNumber `(` / Bool `#`)
+        // carry no nested length or depth — they profile as a default leaf, like a
+        // SimpleString. (frankenredis-resp3profile)
+        RespFrame::Double(_)
+        | RespFrame::Verbatim(_)
+        | RespFrame::BigNumber(_)
+        | RespFrame::Bool(_) => FrameProfile::default(),
+        // RESP3 Set `~` profiles exactly like an Array of the same elements.
+        RespFrame::Array(Some(items)) | RespFrame::Push(items) | RespFrame::Set(Some(items)) => {
             let mut profile = FrameProfile {
                 max_array_len: items.len(),
                 max_depth: 1,
@@ -214,7 +222,9 @@ fn profile_for_frame(frame: &RespFrame) -> FrameProfile {
         // because that's how parse_resp3_map downgrades them
         // when allow_resp3 is set; mirrors the parser's bound on
         // pair_count = count * 2 (br-frankenredis-ozcx).
-        RespFrame::Map(Some(entries)) => {
+        // RESP3 Attribute `|` carries key/value pairs exactly like a Map and
+        // downgrades through the same 2N-entry path.
+        RespFrame::Map(Some(entries)) | RespFrame::Attribute(entries) => {
             let mut profile = FrameProfile {
                 max_array_len: entries.len().saturating_mul(2),
                 max_depth: 1,
