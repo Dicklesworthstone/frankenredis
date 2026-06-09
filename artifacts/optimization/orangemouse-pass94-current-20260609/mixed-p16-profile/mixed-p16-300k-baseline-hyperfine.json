@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/codex-fr-pass94-current/release-perf/frankenredis --bench-bin /tmp/codex-fr-pass94-current/release-perf/fr-bench --port 49350 --workload mixed --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix pass94:mixed:baseline --json-out artifacts/optimization/orangemouse-pass94-current-20260609/mixed-p16-profile/last-mixed-p16-300k-baseline.json",
+      "mean": 0.5478943134599998,
+      "stddev": 0.014575867863892807,
+      "median": 0.54889258426,
+      "user": 0.55825216,
+      "system": 0.70955242,
+      "min": 0.53166602126,
+      "max": 0.57041212026,
+      "times": [
+        0.53166602126,
+        0.53915816426,
+        0.54934267726,
+        0.54889258426,
+        0.57041212026
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

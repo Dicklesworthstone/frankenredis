@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-ohsk5.5 SERVER=target-orangemouse-ohsk5-5-candidate/release-perf/frankenredis BENCH=target-orangemouse-ohsk5-5-candidate/release-perf/fr-bench PORT=49349 WORKLOAD=hset LABEL=candidate-hset PREFIX=om-ohsk5-5-cand-hset bash -c 'log=\"$OUT/$LABEL-server-$PORT-$$.log\"; \"$SERVER\" --bind 127.0.0.1 --port \"$PORT\" --mode strict >\"$log\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for _ in $(seq 1 100); do grep -q ready \"$log\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$log\" || exit 1; \"$BENCH\" --host 127.0.0.1 --port \"$PORT\" --clients 50 --requests 300000 --pipeline 16 --workload \"$WORKLOAD\" --keyspace 10000 --datasize 3 --json-out \"$OUT/$LABEL-$WORKLOAD-p16-300k-last.json\" --key-prefix \"$PREFIX\" >/dev/null; cleanup; trap - EXIT'",
+      "mean": 0.7777204796200001,
+      "stddev": 0.12606675066179152,
+      "median": 0.77181649362,
+      "user": 0.78588262,
+      "system": 0.9244492428571428,
+      "min": 0.62800583062,
+      "max": 0.9478853856200001,
+      "times": [
+        0.71892830762,
+        0.7925921596200001,
+        0.6512650796200001,
+        0.62800583062,
+        0.77181649362,
+        0.9478853856200001,
+        0.9335501006200001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-ohsk5.5 SERVER=target-orangemouse-pass94-current/release-perf/frankenredis BENCH=target-orangemouse-pass94-current/release-perf/fr-bench PORT=49345 WORKLOAD=get LABEL=baseline-get PREFIX=om-ohsk5-5-base-get bash -c 'log=\"$OUT/$LABEL-server-$PORT-$$.log\"; \"$SERVER\" --bind 127.0.0.1 --port \"$PORT\" --mode strict >\"$log\" 2>&1 & pid=$!; cleanup(){ kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; }; trap cleanup EXIT; for _ in $(seq 1 100); do grep -q ready \"$log\" && break; kill -0 \"$pid\" 2>/dev/null || exit 1; sleep 0.05; done; grep -q ready \"$log\" || exit 1; \"$BENCH\" --host 127.0.0.1 --port \"$PORT\" --clients 50 --requests 300000 --pipeline 16 --workload \"$WORKLOAD\" --keyspace 10000 --datasize 3 --json-out \"$OUT/$LABEL-$WORKLOAD-p16-300k-last.json\" --key-prefix \"$PREFIX\" >/dev/null; cleanup; trap - EXIT'",
+      "mean": 0.4846678526371428,
+      "stddev": 0.0157313750034202,
+      "median": 0.47992724778,
+      "user": 0.45390805714285715,
+      "system": 0.7067901028571428,
+      "min": 0.46686300978,
+      "max": 0.5107037197800001,
+      "times": [
+        0.5107037197800001,
+        0.47992724778,
+        0.47097179278,
+        0.46686300978,
+        0.48555583078000003,
+        0.47847023778000003,
+        0.50018312978
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

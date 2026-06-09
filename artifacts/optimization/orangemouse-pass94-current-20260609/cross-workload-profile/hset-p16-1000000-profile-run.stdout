@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:49343
+workload: hset
+clients: 50  requests: 1000000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 1623 ms  throughput: 615979.97 ops/sec
+latency(us): min=78 p50=1205 p95=1861 p99=2467 p999=3501 max=5267 mean=1281.09
+bytes: sent=66339184 received=4000000 key_prefix=om-pass94-hset

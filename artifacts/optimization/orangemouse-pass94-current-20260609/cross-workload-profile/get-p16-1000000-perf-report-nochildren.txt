@@ -1,0 +1,531 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 921  of event 'cycles:P'
+# Event count (approx.): 5396272283
+#
+# Overhead  Command       Shared Object     Symbol                                                                                                                     
+# ........  ............  ................  ...........................................................................................................................
+#
+     7.04%  frankenredis  frankenredis      [.] <fr_store::Value>::string_owned
+            |          
+            |--1.54%--<fr_runtime::Runtime>::refresh_store_runtime_info_context
+            |          
+            |--0.75%--0x769fd1657986
+            |          clock_gettime@@GLIBC_2.17
+            |          <std::sys::pal::unix::time::Timespec>::now
+            |          |          
+            |           --0.54%--<fr_runtime::ServerState>::run_active_expire_cycle
+            |          
+            |--0.74%--<fr_runtime::Runtime>::execute_plain_get_borrowed
+            |          
+             --0.50%--<std::sys::pal::unix::time::Timespec>::now
+
+     5.52%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::refresh_store_runtime_info_context
+            |          
+            |--1.48%--<fr_store::Store>::drop_if_expired
+            |          
+            |--1.28%--0x769fd1657986
+            |          clock_gettime@@GLIBC_2.17
+            |          <std::sys::pal::unix::time::Timespec>::now
+            |          |          
+            |          |--0.64%--<fr_runtime::ServerState>::run_active_expire_cycle
+            |          |          
+            |           --0.63%--<fr_runtime::Runtime>::execute_plain_get_borrowed
+            |          
+            |--0.95%--__memcmp_avx2_movbe
+            |          
+             --0.57%--<fr_runtime::Runtime>::refresh_store_runtime_info_context
+
+     4.45%  frankenredis  libc.so.6         [.] __memmove_avx_unaligned_erms
+            |          
+            |--1.19%--__memcmp_avx2_movbe
+            |          
+            |--0.64%--<fr_runtime::Runtime>::refresh_store_runtime_info_context
+            |          
+             --0.56%--0x769fd1657986
+                       clock_gettime@@GLIBC_2.17
+                       <std::sys::pal::unix::time::Timespec>::now
+
+     3.75%  frankenredis  [vdso]            [.] 0x0000000000000983
+            |          
+            |--0.78%--__memcmp_avx2_movbe
+            |          
+             --0.52%--<fr_store::Store>::drop_if_expired
+
+     2.18%  frankenredis  frankenredis      [.] frankenredis::process_buffered_frames
+            |          
+             --0.64%--0x769fd1657986
+                       clock_gettime@@GLIBC_2.17
+                       <std::sys::pal::unix::time::Timespec>::now
+
+     2.17%  frankenredis  [unknown]         [k] 0xffffffff84c001bd
+     1.87%  frankenredis  [unknown]         [k] 0xffffffff84d0410b
+     1.69%  frankenredis  [unknown]         [k] 0xffffffff85f2e332
+            |          
+             --0.96%--0xffffffff84f87bc3
+                       0xffffffff8600a1a8
+                       0xffffffff8600a275
+                       0xffffffff8600a886
+                       0xffffffff85f2df9d
+                       0xffffffff85f2e026
+                       0xffffffff85f2e2b0
+                       0xffffffff85f2e985
+                       0xffffffff85f2f11b
+                       0xffffffff8502171f
+                       0xffffffff8623b890
+                       0xffffffff850210af
+                       0xffffffff85021b1a
+                       0xffffffff85f2b96f
+                       0xffffffff8600dd5f
+                       0xffffffff86010bf8
+                       0xffffffff86010f85
+                       0xffffffff860110d6
+                       0xffffffff86011271
+                       0xffffffff86011c1d
+                       0xffffffff86011dd5
+                       0xffffffff8603d9fa
+                       0xffffffff8603f912
+                       0xffffffff86040239
+                       0xffffffff86022e1d
+                       0xffffffff86023c23
+                       0xffffffff860248f0
+                       0xffffffff860733b6
+                       0xffffffff85eefaba
+                       0xffffffff85eefb24
+                       0xffffffff84f24d8f
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __syscall_cancel
+                       __send
+                       <frankenredis::ClientConnection>::try_flush
+                       0
+
+     1.56%  frankenredis  frankenredis      [.] <fr_runtime::ServerState>::run_active_expire_cycle
+            |          
+             --0.62%--0x769fd1657986
+                       clock_gettime@@GLIBC_2.17
+                       <std::sys::pal::unix::time::Timespec>::now
+                       <fr_runtime::ServerState>::run_active_expire_cycle
+
+     1.53%  frankenredis  frankenredis      [.] fr_protocol::parse_command_args_borrowed_into
+     1.53%  frankenredis  frankenredis      [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u64>
+     1.50%  frankenredis  frankenredis      [.] <fr_store::Store>::get
+            |          
+             --0.53%--<fr_runtime::Runtime>::refresh_store_runtime_info_context
+
+     1.10%  frankenredis  [unknown]         [k] 0xffffffff84d04109
+     1.08%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::plain_borrowed_default_key_read_allows
+     1.01%  frankenredis  [unknown]         [k] 0xffffffff84f87bc0
+     0.94%  frankenredis  frankenredis      [.] _mi_page_malloc_zero
+     0.93%  frankenredis  [unknown]         [k] 0xffffffff84c00080
+     0.83%  frankenredis  [unknown]         [k] 0xffffffff85835fd6
+     0.81%  frankenredis  frankenredis      [.] <fr_store::Store>::drop_if_expired
+     0.80%  frankenredis  [unknown]         [k] 0xffffffff8546fd6a
+     0.78%  frankenredis  frankenredis      [.] <fr_protocol::RespFrame>::encode_into
+     0.76%  frankenredis  frankenredis      [.] fr_protocol::push_usize
+     0.72%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::is_pubsub_client
+     0.66%  frankenredis  [unknown]         [k] 0xffffffff8602f7fb
+     0.63%  frankenredis  [unknown]         [k] 0xffffffff85eef90b
+            |
+            ---0xffffffff85ef1dac
+               0xffffffff85ef2da1
+               0xffffffff86023cda
+               0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0
+
+     0.63%  frankenredis  [unknown]         [k] 0xffffffff8621f910
+     0.62%  frankenredis  [unknown]         [k] 0xffffffff86027636
+     0.60%  frankenredis  [unknown]         [k] 0xffffffff850b8f3e
+     0.54%  frankenredis  [unknown]         [k] 0xffffffff851a298b
+            |
+            ---0xffffffff84c001c4
+               __syscall_cancel
+               __libc_recv
+               frankenredis::handle_readable
+               0
+
+     0.49%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::refresh_client_memory_aggregates
+     0.48%  frankenredis  [unknown]         [k] 0xffffffff86229e6b
+     0.48%  frankenredis  [unknown]         [k] 0xffffffff8604cf73
+     0.48%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::drain_pending_pubsub
+     0.48%  frankenredis  [unknown]         [k] 0xffffffffc0f923ed
+     0.48%  frankenredis  [vdso]            [.] 0x000000000000097a
+     0.47%  frankenredis  libc.so.6         [.] __memcmp_avx2_movbe
+     0.47%  frankenredis  libc.so.6         [.] __errno_location
+     0.47%  frankenredis  [unknown]         [k] 0xffffffff84fef5b2
+     0.46%  frankenredis  frankenredis      [.] <fr_store::CommandHistogramTracker>::record_canonical_with_kind
+     0.46%  frankenredis  [unknown]         [k] 0xffffffff85f2e2da
+     0.46%  frankenredis  [unknown]         [k] 0xffffffff86001824
+     0.40%  frankenredis  frankenredis      [.] core::str::converts::from_utf8
+     0.38%  frankenredis  [unknown]         [k] 0xffffffff85f03f76
+     0.36%  frankenredis  [unknown]         [k] 0xffffffff8546fb9b
+     0.35%  frankenredis  [unknown]         [k] 0xffffffff8602f685
+     0.35%  frankenredis  [unknown]         [k] 0xffffffff850ca0bc
+     0.34%  frankenredis  [unknown]         [k] 0xffffffff8623a6aa
+     0.32%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::pubsub_sub_count
+     0.32%  frankenredis  [unknown]         [k] 0xffffffff86025d08
+     0.32%  frankenredis  [unknown]         [k] 0xffffffff85f2e226
+     0.32%  frankenredis  frankenredis      [.] frankenredis::handle_readable
+     0.32%  frankenredis  [unknown]         [k] 0xffffffff8602eb12
+     0.32%  frankenredis  [unknown]         [k] 0xffffffff8603fc86
+     0.32%  frankenredis  [unknown]         [k] 0xffffffff86024531
+     0.32%  frankenredis  [unknown]         [k] 0xffffffff8508e766
+     0.32%  frankenredis  [unknown]         [k] 0xffffffff86036e97
+     0.32%  frankenredis  [unknown]         [k] 0xffffffffc08551a0
+     0.32%  frankenredis  [unknown]         [k] 0xffffffff86011c1d
+     0.31%  frankenredis  frankenredis      [.] <hashbrown::map::HashMap<u64, alloc::vec::Vec<fr_store::PubSubMessage>, std::hash::random::RandomState>>::remove::<u64>
+     0.31%  frankenredis  [unknown]         [k] 0xffffffff84c00002
+     0.31%  frankenredis  frankenredis      [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     0.31%  frankenredis  [unknown]         [k] 0xffffffff8603a6d1
+     0.31%  frankenredis  frankenredis      [.] mi_free
+     0.31%  frankenredis  [unknown]         [k] 0xffffffff85eefc89
+     0.30%  frankenredis  [unknown]         [k] 0xffffffff85f05382
+     0.30%  frankenredis  [unknown]         [k] 0xffffffff860344a4
+     0.26%  frankenredis  [unknown]         [k] 0xffffffff85efef05
+     0.25%  frankenredis  [unknown]         [k] 0xffffffff85f2f081
+     0.25%  frankenredis  frankenredis      [.] <hashbrown::map::HashMap<alloc::vec::Vec<u8>, (usize, usize), foldhash::quality::RandomState>>::insert
+     0.25%  frankenredis  frankenredis      [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+     0.25%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::execute_plain_get_borrowed
+     0.22%  frankenredis  [unknown]         [k] 0xffffffff84c00005
+     0.22%  frankenredis  [unknown]         [k] 0xffffffff85835fc8
+     0.21%  frankenredis  [unknown]         [k] 0xffffffff8600a7d3
+     0.21%  frankenredis  [unknown]         [k] 0xffffffff85ef4079
+     0.21%  frankenredis  [unknown]         [k] 0xffffffff84d04104
+     0.21%  frankenredis  frankenredis      [.] mi_theap_malloc_aligned
+     0.21%  frankenredis  [unknown]         [k] 0xffffffff86001805
+     0.21%  frankenredis  [unknown]         [k] 0xffffffff85f2adfc
+     0.20%  frankenredis  [unknown]         [k] 0xffffffff8604124c
+     0.20%  frankenredis  [unknown]         [k] 0xffffffff85104b20
+     0.20%  frankenredis  [unknown]         [k] 0xffffffff850790f5
+     0.20%  frankenredis  [unknown]         [k] 0xffffffffc0816032
+     0.20%  frankenredis  frankenredis      [.] <fr_runtime::ClientSession as core::default::Default>::default
+     0.20%  frankenredis  [unknown]         [k] 0xffffffffc0fbd2ae
+     0.19%  frankenredis  [unknown]         [k] 0xffffffff860118cf
+     0.19%  frankenredis  [unknown]         [k] 0xffffffff86039fcb
+     0.19%  frankenredis  [unknown]         [k] 0xffffffffc0f9246c
+     0.19%  frankenredis  [unknown]         [k] 0xffffffff85f2ce1b
+     0.19%  frankenredis  [unknown]         [k] 0xffffffff8508e843
+     0.19%  frankenredis  [unknown]         [k] 0xffffffff85083649
+     0.19%  frankenredis  [unknown]         [k] 0xffffffffc0fe9090
+     0.18%  frankenredis  [unknown]         [k] 0xffffffff856a20bf
+     0.18%  frankenredis  [unknown]         [k] 0xffffffff85712c29
+     0.18%  frankenredis  [unknown]         [k] 0xffffffff8602f880
+     0.18%  frankenredis  [unknown]         [k] 0xffffffff8602f2a5
+     0.18%  frankenredis  [vdso]            [.] 0x00000000000009a6
+     0.18%  frankenredis  [unknown]         [k] 0xffffffffc0f9253b
+     0.18%  frankenredis  [unknown]         [k] 0xffffffffc0fee6e6
+     0.17%  frankenredis  [unknown]         [k] 0xffffffff8548f9be
+     0.17%  frankenredis  [unknown]         [k] 0xffffffff86045dc5
+     0.17%  frankenredis  [unknown]         [k] 0xffffffff85fb0331
+     0.17%  frankenredis  [unknown]         [k] 0xffffffff86044d97
+     0.17%  frankenredis  [unknown]         [k] 0xffffffff84f23441
+     0.17%  frankenredis  [unknown]         [k] 0xffffffffc0fd747b
+     0.17%  frankenredis  [unknown]         [k] 0xffffffff85efbc79
+     0.17%  frankenredis  [vdso]            [.] 0x000000000000098f
+     0.17%  frankenredis  [unknown]         [k] 0xffffffff851629e9
+     0.17%  frankenredis  [unknown]         [k] 0xffffffff84fc6206
+     0.17%  frankenredis  [unknown]         [k] 0xffffffff86220551
+     0.17%  frankenredis  [unknown]         [k] 0xffffffffc0feafe0
+     0.17%  frankenredis  [unknown]         [k] 0xffffffff8602045f
+     0.16%  frankenredis  [unknown]         [k] 0xffffffffc0fbe405
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8600a158
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85124c0d
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85729268
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85ef6ac6
+     0.16%  frankenredis  [unknown]         [k] 0xffffffffc0fdcfa3
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f0058a
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8546fe42
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8602f79a
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8602f82a
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8603eb13
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85453c45
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85838ed6
+     0.16%  frankenredis  [unknown]         [k] 0xffffffffc081654e
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff860365fb
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f2e026
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff860240dd
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff86017dd4
+     0.16%  frankenredis  frankenredis      [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&mio::token::Token>
+     0.16%  frankenredis  [vdso]            [.] 0x00000000000009fb
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8513cf21
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff86001802
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8623a353
+     0.16%  frankenredis  frankenredis      [.] <alloc::raw_vec::RawVecInner>::finish_grow
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff860415cf
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f2f037
+     0.16%  frankenredis  frankenredis      [.] mi_bin
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8513d050
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff850210af
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8519f426
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff860470f9
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8620ae2f
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85021f59
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff850b2c9a
+     0.16%  frankenredis  [unknown]         [k] 0xffffffffc0fde292
+     0.16%  frankenredis  [unknown]         [k] 0xffffffffc0fee6e0
+     0.16%  frankenredis  [unknown]         [k] 0xffffffffc13da475
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff86034254
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f2e029
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f2e229
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff86239c3b
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff853f122b
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8600a2a1
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff862206af
+     0.16%  frankenredis  [unknown]         [k] 0xffffffffc0fd74a4
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85eff157
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8603184b
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8603d39a
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff86039f96
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f053a6
+     0.16%  frankenredis  [unknown]         [k] 0xffffffffc0fddc98
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8600e13c
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8602b86c
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff84f25588
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85ef4072
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85131a40
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f0cbcb
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff860733bd
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff851a220b
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8603f8e2
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff84fef5b7
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f2c8c0
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff853ec7fd
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff86022fe5
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f2bc4b
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8600a2ee
+     0.16%  frankenredis  [unknown]         [k] 0xffffffffc0ffd776
+     0.16%  frankenredis  frankenredis      [.] frankenredis::main
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff86071a1f
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8602eb19
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8603ac00
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85072bcf
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff851629e5
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff856a2086
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff850cd883
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff853f1304
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85072c81
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8623a4cd
+     0.16%  frankenredis  [vdso]            [.] 0x0000000000000937
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f2e975
+     0.16%  frankenredis  frankenredis      [.] <fr_runtime::ServerState>::propagate_expired_key_deletions
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff850b683a
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff850b2ca9
+     0.16%  frankenredis  libc.so.6         [.] __syscall_cancel
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8600a0f0
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff853f1319
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f0b742
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff84fc6216
+     0.16%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::check_child_processes
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8506c87b
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff853bf221
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff851a222e
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85104b2e
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8603d819
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85ef6df6
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff86022cc4
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85ef4076
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8623a3c7
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85456da7
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff86009f06
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f2c8e3
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f270bc
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff851965e6
+     0.16%  frankenredis  [unknown]         [k] 0xffffffffc0f9247d
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8603b832
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8506c7b1
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8602ce12
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff84f8c368
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8603acf3
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85133c73
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff860114df
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff86017d57
+     0.16%  frankenredis  [unknown]         [k] 0xffffffffc0816cb8
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff853f1400
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8604ce72
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff86022fe6
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff86002fff
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8546fe41
+     0.16%  frankenredis  libc.so.6         [.] clock_gettime@@GLIBC_2.17
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f2f033
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f606e9
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85ef183b
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff84fef5b3
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85133c77
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff857121da
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff84c000f3
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8507fdb7
+     0.16%  frankenredis  [unknown]         [k] 0xffffffffc0816c70
+     0.16%  frankenredis  [unknown]         [k] 0xffffffffc0fbe420
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f272b9
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8623a42d
+     0.16%  frankenredis  frankenredis      [.] <std::sys::pal::unix::time::Timespec>::now
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f2e2b5
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff8508e84a
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff86017dce
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85456d9a
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85eef8ec
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff84fc6538
+     0.16%  frankenredis  [unknown]         [k] 0xffffffffc0fb218d
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f27134
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff850b8f29
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85f0c7de
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85eff1a7
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff862252ea
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85124af4
+     0.16%  frankenredis  [unknown]         [k] 0xffffffffc0fed266
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff85ef6e5d
+     0.16%  frankenredis  [unknown]         [k] 0xffffffff853bf1f6
+     0.16%  frankenredis  [vdso]            [.] 0x000000000000093f
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff86011271
+     0.15%  frankenredis  [unknown]         [k] 0xffffffffc0fddcba
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff8508e765
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff85eef9db
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff84fdec12
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff85021ae2
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff85f0cd7e
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff8603ad9a
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff84f24d8a
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff851a2adb
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff8602eb0b
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff8623b8aa
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff85f2ef60
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff853f11d5
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff8602fcb5
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff8623b8a0
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff85712c20
+     0.15%  frankenredis  [unknown]         [k] 0xffffffffc0fd71fa
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff86011266
+     0.15%  frankenredis  [unknown]         [k] 0xffffffff86025c7e
+     0.15%  frankenredis  frankenredis      [.] mi_find_page
+     0.14%  frankenredis  [unknown]         [k] 0xffffffff84fef58e
+     0.14%  frankenredis  [unknown]         [k] 0xffffffff8603ac32
+     0.14%  frankenredis  [unknown]         [k] 0xffffffff85ef4034
+     0.14%  frankenredis  libc.so.6         [.] __memset_avx2_unaligned_erms
+     0.14%  frankenredis  [unknown]         [k] 0xffffffff8508129a
+     0.13%  frankenredis  [unknown]         [k] 0xffffffff8603f80a
+     0.09%  frankenredis  [unknown]         [k] 0xffffffff85137765
+     0.08%  frankenredis  [unknown]         [k] 0xffffffff8621b2b5
+     0.08%  frankenredis  [unknown]         [k] 0xffffffff853a4ee9
+     0.08%  frankenredis  [unknown]         [k] 0xffffffff86036df8
+     0.08%  frankenredis  frankenredis      [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+     0.08%  frankenredis  [unknown]         [k] 0xffffffffc0f923de
+     0.07%  frankenredis  [unknown]         [k] 0xffffffff86034227
+     0.07%  frankenredis  frankenredis      [.] <frankenredis::ClientConnection>::try_flush
+     0.07%  frankenredis  [unknown]         [k] 0xffffffffc0f924b3
+     0.07%  frankenredis  frankenredis      [.] <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+     0.07%  frankenredis  [unknown]         [k] 0xffffffff850222ce
+     0.06%  frankenredis  [unknown]         [k] 0xffffffffc0817799
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff8623a4ce
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff8548f9b9
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff86041535
+     0.06%  frankenredis  [unknown]         [k] 0xffffffff8572925f
+     0.05%  frankenredis  [unknown]         [k] 0xffffffff8623a4b6
+     0.04%  frankenredis  [unknown]         [k] 0xffffffff8572a640
+     0.04%  frankenredis  [unknown]         [k] 0xffffffff8603caa5
+     0.03%  frankenredis  [unknown]         [k] 0xffffffff850aad27
+     0.03%  frankenredis  [unknown]         [k] 0xffffffff85f2b96f
+     0.03%  frankenredis  [unknown]         [k] 0xffffffffc0fe8f82
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8603d223
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85131a5b
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85480b7e
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8519f584
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8603ac99
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff86011af8
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85ffba18
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff862251f4
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff851318cc
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8604261a
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8622811f
+     0.00%  frankenredis  [unknown]         [k] 0xffffffffc0fe8fac
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff86010aa1
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff850b6b82
+     0.00%  frankenredis  [unknown]         [k] 0xffffffffc0fd6cc8
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff850bc635
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8508866e
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8508e768
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8602cd80
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8534146a
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85081200
+     0.00%  frankenredis  frankenredis      [.] fr_store::canonical_string_value
+     0.00%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::swap_session
+     0.00%  frankenredis  frankenredis      [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     0.00%  frankenredis  [unknown]         [k] 0xffffffffc0fba736
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff850b8f25
+     0.00%  frankenredis  libc.so.6         [.] __GI___setsockopt
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff86025f9b
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85f03ee8
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff86003008
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff853ec7d6
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff860114b7
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8621c6a9
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff84c01192
+     0.00%  frankenredis  libc.so.6         [.] __send
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff84f8c9d1
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff84c01248
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8530d2bc
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff84c00ef0
+     0.00%  frankenredis  frankenredis      [.] <std::io::error::Error>::kind
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8530d2c3
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff850886ae
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8508a436
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff86228924
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff850884ef
+     0.00%  frankenredis  frankenredis      [.] mi_theap_malloc_zero_aligned_at_overalloc
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff862251d0
+     0.00%  frankenredis  [unknown]         [k] 0xffffffffc0f92019
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff850906eb
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff850ee3d3
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8508a42f
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff853263a6
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff854fe33a
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8507e634
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8508128b
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff850a7169
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff84f8c989
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff84fdedcb
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8508a491
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85080faf
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff853267f0
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8532641b
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff86227692
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff86232e70
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85124138
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff84fc4b79
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85124095
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff851a054a
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8530d2cc
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff850c2910
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85300b66
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff850c2900
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85300b65
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff862251cb
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff850c2905
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85300b73
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85300b80
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8530d285
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff850c2906
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85104b43
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85300b60
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff85300b69
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8530d280
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8530d2d4
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8530d2db
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff862251b4
+     0.00%  frankenredis  [unknown]         [k] 0xffffffff8622855a
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

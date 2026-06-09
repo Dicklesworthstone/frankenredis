@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:49342
+workload: get
+clients: 50  requests: 1000000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 1406 ms  throughput: 711203.54 ops/sec
+latency(us): min=50 p50=1053 p95=1514 p99=1821 p999=2231 max=2967 mean=1109.64
+bytes: sent=44889139 received=9000000 key_prefix=om-pass94-get
