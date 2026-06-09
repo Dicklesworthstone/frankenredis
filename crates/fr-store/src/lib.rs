@@ -866,6 +866,34 @@ impl SortedSet {
         SortedSetIterAsc { inner }
     }
 
+    /// (frankenredis-4ywto) Clone the `(member, score)` pairs at the given
+    /// ascending indices, preserving `indices` order and duplicates. A single
+    /// ordered pass clones ONLY the distinct requested positions (stopping once
+    /// all are found), so the allocation cost is O(distinct indices) rather than
+    /// O(n) — the key to making ZRANDMEMBER-with-small-count over a large zset
+    /// cheap, since the BTreeMap backing has no O(1) nth accessor. The output is
+    /// byte-identical to `let v: Vec<_> = iter_asc().collect(); indices.map(|i|
+    /// v[i].clone())`.
+    pub(crate) fn members_at_indices(&self, indices: &[usize]) -> Vec<(Vec<u8>, f64)> {
+        if indices.is_empty() {
+            return Vec::new();
+        }
+        let needed: HashSet<usize> = indices.iter().copied().collect();
+        let mut by_idx: HashMap<usize, (Vec<u8>, f64)> = HashMap::with_capacity(needed.len());
+        for (i, (m, s)) in self.iter_asc().enumerate() {
+            if needed.contains(&i) {
+                by_idx.insert(i, (m.to_vec(), s));
+                if by_idx.len() == needed.len() {
+                    break;
+                }
+            }
+        }
+        indices
+            .iter()
+            .filter_map(|idx| by_idx.get(idx).cloned())
+            .collect()
+    }
+
     fn iter_desc(&self) -> SortedSetIterDesc<'_> {
         match &self.inner {
             SortedSetInner::Packed(p) => SortedSetIterDesc::Packed(p.iter_desc()),
@@ -11942,62 +11970,71 @@ impl Store {
         } else {
             0
         };
-        let mut result_data = None;
-        if let Some(entry) = self.entries.get_mut(key) {
+        // (frankenredis-4ywto) Read the cardinality + apply LFU/touch WITHOUT
+        // cloning every (member, score). The zset is BTreeMap-backed (no O(1)
+        // nth like the IndexMap-backed hash/set), so we keep the same next_rand()
+        // index-draw sequence as before, then materialise ONLY the chosen members
+        // in a single ordered pass. Allocation drops from O(n) member clones to
+        // O(distinct picks) — e.g. ZRANDMEMBER key 1 over a 100k zset went from
+        // cloning 100k members to one.
+        let len = if let Some(entry) = self.entries.get_mut(key) {
             if lfu_tracking_enabled {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
             }
-            match &entry.value {
-                Value::SortedSet(zs) => {
-                    if !zs.is_empty() {
-                        let members: Vec<(Vec<u8>, f64)> =
-                            zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
-                        entry.touch(now_ms);
-                        result_data = Some(members);
-                    }
-                }
+            let zlen = match &entry.value {
+                Value::SortedSet(zs) => zs.len(),
                 _ => return Err(StoreError::WrongType),
+            };
+            if zlen == 0 {
+                return Ok(Vec::new());
             }
-        }
-
-        let members = match result_data {
-            Some(m) if !m.is_empty() => m,
-            _ => return Ok(Vec::new()),
+            entry.touch(now_ms);
+            zlen
+        } else {
+            return Ok(Vec::new());
         };
 
-        if count >= 0 {
-            let n = (count as usize).min(members.len());
-            // Use a more memory-efficient approach for small n
-            if n < members.len() / 2 && n < 1024 {
-                let mut results = Vec::with_capacity(n);
+        // Draw the pick indices (in output order; duplicates allowed for the
+        // negative-count form) using the IDENTICAL next_rand() sequence as the
+        // old materialise-then-index path, so the output is byte-for-byte the same.
+        let indices: Vec<usize> = if count >= 0 {
+            let n = (count as usize).min(len);
+            if n < len / 2 && n < 1024 {
+                let mut idxs = Vec::with_capacity(n);
                 let mut picked = HashSet::with_capacity(n);
-                while results.len() < n {
-                    let idx = (self.next_rand() as usize) % members.len();
+                while idxs.len() < n {
+                    let idx = (self.next_rand() as usize) % len;
                     if picked.insert(idx) {
-                        results.push(members[idx].clone());
+                        idxs.push(idx);
                     }
                 }
-                Ok(results)
+                idxs
             } else {
-                let mut indices: Vec<usize> = (0..members.len()).collect();
+                let mut order: Vec<usize> = (0..len).collect();
                 for i in 0..n {
-                    let j = i + (self.next_rand() as usize % (members.len() - i));
-                    indices.swap(i, j);
+                    let j = i + (self.next_rand() as usize % (len - i));
+                    order.swap(i, j);
                 }
-                Ok(indices[..n]
-                    .iter()
-                    .map(|&idx| members[idx].clone())
-                    .collect())
+                order.truncate(n);
+                order
             }
         } else {
             let abs_count = count.unsigned_abs() as usize;
-            // Cap initial allocation to avoid DoS, but allow growth.
-            let mut result = Vec::with_capacity(abs_count.min(1024));
+            let mut idxs = Vec::with_capacity(abs_count.min(1024));
             for _ in 0..abs_count {
-                let idx = (self.next_rand() as usize) % members.len();
-                result.push(members[idx].clone());
+                idxs.push((self.next_rand() as usize) % len);
             }
-            Ok(result)
+            idxs
+        };
+
+        // Clone only the picked members in a single ordered pass (see
+        // SortedSet::members_at_indices). Output preserves pick order + dups.
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::SortedSet(zs) => Ok(zs.members_at_indices(&indices)),
+                _ => Ok(Vec::new()),
+            },
+            None => Ok(Vec::new()),
         }
     }
 
@@ -27757,6 +27794,115 @@ mod tests {
         let skew_score = skew_old as f64 / skew_new as f64;
         eprintln!("SDF2 skewed 20k_diff_2M: old={skew_old}ns new={skew_new}ns score={skew_score:.2}x");
         assert!(skew_score >= 0.85, "adaptive diff regressed skewed case: {skew_score:.2}x");
+    }
+
+    // (frankenredis-4ywto) Frozen fingerprint of the members_at_indices output
+    // corpus; pinned from the first run.
+    const ZRND1_GOLDEN: u64 = 0x3f2b_2cc4_0d71_8c60;
+
+    // (frankenredis-4ywto) ZRANDMEMBER-count single-pass member fetch:
+    // isomorphism proof (output byte-identical to the old materialise-all-then-
+    // index reference over a randomized + edge-case corpus, pinned by a golden
+    // fingerprint) + a Score microbench (old full materialise vs new single-pass
+    // clone-only-needed) for a small count over a large zset.
+    #[test]
+    fn members_at_indices_isomorphic_and_faster_zrnd1() {
+        use super::SortedSet;
+
+        let build = |n: usize| -> SortedSet {
+            let mut zs = SortedSet::new();
+            for i in 0..n {
+                // Distinct scores + members so iter_asc order is well-defined.
+                zs.insert(format!("m{i:08}").into_bytes(), i as f64 * 1.5);
+            }
+            zs
+        };
+        // Reference: the old path — materialise EVERY (member,score) then index.
+        let reference = |zs: &SortedSet, idxs: &[usize]| -> Vec<(Vec<u8>, f64)> {
+            let mat: Vec<(Vec<u8>, f64)> =
+                zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
+            idxs.iter().filter_map(|&i| mat.get(i).cloned()).collect()
+        };
+
+        let mut state: u64 = 0x84242F96ECECECEC;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fnv = |g: &mut u64, b: &[u8]| {
+            for &byte in b {
+                *g ^= u64::from(byte);
+                *g = g.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+
+        for _ in 0..4000 {
+            let n = 1 + (next() % 200) as usize;
+            let zs = build(n);
+            // A pick list with arbitrary order, repeats, and out-of-range probes.
+            let k = (next() % 12) as usize;
+            let idxs: Vec<usize> = (0..k).map(|_| (next() as usize) % (n + 2)).collect();
+            let got = zs.members_at_indices(&idxs);
+            assert_eq!(got, reference(&zs, &idxs), "members_at_indices mismatch n={n} idxs={idxs:?}");
+            for (m, s) in &got {
+                fnv(&mut golden, m);
+                fnv(&mut golden, &s.to_bits().to_le_bytes());
+            }
+            fnv(&mut golden, &[0xFF]);
+        }
+        // Edge cases: empty picks, single, all-in-order, reverse, all-dups, OOB.
+        let zs = build(8);
+        let edge: &[&[usize]] = &[
+            &[],
+            &[0],
+            &[7],
+            &[0, 1, 2, 3, 4, 5, 6, 7],
+            &[7, 6, 5, 4, 3, 2, 1, 0],
+            &[3, 3, 3, 3],
+            &[8, 9, 100],
+            &[2, 8, 2, 0, 100, 7],
+        ];
+        for idxs in edge {
+            assert_eq!(zs.members_at_indices(idxs), reference(&zs, idxs), "edge idxs={idxs:?}");
+        }
+        assert_eq!(
+            golden, ZRND1_GOLDEN,
+            "members_at_indices output fingerprint changed: {golden:#018x} (golden {ZRND1_GOLDEN:#018x})"
+        );
+
+        if cfg!(debug_assertions) {
+            return;
+        }
+        // Score: small count over a large zset — the materialise-all anti-pattern.
+        let big = build(100_000);
+        let picks: Vec<usize> = (0..4).map(|_| (next() as usize) % 100_000).collect();
+        let reps = 2000;
+        let old_index = |zs: &SortedSet, idxs: &[usize]| -> Vec<(Vec<u8>, f64)> {
+            let mat: Vec<(Vec<u8>, f64)> =
+                zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
+            idxs.iter().filter_map(|&i| mat.get(i).cloned()).collect()
+        };
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc.wrapping_add(old_index(&big, &picks).len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 = acc2.wrapping_add(big.members_at_indices(&picks).len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(acc, acc2, "old/new disagree on pick count");
+        let score = old_ns as f64 / new_ns as f64;
+        eprintln!("ZRND1 zrandmember 4-of-100k: old={old_ns}ns new={new_ns}ns score={score:.2}x");
+        assert!(score >= 2.0, "single-pass fetch must be >=2.0x for small count; got {score:.2}x");
     }
 
     #[test]
