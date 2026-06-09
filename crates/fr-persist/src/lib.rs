@@ -4364,6 +4364,37 @@ mod tests {
     }
 
     #[test]
+    fn lzf_decompress_never_panics_on_adversarial_input() {
+        // lzf_decompress parses UNTRUSTED bytes (RESTORE payloads, RDB string
+        // fields). A crafted corrupt stream — truncated control/backref bytes,
+        // a back-reference pointing before the output start, an over-long copy,
+        // or a literal run that overruns the input — must be REJECTED (None),
+        // never panic (a panic here is a remote DoS). Regression guard for the
+        // bounds discipline (all reads via get()?/checked_add + the
+        // backref > output.len() check) and the 512MB OOM cap. (frankenredis-lzfadv)
+        let cases: &[&[u8]] = &[
+            &[],                                    // empty
+            &[0x04, b'h', b'i'],                    // literal run wants 5 bytes, only 2 present
+            &[0x1F],                                // literal ctrl, no payload
+            &[0x20, 0x00],                          // backref=1 into empty output
+            &[0xE0, 0x00],                          // copy_len=9 marker, truncated backref
+            &[0xE0, 0xFF],                          // copy_len extended, no backref byte
+            &[0xFF, 0xFF, 0xFF],                    // max ctrl, backref far past output start
+            &[0x04, b'a', b'b', b'c', b'd', b'e', 0x20, 0x00], // literal then bad backref
+        ];
+        for c in cases {
+            for &elen in &[0usize, 1, 5, 64, 1_000_000, 600_000_000, usize::MAX] {
+                // Contract: returns Some/None, NEVER panics, NEVER over-allocates.
+                let _ = lzf_decompress(c, elen);
+            }
+        }
+        // Oversized expected_len is rejected outright (OOM guard).
+        assert!(lzf_decompress(&[0x00, b'x'], 600_000_000).is_none());
+        // Back-reference before output start → None, not an arithmetic underflow.
+        assert!(lzf_decompress(&[0x20, 0x00], 4).is_none());
+    }
+
+    #[test]
     fn lzf_decompress_chunked_matches_bytewise_and_reports_ab_ratio() {
         // Byte-at-a-time reference (the pre-chunk back-reference path), used as
         // the equivalence oracle and A/B baseline. (frankenredis-5boi9)
