@@ -229,16 +229,27 @@ fn expected_state(
                 prefixes,
             }
         }
-        TrackingFlavor::Bcast => ClientTrackingState {
-            enabled: true,
-            redirect: redirect.map(|value| u64::from(value) + 1),
-            bcast: true,
-            optin: false,
-            optout: false,
-            caching: None,
-            noloop,
-            prefixes,
-        },
+        TrackingFlavor::Bcast => {
+            // (frankenredis-trbcast) Upstream tracking.c::enableTracking
+            // registers the empty prefix "" for a BCAST client that passes no
+            // explicit PREFIX: `if (numprefix == 0) enableBcastTrackingForPrefix
+            // (c,"",0)`. parse_client_tracking_state mirrors that, so the
+            // expected model must also carry the implicit match-all "" prefix
+            // for BCAST-with-no-prefix (otherwise expected={} but parse={[""]}).
+            if prefixes.is_empty() {
+                prefixes.insert(Vec::new());
+            }
+            ClientTrackingState {
+                enabled: true,
+                redirect: redirect.map(|value| u64::from(value) + 1),
+                bcast: true,
+                optin: false,
+                optout: false,
+                caching: None,
+                noloop,
+                prefixes,
+            }
+        }
         TrackingFlavor::Optin => {
             prefixes.clear();
             ClientTrackingState {
