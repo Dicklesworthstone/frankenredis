@@ -8475,18 +8475,29 @@ fn xread(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let keys = &argv[idx..idx + stream_count];
     let ids = &argv[idx + stream_count..];
 
-    let mut out = Vec::new();
+    // (frankenredis-lnglj) Upstream t_stream.c::xreadCommand looks up each stream
+    // key TWICE via lookupKeyRead — once in the id-resolution loop, once in the
+    // serve loop — so every key records two keyspace hits, and any WRONGTYPE /
+    // bad-id error surfaces in the resolution pass BEFORE any key is served. Keep
+    // the two-phase shape: `store.xlast_id` is the first lookup (and resolves the
+    // `$` cursor); `store.xread` below is the second.
+    let mut cursors = Vec::with_capacity(stream_count);
     for (key, id_arg) in keys.iter().zip(ids.iter()) {
+        let resolved_last = store.xlast_id(key, now_ms)?;
         let cursor = if id_arg.as_slice() == b"$" {
-            store.xlast_id(key, now_ms)?.unwrap_or((u64::MAX, u64::MAX))
+            resolved_last.unwrap_or((u64::MAX, u64::MAX))
         } else {
             match parse_xread_id(id_arg) {
                 Ok(id) => id,
                 Err(reply) => return Ok(reply),
             }
         };
+        cursors.push(cursor);
+    }
 
-        let records = store.xread(key, cursor, count, now_ms)?;
+    let mut out = Vec::new();
+    for (key, cursor) in keys.iter().zip(cursors.iter()) {
+        let records = store.xread(key, *cursor, count, now_ms)?;
         if records.is_empty() {
             continue;
         }
