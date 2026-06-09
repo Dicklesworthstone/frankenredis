@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "env OUT=artifacts/optimization/tealotter-pass107-current-reprofile-20260609 SERVER=/tmp/tealotter-fr-pass107-current-target/release-perf/frankenredis BENCH=/tmp/tealotter-fr-pass107-current-target/release-perf/fr-bench PORT=6416 WORKLOAD=set REQUESTS=300000 JSON_OUT=artifacts/optimization/tealotter-pass107-current-reprofile-20260609/current-set-p16-300k-last.json KEY_PREFIX=teal107set artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 0.46331633731999994,
+      "stddev": 0.07147148343922514,
+      "median": 0.44733322422,
+      "user": 0.42156625999999997,
+      "system": 0.6983504799999999,
+      "min": 0.38935386522000004,
+      "max": 0.65774113522,
+      "times": [
+        0.44783535322,
+        0.42613459922,
+        0.46167859322000004,
+        0.44579191622000003,
+        0.46047000522000003,
+        0.38935386522000004,
+        0.44683109522000003,
+        0.65774113522,
+        0.44314545822,
+        0.45418135222
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

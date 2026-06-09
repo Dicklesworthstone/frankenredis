@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "env OUT=artifacts/optimization/tealotter-pass107-lazy-set-classification-20260609 SERVER=/tmp/tealotter-fr-pass107-lazy-candidate-target/release-perf/frankenredis BENCH=/tmp/tealotter-fr-pass107-current-target/release-perf/fr-bench PORT=6424 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/tealotter-pass107-lazy-set-classification-20260609/reversed-candidate-last.json KEY_PREFIX=teal107rc artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 1.28276127482,
+      "stddev": 0.01988864429124739,
+      "median": 1.27976672742,
+      "user": 1.3636320000000002,
+      "system": 2.09566552,
+      "min": 1.25129341392,
+      "max": 1.31833312692,
+      "times": [
+        1.25129341392,
+        1.28415841892,
+        1.29795619592,
+        1.27812876792,
+        1.30597265192,
+        1.31833312692,
+        1.27365239192,
+        1.28140468692,
+        1.26595130492,
+        1.27076178892
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "env OUT=artifacts/optimization/tealotter-pass107-lazy-set-classification-20260609 SERVER=/tmp/tealotter-fr-pass107-current-target/release-perf/frankenredis BENCH=/tmp/tealotter-fr-pass107-current-target/release-perf/fr-bench PORT=6425 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/tealotter-pass107-lazy-set-classification-20260609/reversed-baseline-last.json KEY_PREFIX=teal107rb artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 1.24593773402,
+      "stddev": 0.026828249121022496,
+      "median": 1.23750237142,
+      "user": 1.3348723000000002,
+      "system": 2.09886192,
+      "min": 1.21146110092,
+      "max": 1.28611419792,
+      "times": [
+        1.21146110092,
+        1.26775611792,
+        1.24043684892,
+        1.21798978892,
+        1.23456789392,
+        1.22311926792,
+        1.27708714692,
+        1.26949014692,
+        1.23135482992,
+        1.28611419792
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

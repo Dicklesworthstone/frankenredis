@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781033976618,
+  "host": "127.0.0.1",
+  "port": 6424,
+  "workload": "set",
+  "clients": 50,
+  "requests": 1000000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "teal107rc",
+  "total_time_ms": 1197,
+  "ops_per_sec": 835339.6583899017,
+  "bytes_sent": 51338713,
+  "bytes_received": 5000000,
+  "latency_us": {
+    "min": 174,
+    "p50": 900,
+    "p95": 1258,
+    "p99": 1603,
+    "p999": 2555,
+    "max": 3357,
+    "mean": 942.6268549999998,
+    "samples": 1000000
+  }
+}
