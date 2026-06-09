@@ -6225,18 +6225,27 @@ impl Store {
 
     #[must_use]
     pub fn keys_matching(&mut self, pattern: &[u8], now_ms: u64) -> Vec<Vec<u8>> {
-        // Fallback to O(N) scan across all databases if DB index is not known.
-        // This is primarily for unit tests and direct fr-command usage.
-        let physical_keys: Vec<Vec<u8>> = self.ordered_keys.iter().cloned().collect();
-        for key in &physical_keys {
+        // (frankenredis-2wgom) Range-prune by the pattern's literal prefix when
+        // one exists: fr's keyspace is an ORDERED BTreeSet, so a prefix glob
+        // (`user:*`, an exact key, ...) touches only O(log n + matches) keys
+        // instead of glob-matching all n — an asymmetry redis's unordered
+        // hashtable cannot exploit. Correctness is identical: `glob_match` still
+        // filters every candidate; the range only skips keys that provably
+        // cannot match (they don't carry the required literal prefix).
+        let lit = glob_literal_prefix(pattern);
+        let candidates: Vec<Vec<u8>> = if lit.is_empty() {
+            self.ordered_keys.iter().cloned().collect()
+        } else if let Some(end) = prefix_range_end(lit) {
+            self.ordered_keys.range(lit.to_vec()..end).cloned().collect()
+        } else {
+            self.ordered_keys.range(lit.to_vec()..).cloned().collect()
+        };
+        for key in &candidates {
             self.drop_if_expired(key, now_ms);
         }
-
-        let mut result: Vec<Vec<u8>> = self
-            .ordered_keys
-            .iter()
-            .filter(|key| glob_match(pattern, key))
-            .cloned()
+        let mut result: Vec<Vec<u8>> = candidates
+            .into_iter()
+            .filter(|key| self.entries.contains_key(key) && glob_match(pattern, key))
             .collect();
         result.sort();
         result
@@ -6244,15 +6253,47 @@ impl Store {
 
     #[must_use]
     pub fn keys_matching_in_db(&mut self, db: usize, pattern: &[u8], now_ms: u64) -> Vec<Vec<u8>> {
-        let physical_keys = self.ordered_physical_keys_in_db(db);
+        // (frankenredis-2wgom) Range-prune by the pattern's literal prefix. The
+        // prefix applies to the LOGICAL key, so the candidate PHYSICAL range is
+        // `encode_db_key(db, lit) ..`; the db-membership filter (db-0: not
+        // db-encoded; db>0: carries the db prefix) keeps correctness exact even
+        // when the byte range bleeds past the db, and `glob_match` still filters
+        // every candidate. O(log n + matches) vs the old O(n) all-key glob.
+        let lit = glob_literal_prefix(pattern);
+        let candidates: Vec<Vec<u8>> = if lit.is_empty() {
+            self.ordered_physical_keys_in_db(db)
+        } else {
+            let lower = encode_db_key(db, lit);
+            let db_prefix = encode_db_key(db, b"");
+            let in_db = |key: &[u8]| -> bool {
+                if db == 0 {
+                    decode_db_key(key).is_none()
+                } else {
+                    key.starts_with(&db_prefix)
+                }
+            };
+            if let Some(end) = prefix_range_end(&lower) {
+                self.ordered_keys
+                    .range(lower.clone()..end)
+                    .filter(|k| in_db(k))
+                    .cloned()
+                    .collect()
+            } else {
+                self.ordered_keys
+                    .range(lower.clone()..)
+                    .filter(|k| in_db(k))
+                    .cloned()
+                    .collect()
+            }
+        };
 
-        for key in &physical_keys {
+        for key in &candidates {
             self.drop_if_expired(key, now_ms);
         }
 
-        let mut result: Vec<Vec<u8>> = self
-            .ordered_physical_keys_in_db(db)
+        let mut result: Vec<Vec<u8>> = candidates
             .into_iter()
+            .filter(|key| self.entries.contains_key(key))
             .filter_map(|key| {
                 let logical = decode_db_key(&key)
                     .map(|(_, logical)| logical)
@@ -21484,6 +21525,39 @@ fn extract_quoted_string(s: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// (frankenredis-2wgom) The longest LITERAL prefix every string matching glob
+/// `pattern` must start with: the bytes before the first unescaped glob
+/// metacharacter (`*`, `?`, `[`) or escape (`\`). Stopping at `\` *under*-
+/// approximates the true prefix (a shorter prefix widens the candidate range),
+/// which is always safe because the per-candidate `glob_match` still filters
+/// exactly. Empty when the pattern opens with a metacharacter — no pruning.
+fn glob_literal_prefix(pattern: &[u8]) -> &[u8] {
+    let mut i = 0;
+    while i < pattern.len() {
+        match pattern[i] {
+            b'*' | b'?' | b'[' | b'\\' => break,
+            _ => i += 1,
+        }
+    }
+    &pattern[..i]
+}
+
+/// (frankenredis-2wgom) Exclusive upper bound for the `BTreeSet` range that
+/// selects exactly the keys having `prefix` as a prefix: increment the last byte
+/// below `0xFF`, dropping trailing `0xFF`s. `None` means an all-`0xFF` (or empty)
+/// prefix, i.e. the range is unbounded above (`prefix..`).
+fn prefix_range_end(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut end = prefix.to_vec();
+    while let Some(last) = end.last_mut() {
+        if *last < 0xFF {
+            *last += 1;
+            return Some(end);
+        }
+        end.pop();
+    }
+    None
+}
+
 pub fn glob_match(pattern: &[u8], string: &[u8]) -> bool {
     glob_match_inner(pattern, string, 0, 0)
 }
@@ -27794,6 +27868,150 @@ mod tests {
         let skew_score = skew_old as f64 / skew_new as f64;
         eprintln!("SDF2 skewed 20k_diff_2M: old={skew_old}ns new={skew_new}ns score={skew_score:.2}x");
         assert!(skew_score >= 0.85, "adaptive diff regressed skewed case: {skew_score:.2}x");
+    }
+
+    // (frankenredis-2wgom) Frozen fingerprint of the KEYS prefix-pruned output
+    // corpus; pinned from the first run.
+    const KPRFX_GOLDEN: u64 = 0x2516_5b2a_a2f9_9213;
+
+    // (frankenredis-2wgom) KEYS literal-prefix range-pruning: isomorphism vs a
+    // brute-force full-keyspace glob reference over randomized key sets +
+    // pattern families (exact / prefix-star / prefix-? / leading-metachar /
+    // char-class / escaped), pinned by a golden fingerprint; plus a Score
+    // microbench of old full-scan glob vs new pruned range for a selective
+    // prefix over a large keyspace.
+    #[test]
+    fn keys_matching_prefix_prune_isomorphic_and_faster_kprfx() {
+        use super::{Store, decode_db_key, encode_db_key, glob_match};
+
+        // Brute-force reference: glob every db-0 logical key (the old behavior).
+        fn brute(store: &Store, pat: &[u8]) -> Vec<Vec<u8>> {
+            let mut r: Vec<Vec<u8>> = store
+                .ordered_physical_keys_in_db(0)
+                .into_iter()
+                .filter_map(|key| {
+                    let logical = decode_db_key(&key).map(|(_, l)| l).unwrap_or(key.as_slice());
+                    if glob_match(pat, logical) {
+                        Some(logical.to_vec())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            r.sort();
+            r
+        }
+
+        let mut s: u64 = 0x243F6A8885A308D3;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fnv = |g: &mut u64, b: &[u8]| {
+            for &byte in b {
+                *g ^= u64::from(byte);
+                *g = g.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+
+        for _ in 0..400 {
+            let mut store = Store::new();
+            let nkeys = 1 + (next() % 60) as usize;
+            for _ in 0..nkeys {
+                // Keys over a tiny alphabet so prefixes/classes actually collide.
+                let klen = 1 + (next() % 6) as usize;
+                let key: Vec<u8> = (0..klen).map(|_| b"ab:cd"[(next() % 5) as usize]).collect();
+                store.set(encode_db_key(0, &key), b"v".to_vec(), None, 0);
+            }
+            // Pattern family drawn from the same alphabet + metacharacters.
+            let patterns: [Vec<u8>; 9] = [
+                b"*".to_vec(),
+                b"a*".to_vec(),
+                b"a?".to_vec(),
+                b"ab*".to_vec(),
+                b"*b".to_vec(),
+                b"[ab]*".to_vec(),
+                b"a:c*".to_vec(),
+                b"\\a*".to_vec(),
+                {
+                    let l = 1 + (next() % 4) as usize;
+                    let mut p: Vec<u8> = (0..l).map(|_| b"ab:cd"[(next() % 5) as usize]).collect();
+                    p.push(b'*');
+                    p
+                },
+            ];
+            for pat in &patterns {
+                let got = store.keys_matching_in_db(0, pat, 0);
+                assert_eq!(got, brute(&store, pat), "KEYS prune mismatch pat={pat:?}");
+                // keys_matching (db-agnostic) must agree with keys_matching_in_db
+                // on a pure db-0 keyspace.
+                assert_eq!(store.keys_matching(pat, 0), got, "keys_matching disagrees pat={pat:?}");
+                for k in &got {
+                    fnv(&mut golden, k);
+                }
+                fnv(&mut golden, &[0xFF]);
+            }
+        }
+        // Explicit edge patterns: empty, all-0xFF-ish prefix, exact-key lookup.
+        {
+            let mut store = Store::new();
+            for k in [b"user:1".as_slice(), b"user:2", b"user:30", b"v", b"users"] {
+                store.set(encode_db_key(0, k), b"v".to_vec(), None, 0);
+            }
+            for pat in [
+                b"user:*".as_slice(),
+                b"user:1",
+                b"user:?",
+                b"user:3*",
+                b"nomatch*",
+                b"*",
+            ] {
+                assert_eq!(
+                    store.keys_matching_in_db(0, pat, 0),
+                    brute(&store, pat),
+                    "edge pat={pat:?}"
+                );
+            }
+        }
+        assert_eq!(
+            golden, KPRFX_GOLDEN,
+            "KEYS prune output fingerprint changed: {golden:#018x} (golden {KPRFX_GOLDEN:#018x})"
+        );
+
+        if cfg!(debug_assertions) {
+            return;
+        }
+        // ---- Score: old full-scan glob vs new prefix-pruned range ----
+        let mut big = Store::new();
+        let n = 100_000u32;
+        for i in 0..n {
+            // Keys spread over many prefixes; only "key:00042:*" is selective.
+            let k = format!("key:{:05}:{}", i % 1000, i);
+            big.set(encode_db_key(0, k.as_bytes()), b"v".to_vec(), None, 0);
+        }
+        let pat = b"key:00042:*";
+        let reps = 200;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc.wrapping_add(brute(&big, pat).len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 = acc2.wrapping_add(big.keys_matching_in_db(0, pat, 0).len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(acc, acc2, "old/new disagree on match count");
+        let score = old_ns as f64 / new_ns as f64;
+        eprintln!("KPRFX KEYS selective-prefix over 100k: old={old_ns}ns new={new_ns}ns score={score:.2}x");
+        assert!(score >= 2.0, "prefix prune must be >=2.0x for a selective prefix; got {score:.2}x");
     }
 
     // (frankenredis-4ywto) Frozen fingerprint of the members_at_indices output
