@@ -28401,6 +28401,66 @@ mod tests {
         assert!(score >= 2.0, "resume-cache SCAN must be >=2.0x; got {score:.2}x");
     }
 
+    // (frankenredis-3e92e) Correctness gate for the SCAN resume cache's
+    // generation guard: it must bump on every STRUCTURAL keyspace mutation
+    // (insert / remove / flushdb) but NOT on a value-only update (so the cache
+    // survives non-structural writes), and a flush+readd mid-scan must leave
+    // cache-on byte-identical to cache-off.
+    #[test]
+    fn scan_cache_generation_guard_correct_scanlin2() {
+        use super::{Store, encode_db_key};
+
+        // (a) generation bumps only on structural keyspace changes.
+        let mut s = Store::new();
+        let g0 = s.keyspace_generation;
+        s.set(encode_db_key(0, b"k1"), b"v".to_vec(), None, 0);
+        assert_ne!(s.keyspace_generation, g0, "new-key insert must bump generation");
+        let g1 = s.keyspace_generation;
+        // Value-only overwrite of an existing key: ordered_keys is unchanged, so
+        // the resume cache stays valid — the generation must NOT bump.
+        s.set(encode_db_key(0, b"k1"), b"v2".to_vec(), None, 0);
+        assert_eq!(s.keyspace_generation, g1, "in-place value update must NOT bump generation");
+        s.del(&[encode_db_key(0, b"k1")], 0);
+        assert_ne!(s.keyspace_generation, g1, "remove must bump generation");
+        let g2 = s.keyspace_generation;
+        s.set(encode_db_key(0, b"k2"), b"v".to_vec(), None, 0);
+        s.flushdb();
+        assert_ne!(s.keyspace_generation, g2, "flushdb must bump generation");
+
+        // (b) flush + readd of a DIFFERENT keyspace mid-scan: the stale cached
+        // last-key would mis-resume if the generation guard failed; cache-on must
+        // reproduce cache-off exactly.
+        let run = |disable_cache: bool| -> Vec<Vec<u8>> {
+            let mut store = Store::new();
+            for i in 0..200u32 {
+                store.set(encode_db_key(0, format!("a{i:04}").as_bytes()), b"v".to_vec(), None, 0);
+            }
+            let mut out = Vec::new();
+            let mut cursor = 0u64;
+            let mut step = 0;
+            loop {
+                if disable_cache {
+                    store.scan_cache = None;
+                }
+                let (next, batch) = store.scan(cursor, None, 7, 0);
+                out.extend(batch);
+                step += 1;
+                if step == 4 {
+                    store.flushdb();
+                    for i in 0..150u32 {
+                        store.set(encode_db_key(0, format!("b{i:04}").as_bytes()), b"v".to_vec(), None, 0);
+                    }
+                }
+                if next == 0 || step > 100_000 {
+                    break;
+                }
+                cursor = next;
+            }
+            out
+        };
+        assert_eq!(run(false), run(true), "flush+readd mid-scan: cache-on diverged from cache-off");
+    }
+
     // (frankenredis-377jl) Frozen fingerprint of the grouped PEL AOF corpus.
     const AOFPEL_GOLDEN: u64 = 0xa82a_4b22_ca56_1dc1;
 
