@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-zhphm/pass3/baseline SERVER=/tmp/rch_target_fr_zhphm_p3_baseline/release-perf/frankenredis BENCH=/tmp/rch_target_fr_zhphm_p3_baseline/release-perf/fr-bench PORT=26840 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-zhphm/pass3/baseline/baseline-set-p16-1m-last.json KEY_PREFIX=zhphm-p3-base artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 1.75603325892,
+      "stddev": 0.35051580294899093,
+      "median": 1.79560475142,
+      "user": 1.35091186,
+      "system": 2.194488655,
+      "min": 1.25900911592,
+      "max": 2.22610782992,
+      "times": [
+        1.9878512279200002,
+        1.78654537192,
+        2.06340074392,
+        1.80466413092,
+        2.22610782992,
+        1.64152249592,
+        1.25900911592,
+        1.27916515492
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
