@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/frankenredis --bench-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/fr-bench --port 49512 --workload hset --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix bf96:hset --json-out artifacts/optimization/boldfalcon-pass96-current-20260609/baseline-hset-p16-300k-last.json",
+      "mean": 0.6529690496800001,
+      "stddev": 0.04116964004206955,
+      "median": 0.6469191670800001,
+      "user": 0.6791149599999999,
+      "system": 0.7795997800000001,
+      "min": 0.60709566808,
+      "max": 0.7427271590800001,
+      "times": [
+        0.6332465620800001,
+        0.6149741270800001,
+        0.6131064140800001,
+        0.64893569508,
+        0.6717875400800001,
+        0.6683002330800001,
+        0.64490263908,
+        0.60709566808,
+        0.6846144590800001,
+        0.7427271590800001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

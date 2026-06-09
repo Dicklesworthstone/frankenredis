@@ -32,7 +32,7 @@ use fr_persist::{
     AofRecord, PersistError, RdbEntry, RdbStringEntryRef, RdbValue, decode_aof_stream,
     encode_aof_stream, read_rdb_file,
 };
-use fr_protocol::{RespFrame, RespParseError};
+use fr_protocol::{RespFrame, RespParseError, encode_bulk_string_slice};
 use fr_repl::{
     BacklogWindow, PsyncReply, ReplOffset, WaitAofThreshold, WaitThreshold, decide_psync,
     evaluate_wait, evaluate_waitaof, parse_psync_reply,
@@ -3395,7 +3395,10 @@ impl ServerState {
                 }
                 for key in keys {
                     let matches = tracking.prefixes.is_empty()
-                        || tracking.prefixes.iter().any(|prefix| key.starts_with(prefix));
+                        || tracking
+                            .prefixes
+                            .iter()
+                            .any(|prefix| key.starts_with(prefix));
                     if matches {
                         let entry = bcast.entry(target_id).or_default();
                         if !entry.iter().any(|existing| existing == key) {
@@ -3431,12 +3434,11 @@ impl ServerState {
             }
             targets.sort_unstable();
             for target_id in targets {
-                self.pubsub_outbox
-                    .entry(target_id)
-                    .or_default()
-                    .push(fr_store::PubSubMessage::Invalidate {
+                self.pubsub_outbox.entry(target_id).or_default().push(
+                    fr_store::PubSubMessage::Invalidate {
                         keys: vec![key.clone()],
-                    });
+                    },
+                );
             }
         }
     }
@@ -4238,7 +4240,11 @@ impl Runtime {
         self.server.bind_addr = addr.clone();
         // (frankenredis-jd75g) The standalone server binds a single address at
         // startup; seed the bind list so CONFIG SET port/bind can test-bind it.
-        self.server.bind_addrs = if addr.is_empty() { Vec::new() } else { vec![addr] };
+        self.server.bind_addrs = if addr.is_empty() {
+            Vec::new()
+        } else {
+            vec![addr]
+        };
     }
 
     /// Take a pending CONFIG SET port change for the standalone event loop to
@@ -6908,7 +6914,9 @@ impl Runtime {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < cmd.name_upper().len()
             || key.len() > self.policy.gate.max_bulk_len
-            || values.iter().any(|v| v.len() > self.policy.gate.max_bulk_len)
+            || values
+                .iter()
+                .any(|v| v.len() > self.policy.gate.max_bulk_len)
         {
             return None;
         }
@@ -7075,7 +7083,9 @@ impl Runtime {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"HSET".len()
             || key.len() > self.policy.gate.max_bulk_len
-            || pairs.iter().any(|p| p.len() > self.policy.gate.max_bulk_len)
+            || pairs
+                .iter()
+                .any(|p| p.len() > self.policy.gate.max_bulk_len)
         {
             return None;
         }
@@ -7117,8 +7127,8 @@ impl Runtime {
             }
         }
         let elapsed_us = start.elapsed().as_micros() as u64;
-        let reply = error
-            .unwrap_or_else(|| RespFrame::Integer(i64::try_from(added).unwrap_or(i64::MAX)));
+        let reply =
+            error.unwrap_or_else(|| RespFrame::Integer(i64::try_from(added).unwrap_or(i64::MAX)));
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_hset_borrowed_metrics(key, pairs, elapsed_us, now_ms, packet_id, failed);
@@ -7229,7 +7239,9 @@ impl Runtime {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"ZADD".len()
             || key.len() > self.policy.gate.max_bulk_len
-            || pairs.iter().any(|p| p.len() > self.policy.gate.max_bulk_len)
+            || pairs
+                .iter()
+                .any(|p| p.len() > self.policy.gate.max_bulk_len)
         {
             return None;
         }
@@ -7480,9 +7492,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_with_kind(cmd.name_lower(), elapsed_us, kind);
+            self.server.store.record_command_histogram_with_kind(
+                cmd.name_lower(),
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -7505,6 +7519,82 @@ impl Runtime {
                 output: &RespFrame::BulkString(None),
             });
         }
+    }
+
+    pub fn execute_plain_get_borrowed_into(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_get_borrowed(key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.refresh_store_runtime_info_context();
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("get");
+        self.session.last_argv_len_sum = b"GET".len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let result = self.server.store.get_string_bytes(key, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let mut error_reply = None;
+        match result {
+            Ok(value) => {
+                if !suppress_reply {
+                    encode_bulk_string_slice(value.as_deref(), resp3, out);
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_get_borrowed_metrics(key, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.server.store.stat_total_reads_processed += 1;
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
     }
 
     pub fn execute_plain_get_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
@@ -11485,9 +11575,8 @@ impl Runtime {
         // so EVAL/EVALSHA/FCALL/PFCOUNT/PUBLISH/SPUBLISH (which can produce
         // replication traffic without being plain writes) must be deferred too —
         // not just `is_write_command`. (frankenredis)
-        argv.first().is_some_and(|cmd| {
-            fr_command::is_write_command(cmd) || command_is_may_replicate(cmd)
-        })
+        argv.first()
+            .is_some_and(|cmd| fr_command::is_write_command(cmd) || command_is_may_replicate(cmd))
     }
 
     pub fn execute_bytes(&mut self, input: &[u8], now_ms: u64) -> Vec<u8> {
@@ -14809,14 +14898,11 @@ impl Runtime {
                 // Upstream config.c marks this as MEMORY_CONFIG with
                 // a 1MB lower bound. (br-frankenredis-cfgmemvalue)
                 // Over-cap/overflow is a RANGE error. (frankenredis-vqmkt)
-                let parsed = match parse_memory_config_value(
-                    "proto-max-bulk-len",
-                    &pair[1],
-                    1024 * 1024,
-                ) {
-                    Ok(value) => value as usize,
-                    Err(resp) => return resp,
-                };
+                let parsed =
+                    match parse_memory_config_value("proto-max-bulk-len", &pair[1], 1024 * 1024) {
+                        Ok(value) => value as usize,
+                        Err(resp) => return resp,
+                    };
                 next_proto_max_bulk_len = Some(parsed);
                 static_override_updates
                     .push(("proto-max-bulk-len".to_string(), parsed.to_string()));
@@ -14889,8 +14975,10 @@ impl Runtime {
                     Ok(value) => value,
                     Err(resp) => return resp,
                 };
-                static_override_updates
-                    .push(("auto-aof-rewrite-percentage".to_string(), parsed.to_string()));
+                static_override_updates.push((
+                    "auto-aof-rewrite-percentage".to_string(),
+                    parsed.to_string(),
+                ));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("active-defrag-threshold-lower")
@@ -14921,9 +15009,10 @@ impl Runtime {
                         "Hostnames must be less than 256 characters",
                     );
                 }
-                if value_bytes.iter().any(|&c| {
-                    !(c.is_ascii_alphanumeric() || c == b'-' || c == b'.')
-                }) {
+                if value_bytes
+                    .iter()
+                    .any(|&c| !(c.is_ascii_alphanumeric() || c == b'-' || c == b'.'))
+                {
                     return config_set_failed(
                         "cluster-announce-hostname",
                         "Hostnames may only contain alphanumeric characters, hyphens or dots",
@@ -15208,8 +15297,7 @@ impl Runtime {
                     Ok(v) => v,
                     Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
                 };
-                let addrs: Vec<String> =
-                    value.split_whitespace().map(|s| s.to_string()).collect();
+                let addrs: Vec<String> = value.split_whitespace().map(|s| s.to_string()).collect();
                 if addrs.len() > 16 {
                     return config_set_failed("bind", "Too many bind addresses specified.");
                 }
@@ -19770,7 +19858,10 @@ fn parse_memory_config_value(canonical: &str, value: &[u8], min: u64) -> Result<
     let parsed = match parse_memory_size_arg(value) {
         Ok(value) => value,
         Err(()) => {
-            return Err(config_set_failed(canonical, "argument must be a memory value"));
+            return Err(config_set_failed(
+                canonical,
+                "argument must be a memory value",
+            ));
         }
     };
     if parsed < min || parsed > i64::MAX as u64 {
@@ -20585,6 +20676,86 @@ mod tests {
             fast.session.last_argv_len_sum,
             generic.session.last_argv_len_sum
         );
+    }
+
+    #[test]
+    fn plain_get_borrowed_into_matches_frame_bytes_and_stats() {
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"k", b"v"]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"LPUSH", b"list", b"x"]), 1),
+                RespFrame::Integer(1)
+            );
+        }
+
+        let mut out = Vec::new();
+        assert_eq!(
+            direct.execute_plain_get_borrowed_into(b"k", 2, false, &mut out),
+            Some(())
+        );
+        assert_eq!(
+            out,
+            generic
+                .execute_frame(command(&[b"GET", b"k"]), 2)
+                .to_bytes()
+        );
+
+        out.clear();
+        assert_eq!(
+            direct.execute_plain_get_borrowed_into(b"missing", 3, false, &mut out),
+            Some(())
+        );
+        assert_eq!(
+            out,
+            generic
+                .execute_frame(command(&[b"GET", b"missing"]), 3)
+                .to_bytes()
+        );
+
+        out.clear();
+        assert_eq!(
+            direct.execute_plain_get_borrowed_into(b"list", 4, false, &mut out),
+            Some(())
+        );
+        assert_eq!(
+            out,
+            generic
+                .execute_frame(command(&[b"GET", b"list"]), 4)
+                .to_bytes()
+        );
+
+        assert_eq!(
+            direct.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            direct.server.store.stat_total_reads_processed,
+            generic.server.store.stat_total_reads_processed
+        );
+        assert_eq!(
+            direct.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+
+        let mut resp3_out = Vec::new();
+        assert_eq!(
+            direct.execute_plain_get_borrowed_into(b"still-missing", 5, true, &mut resp3_out),
+            Some(())
+        );
+        assert_eq!(resp3_out, b"_\r\n");
     }
 
     #[test]
@@ -27244,7 +27415,10 @@ mod tests {
         let _ = rt.execute_frame(command(&[b"SELECT", b"1"]), 2);
         assert_eq!(
             rt.drain_monitor_output(),
-            vec![(9, b"+0.002000 [1 127.0.0.1:0] \"SELECT\" \"1\"\r\n".to_vec())],
+            vec![(
+                9,
+                b"+0.002000 [1 127.0.0.1:0] \"SELECT\" \"1\"\r\n".to_vec()
+            )],
             "replica MONITOR must echo the replayed SELECT"
         );
 
@@ -27262,7 +27436,10 @@ mod tests {
         let _ = rt.execute_frame(command(&[b"SELECT", b"2"]), 4);
         assert_eq!(
             rt.drain_monitor_output(),
-            vec![(9, b"+0.004000 [2 127.0.0.1:0] \"SELECT\" \"2\"\r\n".to_vec())],
+            vec![(
+                9,
+                b"+0.004000 [2 127.0.0.1:0] \"SELECT\" \"2\"\r\n".to_vec()
+            )],
             "normal-client SELECT must now be mirrored to MONITOR (e8f9q)"
         );
     }
@@ -28939,7 +29116,10 @@ mod tests {
             RespFrame::Integer(1)
         );
         let end = rt.replication_primary_offset().0;
-        assert!(end > mid, "phase-B writes must advance the replication offset");
+        assert!(
+            end > mid,
+            "phase-B writes must advance the replication offset"
+        );
 
         // The +CONTINUE backlog served from `mid` is exactly the phase-B tail.
         let backlog = rt.encoded_aof_stream_from_offset(mid);
@@ -28953,7 +29133,10 @@ mod tests {
             "backlog byte length must equal the master_repl_offset delta"
         );
         let text = String::from_utf8_lossy(&backlog);
-        assert!(text.contains('c'), "backlog must replay 'SET c 3': {text:?}");
+        assert!(
+            text.contains('c'),
+            "backlog must replay 'SET c 3': {text:?}"
+        );
         assert!(
             text.contains("ctr"),
             "backlog must replay 'INCR ctr': {text:?}"
@@ -29087,7 +29270,8 @@ mod tests {
         // Reload into a fresh runtime from disk alone — every key must survive.
         let mut rt2 = Runtime::default_strict();
         rt2.set_aof_path(aof_path.clone());
-        rt2.load_aof(300).expect("appendonlydir load should succeed");
+        rt2.load_aof(300)
+            .expect("appendonlydir load should succeed");
         let dbsize = rt2.execute_frame(command(&[b"DBSIZE"]), 300);
         assert_eq!(
             dbsize,
@@ -33781,7 +33965,11 @@ mod tests {
             );
         }
         // Int params: parse error vs out-of-range, both via config_set_failed.
-        for p in ["latency-monitor-threshold", "busy-reply-threshold", "lua-time-limit"] {
+        for p in [
+            "latency-monitor-threshold",
+            "busy-reply-threshold",
+            "lua-time-limit",
+        ] {
             assert_eq!(
                 rt.execute_frame(command(&[b"CONFIG", b"SET", p.as_bytes(), b"__bogus__"]), 0),
                 RespFrame::Error(format!(
@@ -33824,7 +34012,10 @@ mod tests {
         );
         // Whitespace is normalized to single spaces (matches getConfigBindOption).
         assert_eq!(
-            rt.execute_frame(command(&[b"CONFIG", b"SET", b"bind", b"  127.0.0.1   ::1  "]), 0),
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"bind", b"  127.0.0.1   ::1  "]),
+                0
+            ),
             ok,
         );
         assert_eq!(
@@ -33881,8 +34072,14 @@ mod tests {
             ])),
         );
         // 0 is valid (disable TCP listener); boundary 65535 valid.
-        assert_eq!(rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"0"]), 0), ok);
-        assert_eq!(rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"65535"]), 0), ok);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"0"]), 0),
+            ok
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"65535"]), 0),
+            ok
+        );
         // Out of range and unparseable: INTEGER_CONFIG wording, not "immutable".
         assert_eq!(
             rt.execute_frame(command(&[b"CONFIG", b"SET", b"port", b"65536"]), 0),
@@ -33933,7 +34130,10 @@ mod tests {
             ("zset-max-listpack-value", 0),
             ("zset-max-ziplist-value", 0),
         ] {
-            assert_eq!(set(&mut rt, p, "__garbage__"), err(p, "argument must be a memory value"));
+            assert_eq!(
+                set(&mut rt, p, "__garbage__"),
+                err(p, "argument must be a memory value")
+            );
             let range = format!("argument must be between {min} and 9223372036854775807 inclusive");
             assert_eq!(
                 set(&mut rt, p, "99999999999999999999999"),
@@ -33946,7 +34146,11 @@ mod tests {
                 assert_eq!(set(&mut rt, p, "0"), ok, "{p}: 0 is in range");
             }
             // A plain valid value (>= min) is accepted; suffix forms too.
-            assert_eq!(set(&mut rt, p, "2097152"), ok, "{p}: in-range value accepted");
+            assert_eq!(
+                set(&mut rt, p, "2097152"),
+                ok,
+                "{p}: in-range value accepted"
+            );
         }
 
         // INTEGER_CONFIG: garbage/overflow -> parse error; out-of-range -> range.
@@ -33977,7 +34181,10 @@ mod tests {
         for bad in ["bad_underscore", "has space", "a@b"] {
             assert_eq!(
                 set(&mut rt, hp, bad),
-                err(hp, "Hostnames may only contain alphanumeric characters, hyphens or dots"),
+                err(
+                    hp,
+                    "Hostnames may only contain alphanumeric characters, hyphens or dots"
+                ),
             );
         }
         assert_eq!(
@@ -34001,7 +34208,12 @@ mod tests {
         // latency-tracking-info-percentiles: parse-fail vs range-fail.
         assert_eq!(
             rt.execute_frame(
-                command(&[b"CONFIG", b"SET", b"latency-tracking-info-percentiles", b"abc"]),
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"latency-tracking-info-percentiles",
+                    b"abc"
+                ]),
                 0,
             ),
             err(
@@ -34028,7 +34240,12 @@ mod tests {
         }
         assert_eq!(
             rt.execute_frame(
-                command(&[b"CONFIG", b"SET", b"latency-tracking-info-percentiles", b"0 50 100"]),
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"latency-tracking-info-percentiles",
+                    b"0 50 100"
+                ]),
                 0,
             ),
             ok,
@@ -34036,7 +34253,10 @@ mod tests {
 
         // repl-diskless-sync-delay: [0, INT_MAX], with parse/range messages.
         assert_eq!(
-            rt.execute_frame(command(&[b"CONFIG", b"SET", b"repl-diskless-sync-delay", b"abc"]), 0),
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"repl-diskless-sync-delay", b"abc"]),
+                0
+            ),
             err(
                 "repl-diskless-sync-delay",
                 "argument couldn't be parsed into an integer"
@@ -34045,7 +34265,12 @@ mod tests {
         for bad in ["-1", "2147483648", "9999999999"] {
             assert_eq!(
                 rt.execute_frame(
-                    command(&[b"CONFIG", b"SET", b"repl-diskless-sync-delay", bad.as_bytes()]),
+                    command(&[
+                        b"CONFIG",
+                        b"SET",
+                        b"repl-diskless-sync-delay",
+                        bad.as_bytes()
+                    ]),
                     0,
                 ),
                 err(
@@ -34058,7 +34283,12 @@ mod tests {
         for good in ["0", "5", "2147483647"] {
             assert_eq!(
                 rt.execute_frame(
-                    command(&[b"CONFIG", b"SET", b"repl-diskless-sync-delay", good.as_bytes()]),
+                    command(&[
+                        b"CONFIG",
+                        b"SET",
+                        b"repl-diskless-sync-delay",
+                        good.as_bytes()
+                    ]),
                     0,
                 ),
                 ok,
@@ -36981,7 +37211,10 @@ mod tests {
         let err = |rt: &mut Runtime, rule: &[u8]| -> String {
             match rt.execute_frame(command(&[b"ACL", b"SETUSER", b"u", b"reset", rule]), 0) {
                 RespFrame::Error(e) => e,
-                other => panic!("expected error for {:?}, got {other:?}", String::from_utf8_lossy(rule)),
+                other => panic!(
+                    "expected error for {:?}, got {other:?}",
+                    String::from_utf8_lossy(rule)
+                ),
             }
         };
         // Unmatched parenthesis reports the text from the '(' onward.

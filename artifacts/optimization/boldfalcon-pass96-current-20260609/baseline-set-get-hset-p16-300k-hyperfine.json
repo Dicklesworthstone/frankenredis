@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/frankenredis --bench-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/fr-bench --port 49410 --workload set --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix bf96:set --json-out artifacts/optimization/boldfalcon-pass96-current-20260609/baseline-set-p16-300k-last.json",
+      "mean": 0.5616129008599999,
+      "stddev": 0.026417622158390688,
+      "median": 0.5644127170600001,
+      "user": 0.53545564,
+      "system": 0.6968535,
+      "min": 0.51656379556,
+      "max": 0.5988236945600001,
+      "times": [
+        0.5694636415600001,
+        0.5746210605600001,
+        0.52508852156,
+        0.5704431385600001,
+        0.5593617925600001,
+        0.51656379556,
+        0.55122713356,
+        0.55605561056,
+        0.5988236945600001,
+        0.59448061956
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/frankenredis --bench-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/fr-bench --port 49411 --workload get --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix bf96:get --json-out artifacts/optimization/boldfalcon-pass96-current-20260609/baseline-get-p16-300k-last.json",
+      "mean": 0.5471554217600001,
+      "stddev": 0.042906344390486184,
+      "median": 0.53255014856,
+      "user": 0.5142319399999999,
+      "system": 0.7051854999999999,
+      "min": 0.50632652356,
+      "max": 0.65163853856,
+      "times": [
+        0.50632652356,
+        0.52544827656,
+        0.54670084056,
+        0.65163853856,
+        0.58780292456,
+        0.51894108856,
+        0.54558431356,
+        0.5252828605600001,
+        0.5396520205600001,
+        0.52417683056
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

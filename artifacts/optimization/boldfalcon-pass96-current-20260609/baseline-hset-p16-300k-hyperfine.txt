@@ -1,0 +1,4 @@
+Benchmark 1: python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/frankenredis --bench-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/fr-bench --port 49512 --workload hset --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix bf96:hset --json-out artifacts/optimization/boldfalcon-pass96-current-20260609/baseline-hset-p16-300k-last.json
+  Time (mean ± σ):     653.0 ms ±  41.2 ms    [User: 679.1 ms, System: 779.6 ms]
+  Range (min … max):   607.1 ms … 742.7 ms    10 runs
+ 

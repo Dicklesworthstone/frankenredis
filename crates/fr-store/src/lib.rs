@@ -4292,6 +4292,21 @@ impl Store {
     /// Get a string value. Returns `None` if the key doesn't exist.
     /// Returns `Err(WrongType)` if the key holds a non-string value.
     pub fn get(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
+        self.get_string_bytes(key, now_ms)
+            .map(|value| value.map(std::borrow::Cow::into_owned))
+    }
+
+    /// Get a string-like value while borrowing ordinary string payloads.
+    ///
+    /// This mirrors [`Store::get`] exactly for keyspace stats, lazy expiry,
+    /// WRONGTYPE handling, LRU touch, and LFU sampling. The only difference is
+    /// that ordinary string values are returned as borrowed bytes; integer
+    /// encodings still allocate their decimal representation like `GET` must.
+    pub fn get_string_bytes(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Cow<'_, [u8]>>, StoreError> {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
         }
@@ -4305,14 +4320,18 @@ impl Store {
         };
         match self.entries.get_mut(key) {
             Some(entry) => {
-                let Some(v) = entry.value.string_owned() else {
+                if !entry.value.is_string_like() {
                     return Err(StoreError::WrongType);
-                };
+                }
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 entry.touch(now_ms);
-                Ok(Some(v))
+                let value = entry
+                    .value
+                    .string_bytes()
+                    .expect("string-like value exposes bytes");
+                Ok(Some(value))
             }
             None => Ok(None),
         }
@@ -21630,6 +21649,52 @@ mod tests {
     }
 
     #[test]
+    fn get_string_bytes_matches_get_stats_and_touch() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 100);
+        store.reset_info_stats();
+
+        let copied = store
+            .get_string_bytes(b"k", 200)
+            .map(|value| value.map(std::borrow::Cow::into_owned))
+            .expect("borrowed get succeeds");
+        assert_eq!(copied, Some(b"v".to_vec()));
+        assert_eq!(store.stat_keyspace_hits, 1);
+        assert_eq!(store.stat_keyspace_misses, 0);
+        assert_eq!(
+            store
+                .entries
+                .get(b"k".as_ref())
+                .expect("entry remains")
+                .last_access_ms,
+            200
+        );
+
+        let missing = store
+            .get_string_bytes(b"missing", 300)
+            .map(|value| value.map(std::borrow::Cow::into_owned))
+            .expect("missing borrowed get succeeds");
+        assert_eq!(missing, None);
+        assert_eq!(store.stat_keyspace_misses, 1);
+
+        store
+            .rpush(b"list", &[b"x".to_vec()], 400)
+            .expect("create list");
+        store.reset_info_stats();
+        let wrong_type = store.get_string_bytes(b"list", 500);
+        assert!(matches!(wrong_type, Err(StoreError::WrongType)));
+        assert_eq!(store.stat_keyspace_hits, 1);
+        assert_eq!(
+            store
+                .entries
+                .get(b"list".as_ref())
+                .expect("list entry remains")
+                .last_access_ms,
+            400
+        );
+    }
+
+    #[test]
     fn touch_and_sort_update_lru_and_keyspace_stats() {
         let mut store = Store::new();
         store
@@ -21825,7 +21890,11 @@ mod tests {
 
         // Exactly 128 bytes is NOT trimmed (strictly-greater threshold).
         store.reset_slowlog();
-        store.record_slowlog(&[b"SET".to_vec(), b"k".to_vec(), vec![b'B'; 128]], 100, 3_000);
+        store.record_slowlog(
+            &[b"SET".to_vec(), b"k".to_vec(), vec![b'B'; 128]],
+            100,
+            3_000,
+        );
         let e3 = store.get_slowlog(1);
         assert_eq!(e3[0].argv[2], vec![b'B'; 128]);
 
@@ -22287,7 +22356,9 @@ mod tests {
         assert_eq!(store.object_encoding(b"c", 0), Some("quicklist"));
 
         // Small list under both limits stays listpack.
-        let _ = store.rpush(b"d", &[b"x".to_vec(), b"y".to_vec()], 0).unwrap();
+        let _ = store
+            .rpush(b"d", &[b"x".to_vec(), b"y".to_vec()], 0)
+            .unwrap();
         assert_eq!(store.object_encoding(b"d", 0), Some("listpack"));
     }
 

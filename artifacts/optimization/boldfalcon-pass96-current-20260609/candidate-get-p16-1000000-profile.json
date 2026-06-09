@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780983073478,
+  "host": "127.0.0.1",
+  "port": 49634,
+  "workload": "get",
+  "clients": 50,
+  "requests": 1000000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "bf96profile:cand",
+  "total_time_ms": 1914,
+  "ops_per_sec": 522272.8767837837,
+  "bytes_sent": 47889300,
+  "bytes_received": 9000000,
+  "latency_us": {
+    "min": 57,
+    "p50": 1387,
+    "p95": 2141,
+    "p99": 3031,
+    "p999": 4227,
+    "max": 8551,
+    "mean": 1505.150408,
+    "samples": 1000000
+  }
+}

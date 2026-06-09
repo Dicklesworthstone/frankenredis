@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:49610
+workload: set
+clients: 50  requests: 1000000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 1572 ms  throughput: 635794.52 ops/sec
+latency(us): min=43 p50=1156 p95=1742 p99=2143 p999=3467 max=4215 mean=1243.14
+bytes: sent=58338927 received=5000000 key_prefix=bf96:profile:set

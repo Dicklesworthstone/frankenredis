@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780981866993,
+  "host": "127.0.0.1",
+  "port": 49512,
+  "workload": "hset",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "bf96:hset",
+  "total_time_ms": 676,
+  "ops_per_sec": 443340.43677518563,
+  "bytes_sent": 18216488,
+  "bytes_received": 1200000,
+  "latency_us": {
+    "min": 85,
+    "p50": 1543,
+    "p95": 2799,
+    "p99": 3663,
+    "p999": 4791,
+    "max": 5987,
+    "mean": 1761.0826933333324,
+    "samples": 300000
+  }
+}

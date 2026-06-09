@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1780982987622,
+  "host": "127.0.0.1",
+  "port": 49630,
+  "workload": "get",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "bf96pair:base",
+  "total_time_ms": 464,
+  "ops_per_sec": 646221.6218775486,
+  "bytes_sent": 13466769,
+  "bytes_received": 2700000,
+  "latency_us": {
+    "min": 39,
+    "p50": 1112,
+    "p95": 1662,
+    "p99": 2403,
+    "p999": 3677,
+    "max": 11071,
+    "mean": 1189.9251233333327,
+    "samples": 300000
+  }
+}

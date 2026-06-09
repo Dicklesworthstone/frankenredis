@@ -1,0 +1,11 @@
+Benchmark 1: python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/boldfalcon-fr-pass96-baseline-target/release-perf/frankenredis --bench-bin /tmp/boldfalcon-fr-pass96-baseline-target/release-perf/fr-bench --port 49630 --workload get --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix bf96pair:base --json-out artifacts/optimization/boldfalcon-pass96-current-20260609/paired-get-p16-300k-baseline-last.json
+  Time (mean ± σ):     546.7 ms ±  23.8 ms    [User: 495.1 ms, System: 692.0 ms]
+  Range (min … max):   501.5 ms … 578.8 ms    10 runs
+ 
+Benchmark 2: python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/frankenredis --bench-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/fr-bench --port 49631 --workload get --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix bf96pair:cand --json-out artifacts/optimization/boldfalcon-pass96-current-20260609/paired-get-p16-300k-candidate-last.json
+  Time (mean ± σ):     513.8 ms ±  19.8 ms    [User: 471.5 ms, System: 677.5 ms]
+  Range (min … max):   491.3 ms … 549.7 ms    10 runs
+ 
+Summary
+  python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/frankenredis --bench-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/fr-bench --port 49631 --workload get --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix bf96pair:cand --json-out artifacts/optimization/boldfalcon-pass96-current-20260609/paired-get-p16-300k-candidate-last.json ran
+    1.06 ± 0.06 times faster than python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/boldfalcon-fr-pass96-baseline-target/release-perf/frankenredis --bench-bin /tmp/boldfalcon-fr-pass96-baseline-target/release-perf/fr-bench --port 49630 --workload get --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix bf96pair:base --json-out artifacts/optimization/boldfalcon-pass96-current-20260609/paired-get-p16-300k-baseline-last.json

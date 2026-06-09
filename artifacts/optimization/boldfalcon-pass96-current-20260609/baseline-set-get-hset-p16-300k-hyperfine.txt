@@ -1,0 +1,10 @@
+Benchmark 1: python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/frankenredis --bench-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/fr-bench --port 49410 --workload set --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix bf96:set --json-out artifacts/optimization/boldfalcon-pass96-current-20260609/baseline-set-p16-300k-last.json
+  Time (mean ± σ):     561.6 ms ±  26.4 ms    [User: 535.5 ms, System: 696.9 ms]
+  Range (min … max):   516.6 ms … 598.8 ms    10 runs
+ 
+Benchmark 2: python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/frankenredis --bench-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/fr-bench --port 49411 --workload get --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix bf96:get --json-out artifacts/optimization/boldfalcon-pass96-current-20260609/baseline-get-p16-300k-last.json
+  Time (mean ± σ):     547.2 ms ±  42.9 ms    [User: 514.2 ms, System: 705.2 ms]
+  Range (min … max):   506.3 ms … 651.6 ms    10 runs
+ 
+Benchmark 3: python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/frankenredis --bench-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/fr-bench --port 49412 --workload hset --requests 300000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix bf96:hset --json-out artifacts/optimization/boldfalcon-pass96-current-20260609/baseline-hset-p16-300k-last.json
+Error: Command terminated with non-zero exit code 1 in the first warmup run. Use the '-i'/'--ignore-failure' option if you want to ignore this. Alternatively, use the '--show-output' option to debug what went wrong.

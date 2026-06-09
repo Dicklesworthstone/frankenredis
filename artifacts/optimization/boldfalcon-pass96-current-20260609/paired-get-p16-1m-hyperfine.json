@@ -1,0 +1,56 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/boldfalcon-fr-pass96-baseline-target/release-perf/frankenredis --bench-bin /tmp/boldfalcon-fr-pass96-baseline-target/release-perf/fr-bench --port 49632 --workload get --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix bf96pair1m:base --json-out artifacts/optimization/boldfalcon-pass96-current-20260609/paired-get-p16-1m-baseline-last.json",
+      "mean": 1.4837651574466666,
+      "stddev": 0.03828497053479918,
+      "median": 1.48080146578,
+      "user": 1.4456326333333334,
+      "system": 2.101796153333334,
+      "min": 1.43392023078,
+      "max": 1.54998529578,
+      "times": [
+        1.49111700778,
+        1.47485898278,
+        1.54998529578,
+        1.46596547878,
+        1.43392023078,
+        1.48674394878
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-5srqd-pass67/run_fr_bench_once.py --server-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/frankenredis --bench-bin /tmp/boldfalcon-fr-pass96-profile-target/release-perf/fr-bench --port 49633 --workload get --requests 1000000 --clients 50 --pipeline 16 --keyspace 10000 --datasize 3 --key-prefix bf96pair1m:cand --json-out artifacts/optimization/boldfalcon-pass96-current-20260609/paired-get-p16-1m-candidate-last.json",
+      "mean": 1.4542369234466666,
+      "stddev": 0.029283078726021875,
+      "median": 1.44584618378,
+      "user": 1.4229906333333335,
+      "system": 2.0574509866666664,
+      "min": 1.42823075578,
+      "max": 1.50292429178,
+      "times": [
+        1.42823075578,
+        1.43707962778,
+        1.45461273978,
+        1.50292429178,
+        1.42973717278,
+        1.47283695278
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

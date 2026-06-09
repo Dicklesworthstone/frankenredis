@@ -1388,7 +1388,9 @@ fn rebind_listeners(
             true
         }
         Err(e) => {
-            eprintln!("warn: CONFIG SET port/bind: rebind failed ({e}); restoring previous listeners");
+            eprintln!(
+                "warn: CONFIG SET port/bind: rebind failed ({e}); restoring previous listeners"
+            );
             match bind_and_register(poll, old_binds, old_port) {
                 Ok(restored) => *listeners = restored,
                 Err(e2) => eprintln!("error: failed to restore previous listeners: {e2}"),
@@ -1864,13 +1866,32 @@ fn process_buffered_frames(
                         let argv_len = borrowed_args.len();
                         if matches!(parsed.kind, BorrowedCommandArgsKind::Arguments) && argv_len > 0
                         {
-                            if let Some(key) = borrowed_plain_get_args(&borrowed_args)
-                                && let Some(response) = runtime.execute_plain_get_borrowed(key, ts)
-                            {
-                                Ok(BorrowedMultibulkAction::FastReply {
-                                    consumed: parsed.consumed,
-                                    response,
-                                })
+                            if let Some(key) = borrowed_plain_get_args(&borrowed_args) {
+                                let client_resp3 =
+                                    runtime.client_session().resp_protocol_version() == 3;
+                                if runtime
+                                    .execute_plain_get_borrowed_into(
+                                        key,
+                                        ts,
+                                        client_resp3,
+                                        &mut conn.write_buf,
+                                    )
+                                    .is_some()
+                                {
+                                    Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                        consumed: parsed.consumed,
+                                    })
+                                } else {
+                                    copy_borrowed_argv_into_scratch(
+                                        &borrowed_args,
+                                        &mut argv_scratch,
+                                    );
+                                    Ok(BorrowedMultibulkAction::Parsed {
+                                        kind: parsed.kind,
+                                        consumed: parsed.consumed,
+                                        argv_len,
+                                    })
+                                }
                             } else if let Some((key, value)) =
                                 borrowed_plain_set_args(&borrowed_args)
                                 && let Some(response) =
@@ -1924,9 +1945,7 @@ fn process_buffered_frames(
                             } else if let Some((cmd, key, values)) =
                                 borrowed_plain_keyed_values_args(&borrowed_args)
                                 && let Some(response) = runtime
-                                    .execute_plain_keyed_values_write_borrowed(
-                                        cmd, key, values, ts,
-                                    )
+                                    .execute_plain_keyed_values_write_borrowed(cmd, key, values, ts)
                             {
                                 Ok(BorrowedMultibulkAction::FastReply {
                                     consumed: parsed.consumed,
@@ -2081,6 +2100,20 @@ fn process_buffered_frames(
                 }
             };
             match borrowed_parse_result {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed }) => {
+                    processed_frames = processed_frames.saturating_add(1);
+                    drain_pending_pubsub_to_connection(runtime, conn);
+                    consumed_total += consumed;
+                    if disconnect_if_output_limit_exceeded(
+                        conn,
+                        runtime.effective_output_hard_limit(conn.session.client_id),
+                        closing_tokens,
+                        token,
+                    ) {
+                        break;
+                    }
+                    continue;
+                }
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response }) => {
                     processed_frames = processed_frames.saturating_add(1);
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
@@ -2243,6 +2276,9 @@ enum BorrowedMultibulkAction {
     FastReply {
         consumed: usize,
         response: RespFrame,
+    },
+    FastEncodedReply {
+        consumed: usize,
     },
 }
 
@@ -2731,10 +2767,17 @@ fn probe_sentinel_master(
     let mut read_buf = Vec::new();
 
     stream.write_all(&replica_handshake_frame(&[b"PING"]).to_bytes())?;
-    let pong =
-        read_frame_from_stream(&mut stream, &mut read_buf, parser_config, query_buffer_limit)?;
+    let pong = read_frame_from_stream(
+        &mut stream,
+        &mut read_buf,
+        parser_config,
+        query_buffer_limit,
+    )?;
     if !matches!(&pong, RespFrame::SimpleString(s) if s.eq_ignore_ascii_case("PONG")) {
-        return Err(io::Error::new(ErrorKind::InvalidData, "master did not PONG"));
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "master did not PONG",
+        ));
     }
 
     // (frankenredis-pkdgs) Gossip our hello on the master's pub/sub channel so
@@ -2745,12 +2788,21 @@ fn probe_sentinel_master(
             &replica_handshake_frame(&[b"PUBLISH", b"__sentinel__:hello", hello.as_bytes()])
                 .to_bytes(),
         )?;
-        let _ = read_frame_from_stream(&mut stream, &mut read_buf, parser_config, query_buffer_limit)?;
+        let _ = read_frame_from_stream(
+            &mut stream,
+            &mut read_buf,
+            parser_config,
+            query_buffer_limit,
+        )?;
     }
 
     stream.write_all(&replica_handshake_frame(&[b"INFO"]).to_bytes())?;
-    let info =
-        read_frame_from_stream(&mut stream, &mut read_buf, parser_config, query_buffer_limit)?;
+    let info = read_frame_from_stream(
+        &mut stream,
+        &mut read_buf,
+        parser_config,
+        query_buffer_limit,
+    )?;
     match info {
         RespFrame::BulkString(Some(bytes)) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
         _ => Err(io::Error::new(
@@ -2897,9 +2949,14 @@ fn run_sentinel_monitoring_tick(
         // so peer sentinels discover this instance. Decided (and rate-limited)
         // by the store before the blocking probe sends it.
         let hello = runtime.sentinel_take_hello_to_publish(name, now_ms);
-        let info =
-            probe_sentinel_master(ip, *port, &parser_config, query_buffer_limit, hello.as_deref())
-                .ok();
+        let info = probe_sentinel_master(
+            ip,
+            *port,
+            &parser_config,
+            query_buffer_limit,
+            hello.as_deref(),
+        )
+        .ok();
         runtime.apply_sentinel_probe_result(name, now_ms, info.as_deref());
     }
 }
@@ -4739,12 +4796,12 @@ mod tests {
         BlockingOp, CheckBlockedClientsContext, InlineParseResult, PendingClientUnblocksContext,
         REPLICA_ACK_INTERVAL_MS, REPLICA_RECONNECT_BACKOFF_MS, ReplicaPrimaryConnection,
         ReplicaSyncState, StartupConfig, apply_pending_client_unblocks, check_blocked_clients,
-        command_frame_can_move_to_argv, consume_complete_replication_prefix, drain_replica_stream,
-        drive_replica_sync, encode_eof_marked_replication_snapshot, encode_replication_snapshot,
-        check_subscription_mode_gate, find_crlf, frame_matches_suppressed_replication_reply,
-        is_quit_frame,
-        parse_blocking_deadline, parse_xread_block_deadline_argv, process_buffered_frames,
-        read_frame_from_stream, read_replication_snapshot_from_stream, replica_handshake_frame,
+        check_subscription_mode_gate, command_frame_can_move_to_argv,
+        consume_complete_replication_prefix, drain_replica_stream, drive_replica_sync,
+        encode_eof_marked_replication_snapshot, encode_replication_snapshot, find_crlf,
+        frame_matches_suppressed_replication_reply, is_quit_frame, parse_blocking_deadline,
+        parse_xread_block_deadline_argv, process_buffered_frames, read_frame_from_stream,
+        read_replication_snapshot_from_stream, replica_handshake_frame,
         replica_handshake_read_timeout, replication_follow_up_bytes, resolve_xread_block_argv,
         server_help_text, should_try_inline_parsing, startup_config_from_directives,
         sync_replica_with_primary, try_build_blocked_state, try_fulfill_blocked, wait_should_block,
@@ -6861,8 +6918,7 @@ mod tests {
         runtime.server.max_clients = 1;
 
         let mut poll = Poll::new().unwrap();
-        let listener =
-            mio::net::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = mio::net::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let addr = listener.local_addr().unwrap();
 
         let mut clients: HashMap<Token, crate::ClientConnection> = HashMap::new();
@@ -6900,7 +6956,11 @@ mod tests {
         );
 
         // The over-limit connection was rejected (not admitted) and got the reply.
-        assert_eq!(clients.len(), 1, "over-limit connection must not be admitted");
+        assert_eq!(
+            clients.len(),
+            1,
+            "over-limit connection must not be admitted"
+        );
         let mut buf = [0u8; 64];
         let n = over_client.read(&mut buf).unwrap();
         assert_eq!(
@@ -6923,12 +6983,13 @@ mod tests {
 
         let mut runtime = Runtime::default_strict();
         let mut poll = Poll::new().unwrap();
-        let listener =
-            mio::net::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = mio::net::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let addr = listener.local_addr().unwrap();
 
         let mut client = StdTcpStream::connect(addr).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         std::thread::sleep(Duration::from_millis(40));
         let (srv, _) = listener.accept().unwrap();
 
@@ -6961,11 +7022,22 @@ mod tests {
 
         // Before the deadline: nothing is released, the command stays buffered.
         crate::release_expired_client_pause(
-            &mut clients, &mut runtime, &mut poll, &mut blocked_tokens,
-            &mut blocked_wake_index, &mut closing_tokens, &mut write_tokens,
-            &mut paused_tokens, &mut deferred_tokens, 500, 500_000,
+            &mut clients,
+            &mut runtime,
+            &mut poll,
+            &mut blocked_tokens,
+            &mut blocked_wake_index,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut paused_tokens,
+            &mut deferred_tokens,
+            500,
+            500_000,
         );
-        assert!(paused_tokens.contains(&token), "still paused before deadline");
+        assert!(
+            paused_tokens.contains(&token),
+            "still paused before deadline"
+        );
         assert!(
             !clients[&token].read_buf.is_empty(),
             "deferred command must stay buffered before the deadline"
@@ -6973,11 +7045,22 @@ mod tests {
 
         // After the deadline: the command executes and its reply flushes.
         crate::release_expired_client_pause(
-            &mut clients, &mut runtime, &mut poll, &mut blocked_tokens,
-            &mut blocked_wake_index, &mut closing_tokens, &mut write_tokens,
-            &mut paused_tokens, &mut deferred_tokens, 2_000, 2_000_000,
+            &mut clients,
+            &mut runtime,
+            &mut poll,
+            &mut blocked_tokens,
+            &mut blocked_wake_index,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut paused_tokens,
+            &mut deferred_tokens,
+            2_000,
+            2_000_000,
         );
-        assert!(paused_tokens.is_empty(), "pause must be cleared after deadline");
+        assert!(
+            paused_tokens.is_empty(),
+            "pause must be cleared after deadline"
+        );
         assert!(
             clients[&token].read_buf.is_empty(),
             "deferred command must be consumed after release"
@@ -8474,10 +8557,19 @@ mod tests {
         // Wrong-arity / unknown -> gate SKIPPED, command reaches dispatch so its
         // own unknown/arity error surfaces (matching upstream order).
         assert!(!gate_fires(&["GET"]), "GET with no key is wrong-arity");
-        assert!(!gate_fires(&["SET", "k"]), "SET missing value is wrong-arity");
-        assert!(!gate_fires(&["GET", "k", "x"]), "GET with extra arg is wrong-arity");
+        assert!(
+            !gate_fires(&["SET", "k"]),
+            "SET missing value is wrong-arity"
+        );
+        assert!(
+            !gate_fires(&["GET", "k", "x"]),
+            "GET with extra arg is wrong-arity"
+        );
         assert!(!gate_fires(&["FOOBARNOTACMD", "x"]), "unknown command");
-        assert!(!gate_fires(&["DEBUG"]), "DEBUG with no subcommand is wrong-arity");
+        assert!(
+            !gate_fires(&["DEBUG"]),
+            "DEBUG with no subcommand is wrong-arity"
+        );
 
         // Valid-arity deny-listed commands -> gate FIRES (subscribe-context error).
         assert!(gate_fires(&["GET", "k"]));
