@@ -1,0 +1,5 @@
+f2953b9049ac879773da29b290aab1e7ea9e53785f17edd04a7c97293a64408b  artifacts/optimization/orangemouse-pass99-output-limit-cache-20260609/baseline-set-p16-300k-hyperfine.json
+a5603d6ba56e29f29e136a65674fae6cd76626dc0ffceed896eb75674ce2acb7  artifacts/optimization/orangemouse-pass99-output-limit-cache-20260609/paired-set-p16-300k-hyperfine.json
+0535cd45e54beeccf8802b221fe76d3f4d5e3e2b164c3e77cb7d8d717c15727b  artifacts/optimization/orangemouse-pass99-output-limit-cache-20260609/golden-compare.json
+cd37cbcdc1c44b04bcd11c2644c6ed0233cbc87eca53c9edfab159e9d8a748f3  artifacts/optimization/orangemouse-pass99-output-limit-cache-20260609/golden-baseline.transcript
+cd37cbcdc1c44b04bcd11c2644c6ed0233cbc87eca53c9edfab159e9d8a748f3  artifacts/optimization/orangemouse-pass99-output-limit-cache-20260609/golden-candidate.transcript
