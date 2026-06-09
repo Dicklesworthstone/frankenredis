@@ -22389,16 +22389,40 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             .saturating_add(aof_buffer)
             .saturating_add(lua_caches)
             .saturating_add(functions_caches);
-        // (frankenredis-cucvq) peak.allocated is the historical max
-        // observed by Store::observe_memory_sample (driven by RSS each
-        // INFO memory call). Fall back to `used` if no peak has been
-        // sampled yet -- upstream's c->stat_peak_memory is initialised
-        // to 0 but server.c::serverCron updates it before the first
-        // INFO call, so peak >= used in practice.
-        let peak_allocated: i64 = (store.stat_used_memory_peak as i64).max(used);
+        // (frankenredis-nckib) Per-db hashtable overhead (dictEntry bytes for
+        // keys + expires) is part of overhead.total. Sum it UP-FRONT so the
+        // emitted total.allocated already reflects the full overhead; the per-db
+        // display loop below reuses the same per-db figures without
+        // re-accumulating into overhead_total (which would double-count).
+        const DICT_ENTRY_BYTES: i64 = 64;
+        let mut hashtable_overhead: i64 = 0;
+        for db in 0..store.database_count {
+            let keys = store.dbsize_in_db(db);
+            if keys == 0 {
+                continue;
+            }
+            let expires = store.expires_in_db(db);
+            hashtable_overhead = hashtable_overhead
+                .saturating_add((keys as i64).saturating_mul(DICT_ENTRY_BYTES))
+                .saturating_add((expires as i64).saturating_mul(DICT_ENTRY_BYTES));
+        }
+        overhead_total = overhead_total.saturating_add(hashtable_overhead);
+        // (frankenredis-nckib) `used` (== dataset.bytes) is DATA-ONLY; the grand
+        // total allocated memory is data + overhead. Emitting total.allocated =
+        // used alone violated upstream's invariant total_allocated >=
+        // overhead_total (object.c getMemoryOverheadData) and made the derived
+        // dataset.bytes (= total - overhead) and allocator.* fields inconsistent.
+        let total_allocated: i64 = used.saturating_add(overhead_total);
+        // (frankenredis-cucvq) peak.allocated is the historical max observed by
+        // Store::observe_memory_sample (driven by RSS each INFO memory call).
+        // Fall back to total_allocated if no peak has been sampled yet --
+        // upstream's c->stat_peak_memory is initialised to 0 but
+        // server.c::serverCron updates it before the first INFO call, so peak >=
+        // total in practice.
+        let peak_allocated: i64 = (store.stat_used_memory_peak as i64).max(total_allocated);
         for kv in [
             pair("peak.allocated", peak_allocated),
-            pair("total.allocated", used),
+            pair("total.allocated", total_allocated),
             pair("startup.allocated", startup_allocated),
             pair("replication.backlog", replication_backlog),
             // (frankenredis-zfu61) Real per-client buffer summation
@@ -22440,7 +22464,6 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         // + value pointer + next-bucket pointer + overhead). Real
         // upstream uses a dict-impl-specific term; fr tracks the
         // dominant data-bearing factor that monitoring tools watch.
-        const DICT_ENTRY_BYTES: i64 = 64;
         let resp_v3 = store.dispatch_client_ctx.resp_protocol_version == 3;
         for db in 0..store.database_count {
             let keys = store.dbsize_in_db(db);
@@ -22448,13 +22471,11 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
                 continue;
             }
             let expires = store.expires_in_db(db);
+            // (frankenredis-nckib) Per-db hashtable overhead was already summed
+            // into overhead_total up-front (so total.allocated could reflect it);
+            // here we only re-derive the per-db display figures.
             let main_bytes = (keys as i64).saturating_mul(DICT_ENTRY_BYTES);
             let expires_bytes = (expires as i64).saturating_mul(DICT_ENTRY_BYTES);
-            // (frankenredis-wkglo) Per-db hashtable overhead contributes
-            // to overhead.total; sum here while we still have the values.
-            overhead_total = overhead_total
-                .saturating_add(main_bytes)
-                .saturating_add(expires_bytes);
             items.push(RespFrame::BulkString(Some(format!("db.{db}").into_bytes())));
             if resp_v3 {
                 items.push(RespFrame::Map(Some(vec![
@@ -22527,9 +22548,9 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             items.extend(kv);
         }
         for kv in [
-            pair("allocator.allocated", used),
-            pair("allocator.active", used),
-            pair("allocator.resident", used),
+            pair("allocator.allocated", total_allocated),
+            pair("allocator.active", total_allocated),
+            pair("allocator.resident", total_allocated),
         ] {
             items.extend(kv);
         }
@@ -46332,8 +46353,9 @@ mod tests {
         // keyspace overhead_total can exceed it; the old formula treated `used`
         // as the grand total and subtracted overhead from it, underflowing to a
         // negative percentage (observed -2.65 vs redis 7.2.4 differential).
-        // Helper: pull a ratio field's numeric value from the RESP2 flat array.
-        fn ratio(store: &mut Store, field: &[u8]) -> f64 {
+        // Helpers: pull a field's value (ratio as f64, integer as i64) from the
+        // RESP2 flat array.
+        fn field_at(store: &mut Store, field: &[u8]) -> RespFrame {
             let out = dispatch_argv(&[b"MEMORY".to_vec(), b"STATS".to_vec()], store, 0)
                 .expect("memory stats");
             let RespFrame::Array(Some(items)) = out else {
@@ -46343,34 +46365,57 @@ mod tests {
                 .iter()
                 .position(|f| matches!(f, RespFrame::BulkString(Some(b)) if b.as_slice() == field))
                 .unwrap_or_else(|| panic!("missing {:?}", String::from_utf8_lossy(field)));
-            let RespFrame::BulkString(Some(v)) = &items[pos + 1] else {
+            items[pos + 1].clone()
+        }
+        fn ratio(store: &mut Store, field: &[u8]) -> f64 {
+            let RespFrame::BulkString(Some(v)) = field_at(store, field) else {
                 panic!("ratio value must be a bulk string"); // ubs:ignore — AI triage
             };
-            std::str::from_utf8(v).unwrap().parse::<f64>().unwrap()
+            std::str::from_utf8(&v).unwrap().parse::<f64>().unwrap()
+        }
+        fn int_field(store: &mut Store, field: &[u8]) -> i64 {
+            match field_at(store, field) {
+                RespFrame::Integer(n) => n,
+                other => panic!("{:?} must be an Integer, got {other:?}", // ubs:ignore — AI triage
+                    String::from_utf8_lossy(field)),
+            }
         }
 
-        // Tiny keyspace (one small key): the exact regime where data-only `used`
-        // is dwarfed by overhead — the trigger for the old negative result.
-        let mut store = Store::new();
-        store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
-        let p = ratio(&mut store, b"dataset.percentage");
-        assert!(
-            (0.0..=100.0).contains(&p),
-            "dataset.percentage must be in [0,100], got {p}"
-        );
-
-        // Larger keyspace: still bounded, and data now dominates so the value
-        // should be a healthy positive fraction.
-        let mut store2 = Store::new();
+        // Exercise both the tiny-keyspace trigger (data dwarfed by overhead —
+        // the regime that produced the old negative result) and a populated one.
+        let mut tiny = Store::new();
+        tiny.set(b"k".to_vec(), b"v".to_vec(), None, 0);
+        let mut big = Store::new();
         for i in 0..2000u32 {
-            store2.set(format!("key:{i:08}").into_bytes(), vec![b'x'; 256], None, 0);
+            big.set(format!("key:{i:08}").into_bytes(), vec![b'x'; 256], None, 0);
         }
-        let p2 = ratio(&mut store2, b"dataset.percentage");
+        for store in [&mut tiny, &mut big] {
+            let p = ratio(store, b"dataset.percentage");
+            assert!(
+                (0.0..=100.0).contains(&p),
+                "dataset.percentage must be in [0,100], got {p}"
+            );
+            // Restored upstream invariants (frankenredis-nckib): total.allocated
+            // must be >= overhead.total, and dataset.bytes == total - overhead.
+            let total = int_field(store, b"total.allocated");
+            let overhead = int_field(store, b"overhead.total");
+            let dataset = int_field(store, b"dataset.bytes");
+            assert!(
+                total >= overhead,
+                "total.allocated ({total}) must be >= overhead.total ({overhead})"
+            );
+            assert_eq!(
+                dataset,
+                total - overhead,
+                "dataset.bytes must equal total.allocated - overhead.total"
+            );
+            // allocator.allocated tracks total.allocated (frag ratio is 1.0).
+            assert_eq!(int_field(store, b"allocator.allocated"), total);
+        }
         assert!(
-            (0.0..=100.0).contains(&p2),
-            "dataset.percentage must be in [0,100], got {p2}"
+            ratio(&mut big, b"dataset.percentage") > 0.0,
+            "non-empty dataset should have positive percentage"
         );
-        assert!(p2 > 0.0, "non-empty dataset should have positive percentage");
     }
 
     #[test]
