@@ -1572,7 +1572,6 @@ fn handle_readable(
     // edge-triggered readiness — any command/pipeline larger than what one
     // event delivered (≈ >16KB in practice) stranded its tail bytes and hung
     // the connection. (frankenredis-apg7r, reverts the read-side no-drain)
-    let drain_until_would_block = true;
     let mut buf = [0u8; 8192];
     let mut read_any = false;
     loop {
@@ -1595,7 +1594,17 @@ fn handle_readable(
                         conn.read_buf.extend_from_slice(&buf[..n]);
                         runtime.track_net_input_bytes(n as u64);
                         read_any = true;
-                        if !drain_until_would_block {
+                        // (frankenredis-recvdrain) A non-blocking read that
+                        // returned FEWER bytes than the buffer means the socket is
+                        // drained right now — the kernel had exactly `n` bytes
+                        // queued. Under edge-triggered epoll any later data raises a
+                        // fresh EPOLLIN, so we stop here and skip the extra recv()
+                        // that would only return EAGAIN — one syscall saved per
+                        // readable event in the common (sub-8KB pipeline) case. We
+                        // keep looping ONLY when the read filled the buffer
+                        // (`n == buf.len()`), where more data may be queued — that
+                        // is the >8KB-pipeline case apg7r must not strand.
+                        if n < buf.len() {
                             break;
                         }
                     }
