@@ -6255,7 +6255,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("set");
         self.session.last_argv_len_sum = b"SET".len() + key.len() + value.len();
@@ -6363,7 +6362,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("incr");
         self.session.last_argv_len_sum = b"INCR".len() + key.len();
@@ -6488,7 +6486,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("decr");
         self.session.last_argv_len_sum = b"DECR".len() + key.len();
@@ -6629,7 +6626,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("decrby");
         self.session.last_argv_len_sum = b"DECRBY".len() + key.len() + delta_arg.len();
@@ -6763,7 +6759,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("append");
         self.session.last_argv_len_sum = b"APPEND".len() + key.len() + value.len();
@@ -6919,7 +6914,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str(cmd.name_lower());
         self.session.last_argv_len_sum =
@@ -7087,7 +7081,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("hset");
         self.session.last_argv_len_sum =
@@ -7249,7 +7242,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("zadd");
         self.session.last_argv_len_sum =
@@ -7397,7 +7389,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str(cmd.name_lower());
         self.session.last_argv_len_sum = cmd.name_upper().len() + key.len();
@@ -7523,7 +7514,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("get");
         self.session.last_argv_len_sum = b"GET".len() + key.len();
@@ -7592,7 +7582,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("get");
         self.session.last_argv_len_sum = b"GET".len() + key.len();
@@ -7721,7 +7710,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("hget");
         self.session.last_argv_len_sum = b"HGET".len() + key.len() + field.len();
@@ -7853,7 +7841,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("mget");
         self.session.last_argv_len_sum =
@@ -7963,7 +7950,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("exists");
         self.session.last_argv_len_sum =
@@ -8069,7 +8055,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("strlen");
         self.session.last_argv_len_sum = b"STRLEN".len() + key.len();
@@ -8214,7 +8199,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("getrange");
         self.session.last_argv_len_sum =
@@ -8360,7 +8344,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("hmget");
         self.session.last_argv_len_sum =
@@ -8500,7 +8483,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("sismember");
         self.session.last_argv_len_sum = b"SISMEMBER".len() + key.len() + member.len();
@@ -8637,7 +8619,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("hexists");
         self.session.last_argv_len_sum = b"HEXISTS".len() + key.len() + field.len();
@@ -8764,7 +8745,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("llen");
         self.session.last_argv_len_sum = b"LLEN".len() + key.len();
@@ -8889,7 +8869,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("scard");
         self.session.last_argv_len_sum = b"SCARD".len() + key.len();
@@ -9028,7 +9007,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("lindex");
         self.session.last_argv_len_sum = b"LINDEX".len() + key.len() + index_arg.len();
@@ -9172,7 +9150,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("zscore");
         self.session.last_argv_len_sum = b"ZSCORE".len() + key.len() + member.len();
@@ -9322,7 +9299,6 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.refresh_store_runtime_info_context();
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("incrby");
         self.session.last_argv_len_sum = b"INCRBY".len() + key.len() + delta_arg.len();
