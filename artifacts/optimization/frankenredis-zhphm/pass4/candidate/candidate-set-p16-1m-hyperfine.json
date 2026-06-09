@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-zhphm/pass4/candidate SERVER=/tmp/rch_target_fr_zhphm_p4_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_zhphm_p4_candidate/release-perf/fr-bench PORT=26851 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-zhphm/pass4/candidate/candidate-set-p16-1m-last.json KEY_PREFIX=zhphm-p4-cand artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 1.3012376700700001,
+      "stddev": 0.04770099788722468,
+      "median": 1.30752578732,
+      "user": 1.3207113199999998,
+      "system": 2.198711315,
+      "min": 1.24621435532,
+      "max": 1.38840587532,
+      "times": [
+        1.38840587532,
+        1.32242242432,
+        1.32626020432,
+        1.30628445532,
+        1.24621435532,
+        1.25809330732,
+        1.30876711932,
+        1.25345361932
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
