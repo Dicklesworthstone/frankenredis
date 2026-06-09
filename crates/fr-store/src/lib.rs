@@ -7699,10 +7699,10 @@ impl Store {
 
     // ── List operations ─────────────────────────────────────────
 
-    pub fn lpush(
+    pub fn lpush<M: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
-        values: &[Vec<u8>],
+        values: &[M],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
@@ -7726,8 +7726,9 @@ impl Store {
                         let lp_pre = l.listpack_byte_len();
                         let mut raw_add = 0u64;
                         for v in values {
-                            raw_add += v.len() as u64;
-                            l.push_front(v.clone());
+                            let bytes = v.as_ref();
+                            raw_add += bytes.len() as u64;
+                            l.push_front(bytes.to_vec());
                         }
                         l.note_command_grow(lp_pre, raw_add);
                         let len = l.len();
@@ -7746,8 +7747,9 @@ impl Store {
                 let mut l = ListValue::default();
                 let mut raw_add = 0u64;
                 for v in values {
-                    raw_add += v.len() as u64;
-                    l.push_front(v.clone());
+                    let bytes = v.as_ref();
+                    raw_add += bytes.len() as u64;
+                    l.push_front(bytes.to_vec());
                 }
                 l.note_command_grow(ListValue::empty_listpack_bytes(), raw_add);
                 let len = l.len();
@@ -7761,10 +7763,10 @@ impl Store {
         }
     }
 
-    pub fn rpush(
+    pub fn rpush<M: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
-        values: &[Vec<u8>],
+        values: &[M],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
@@ -7788,8 +7790,9 @@ impl Store {
                         let lp_pre = l.listpack_byte_len();
                         let mut raw_add = 0u64;
                         for v in values {
-                            raw_add += v.len() as u64;
-                            l.push_back(v.clone());
+                            let bytes = v.as_ref();
+                            raw_add += bytes.len() as u64;
+                            l.push_back(bytes.to_vec());
                         }
                         l.note_command_grow(lp_pre, raw_add);
                         let len = l.len();
@@ -7808,8 +7811,9 @@ impl Store {
                 let mut l = ListValue::default();
                 let mut raw_add = 0u64;
                 for v in values {
-                    raw_add += v.len() as u64;
-                    l.push_back(v.clone());
+                    let bytes = v.as_ref();
+                    raw_add += bytes.len() as u64;
+                    l.push_back(bytes.to_vec());
                 }
                 l.note_command_grow(ListValue::empty_listpack_bytes(), raw_add);
                 let len = l.len();
@@ -8865,10 +8869,10 @@ impl Store {
 
     // ── Set operations ──────────────────────────────────────────
 
-    pub fn sadd(
+    pub fn sadd<M: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
-        members: &[Vec<u8>],
+        members: &[M],
         now_ms: u64,
     ) -> Result<u64, StoreError> {
         self.drop_if_expired(key, now_ms);
@@ -8899,7 +8903,7 @@ impl Store {
                             && Self::set_fits_intset(s, max_intset_entries);
                         let mut added = 0_u64;
                         for m in members {
-                            if s.insert(m.clone(), max_intset_entries) {
+                            if s.insert(m.as_ref().to_vec(), max_intset_entries) {
                                 added += 1;
                             }
                         }
@@ -8937,7 +8941,7 @@ impl Store {
                 let mut s = GenericSet::default();
                 let mut added = 0_u64;
                 for m in members {
-                    if s.insert(m.clone()) {
+                    if s.insert(m.as_ref().to_vec()) {
                         added += 1;
                     }
                 }

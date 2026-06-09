@@ -6946,26 +6946,25 @@ impl Runtime {
         self.server.last_eviction_loop = None;
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        // Materialize the values once (the store methods take owned members, the
-        // same allocation the generic argv path performs); the command-name and
-        // key argv Vecs the generic path builds are still skipped.
-        let owned: Vec<Vec<u8>> = values.iter().map(|v| v.to_vec()).collect();
+        // Pass borrowed values straight through so the store copies each member
+        // once directly into its container. The old code first collected an
+        // intermediate Vec<Vec<u8>> here, then had the store clone out of it.
         let start = Instant::now();
         let store_result = match cmd {
             PlainKeyedValuesCmd::Sadd => self
                 .server
                 .store
-                .sadd(key, &owned, now_ms)
+                .sadd(key, values, now_ms)
                 .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
             PlainKeyedValuesCmd::Lpush => self
                 .server
                 .store
-                .lpush(key, &owned, now_ms)
+                .lpush(key, values, now_ms)
                 .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
             PlainKeyedValuesCmd::Rpush => self
                 .server
                 .store
-                .rpush(key, &owned, now_ms)
+                .rpush(key, values, now_ms)
                 .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
         };
         let elapsed_us = start.elapsed().as_micros() as u64;
