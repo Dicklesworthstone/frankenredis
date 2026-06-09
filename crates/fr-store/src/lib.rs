@@ -1930,6 +1930,7 @@ fn merge_sorted_unique_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
 ///     binary search with a monotonically-advancing finger over the shrinking
 ///     `large[base..]` suffix — `O(k·log(N/k))`, never worse than the binary
 ///     search it replaces (the finger only shrinks the search span).
+///
 /// Result is byte-identical to
 /// `small.iter().filter(|x| large.binary_search(x).is_ok())` in both modes.
 fn intersect_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
@@ -1986,6 +1987,7 @@ fn intersect_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
 ///   * otherwise (similar sizes, or `b` smaller): a single linear merge emitting
 ///     `a`-only runs — `O(|a|+|b|)`, far below the old per-element binary search
 ///     when the two intsets are of similar size (the common SDIFF case).
+///
 /// Byte-identical to `a.iter().filter(|x| b.binary_search(x).is_err())`.
 fn diff_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
     /// Same crossover heuristic as intersection: above this `|b|:|a|` ratio a
