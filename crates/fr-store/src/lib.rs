@@ -1618,7 +1618,11 @@ impl SetValue {
     pub(crate) fn retain_diff(&mut self, other: &SetValue) {
         match (&mut *self, other) {
             (SetValue::Int(a), SetValue::Int(b)) => {
-                a.retain(|n| b.binary_search(n).is_err());
+                // (frankenredis-9s4kh) Ratio-adaptive set difference of the two
+                // sorted i64 arrays — linear merge O(|a|+|b|) for similar sizes
+                // vs the old per-element binary search O(|a|·log|b|); identical
+                // members.
+                *a = diff_sorted_i64(a, b);
             }
             _ => self.retain(|m| !other.contains(m)),
         }
@@ -1743,6 +1747,58 @@ fn intersect_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
         }
     }
     out
+}
+
+/// Set difference `a \ b` over two ascending, de-duplicated `i64` slices:
+/// keep the members of `a` that are NOT in `b`, returning an ascending,
+/// de-duplicated `Vec<i64>`.
+///
+/// (frankenredis-9s4kh) Ratio-adaptive, mirroring [`intersect_sorted_i64`] but
+/// asymmetric — `a` is the SDIFF accumulator (the first set), never reordered:
+///   * `b` much larger (`|b| ≥ |a|·GALLOP_RATIO`): probe each `a` member into the
+///     huge `b` with a cache-warm full-array binary search — `O(|a|·log|b|)`,
+///     identical to the code it replaces (a shrinking-suffix finger would cut
+///     comparisons but thrash the cache; see the intersect note).
+///   * otherwise (similar sizes, or `b` smaller): a single linear merge emitting
+///     `a`-only runs — `O(|a|+|b|)`, far below the old per-element binary search
+///     when the two intsets are of similar size (the common SDIFF case).
+/// Byte-identical to `a.iter().filter(|x| b.binary_search(x).is_err())`.
+fn diff_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
+    /// Same crossover heuristic as intersection: above this `|b|:|a|` ratio a
+    /// cache-warm binary search beats a linear merge.
+    const GALLOP_RATIO: usize = 32;
+
+    if a.is_empty() {
+        return Vec::new();
+    }
+    if b.is_empty() {
+        return a.to_vec();
+    }
+
+    if b.len() >= a.len().saturating_mul(GALLOP_RATIO) {
+        // `b` dwarfs `a`: full-array binary search per `a` member (cache-warm).
+        a.iter()
+            .copied()
+            .filter(|x| b.binary_search(x).is_err())
+            .collect()
+    } else {
+        // Similar sizes: a single linear merge, emitting `a` members absent in `b`.
+        let mut out = Vec::with_capacity(a.len());
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < a.len() {
+            if j >= b.len() || a[i] < b[j] {
+                out.push(a[i]);
+                i += 1;
+            } else if a[i] > b[j] {
+                j += 1;
+            } else {
+                // a[i] == b[j]: present in `b`, excluded from the difference.
+                i += 1;
+                j += 1;
+            }
+        }
+        out
+    }
 }
 
 impl PartialEq for SetValue {
@@ -27558,6 +27614,149 @@ mod tests {
         let skew_score = skew_old as f64 / skew_new as f64;
         eprintln!("GALP1 skewed 20k_int_2M: old={skew_old}ns new={skew_new}ns score={skew_score:.2}x");
         assert!(skew_score >= 0.85, "adaptive intersect regressed skewed case: {skew_score:.2}x");
+    }
+
+    // (frankenredis-9s4kh) Frozen fingerprint of the adaptive set-difference
+    // output corpus; pinned from the first run. Guards output stability.
+    const SDF2_GOLDEN: u64 = 0xa92b_1154_f137_3a89;
+
+    // (frankenredis-9s4kh) Adaptive int-set difference (SDIFF): isomorphism proof
+    // (output byte-identical to the per-element binary-search reference over a
+    // randomized + edge-case corpus, pinned by a golden fingerprint) + a Score
+    // microbench (old binary-search retain vs new merge) on the similar-size
+    // case it targets, plus a skewed case to prove no regression.
+    #[test]
+    fn diff_sorted_i64_adaptive_isomorphic_and_faster_sdf2() {
+        use super::diff_sorted_i64;
+
+        // Trivially-correct reference: keep ascending-unique `a` members ABSENT
+        // from `b` via per-element binary search (the algorithm being replaced).
+        let reference = |a: &[i64], b: &[i64]| -> Vec<i64> {
+            a.iter().copied().filter(|x| b.binary_search(x).is_err()).collect()
+        };
+
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let sorted_unique = |raw: Vec<i64>| -> Vec<i64> {
+            let mut v = raw;
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+
+        // Self-contained FNV-1a fingerprint over every difference output.
+        let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fnv = |g: &mut u64, x: i64| {
+            for byte in x.to_le_bytes() {
+                *g ^= u64::from(byte);
+                *g = g.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        let mut cases = 0u64;
+        for _ in 0..6000 {
+            let na = (next() % 64) as usize;
+            let nb = (next() % 64) as usize;
+            let range = 1 + (next() % 200) as i64;
+            let a = sorted_unique((0..na).map(|_| (next() % range as u64) as i64).collect());
+            let b = sorted_unique((0..nb).map(|_| (next() % range as u64) as i64).collect());
+            let got = diff_sorted_i64(&a, &b);
+            assert_eq!(got, reference(&a, &b), "adaptive diff mismatch a={a:?} b={b:?}");
+            // a\b ∪ a∩b == a, and a\b is disjoint from b.
+            for &v in &got {
+                assert!(b.binary_search(&v).is_err(), "diff kept a member of b: {v}");
+            }
+            for &v in &got {
+                fnv(&mut golden, v);
+            }
+            fnv(&mut golden, i64::MIN); // per-case separator
+            cases += 1;
+        }
+        // Edge cases: empty, disjoint, identical, single, skewed, negative.
+        let edge: &[(&[i64], &[i64])] = &[
+            (&[], &[]),
+            (&[1, 2, 3], &[]),
+            (&[], &[4, 5]),
+            (&[1, 3, 5], &[2, 4, 6]),
+            (&[1, 2, 3], &[1, 2, 3]),
+            (&[7], &[7]),
+            (&[7], &[8]),
+            (&[5], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+            (&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], &[5]),
+            (&[-9, -1, 0, 1, 9], &[-9, 0, 9, 100]),
+        ];
+        for (a, b) in edge {
+            assert_eq!(diff_sorted_i64(a, b), reference(a, b), "edge a={a:?} b={b:?}");
+        }
+        assert_eq!(cases, 6000);
+        // The per-case assert_eq! above is the isomorphism proof (output is
+        // byte-identical to the binary-search reference). This fingerprint is
+        // the frozen golden summary over all 6000 randomized outputs.
+        assert_eq!(
+            golden, SDF2_GOLDEN,
+            "difference output fingerprint changed: {golden:#018x} (golden {SDF2_GOLDEN:#018x})"
+        );
+
+        // Timing asserts only meaningful in optimized builds; the debug `cargo
+        // test` suite still runs the isomorphism + golden proof.
+        if cfg!(debug_assertions) {
+            return;
+        }
+        let bin_search_retain_diff = |a: &[i64], b: &[i64]| -> Vec<i64> {
+            let mut v = a.to_vec();
+            v.retain(|n| b.binary_search(n).is_err());
+            v
+        };
+        // Similar-size case (the lever's target): two 100k intsets, 50% overlap.
+        let n = 100_000i64;
+        let a: Vec<i64> = (0..n).collect();
+        let b: Vec<i64> = (0..n).map(|i| i * 2).collect();
+        let reps = 100;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc = acc.wrapping_add(bin_search_retain_diff(&a, &b).len());
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 = acc2.wrapping_add(diff_sorted_i64(&a, &b).len());
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(acc, acc2, "old/new disagree on similar-size diff count");
+        let score = old_ns as f64 / new_ns as f64;
+        eprintln!("SDF2 similar 100k_diff_100k: old={old_ns}ns new={new_ns}ns score={score:.2}x");
+        assert!(score >= 2.0, "adaptive diff must be >=2.0x on similar sizes; got {score:.2}x");
+
+        // Skewed case (small accumulator ∖ huge b): must NOT regress.
+        let small: Vec<i64> = (0..20_000i64).map(|i| i * 100 + 1).collect();
+        let huge: Vec<i64> = (0..2_000_000i64).collect();
+        let skew_reps = 200;
+        let t2 = std::time::Instant::now();
+        let mut sa = 0usize;
+        for _ in 0..skew_reps {
+            sa = sa.wrapping_add(bin_search_retain_diff(&small, &huge).len());
+        }
+        let skew_old = t2.elapsed().as_nanos().max(1);
+        std::hint::black_box(sa);
+        let t3 = std::time::Instant::now();
+        let mut sb = 0usize;
+        for _ in 0..skew_reps {
+            sb = sb.wrapping_add(diff_sorted_i64(&small, &huge).len());
+        }
+        let skew_new = t3.elapsed().as_nanos().max(1);
+        std::hint::black_box(sb);
+        assert_eq!(sa, sb, "old/new disagree on skewed diff count");
+        let skew_score = skew_old as f64 / skew_new as f64;
+        eprintln!("SDF2 skewed 20k_diff_2M: old={skew_old}ns new={skew_new}ns score={skew_score:.2}x");
+        assert!(skew_score >= 0.85, "adaptive diff regressed skewed case: {skew_score:.2}x");
     }
 
     #[test]
