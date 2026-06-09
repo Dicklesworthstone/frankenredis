@@ -7718,19 +7718,28 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             .unwrap_or(0);
         trimmed_entries = trimmed_entries.saturating_add(removed);
     }
-    // MINID retains the approx-without-LIMIT no-op shortcut (node-boundary MINID
-    // trimming is a separate follow-up; see xtrim_cmd).
-    let should_run_minid_trim = !trim_approx || limit_given;
-    if let Some(min_id) = trim_minid
-        && should_run_minid_trim
-    {
-        // MINID approximate inline trim mirrors XTRIM MINID's
-        // pre-existing behavior; pass through with the LIMIT cap
-        // unchanged. (frankenredis-hpz8a leaves MINID
-        // node-boundary modeling for follow-up.)
-        let removed = store
-            .xtrim_minid(&argv[1], min_id, trim_limit_usize, now_ms)
-            .unwrap_or(0);
+    // (frankenredis-8t4vl.1) Inline MINID trim mirrors XTRIM MINID and upstream
+    // xaddCommand's streamTrim: exact (= or absent) removes every entry below the
+    // threshold; approximate (~) removes WHOLE head nodes via
+    // store.xtrim_minid_approx and runs on every add even WITHOUT an explicit
+    // LIMIT (an un-LIMITed `~` gets the upstream default cap of
+    // 100 * stream-node-max-entries). The previous approx-without-LIMIT no-op /
+    // exact-with-LIMIT path diverged from Redis node-boundary semantics.
+    if let Some(min_id) = trim_minid {
+        let removed = if trim_approx {
+            let approx_limit = if limit_given {
+                trim_limit_usize
+            } else {
+                Some(STREAM_APPROX_TRIM_DEFAULT_LIMIT)
+            };
+            store
+                .xtrim_minid_approx(&argv[1], min_id, approx_limit, now_ms)
+                .unwrap_or(0)
+        } else {
+            store
+                .xtrim_minid(&argv[1], min_id, trim_limit_usize, now_ms)
+                .unwrap_or(0)
+        };
         trimmed_entries = trimmed_entries.saturating_add(removed);
     }
     // (frankenredis-xaddtrimdirty) Drop any dirty units the inline trim added;
@@ -53887,6 +53896,71 @@ mod tests {
             store.last_xadd_trimmed,
             "MAXLEN below length must flag the trim"
         );
+    }
+
+    /// (frankenredis-8t4vl.1) XADD inline `MINID ~` follows the same whole-node
+    /// approximate model as XTRIM MINID ~ (Store::xtrim_minid_approx): it runs on
+    /// every add even without LIMIT, evicts only full head nodes whose last id is
+    /// below the threshold, and a sub-node LIMIT evicts nothing. Previously this
+    /// path no-op'd without LIMIT and used the exact trim with LIMIT.
+    #[test]
+    fn xadd_inline_minid_approx_respects_node_boundary_8t4vl_1() {
+        let mut store = Store::new();
+        let seed = |store: &mut Store, n: u64| {
+            dispatch_argv(&[b"DEL".to_vec(), b"s".to_vec()], store, 0).expect("del");
+            for i in 1..=n {
+                dispatch_argv(
+                    &[
+                        b"XADD".to_vec(),
+                        b"s".to_vec(),
+                        format!("{i}-0").into_bytes(),
+                        b"f".to_vec(),
+                        b"v".to_vec(),
+                    ],
+                    store,
+                    0,
+                )
+                .expect("seed");
+            }
+        };
+        // XADD with an inline MINID ~ trim clause; the add itself uses `next`-0.
+        let xadd_trim = |store: &mut Store, next: u64, clause: &[&[u8]]| -> usize {
+            let mut argv = vec![b"XADD".to_vec(), b"s".to_vec()];
+            for a in clause {
+                argv.push(a.to_vec());
+            }
+            argv.extend([
+                format!("{next}-0").into_bytes(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ]);
+            dispatch_argv(&argv, store, 0).expect("xadd trim");
+            store.xlen(b"s", 0).expect("xlen")
+        };
+
+        // 250 entries + 1 added (251) -> nodes [1..100][101..200][201..251].
+        // ~ 201-0: node0(last 100) and node1(last 200) below threshold -> drop
+        // 200; node2 last id 251 NOT < 201 -> kept. 51 remain, even with no LIMIT.
+        seed(&mut store, 250);
+        assert_eq!(xadd_trim(&mut store, 251, &[b"MINID", b"~", b"201-0"]), 51);
+
+        // Sub-node LIMIT evicts nothing (whole-node granularity).
+        seed(&mut store, 250);
+        assert_eq!(
+            xadd_trim(&mut store, 251, &[b"MINID", b"~", b"201-0", b"LIMIT", b"50"]),
+            251
+        );
+        assert!(!store.last_xadd_trimmed, "sub-node LIMIT removes nothing");
+
+        // Threshold above every id drops all nodes incl. the partial tail.
+        seed(&mut store, 250);
+        assert_eq!(xadd_trim(&mut store, 251, &[b"MINID", b"~", b"10000-0"]), 0);
+        assert!(store.last_xadd_trimmed, "full clear flags a trim");
+
+        // Exact (=) MINID still removes every entry below the threshold.
+        seed(&mut store, 250);
+        // adds 251, then removes ids < 150 -> 150..251 = 102 remain.
+        assert_eq!(xadd_trim(&mut store, 251, &[b"MINID", b"=", b"150-0"]), 102);
     }
 
     #[test]
