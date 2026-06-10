@@ -1,0 +1,62 @@
+[
+  {
+    "reply_hex": "2b4f4b0d0a",
+    "reply_len": 5,
+    "sent_sha256": "9fc625419ce2af20d12c9653202973350c8c352a3ec9d39c00f5abcb64fb3b16",
+    "step": "set_int"
+  },
+  {
+    "reply_hex": "24330d0a3132330d0a",
+    "reply_len": 9,
+    "sent_sha256": "bb22938185b522b024b0bfd9b687971e494d748a356394033e1cd3fe19204811",
+    "step": "get_int"
+  },
+  {
+    "reply_hex": "2b4f4b0d0a",
+    "reply_len": 5,
+    "sent_sha256": "f13ea47450785b9d0e04055f0fc7f9c6b43be5418ee82ef83384b0843fc33204",
+    "step": "set_ascii"
+  },
+  {
+    "reply_hex": "24330d0a7878780d0a",
+    "reply_len": 9,
+    "sent_sha256": "a045f6beddfeae877a87f9d62d44c250342602d7c2d181828ec60a5b8f73bcd9",
+    "step": "get_ascii"
+  },
+  {
+    "reply_hex": "2b4f4b0d0a24330d0a6162630d0a",
+    "reply_len": 14,
+    "sent_sha256": "39895e3419db2698bd6a176c518b9b0aabcb6723739e711912f8244113962f8a",
+    "step": "pipeline_set_get"
+  },
+  {
+    "reply_hex": "",
+    "reply_len": 0,
+    "sent_sha256": "0dd0baac478f7fad1ebcda61c1174d35bf0d0d7636acbbcc49f78a177ddee56a",
+    "step": "reply_off_command"
+  },
+  {
+    "reply_hex": "",
+    "reply_len": 0,
+    "sent_sha256": "bdf6386cf3d37023149a892e3268a767a4b6d6a51507d93a3c5bbb4a1d86a6c2",
+    "step": "reply_off_suppressed_set"
+  },
+  {
+    "reply_hex": "2b4f4b0d0a",
+    "reply_len": 5,
+    "sent_sha256": "a11cc363b9396545f6a75cbc037ec8effb6e6e898c6d69cd9b557371096cdfa2",
+    "step": "reply_on_command"
+  },
+  {
+    "reply_hex": "2b504f4e470d0a",
+    "reply_len": 7,
+    "sent_sha256": "a43cb6a3b9d261112714d00e36b33106d1479eb1b3d8131a07684d4d477c5989",
+    "step": "reply_on_ping"
+  },
+  {
+    "reply_hex": "24330d0a3737370d0a",
+    "reply_len": 9,
+    "sent_sha256": "bc0880f24186a75d2c7e1fc739676127501cbb519485ba30cfe83fefc012f1ec",
+    "step": "reply_on_get_suppressed_key"
+  }
+]

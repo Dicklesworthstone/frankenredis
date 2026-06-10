@@ -1,0 +1,41 @@
+{
+  "baseline_reply_lengths": [
+    5,
+    9,
+    5,
+    9,
+    14,
+    0,
+    0,
+    5,
+    7,
+    9
+  ],
+  "baseline_sha256": "d467530ad9515c694924aaa721cf45fd1a8e90e700fe20944544abdac5d4f580",
+  "candidate_reply_lengths": [
+    5,
+    9,
+    5,
+    9,
+    14,
+    0,
+    0,
+    5,
+    7,
+    9
+  ],
+  "candidate_sha256": "d467530ad9515c694924aaa721cf45fd1a8e90e700fe20944544abdac5d4f580",
+  "match": true,
+  "steps": [
+    "set_int",
+    "get_int",
+    "set_ascii",
+    "get_ascii",
+    "pipeline_set_get",
+    "reply_off_command",
+    "reply_off_suppressed_set",
+    "reply_on_command",
+    "reply_on_ping",
+    "reply_on_get_suppressed_key"
+  ]
+}

@@ -1,0 +1,23 @@
+## set_int
++OK
+## get_int
+$3
+123
+## set_ascii
++OK
+## get_ascii
+$3
+xxx
+## pipeline_set_get
++OK
+$3
+abc
+## reply_off_command
+## reply_off_suppressed_set
+## reply_on_command
++OK
+## reply_on_ping
++PONG
+## reply_on_get_suppressed_key
+$3
+777
