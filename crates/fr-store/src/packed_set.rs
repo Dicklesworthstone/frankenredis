@@ -893,7 +893,35 @@ impl Default for ListRepr {
 // estimate in `Store::object_encoding`).
 const LIST_LP_OVERHEAD: u64 = 7; // 4-byte total-bytes + 2-byte count header + 0xFF EOF
 const LIST_DEFAULT_BUDGET: u64 = 8192; // quicklistNodeLimit(-2) sz_limit
-const LIST_DEFAULT_REVERT: u64 = LIST_DEFAULT_BUDGET / 2; // AUTO hysteresis (count_limit == 0)
+/// quicklist.c `SIZE_SAFETY_LIMIT` — a packed node is never allowed to exceed
+/// this even when `list-max-listpack-size` is a positive (count) limit.
+const LIST_SIZE_SAFETY_LIMIT: u64 = 8192;
+
+/// quicklist.c `quicklistNodeLimit` size budget for a negative `fill`
+/// (`optimization_level[] = {4096, 8192, 16384, 32768, 65536}`, clamped).
+const fn list_neg_fill_size(fill: i64) -> u64 {
+    const LV: [u64; 5] = [4096, 8192, 16384, 32768, 65536];
+    let mut off = ((-fill) as usize).saturating_sub(1);
+    if off >= LV.len() {
+        off = LV.len() - 1;
+    }
+    LV[off]
+}
+
+/// quicklist.c `quicklistNodeExceedsLimit(fill, new_sz, new_count)` — the exact
+/// redis predicate for whether a single packed (listpack) node has outgrown the
+/// `list-max-listpack-size` budget. Negative fill ⇒ size budget; non-negative
+/// fill ⇒ count budget, but a packed node still may not exceed
+/// `SIZE_SAFETY_LIMIT`.
+const fn list_node_exceeds_limit(fill: i64, new_sz: u64, new_count: u64) -> bool {
+    if fill < 0 {
+        new_sz > list_neg_fill_size(fill)
+    } else if new_sz > LIST_SIZE_SAFETY_LIMIT {
+        true
+    } else {
+        new_count > fill as u64
+    }
+}
 
 /// Decimal integer that round-trips to its canonical form — mirrors
 /// `parse_listpack_integer` in `lib.rs` so listpack int-encoding decisions
@@ -964,8 +992,18 @@ pub struct ListValue {
     repr: ListRepr,
     /// Exact `lpBytes` of this list encoded as a single listpack.
     lp_bytes: u64,
-    /// Sticky listpack→quicklist decision under the default (-2) byte budget.
+    /// Sticky listpack→quicklist decision. Set by the ADD-time / LSET-time
+    /// conversion check (`note_command_grow` / `note_lset_grow`) under whatever
+    /// `list-max-listpack-size` was active then; cleared by the AUTO shrink
+    /// hysteresis. Consulted directly for the default (-2) budget and, via
+    /// `forced_for_fill`, for non-default budgets.
     forced_quicklist: bool,
+    /// `list-max-listpack-size` under which `forced_quicklist` was last
+    /// evaluated. The non-(-2) encoding report trusts the sticky flag only when
+    /// this matches the current config (so construction/load defaults baked
+    /// under -2 cannot pollute a non-default report); the next mutation under
+    /// the current config re-evaluates it. (frankenredis-lsetql)
+    fill: i64,
 }
 
 impl Default for ListValue {
@@ -974,6 +1012,7 @@ impl Default for ListValue {
             repr: ListRepr::default(),
             lp_bytes: LIST_LP_OVERHEAD,
             forced_quicklist: false,
+            fill: -2,
         }
     }
 }
@@ -1001,10 +1040,41 @@ impl ListValue {
     /// default `-2` budget. `lp_before_command` is the list's `lpBytes`
     /// snapshotted BEFORE the command's pushes; `raw_add` is the sum of the RAW
     /// byte lengths of the newly-added elements. (frankenredis-rc49s)
-    pub fn note_command_grow(&mut self, lp_before_command: u64, raw_add: u64) {
-        if !self.forced_quicklist && lp_before_command + raw_add > LIST_DEFAULT_BUDGET {
+    pub fn note_command_grow(&mut self, lp_before_command: u64, raw_add: u64, fill: i64) {
+        self.fill = fill;
+        // After an ADD command the post-mutation length equals redis's
+        // `lpLength(before) + add_length`, so `self.len()` is the count redis
+        // feeds `quicklistNodeExceedsLimit`.
+        if !self.forced_quicklist
+            && list_node_exceeds_limit(fill, lp_before_command + raw_add, self.len() as u64)
+        {
             self.forced_quicklist = true;
         }
+    }
+
+    /// Apply redis's LSET-time conversion. `lsetCommand` runs
+    /// `listTypeTryConversionAppend(o, value)` — `LIST_CONV_GROWING` over the
+    /// CURRENT full listpack plus the new value's raw length, with
+    /// `count = lpLength + 1` — BEFORE the index range check, so even an
+    /// out-of-range LSET can stickily convert a full listpack to quicklist.
+    /// (frankenredis-lsetql)
+    pub fn note_lset_grow(&mut self, value_raw_len: u64, fill: i64) {
+        self.fill = fill;
+        if !self.forced_quicklist
+            && list_node_exceeds_limit(fill, self.lp_bytes + value_raw_len, self.len() as u64 + 1)
+        {
+            self.forced_quicklist = true;
+        }
+    }
+
+    /// OBJECT ENCODING hint for a NON-default budget: `true` when the sticky
+    /// listpack→quicklist decision was made under the current `fill`. A flag
+    /// baked under a different budget (e.g. the -2 default a freshly-loaded list
+    /// starts with) is NOT trusted here — the caller falls back to the stateless
+    /// current-content check. (frankenredis-lsetql)
+    #[must_use]
+    pub fn forced_for_fill(&self, fill: i64) -> bool {
+        self.forced_quicklist && self.fill == fill
     }
 
     /// Apply redis's AUTO shrink hysteresis: convert quicklist→listpack only
@@ -1014,7 +1084,25 @@ impl ListValue {
         if self.is_empty() {
             self.lp_bytes = LIST_LP_OVERHEAD;
         }
-        if self.forced_quicklist && self.lp_bytes <= LIST_DEFAULT_REVERT {
+        if !self.forced_quicklist {
+            return;
+        }
+        // redis `listTypeTryConvertQuicklist` (LIST_CONV_SHRINKING): a quicklist
+        // collapses back to a single listpack node only when that node both fits
+        // the limit AND has fallen to at most HALF of it (hysteresis, so it does
+        // not flap around the boundary). For the default -2 budget this reduces
+        // to `lp_bytes <= 4096`, matching the prior `LIST_DEFAULT_REVERT` gate.
+        let fill = self.fill;
+        let count = self.len() as u64;
+        if list_node_exceeds_limit(fill, self.lp_bytes, count) {
+            return;
+        }
+        let below_half = if fill < 0 {
+            self.lp_bytes <= list_neg_fill_size(fill) / 2
+        } else {
+            count <= (fill as u64) / 2
+        };
+        if below_half {
             self.forced_quicklist = false;
         }
     }
@@ -1142,18 +1230,16 @@ impl ListValue {
         removed
     }
 
-    /// Replace the element at `idx` (LSET); false if out of range.
+    /// Replace the element at `idx` (LSET); false if out of range. This only
+    /// updates the byte accounting and the contents; the listpack→quicklist
+    /// conversion is the caller's responsibility via `note_lset_grow`, which
+    /// upstream runs BEFORE the index range check. (frankenredis-rc49s/lsetql)
     pub fn set(&mut self, idx: usize, elem: Vec<u8>) -> bool {
-        // LSET is a single-element command: model it as removing the old entry
-        // and adding the new one by its RAW length (the same ADD-time test
-        // `note_command_grow` applies, with the post-removal listpack as the
-        // "before" size). (frankenredis-rc49s)
         let old_entry_bytes = self.get(idx).map(list_lp_entry_bytes);
         let Some(old_entry_bytes) = old_entry_bytes else {
             return false;
         };
         let base = self.lp_bytes - old_entry_bytes;
-        self.note_command_grow(base, elem.len() as u64);
         self.lp_bytes = base + list_lp_entry_bytes(&elem);
         match &mut self.repr {
             ListRepr::Packed(p) => p.set(idx, &elem),
@@ -1229,6 +1315,7 @@ impl From<VecDeque<Vec<u8>>> for ListValue {
             repr,
             lp_bytes: LIST_LP_OVERHEAD,
             forced_quicklist: false,
+            fill: -2,
         };
         list.rebuild_growth_state();
         list

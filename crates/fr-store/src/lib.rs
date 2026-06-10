@@ -6238,10 +6238,20 @@ impl Store {
                     } else {
                         "listpack"
                     }
-                } else if self.list_fits_legacy_listpack_size(l) {
-                    "listpack"
-                } else {
+                } else if l.forced_for_fill(self.list_max_listpack_size)
+                    || !self.list_fits_legacy_listpack_size(l)
+                {
+                    // Non-default budget: redis's listpack→quicklist transition
+                    // is sticky, so trust the per-command conversion decision
+                    // (made under this same budget) even after the list shrinks
+                    // back under the limit — e.g. LSET on a full listpack, or a
+                    // grow-then-pop above the half-limit hysteresis. Fall back to
+                    // the stateless current-content check for lists whose sticky
+                    // flag was not set under this budget (bulk loads / RESTORE).
+                    // (frankenredis-lsetql)
                     "quicklist"
+                } else {
+                    "listpack"
                 }
             }
             Value::Set(s) => {
@@ -8269,7 +8279,7 @@ impl Store {
                             raw_add += bytes.len() as u64;
                             l.push_front(bytes.to_vec());
                         }
-                        l.note_command_grow(lp_pre, raw_add);
+                        l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
                         let len = l.len();
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
@@ -8290,7 +8300,11 @@ impl Store {
                     raw_add += bytes.len() as u64;
                     l.push_front(bytes.to_vec());
                 }
-                l.note_command_grow(ListValue::empty_listpack_bytes(), raw_add);
+                l.note_command_grow(
+                    ListValue::empty_listpack_bytes(),
+                    raw_add,
+                    self.list_max_listpack_size,
+                );
                 let len = l.len();
                 self.internal_entries_insert(
                     key.to_vec(),
@@ -8333,7 +8347,7 @@ impl Store {
                             raw_add += bytes.len() as u64;
                             l.push_back(bytes.to_vec());
                         }
-                        l.note_command_grow(lp_pre, raw_add);
+                        l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
                         let len = l.len();
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
@@ -8354,7 +8368,11 @@ impl Store {
                     raw_add += bytes.len() as u64;
                     l.push_back(bytes.to_vec());
                 }
-                l.note_command_grow(ListValue::empty_listpack_bytes(), raw_add);
+                l.note_command_grow(
+                    ListValue::empty_listpack_bytes(),
+                    raw_add,
+                    self.list_max_listpack_size,
+                );
                 let len = l.len();
                 self.internal_entries_insert(
                     key.to_vec(),
@@ -8695,6 +8713,12 @@ impl Store {
                 match &mut entry.value {
                     Value::List(l) => {
                         let len = l.len() as i64;
+                        // Upstream lsetCommand runs the listpack→quicklist
+                        // GROWING conversion (with the new value) BEFORE the
+                        // index range check, so an LSET on a full listpack node
+                        // stickily converts even when the index is out of range.
+                        // (frankenredis-lsetql)
+                        l.note_lset_grow(value.len() as u64, self.list_max_listpack_size);
                         if index < -len || index >= len {
                             return Err(StoreError::IndexOutOfRange);
                         }
@@ -8858,7 +8882,7 @@ impl Store {
                             let lp_pre = l.listpack_byte_len();
                             let raw_add = value.len() as u64;
                             l.insert(pos, value);
-                            l.note_command_grow(lp_pre, raw_add);
+                            l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
                             let len = l.len();
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
@@ -8905,7 +8929,7 @@ impl Store {
                             let lp_pre = l.listpack_byte_len();
                             let raw_add = value.len() as u64;
                             l.insert(pos + 1, value);
-                            l.note_command_grow(lp_pre, raw_add);
+                            l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
                             let len = l.len();
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
@@ -9071,7 +9095,7 @@ impl Store {
                 Value::List(l) => {
                     let lp_pre = l.listpack_byte_len();
                     l.push_front(val.clone());
-                    l.note_command_grow(lp_pre, val.len() as u64);
+                    l.note_command_grow(lp_pre, val.len() as u64, self.list_max_listpack_size);
                     Self::mark_digest_stale_fields(
                         &mut self.digest_stale,
                         &mut self.digest_mutations,
@@ -9083,7 +9107,11 @@ impl Store {
             None => {
                 let mut l = ListValue::default();
                 l.push_front(val.clone());
-                l.note_command_grow(ListValue::empty_listpack_bytes(), val.len() as u64);
+                l.note_command_grow(
+                    ListValue::empty_listpack_bytes(),
+                    val.len() as u64,
+                    self.list_max_listpack_size,
+                );
                 self.internal_entries_insert(
                     destination.to_vec(),
                     Entry::new(Value::List(Box::new(l)), source_ttl, now_ms),
@@ -9201,7 +9229,7 @@ impl Store {
                             raw_add += v.len() as u64;
                             l.push_front(v.clone());
                         }
-                        l.note_command_grow(lp_pre, raw_add);
+                        l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
                         let len = l.len();
                         if !values.is_empty() {
                             Self::mark_digest_stale_fields(
@@ -9253,7 +9281,7 @@ impl Store {
                             raw_add += v.len() as u64;
                             l.push_back(v.clone());
                         }
-                        l.note_command_grow(lp_pre, raw_add);
+                        l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
                         let len = l.len();
                         if !values.is_empty() {
                             Self::mark_digest_stale_fields(
@@ -9378,7 +9406,7 @@ impl Store {
                         } else {
                             l.push_back(val.clone());
                         }
-                        l.note_command_grow(lp_pre, val.len() as u64);
+                        l.note_command_grow(lp_pre, val.len() as u64, self.list_max_listpack_size);
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
@@ -9395,7 +9423,11 @@ impl Store {
                 } else {
                     l.push_back(val.clone());
                 }
-                l.note_command_grow(ListValue::empty_listpack_bytes(), val.len() as u64);
+                l.note_command_grow(
+                    ListValue::empty_listpack_bytes(),
+                    val.len() as u64,
+                    self.list_max_listpack_size,
+                );
                 self.internal_entries_insert(
                     destination.to_vec(),
                     Entry::new(Value::List(Box::new(l)), source_ttl, now_ms),
@@ -22815,6 +22847,68 @@ mod tests {
         store.set(b"big".to_vec(), b"50000".to_vec(), None, 0);
         assert!(store.copy(b"big", b"bigdst", false, 0).unwrap());
         assert_eq!(store.object_refcount(b"bigdst", 0), Some(1));
+    }
+
+    #[test]
+    fn object_encoding_list_lset_growing_conversion_is_sticky() {
+        // (frankenredis-lsetql) Upstream lsetCommand runs the listpack→quicklist
+        // GROWING conversion (lpLength + 1 vs the count limit) BEFORE the index
+        // range check, and the conversion is sticky. With a count limit of 4 and
+        // exactly 4 elements, an LSET — even an out-of-range one — converts to
+        // quicklist and STAYS quicklist; with 3 elements it stays listpack.
+        let mut store = Store::new();
+        store.list_max_listpack_size = 4;
+
+        // count == limit: valid in-range LSET converts (count+1 = 5 > 4).
+        let _ = store.rpush(
+            b"full",
+            &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()],
+            0,
+        );
+        assert_eq!(store.object_encoding(b"full", 0), Some("listpack"));
+        store.lset(b"full", 0, b"z".to_vec(), 0).unwrap();
+        assert_eq!(store.object_encoding(b"full", 0), Some("quicklist"));
+
+        // count == limit, out-of-range LSET errors but STILL converts.
+        let _ = store.rpush(
+            b"oor",
+            &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()],
+            0,
+        );
+        assert!(store.lset(b"oor", 100, b"z".to_vec(), 0).is_err());
+        assert_eq!(store.object_encoding(b"oor", 0), Some("quicklist"));
+
+        // count < limit: LSET stays listpack (count+1 = 4, not > 4).
+        let _ = store.rpush(b"sub", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 0);
+        store.lset(b"sub", 0, b"z".to_vec(), 0).unwrap();
+        assert_eq!(store.object_encoding(b"sub", 0), Some("listpack"));
+    }
+
+    #[test]
+    fn object_encoding_list_shrink_hysteresis_below_half_limit() {
+        // (frankenredis-lsetql) A quicklist (grown past the count limit) collapses
+        // back to a single listpack node only once it has fallen to at most HALF
+        // the limit (LIST_CONV_SHRINKING hysteresis). With limit 4: popping from 5
+        // down to 3 stays quicklist (3 > 4/2); down to 2 reverts to listpack.
+        let mut store = Store::new();
+        store.list_max_listpack_size = 4;
+        let _ = store.rpush(
+            b"l",
+            &[
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+                b"d".to_vec(),
+                b"e".to_vec(),
+            ],
+            0,
+        );
+        assert_eq!(store.object_encoding(b"l", 0), Some("quicklist"));
+        let _ = store.rpop(b"l", 0);
+        let _ = store.rpop(b"l", 0); // -> 3 elements, > 2
+        assert_eq!(store.object_encoding(b"l", 0), Some("quicklist"));
+        let _ = store.rpop(b"l", 0); // -> 2 elements, <= 2
+        assert_eq!(store.object_encoding(b"l", 0), Some("listpack"));
     }
 
     #[test]
