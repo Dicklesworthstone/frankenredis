@@ -6099,7 +6099,7 @@ impl Store {
     #[must_use]
     pub fn peek_value_type(&self, key: &[u8], now_ms: u64) -> Option<ValueType> {
         let entry = self.entries.get(key)?;
-        if entry.expiry_ms().is_some_and(|deadline| now_ms >= deadline) {
+        if entry.expiry_ms().is_some_and(|deadline| now_ms > deadline) {
             return None;
         }
         Some(match &entry.value {
@@ -6121,7 +6121,7 @@ impl Store {
         let Some(entry) = self.entries.get(key) else {
             return Ok(0);
         };
-        if entry.expiry_ms().is_some_and(|deadline| now_ms >= deadline) {
+        if entry.expiry_ms().is_some_and(|deadline| now_ms > deadline) {
             return Ok(0);
         }
         entry.value.string_len().ok_or(StoreError::WrongType)
@@ -6134,7 +6134,7 @@ impl Store {
     #[must_use]
     pub fn set_cardinality_no_stats(&self, key: &[u8], now_ms: u64) -> Option<usize> {
         let entry = self.entries.get(key)?;
-        if entry.expiry_ms().is_some_and(|deadline| now_ms >= deadline) {
+        if entry.expiry_ms().is_some_and(|deadline| now_ms > deadline) {
             return None;
         }
         match &entry.value {
@@ -6150,7 +6150,7 @@ impl Store {
         let Some(entry) = self.entries.get(key) else {
             return PttlValue::KeyMissing;
         };
-        if entry.expiry_ms().is_some_and(|deadline| now_ms >= deadline) {
+        if entry.expiry_ms().is_some_and(|deadline| now_ms > deadline) {
             return PttlValue::KeyMissing;
         }
         let decision = evaluate_expiry(now_ms, entry.expiry_ms());
@@ -6751,7 +6751,7 @@ impl Store {
 
     fn has_expiry_due(&self, now_ms: u64) -> bool {
         self.earliest_expiry_deadline_ms()
-            .is_some_and(|deadline_ms| now_ms >= deadline_ms)
+            .is_some_and(|deadline_ms| now_ms > deadline_ms)
     }
 
     fn volatile_physical_keys_in_db(&self, db: usize) -> Vec<Vec<u8>> {
@@ -15880,7 +15880,7 @@ impl Store {
             None => return 0,
         };
         if let Some(exp) = entry.expiry_ms()
-            && now_ms >= exp
+            && now_ms > exp
         {
             return 0;
         }
@@ -15950,7 +15950,7 @@ impl Store {
         match self.entries.get(key) {
             Some(entry) => {
                 if let Some(exp) = entry.expiry_ms()
-                    && now_ms >= exp
+                    && now_ms > exp
                 {
                     return 0;
                 }
@@ -23186,12 +23186,16 @@ mod tests {
     }
 
     #[test]
-    fn lazy_expiration_evicts_key_at_exact_deadline() {
+    fn lazy_expiration_evicts_key_one_ms_past_deadline() {
         let mut store = Store::new();
-        store.set(b"k".to_vec(), b"v".to_vec(), Some(1_000), 5_000);
+        store.set(b"k".to_vec(), b"v".to_vec(), Some(1_000), 5_000); // deadline 6_000
         assert!(store.exists(b"k", 5_999));
-        assert!(!store.exists(b"k", 6_000));
-        assert_eq!(store.get(b"k", 6_000).unwrap(), None);
+        // Upstream keyIsExpired uses `now > when`, so the key is still alive in
+        // its final millisecond (now == deadline) and is only evicted once the
+        // clock passes the deadline.
+        assert!(store.exists(b"k", 6_000));
+        assert!(!store.exists(b"k", 6_001));
+        assert_eq!(store.get(b"k", 6_001).unwrap(), None);
         assert_eq!(store.stat_expired_keys, 1);
     }
 
@@ -23324,7 +23328,9 @@ mod tests {
         store.set(b"b".to_vec(), b"2".to_vec(), Some(10_000), 0);
         store.set(b"c".to_vec(), b"3".to_vec(), Some(10_000), 0);
 
-        let result = store.run_active_expire_cycle(1, Some(b"b".to_vec()), 5);
+        // `a` (deadline 1) is only due once now passes it (`now > when`), so
+        // sample at now=2; `b`/`c` (deadline 10_000) stay alive.
+        let result = store.run_active_expire_cycle(2, Some(b"b".to_vec()), 5);
 
         assert_eq!(result.sampled_keys, 3);
         assert_eq!(result.evicted_keys, 1);
@@ -23346,7 +23352,8 @@ mod tests {
         assert_eq!(early.next_cursor, Some(b"a".to_vec()));
         assert_eq!(store.dbsize_in_db(0), 2);
 
-        let due = store.run_active_expire_cycle(10_000, None, 5);
+        // `a` (deadline 10_000) becomes due only once now passes it (`now > when`).
+        let due = store.run_active_expire_cycle(10_001, None, 5);
         assert_eq!(due.sampled_keys, 2);
         assert_eq!(due.evicted_keys, 1);
         assert_eq!(store.dbsize_in_db(0), 1);
@@ -23369,7 +23376,8 @@ mod tests {
         assert!(store.volatile_keys_dirty);
         assert!(store.volatile_keys.is_empty());
 
-        let due = store.run_active_expire_cycle(10_000, None, 10);
+        // `a` (deadline 10_000) becomes due only once now passes it (`now > when`).
+        let due = store.run_active_expire_cycle(10_001, None, 10);
         assert_eq!(due.sampled_keys, 2);
         assert_eq!(due.evicted_keys, 1);
         assert!(!store.volatile_keys_dirty);

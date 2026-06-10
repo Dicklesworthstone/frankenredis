@@ -1,4 +1,4 @@
 ExpiryDecision {
-    should_evict: true,
-    remaining_ms: -2,
+    should_evict: false,
+    remaining_ms: 0,
 }

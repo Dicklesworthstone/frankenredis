@@ -13,7 +13,14 @@ pub fn evaluate_expiry(now_ms: u64, expires_at_ms: Option<u64>) -> ExpiryDecisio
             should_evict: false,
             remaining_ms: -1,
         },
-        Some(deadline) if deadline <= now_ms => ExpiryDecision {
+        // Upstream treats a key as expired only when the clock is STRICTLY past
+        // the deadline: keyIsExpired (db.c:1743) and activeExpireCycleTryExpire
+        // (expire.c:56) both `return now > when`. A key whose deadline equals
+        // `now` is still alive (its final millisecond), so PTTL reports 0 rather
+        // than -2. The distinct set-time "already expired" decision
+        // (expireGenericCommand / checkAlreadyExpired uses `when <= now`) is
+        // handled separately by Store::expire_at_milliseconds, not here.
+        Some(deadline) if deadline < now_ms => ExpiryDecision {
             should_evict: true,
             remaining_ms: -2,
         },
@@ -47,10 +54,17 @@ mod tests {
     }
 
     #[test]
-    fn deadline_equal_to_now_is_evicted() {
-        let decision = evaluate_expiry(100, Some(100));
-        assert_eq!(decision.remaining_ms, -2);
-        assert!(decision.should_evict);
+    fn deadline_equal_to_now_is_alive() {
+        // Upstream keyIsExpired/activeExpireCycleTryExpire use `now > when`, so a
+        // key is alive in its final millisecond (deadline == now): not evicted,
+        // PTTL reports 0. Eviction only happens once `now` passes the deadline.
+        let alive = evaluate_expiry(100, Some(100));
+        assert_eq!(alive.remaining_ms, 0);
+        assert!(!alive.should_evict);
+
+        let evicted = evaluate_expiry(101, Some(100));
+        assert_eq!(evicted.remaining_ms, -2);
+        assert!(evicted.should_evict);
     }
 
     #[test]

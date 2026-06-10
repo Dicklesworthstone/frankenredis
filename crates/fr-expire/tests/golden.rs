@@ -53,6 +53,9 @@ fn golden_expired_past() {
 
 #[test]
 fn golden_expired_exact() {
+    // Deadline exactly equal to `now`: the key is in its final millisecond and
+    // is NOT yet expired (should_evict=false, remaining_ms=0), matching upstream
+    // keyIsExpired/activeExpireCycleTryExpire which evict only once `now > when`.
     eval_and_snapshot("expired_exact", 1000, Some(1000));
 }
 
