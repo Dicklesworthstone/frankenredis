@@ -2882,6 +2882,7 @@ impl CommandHistogram {
 /// Tracks per-command latency histograms.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommandHistogramTracker {
+    get: Option<CommandHistogram>,
     set: Option<CommandHistogram>,
     histograms: HashMap<String, CommandHistogram, foldhash::quality::RandomState>,
 }
@@ -2937,6 +2938,12 @@ impl CommandHistogramTracker {
         latency_us: u64,
         kind: CommandRecordKind,
     ) {
+        if command == "get" {
+            self.get
+                .get_or_insert_with(CommandHistogram::default)
+                .record_with_kind(latency_us, kind);
+            return;
+        }
         if command == "set" {
             self.set
                 .get_or_insert_with(CommandHistogram::default)
@@ -2953,6 +2960,9 @@ impl CommandHistogramTracker {
     #[must_use]
     pub fn get(&self, command: &str) -> Option<&CommandHistogram> {
         let key = command.to_ascii_lowercase();
+        if key == "get" {
+            return self.get.as_ref();
+        }
         if key == "set" {
             return self.set.as_ref();
         }
@@ -2967,6 +2977,9 @@ impl CommandHistogramTracker {
             .iter()
             .map(|(k, v)| (k.as_str(), v))
             .collect();
+        if let Some(hist) = &self.get {
+            result.push(("get", hist));
+        }
         if let Some(hist) = &self.set {
             result.push(("set", hist));
         }
@@ -2977,7 +2990,10 @@ impl CommandHistogramTracker {
     /// Reset histograms for specified commands, or all if empty.
     pub fn reset(&mut self, commands: &[&str]) -> usize {
         if commands.is_empty() {
-            let count = self.histograms.len() + usize::from(self.set.is_some());
+            let count = self.histograms.len()
+                + usize::from(self.get.is_some())
+                + usize::from(self.set.is_some());
+            self.get = None;
             self.set = None;
             self.histograms.clear();
             return count;
@@ -2988,6 +3004,12 @@ impl CommandHistogramTracker {
                 // (frankenredis-6n2qm) Lookup key matches the
                 // canonical lowercase form used by record_with_kind.
                 let key = cmd.to_ascii_lowercase();
+                if key == "get" {
+                    return self.get.as_mut().map(|h| {
+                        h.reset();
+                        1
+                    });
+                }
                 if key == "set" {
                     return self.set.as_mut().map(|h| {
                         h.reset();

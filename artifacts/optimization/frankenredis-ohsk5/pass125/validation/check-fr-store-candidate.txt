@@ -1,0 +1,97 @@
+  [2m2026-06-10T18:49:57.039608Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mProject path normalization failed for /tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr: input resolves outside canonical root (input: /tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr, detail: resolved=/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr root=/data/projects)[0m
+    [2;3mat[0m rch/src/hook.rs:2880 [2;3mon[0m ThreadId(1)
+
+[RCH] local (no admissible workers: critical_pressure=1,insufficient_slots=1)
+    Checking fr-store v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-store)
+warning: unused import: `SetValue`
+     --> crates/fr-store/src/lib.rs:27884:21
+      |
+27884 |         use super::{SetValue, intersect_sorted_i64};
+      |                     ^^^^^^^^
+      |
+      = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:27908:13
+      |
+27908 |         let mut fnv = |g: &mut u64, x: i64| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:28054:13
+      |
+28054 |         let mut fnv = |g: &mut u64, x: i64| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:28197:13
+      |
+28197 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:28330:13
+      |
+28330 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:28662:13
+      |
+28662 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:28797:13
+      |
+28797 |         let mut fnv = |g: &mut u64, n: u64| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:28940:13
+      |
+28940 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:29063:13
+      |
+29063 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:29217:13
+      |
+29217 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:29357:13
+      |
+29357 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: `fr-store` (lib test) generated 11 warnings (run `cargo fix --lib -p fr-store --tests` to apply 11 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.10s
