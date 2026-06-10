@@ -1,0 +1,6 @@
+baseline_sha256=3bae90f33f60f6dd1e0c59ed8dcb9cbc6f7663663572f63a690a95183ba13842
+candidate_sha256=3bae90f33f60f6dd1e0c59ed8dcb9cbc6f7663663572f63a690a95183ba13842
+baseline_bytes=409
+candidate_bytes=409
+match=True
+isomorphism=single-threaded command order preserved; integer grammar accepts the same canonical decimal domain; zero/negative/leading-zero/plus/non-digit/overflow cases remain on the pre-existing slow path; no RNG, floating-point, or tie-breaking behavior touched.

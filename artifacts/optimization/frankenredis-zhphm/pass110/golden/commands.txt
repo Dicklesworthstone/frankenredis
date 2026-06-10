@@ -1,0 +1,41 @@
+PING
+SET p110:int1 1
+GET p110:int1
+OBJECT ENCODING p110:int1
+SET p110:int42 42
+GET p110:int42
+OBJECT ENCODING p110:int42
+SET p110:int18 123456789012345678
+GET p110:int18
+OBJECT ENCODING p110:int18
+SET p110:intmax 9223372036854775807
+GET p110:intmax
+OBJECT ENCODING p110:intmax
+SET p110:intmin -9223372036854775808
+GET p110:intmin
+OBJECT ENCODING p110:intmin
+SET p110:zero 0
+GET p110:zero
+OBJECT ENCODING p110:zero
+SET p110:leading-zero 00
+GET p110:leading-zero
+OBJECT ENCODING p110:leading-zero
+SET p110:leading-zeros 007
+GET p110:leading-zeros
+OBJECT ENCODING p110:leading-zeros
+SET p110:negzero -0
+GET p110:negzero
+OBJECT ENCODING p110:negzero
+SET p110:plus +1
+GET p110:plus
+OBJECT ENCODING p110:plus
+SET p110:nondigit 1x
+GET p110:nondigit
+OBJECT ENCODING p110:nondigit
+SET p110:overflow-pos 9223372036854775808
+GET p110:overflow-pos
+OBJECT ENCODING p110:overflow-pos
+SET p110:overflow-neg -9223372036854775809
+GET p110:overflow-neg
+OBJECT ENCODING p110:overflow-neg
+DBSIZE
