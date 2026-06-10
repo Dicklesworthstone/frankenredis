@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781063918693,
+  "host": "127.0.0.1",
+  "port": 26999,
+  "workload": "set",
+  "clients": 50,
+  "requests": 3000000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "ohsk5-p112-confirm-rev-base",
+  "total_time_ms": 2109,
+  "ops_per_sec": 1422174.9111192352,
+  "bytes_sent": 209117482,
+  "bytes_received": 15000000,
+  "latency_us": {
+    "min": 47,
+    "p50": 512,
+    "p95": 862,
+    "p99": 1279,
+    "p999": 1881,
+    "max": 2847,
+    "mean": 552.5271976666683,
+    "samples": 3000000
+  }
+}
