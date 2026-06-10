@@ -72,13 +72,19 @@ impl Drop for LuaTableInner {
 /// Register a freshly-created table inner so the next eval-end sweep can break
 /// any cycle it participates in.
 fn lua_gc_register_table(inner: &Rc<RefCell<LuaTableInner>>) {
-    LUA_GC_REGISTRY.with(|reg| reg.borrow_mut().push(LuaGcHandle::Table(Rc::downgrade(inner))));
+    LUA_GC_REGISTRY.with(|reg| {
+        reg.borrow_mut()
+            .push(LuaGcHandle::Table(Rc::downgrade(inner)))
+    });
 }
 
 /// Register a freshly-created local/upvalue cell (the carrier of recursive
 /// closure self-references).
 fn lua_gc_register_cell(cell: &Rc<RefCell<LuaValue>>) {
-    LUA_GC_REGISTRY.with(|reg| reg.borrow_mut().push(LuaGcHandle::Cell(Rc::downgrade(cell))));
+    LUA_GC_REGISTRY.with(|reg| {
+        reg.borrow_mut()
+            .push(LuaGcHandle::Cell(Rc::downgrade(cell)))
+    });
 }
 
 /// RAII guard scoping one `eval_script` invocation. Records the registry
@@ -120,10 +126,10 @@ impl Drop for LuaGcScope {
                         }
                     }
                     LuaGcHandle::Cell(weak) => {
-                        if let Some(cell) = weak.upgrade() {
-                            if let Ok(mut slot) = cell.try_borrow_mut() {
-                                *slot = LuaValue::Nil;
-                            }
+                        if let Some(cell) = weak.upgrade()
+                            && let Ok(mut slot) = cell.try_borrow_mut()
+                        {
+                            *slot = LuaValue::Nil;
                         }
                     }
                 }
@@ -12011,9 +12017,19 @@ mod tests {
 
         // (b) self-referential table: `t.x = t`.
         for _ in 0..200 {
-            let r = eval_script(b"local t={}; t.x=t; return type(t.x)", &[], &[], &mut store, 0)
-                .unwrap();
-            assert_eq!(r, bulk("table"), "self-referential table output must be intact");
+            let r = eval_script(
+                b"local t={}; t.x=t; return type(t.x)",
+                &[],
+                &[],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            assert_eq!(
+                r,
+                bulk("table"),
+                "self-referential table output must be intact"
+            );
         }
         // (a) recursive closure capturing its own binding.
         for _ in 0..200 {
@@ -12025,7 +12041,11 @@ mod tests {
                 0,
             )
             .unwrap();
-            assert_eq!(r, RespFrame::Integer(0), "recursive closure must still compute");
+            assert_eq!(
+                r,
+                RespFrame::Integer(0),
+                "recursive closure must still compute"
+            );
         }
         // A deeper nested cycle: table holding a closure that captures the table.
         for _ in 0..200 {
@@ -12071,7 +12091,10 @@ mod tests {
 
         // RESP3: null -> nil; RESP2 (default): null -> false (a boolean).
         assert_eq!(
-            run(&mut store, b"redis.setresp(3); return type(redis.call('get','nokey'))"),
+            run(
+                &mut store,
+                b"redis.setresp(3); return type(redis.call('get','nokey'))"
+            ),
             bulk("nil")
         );
         assert_eq!(
@@ -12080,12 +12103,18 @@ mod tests {
         );
         // RESP3 Double -> {double = n}.
         assert_eq!(
-            run(&mut store, b"redis.setresp(3); return tostring(redis.call('zscore','z','m').double)"),
+            run(
+                &mut store,
+                b"redis.setresp(3); return tostring(redis.call('zscore','z','m').double)"
+            ),
             bulk("1.5")
         );
         // RESP3 Map -> {map = {k = v}}.
         assert_eq!(
-            run(&mut store, b"redis.setresp(3); return redis.call('hgetall','h').map.f"),
+            run(
+                &mut store,
+                b"redis.setresp(3); return redis.call('hgetall','h').map.f"
+            ),
             bulk("v")
         );
         // RESP3 Set -> {set = {member = true}}.
@@ -12102,7 +12131,10 @@ mod tests {
             bulk("string")
         );
         assert_eq!(
-            run(&mut store, b"return redis.call('hgetall','h').map and 'Y' or 'N'"),
+            run(
+                &mut store,
+                b"return redis.call('hgetall','h').map and 'Y' or 'N'"
+            ),
             bulk("N")
         );
         // setresp is per-script: a later script defaults back to RESP2.
@@ -12124,11 +12156,23 @@ mod tests {
             eval_script(src, &[], &[], &mut store, 0).unwrap()
         };
         // RESP3 caller + setresp(3): real Bool frame.
-        assert_eq!(eval(3, b"redis.setresp(3); return true"), RespFrame::Bool(true));
-        assert_eq!(eval(3, b"redis.setresp(3); return false"), RespFrame::Bool(false));
+        assert_eq!(
+            eval(3, b"redis.setresp(3); return true"),
+            RespFrame::Bool(true)
+        );
+        assert_eq!(
+            eval(3, b"redis.setresp(3); return false"),
+            RespFrame::Bool(false)
+        );
         // RESP2 caller + setresp(3): Bool downgrades to :1 / :0.
-        assert_eq!(eval(2, b"redis.setresp(3); return true"), RespFrame::Integer(1));
-        assert_eq!(eval(2, b"redis.setresp(3); return false"), RespFrame::Integer(0));
+        assert_eq!(
+            eval(2, b"redis.setresp(3); return true"),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            eval(2, b"redis.setresp(3); return false"),
+            RespFrame::Integer(0)
+        );
         // Default (no setresp): true -> :1, false -> nil, on both protocols.
         assert_eq!(eval(2, b"return true"), RespFrame::Integer(1));
         assert_eq!(eval(2, b"return false"), RespFrame::BulkString(None));

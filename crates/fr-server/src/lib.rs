@@ -92,10 +92,7 @@ pub fn split_inline_args(line: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
     // access below is already `< n`-guarded, so the unquoted path stops the
     // scan there and the quoted path falls through to the unterminated-quote
     // branch. (frankenredis: sdssplitargs NUL termination)
-    let n = line
-        .iter()
-        .position(|&b| b == b'\0')
-        .unwrap_or(line.len());
+    let n = line.iter().position(|&b| b == b'\0').unwrap_or(line.len());
     let is_sep = |b: u8| b == b' ' || b == b'\t' || b == b'\r' || b == b'\n';
 
     let mut args = Vec::new();
