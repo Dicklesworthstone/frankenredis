@@ -615,11 +615,21 @@ fn assert_dump_restore_round_trip(store: &mut Store, now_ms: u64) {
         expected_records,
         "stream dump/restore must preserve stream records",
     );
-    assert_stream_group_invariants(&mut restored, RESTORED_STREAM_KEY, now_ms);
 
+    // Snapshot the restored groups for the cross-store equality check BEFORE
+    // running the invariant checks. assert_stream_group_invariants replays the
+    // consumer PEL via XREADGROUP with a numeric ID, which — exactly like
+    // upstream streamReplyWithRangeFromConsumerPEL — bumps delivery_count++ for
+    // every still-existing entry it serves. That replay only runs against
+    // `restored`, so doing it before this snapshot would inflate the restored
+    // delivery_count relative to `expected_groups` (taken from the original,
+    // un-replayed store) and falsely fail the round-trip comparison.
     // Consumer idle/inactive times reset on restore (seen_time_ms = 0,
     // active_time_ms = None). Compare only the structural parts.
     let restored_groups = group_snapshots(&mut restored, RESTORED_STREAM_KEY, now_ms);
+
+    assert_stream_group_invariants(&mut restored, RESTORED_STREAM_KEY, now_ms);
+
     assert_eq!(
         restored_groups.len(),
         expected_groups.len(),
