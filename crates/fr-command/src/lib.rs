@@ -10,8 +10,8 @@ use fr_store::{
     PendingAclLogEvent, PttlValue, PubSubMessage, ScoreBound, Store, StoreError,
     StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
     StreamGroupReadCursor, StreamGroupReadOptions, StreamId, StreamPendingRecord, Value, ValueType,
-    glob_match, read_rss_bytes, read_total_system_memory_bytes, redis_score_to_string,
-    sha1_hex_public,
+    decode_db_key, glob_match, read_rss_bytes, read_total_system_memory_bytes,
+    redis_score_to_string, sha1_hex_public,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -9484,8 +9484,18 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
 /// 3388, 3880). The text is identical regardless of whether it
 /// was the key or the group that was actually missing.
 /// (br-frankenredis-ud94)
+/// The keys reaching command handlers are the DB-namespaced PHYSICAL keys
+/// (`\0frdb\0<db><logical>` for db != 0), so any error that echoes the key name
+/// must first strip that prefix — upstream reports the LOGICAL key the client
+/// sent. Without this, e.g. `SELECT 3; XREADGROUP GROUP g c STREAMS s >` leaked
+/// `No such key '\x00frdb\x00...\x03s'` instead of `'s'`.
+fn logical_key_lossy(key: &[u8]) -> std::borrow::Cow<'_, str> {
+    let logical = decode_db_key(key).map_or(key, |(_, lk)| lk);
+    String::from_utf8_lossy(logical)
+}
+
 fn xstream_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
-    let key = String::from_utf8_lossy(key);
+    let key = logical_key_lossy(key);
     let group = String::from_utf8_lossy(group);
     RespFrame::Error(format!(
         "NOGROUP No such key '{key}' or consumer group '{group}'"
@@ -9497,7 +9507,7 @@ fn xreadgroup_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
     // shared NOGROUP wording (legacy_redis_code/redis/src/t_stream.c
     // around line 4495 where the streamLookupCG failure is reported
     // for XREADGROUP specifically). (br-frankenredis-ud94)
-    let key = String::from_utf8_lossy(key);
+    let key = logical_key_lossy(key);
     let group = String::from_utf8_lossy(group);
     RespFrame::Error(format!(
         "NOGROUP No such key '{key}' or consumer group '{group}' in XREADGROUP with GROUP option"
@@ -9509,7 +9519,7 @@ fn xgroup_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
     // "No such consumer group" because the key existence check has
     // already passed by the time the lookup is hit. (Upstream
     // t_stream.c:2632, 3880 in nested branches.)
-    let key = String::from_utf8_lossy(key);
+    let key = logical_key_lossy(key);
     let group = String::from_utf8_lossy(group);
     RespFrame::Error(format!(
         "NOGROUP No such consumer group '{group}' for key name '{key}'"
@@ -9535,7 +9545,7 @@ fn xpending_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
 }
 
 fn xinfo_nogroup_consumers_error(key: &[u8], group: &[u8]) -> RespFrame {
-    let key = String::from_utf8_lossy(key);
+    let key = logical_key_lossy(key);
     let group = String::from_utf8_lossy(group);
     RespFrame::Error(format!(
         "NOGROUP No such consumer group '{group}' for key name '{key}'"
@@ -38746,6 +38756,40 @@ mod tests {
         )
         .expect_err("wrongtype");
         assert!(matches!(err, CommandError::Store(StoreError::WrongType)));
+    }
+
+    #[test]
+    fn nogroup_errors_report_logical_key_not_db_namespaced() {
+        use crate::{
+            xgroup_nogroup_error, xinfo_nogroup_consumers_error, xreadgroup_nogroup_error,
+            xstream_nogroup_error,
+        };
+        // Command handlers receive DB-namespaced physical keys; the NOGROUP
+        // error wording must echo the LOGICAL key the client sent, never the
+        // internal `\0frdb\0<db><key>` encoding. (Found by random_command_differ:
+        // SELECT 3; XREADGROUP ... STREAMS s > leaked the prefix.)
+        let phys = fr_store::encode_db_key(3, b"mystream");
+        assert_ne!(phys.as_slice(), b"mystream", "db>0 key must be prefixed");
+        for err in [
+            xreadgroup_nogroup_error(&phys, b"g"),
+            xstream_nogroup_error(&phys, b"g"),
+            xgroup_nogroup_error(&phys, b"g"),
+            xinfo_nogroup_consumers_error(&phys, b"g"),
+        ] {
+            let RespFrame::Error(msg) = err else {
+                panic!("expected NOGROUP error frame, got {err:?}");
+            };
+            assert!(
+                msg.contains("'mystream'"),
+                "must report logical key: {msg:?}"
+            );
+            assert!(!msg.contains("frdb"), "must not leak db prefix: {msg:?}");
+        }
+        // db 0 keys are unprefixed and pass through unchanged.
+        let RespFrame::Error(msg) = xreadgroup_nogroup_error(b"plainkey", b"g") else {
+            panic!("expected error");
+        };
+        assert!(msg.contains("'plainkey'"), "db0 key unchanged: {msg:?}");
     }
 
     #[test]
