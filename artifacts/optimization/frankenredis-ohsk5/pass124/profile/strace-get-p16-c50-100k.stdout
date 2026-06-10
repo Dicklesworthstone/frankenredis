@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:6672
+workload: get
+clients: 50  requests: 100000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 1216 ms  throughput: 82196.36 ops/sec
+latency(us): min=5396 p50=9511 p95=11351 p99=14375 p999=35487 max=36543 mean=9643.14
+bytes: sent=4888934 received=900000 key_prefix=ohsk5:p124:strace

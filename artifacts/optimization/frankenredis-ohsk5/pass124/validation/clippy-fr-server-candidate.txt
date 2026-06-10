@@ -1,0 +1,16 @@
+  [2m2026-06-10T18:38:47.103288Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mProject path normalization failed for /tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr: input resolves outside canonical root (input: /tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr, detail: resolved=/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr root=/data/projects)[0m
+    [2;3mat[0m rch/src/hook.rs:2880 [2;3mon[0m ThreadId(1)
+
+[RCH] local (no admissible workers: critical_pressure=1,insufficient_slots=1)
+    Checking fr-protocol v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-protocol)
+    Checking fr-expire v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-expire)
+    Checking fr-eventloop v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-eventloop)
+    Checking fr-config v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-config)
+    Checking fr-repl v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-repl)
+   Compiling fr-command v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-command)
+    Checking fr-sentinel v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-sentinel)
+    Checking fr-persist v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-persist)
+    Checking fr-store v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-store)
+    Checking fr-runtime v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-runtime)
+    Checking fr-server v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.83s

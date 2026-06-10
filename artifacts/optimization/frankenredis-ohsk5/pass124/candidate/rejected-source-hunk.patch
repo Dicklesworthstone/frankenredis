@@ -1,0 +1,554 @@
+diff --git a/crates/fr-server/src/main.rs b/crates/fr-server/src/main.rs
+index 2f8dd4bab..000061f88 100644
+--- a/crates/fr-server/src/main.rs
++++ b/crates/fr-server/src/main.rs
+@@ -19,12 +19,12 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+ 
+ use std::cmp::Reverse;
+ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+-use std::io::{self, ErrorKind, Read, Write};
++use std::io::{self, ErrorKind, IoSlice, Read, Write};
+ use std::net::{SocketAddr, TcpStream as StdTcpStream};
+ #[cfg(unix)]
+ use std::os::fd::{AsFd, AsRawFd};
+ use std::process::ExitCode;
+-use std::sync::{Arc, Mutex, mpsc};
++use std::sync::{Arc, mpsc};
+ use std::thread;
+ use std::time::Duration;
+ 
+@@ -314,6 +314,7 @@ struct ClientConnection {
+     stream: TcpStream,
+     writer_stream: Option<StdTcpStream>,
+     writer_in_flight_bytes: usize,
++    writer_blocked: bool,
+     write_failed: bool,
+     session: ClientSession,
+     read_buf: Vec<u8>,
+@@ -382,6 +383,7 @@ impl ClientConnection {
+             stream,
+             writer_stream,
+             writer_in_flight_bytes: 0,
++            writer_blocked: false,
+             write_failed: false,
+             session,
+             read_buf: Vec::with_capacity(4096),
+@@ -442,16 +444,33 @@ impl ClientConnection {
+     }
+ }
+ 
+-struct WriterJob {
+-    token: Token,
+-    stream: StdTcpStream,
+-    bytes: Vec<u8>,
++enum WriterJob {
++    Flush {
++        token: Token,
++        stream: Option<StdTcpStream>,
++        bytes: Vec<u8>,
++    },
++    Resume {
++        token: Token,
++    },
++    Close {
++        token: Token,
++    },
++}
++
++impl WriterJob {
++    fn token(&self) -> Token {
++        match self {
++            WriterJob::Flush { token, .. }
++            | WriterJob::Resume { token }
++            | WriterJob::Close { token } => *token,
++        }
++    }
+ }
+ 
+ struct WriterCompletion {
+     token: Token,
+-    stream: StdTcpStream,
+-    bytes: Vec<u8>,
++    drained_bytes: usize,
+     status: WriterCompletionStatus,
+ }
+ 
+@@ -461,113 +480,253 @@ enum WriterCompletionStatus {
+     Failed(io::Error),
+ }
+ 
++struct WriterChunk {
++    bytes: Vec<u8>,
++    written: usize,
++}
++
++impl WriterChunk {
++    fn new(bytes: Vec<u8>) -> Self {
++        Self { bytes, written: 0 }
++    }
++
++    fn remaining(&self) -> &[u8] {
++        &self.bytes[self.written..]
++    }
++}
++
++struct WriterClient {
++    stream: StdTcpStream,
++    queue: VecDeque<WriterChunk>,
++}
++
++impl WriterClient {
++    fn new(stream: StdTcpStream) -> Self {
++        Self {
++            stream,
++            queue: VecDeque::new(),
++        }
++    }
++}
++
+ struct WriterPool {
+-    jobs: mpsc::SyncSender<WriterJob>,
++    job_shards: Vec<mpsc::SyncSender<WriterJob>>,
+     completions: mpsc::Receiver<WriterCompletion>,
+ }
+ 
+ impl WriterPool {
+     fn new(poll: &Poll) -> io::Result<Self> {
+-        let (job_tx, job_rx) = mpsc::sync_channel(WRITER_QUEUE_BOUND);
+         let (completion_tx, completion_rx) = mpsc::channel();
+-        let shared_rx = Arc::new(Mutex::new(job_rx));
+         let waker = Arc::new(Waker::new(poll.registry(), WRITER_WAKE_TOKEN)?);
++        let mut job_shards = Vec::with_capacity(WRITER_POOL_WORKERS);
+ 
+         for worker_idx in 0..WRITER_POOL_WORKERS {
+-            let rx = Arc::clone(&shared_rx);
++            let (job_tx, job_rx) = mpsc::sync_channel(WRITER_QUEUE_BOUND);
+             let tx = completion_tx.clone();
+             let wake = Arc::clone(&waker);
++            job_shards.push(job_tx);
+             thread::Builder::new()
+                 .name(format!("fr-writer-{worker_idx}"))
+                 .spawn(move || {
++                    let mut writer_clients: HashMap<Token, WriterClient> = HashMap::new();
+                     loop {
+-                        let recv_result = {
+-                            let Ok(receiver) = rx.lock() else {
+-                                return;
+-                            };
+-                            receiver.recv()
+-                        };
+-                        let Ok(job) = recv_result else {
++                        let Ok(first_job) = job_rx.recv() else {
+                             return;
+                         };
+-                        let completion = flush_writer_job(job);
+-                        if tx.send(completion).is_err() {
+-                            return;
++                        let mut active_tokens = Vec::new();
++                        let mut completions = Vec::new();
++                        apply_writer_job(
++                            first_job,
++                            &mut writer_clients,
++                            &mut active_tokens,
++                            &mut completions,
++                        );
++                        while let Ok(job) = job_rx.try_recv() {
++                            apply_writer_job(
++                                job,
++                                &mut writer_clients,
++                                &mut active_tokens,
++                                &mut completions,
++                            );
++                        }
++                        for token in active_tokens {
++                            if let Some(client) = writer_clients.get_mut(&token) {
++                                completions.push(flush_writer_client(token, client));
++                            }
++                        }
++                        for completion in completions {
++                            if tx.send(completion).is_err() {
++                                return;
++                            }
++                            let _ = wake.wake();
+                         }
+-                        let _ = wake.wake();
+                     }
+                 })?;
+         }
+ 
+         Ok(Self {
+-            jobs: job_tx,
++            job_shards,
+             completions: completion_rx,
+         })
+     }
+ 
+-    fn try_enqueue(
++    fn try_enqueue_flush(
+         &self,
+         token: Token,
+-        stream: StdTcpStream,
++        stream: Option<StdTcpStream>,
+         bytes: Vec<u8>,
+     ) -> Result<(), mpsc::TrySendError<WriterJob>> {
+-        self.jobs.try_send(WriterJob {
++        self.try_send_job(WriterJob::Flush {
+             token,
+             stream,
+             bytes,
+         })
+     }
+ 
++    fn try_resume(&self, token: Token) -> Result<(), mpsc::TrySendError<WriterJob>> {
++        self.try_send_job(WriterJob::Resume { token })
++    }
++
++    fn close_token(&self, token: Token) {
++        let _ = self.try_send_job(WriterJob::Close { token });
++    }
++
+     fn try_recv(&self) -> Result<WriterCompletion, mpsc::TryRecvError> {
+         self.completions.try_recv()
+     }
++
++    fn try_send_job(&self, job: WriterJob) -> Result<(), mpsc::TrySendError<WriterJob>> {
++        let shard_count = self.job_shards.len();
++        if shard_count == 0 {
++            return Err(mpsc::TrySendError::Disconnected(job));
++        }
++        let shard_idx = job.token().0 % shard_count;
++        self.job_shards[shard_idx].try_send(job)
++    }
+ }
+ 
+-fn flush_writer_job(job: WriterJob) -> WriterCompletion {
+-    let WriterJob {
+-        token,
+-        mut stream,
+-        mut bytes,
+-    } = job;
+-    let mut total_written = 0usize;
+-    let mut status = WriterCompletionStatus::Drained;
+-
+-    while total_written < bytes.len() {
+-        match stream.write(&bytes[total_written..]) {
++fn apply_writer_job(
++    job: WriterJob,
++    clients: &mut HashMap<Token, WriterClient>,
++    active_tokens: &mut Vec<Token>,
++    completions: &mut Vec<WriterCompletion>,
++) {
++    match job {
++        WriterJob::Flush {
++            token,
++            stream,
++            bytes,
++        } => {
++            if let Some(stream) = stream {
++                clients
++                    .entry(token)
++                    .or_insert_with(|| WriterClient::new(stream));
++            }
++            let Some(client) = clients.get_mut(&token) else {
++                completions.push(WriterCompletion {
++                    token,
++                    drained_bytes: 0,
++                    status: WriterCompletionStatus::Failed(io::Error::new(
++                        ErrorKind::BrokenPipe,
++                        "writer stream not registered",
++                    )),
++                });
++                return;
++            };
++            if !bytes.is_empty() {
++                client.queue.push_back(WriterChunk::new(bytes));
++            }
++            push_unique_token(active_tokens, token);
++        }
++        WriterJob::Resume { token } => {
++            if clients.contains_key(&token) {
++                push_unique_token(active_tokens, token);
++            }
++        }
++        WriterJob::Close { token } => {
++            clients.remove(&token);
++            active_tokens.retain(|active| *active != token);
++        }
++    }
++}
++
++fn push_unique_token(tokens: &mut Vec<Token>, token: Token) {
++    if !tokens.contains(&token) {
++        tokens.push(token);
++    }
++}
++
++fn flush_writer_client(token: Token, client: &mut WriterClient) -> WriterCompletion {
++    let mut drained_bytes = 0usize;
++
++    loop {
++        while client
++            .queue
++            .front()
++            .is_some_and(|chunk| chunk.remaining().is_empty())
++        {
++            client.queue.pop_front();
++        }
++        if client.queue.is_empty() {
++            return WriterCompletion {
++                token,
++                drained_bytes,
++                status: WriterCompletionStatus::Drained,
++            };
++        }
++
++        let slices: Vec<IoSlice<'_>> = client
++            .queue
++            .iter()
++            .take(16)
++            .map(|chunk| IoSlice::new(chunk.remaining()))
++            .collect();
++        match client.stream.write_vectored(&slices) {
+             Ok(0) => {
+-                status = WriterCompletionStatus::Failed(io::Error::new(
+-                    ErrorKind::WriteZero,
+-                    "write zero",
+-                ));
+-                break;
++                return WriterCompletion {
++                    token,
++                    drained_bytes,
++                    status: WriterCompletionStatus::Failed(io::Error::new(
++                        ErrorKind::WriteZero,
++                        "write zero",
++                    )),
++                };
+             }
+             Ok(n) => {
+-                total_written += n;
++                drained_bytes = drained_bytes.saturating_add(n);
++                advance_writer_queue(&mut client.queue, n);
+             }
+             Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+-                status = WriterCompletionStatus::WouldBlock;
+-                break;
++                return WriterCompletion {
++                    token,
++                    drained_bytes,
++                    status: WriterCompletionStatus::WouldBlock,
++                };
+             }
+             Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+             Err(e) => {
+-                status = WriterCompletionStatus::Failed(e);
+-                break;
++                return WriterCompletion {
++                    token,
++                    drained_bytes,
++                    status: WriterCompletionStatus::Failed(e),
++                };
+             }
+         }
+     }
++}
+ 
+-    if total_written > 0 {
+-        bytes.drain(..total_written);
+-    }
+-    if bytes.is_empty() && !matches!(status, WriterCompletionStatus::Failed(_)) {
+-        status = WriterCompletionStatus::Drained;
+-    }
+-
+-    WriterCompletion {
+-        token,
+-        stream,
+-        bytes,
+-        status,
++fn advance_writer_queue(queue: &mut VecDeque<WriterChunk>, mut bytes_written: usize) {
++    while bytes_written > 0 {
++        let Some(front) = queue.front_mut() else {
++            break;
++        };
++        let remaining = front.bytes.len().saturating_sub(front.written);
++        if bytes_written < remaining {
++            front.written += bytes_written;
++            break;
++        }
++        bytes_written -= remaining;
++        queue.pop_front();
+     }
+ }
+ 
+@@ -1464,6 +1623,9 @@ fn main() -> ExitCode {
+             .collect();
+         for token in to_remove {
+             if let Some(mut conn) = clients.remove(&token) {
++                if let Some(pool) = writer_pool.as_ref() {
++                    pool.close_token(token);
++                }
+                 blocked_tokens.remove(&token);
+                 blocked_wake_index.remove(token);
+                 closing_tokens.remove(&token);
+@@ -5182,17 +5344,39 @@ fn drive_client_output(
+     ctx: OutputDriveContext<'_>,
+     allow_sync_fallback: bool,
+ ) {
+-    if conn.writer_in_flight() {
+-        ctx.write_tokens.insert(token);
+-        conn.session.output_buffer_bytes = conn.pending_output_bytes();
+-        let _ = ctx
+-            .poll
+-            .registry()
+-            .reregister(&mut conn.stream, token, Interest::READABLE);
+-        return;
+-    }
+-
+     if conn.write_buf.is_empty() {
++        if let Some(pool) = ctx.writer_pool
++            && conn.writer_blocked
++        {
++            match pool.try_resume(token) {
++                Ok(()) => {
++                    conn.writer_blocked = false;
++                    conn.session.output_buffer_bytes = conn.pending_output_bytes();
++                    ctx.write_tokens.insert(token);
++                    let _ =
++                        ctx.poll
++                            .registry()
++                            .reregister(&mut conn.stream, token, Interest::READABLE);
++                    return;
++                }
++                Err(mpsc::TrySendError::Full(_) | mpsc::TrySendError::Disconnected(_)) => {
++                    arm_main_writable(token, conn, ctx.poll, ctx.write_tokens);
++                    conn.session.output_buffer_bytes = conn.pending_output_bytes();
++                    return;
++                }
++            }
++        }
++
++        if conn.writer_in_flight() {
++            ctx.write_tokens.insert(token);
++            conn.session.output_buffer_bytes = conn.pending_output_bytes();
++            let _ = ctx
++                .poll
++                .registry()
++                .reregister(&mut conn.stream, token, Interest::READABLE);
++            return;
++        }
++
+         ctx.write_tokens.remove(&token);
+         conn.session.output_buffer_bytes = 0;
+         let _ = ctx
+@@ -5202,14 +5386,13 @@ fn drive_client_output(
+         return;
+     }
+ 
+-    if let Some(pool) = ctx.writer_pool
+-        && let Some(writer_stream) = conn.writer_stream.take()
+-    {
++    if let Some(pool) = ctx.writer_pool {
++        let writer_stream = conn.writer_stream.take();
+         let bytes = std::mem::take(&mut conn.write_buf);
+         let byte_len = bytes.len();
+-        match pool.try_enqueue(token, writer_stream, bytes) {
++        match pool.try_enqueue_flush(token, writer_stream, bytes) {
+             Ok(()) => {
+-                conn.writer_in_flight_bytes = byte_len;
++                conn.writer_in_flight_bytes = conn.writer_in_flight_bytes.saturating_add(byte_len);
+                 conn.session.output_buffer_bytes = conn.pending_output_bytes();
+                 ctx.write_tokens.insert(token);
+                 let _ = ctx
+@@ -5219,8 +5402,12 @@ fn drive_client_output(
+                 return;
+             }
+             Err(mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job)) => {
+-                conn.writer_stream = Some(job.stream);
+-                conn.write_buf = job.bytes;
++                restore_failed_writer_flush(conn, job);
++                if conn.writer_in_flight() || conn.writer_blocked {
++                    arm_main_writable(token, conn, ctx.poll, ctx.write_tokens);
++                    conn.session.output_buffer_bytes = conn.pending_output_bytes();
++                    return;
++                }
+             }
+         }
+     }
+@@ -5252,6 +5439,15 @@ fn drive_client_output(
+     conn.session.output_buffer_bytes = conn.pending_output_bytes();
+ }
+ 
++fn restore_failed_writer_flush(conn: &mut ClientConnection, job: WriterJob) {
++    if let WriterJob::Flush { stream, bytes, .. } = job {
++        if let Some(stream) = stream {
++            conn.writer_stream = Some(stream);
++        }
++        conn.write_buf = bytes;
++    }
++}
++
+ fn arm_main_writable(
+     token: Token,
+     conn: &mut ClientConnection,
+@@ -5295,13 +5491,23 @@ fn drain_writer_completions(
+             continue;
+         };
+ 
+-        conn.writer_stream = Some(completion.stream);
+-        conn.writer_in_flight_bytes = 0;
++        conn.writer_in_flight_bytes = conn
++            .writer_in_flight_bytes
++            .saturating_sub(completion.drained_bytes);
+ 
+         match completion.status {
+             WriterCompletionStatus::Drained => {
++                conn.writer_blocked = false;
+                 runtime.note_write_event();
+-                if conn.write_buf.is_empty() {
++                if conn.writer_in_flight() {
++                    write_tokens.insert(completion.token);
++                    let _ = poll.registry().reregister(
++                        &mut conn.stream,
++                        completion.token,
++                        Interest::READABLE,
++                    );
++                    conn.session.output_buffer_bytes = conn.pending_output_bytes();
++                } else if conn.write_buf.is_empty() {
+                     write_tokens.remove(&completion.token);
+                     let _ = poll.registry().reregister(
+                         &mut conn.stream,
+@@ -5325,13 +5531,15 @@ fn drain_writer_completions(
+                 }
+             }
+             WriterCompletionStatus::WouldBlock => {
+-                prefix_writer_unsent_bytes(conn, completion.bytes);
++                conn.writer_blocked = true;
+                 conn.session.output_buffer_bytes = conn.pending_output_bytes();
+                 arm_main_writable(completion.token, conn, poll, write_tokens);
+             }
+             WriterCompletionStatus::Failed(err) => {
+                 eprintln!("warn: client write error: {err}");
+                 conn.write_failed = true;
++                conn.writer_blocked = false;
++                conn.writer_in_flight_bytes = 0;
+                 conn.closing = true;
+                 conn.session.output_buffer_bytes = conn.pending_output_bytes();
+                 closing_tokens.insert(completion.token);
+@@ -5340,18 +5548,6 @@ fn drain_writer_completions(
+     }
+ }
+ 
+-fn prefix_writer_unsent_bytes(conn: &mut ClientConnection, mut unsent: Vec<u8>) {
+-    if unsent.is_empty() {
+-        return;
+-    }
+-    if conn.write_buf.is_empty() {
+-        conn.write_buf = unsent;
+-    } else {
+-        unsent.extend_from_slice(&conn.write_buf);
+-        conn.write_buf = unsent;
+-    }
+-}
+-
+ fn handle_writable(
+     token: Token,
+     clients: &mut HashMap<Token, ClientConnection>,
