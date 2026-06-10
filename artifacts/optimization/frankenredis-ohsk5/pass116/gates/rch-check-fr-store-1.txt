@@ -1,0 +1,138 @@
+  [2m2026-06-10T05:03:38.152559Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mProject path normalization failed for /tmp/frankenredis-tealotter-ohsk5-9-pass111: input resolves outside canonical root (input: /tmp/frankenredis-tealotter-ohsk5-9-pass111, detail: resolved=/tmp/frankenredis-tealotter-ohsk5-9-pass111 root=/data/projects)[0m
+    [2;3mat[0m rch/src/hook.rs:2880 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-10T05:03:38.152921Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1227854 at root@109.123.245.77 (3 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-10T05:03:38.204318Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mRemote execution failed: Project path normalization failed for /tmp/frankenredis-tealotter-ohsk5-9-pass111: input resolves outside canonical root (input: /tmp/frankenredis-tealotter-ohsk5-9-pass111, detail: resolved=/tmp/frankenredis-tealotter-ohsk5-9-pass111 root=/data/projects), running locally[0m
+    [2;3mat[0m rch/src/hook.rs:658 [2;3mon[0m ThreadId(1)
+
+[RCH] local (remote execution failed)
+   Compiling libc v0.2.185
+    Checking cfg-if v1.0.4
+   Compiling getrandom v0.3.4
+   Compiling zerocopy v0.8.48
+   Compiling rustix v1.1.4
+   Compiling getrandom v0.4.2
+    Checking bitflags v2.11.1
+    Checking linux-raw-sys v0.12.1
+   Compiling autocfg v1.5.0
+    Checking once_cell v1.21.4
+    Checking fr-protocol v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-9-pass111/crates/fr-protocol)
+    Checking fastrand v2.4.1
+    Checking equivalent v1.0.2
+    Checking hashbrown v0.17.0
+    Checking bit-vec v0.8.0
+    Checking quick-error v1.2.3
+    Checking fnv v1.0.7
+    Checking foldhash v0.1.5
+    Checking fr-expire v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-9-pass111/crates/fr-expire)
+    Checking unarray v0.1.4
+    Checking regex-syntax v0.8.10
+    Checking bit-set v0.8.0
+    Checking fr-persist v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-9-pass111/crates/fr-persist)
+    Checking fr-sentinel v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-9-pass111/crates/fr-sentinel)
+   Compiling num-traits v0.2.19
+    Checking indexmap v2.14.0
+    Checking wait-timeout v0.2.1
+    Checking fr-store v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-9-pass111/crates/fr-store)
+    Checking rand_core v0.9.5
+    Checking rand_xorshift v0.4.0
+    Checking rand v0.9.4
+    Checking tempfile v3.27.0
+    Checking rusty-fork v0.3.1
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.9.0
+    Checking proptest v1.11.0
+warning: unused import: `SetValue`
+     --> crates/fr-store/src/lib.rs:27905:21
+      |
+27905 |         use super::{SetValue, intersect_sorted_i64};
+      |                     ^^^^^^^^
+      |
+      = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:27929:13
+      |
+27929 |         let mut fnv = |g: &mut u64, x: i64| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:28075:13
+      |
+28075 |         let mut fnv = |g: &mut u64, x: i64| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:28218:13
+      |
+28218 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:28351:13
+      |
+28351 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:28683:13
+      |
+28683 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:28818:13
+      |
+28818 |         let mut fnv = |g: &mut u64, n: u64| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:28961:13
+      |
+28961 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:29084:13
+      |
+29084 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:29238:13
+      |
+29238 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:29378:13
+      |
+29378 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: `fr-store` (lib test) generated 11 warnings (run `cargo fix --lib -p fr-store --tests` to apply 11 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.95s

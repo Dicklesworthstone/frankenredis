@@ -1,0 +1,9 @@
+  [2m2026-06-10T05:05:02.578018Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mProject path normalization failed for /tmp/frankenredis-tealotter-ohsk5-9-pass111: input resolves outside canonical root (input: /tmp/frankenredis-tealotter-ohsk5-9-pass111, detail: resolved=/tmp/frankenredis-tealotter-ohsk5-9-pass111 root=/data/projects)[0m
+    [2;3mat[0m rch/src/hook.rs:2880 [2;3mon[0m ThreadId(1)
+
+[RCH] local (no admissible workers: critical_pressure=1,active_project_exclusion=1)
+error: unexpected argument 'integer_string_values_keep_string_semantics_without_vec_payload' found
+
+Usage: cargo test [OPTIONS] [TESTNAME] [-- [ARGS]...]
+
+For more information, try '--help'.

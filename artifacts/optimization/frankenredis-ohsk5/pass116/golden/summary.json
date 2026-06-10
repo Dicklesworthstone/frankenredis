@@ -1,0 +1,127 @@
+{
+  "commands": [
+    [
+      "SET",
+      "lazy",
+      "123"
+    ],
+    [
+      "GET",
+      "lazy"
+    ],
+    [
+      "OBJECT",
+      "ENCODING",
+      "lazy"
+    ],
+    [
+      "OBJECT",
+      "REFCOUNT",
+      "lazy"
+    ],
+    [
+      "DEBUG",
+      "DIGEST"
+    ],
+    [
+      "INCRBY",
+      "lazy",
+      "1"
+    ],
+    [
+      "GET",
+      "lazy"
+    ],
+    [
+      "OBJECT",
+      "ENCODING",
+      "lazy"
+    ],
+    [
+      "SET",
+      "lazy",
+      "007"
+    ],
+    [
+      "GET",
+      "lazy"
+    ],
+    [
+      "OBJECT",
+      "ENCODING",
+      "lazy"
+    ],
+    [
+      "SET",
+      "lazy",
+      "-42"
+    ],
+    [
+      "GET",
+      "lazy"
+    ],
+    [
+      "OBJECT",
+      "ENCODING",
+      "lazy"
+    ],
+    [
+      "INCRBY",
+      "lazy",
+      "2"
+    ],
+    [
+      "GET",
+      "lazy"
+    ],
+    [
+      "SET",
+      "max",
+      "9223372036854775807"
+    ],
+    [
+      "GET",
+      "max"
+    ],
+    [
+      "OBJECT",
+      "ENCODING",
+      "max"
+    ],
+    [
+      "INCR",
+      "max"
+    ],
+    [
+      "SET",
+      "min",
+      "-9223372036854775808"
+    ],
+    [
+      "GET",
+      "min"
+    ],
+    [
+      "OBJECT",
+      "ENCODING",
+      "min"
+    ],
+    [
+      "DECR",
+      "min"
+    ],
+    [
+      "QUIT"
+    ]
+  ],
+  "baseline": {
+    "bytes": 519,
+    "sha256": "ed6eb02107fc024f5a903539daaaac99d2123b8b194fdcbf0cd7cdefa305230a"
+  },
+  "candidate": {
+    "bytes": 519,
+    "sha256": "ed6eb02107fc024f5a903539daaaac99d2123b8b194fdcbf0cd7cdefa305230a"
+  },
+  "match": true,
+  "request_sha256": "14a42bc4c9c744ee28ca89f4167c42309f4acff12743e030ab13efa9fc111b36"
+}
