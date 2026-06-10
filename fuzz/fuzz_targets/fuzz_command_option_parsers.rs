@@ -25,6 +25,7 @@ enum ParserCase {
     Scan(ScanCase),
     Eval(EvalCase),
     BlockingTimeout(BlockingTimeoutCase),
+    Set(SetOptionsCase),
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -168,6 +169,53 @@ struct BlockingTimeoutCase {
     timeout: TimeoutArg,
 }
 
+/// SET key value [NX|XX] [GET] [EX s|PX ms|EXAT ts|PXAT ts|KEEPTTL] ...
+///
+/// Upstream parses SET's trailing options as an ORDER-INDEPENDENT flag scan:
+/// the result of a command is a pure function of the *set* of option units, not
+/// the sequence they arrive in (a duplicate/conflicting flag like `EX 1 PX 1`
+/// is a syntax error in any order; `NX GET` behaves exactly like `GET NX`).
+/// So permuting intact option units must leave the reply AND the keyspace
+/// digest unchanged.
+///
+/// CAVEAT (why every option below renders a *recognized* keyword with an
+/// integer-typed argument): error *precedence* is genuinely position-dependent —
+/// a left-to-right scan reports the FIRST error it meets, so an arbitrary/unknown
+/// trailing token can surface a different error *variant* (e.g. `SyntaxError` vs
+/// `InvalidUtf8Argument`) depending on where it lands. We therefore restrict the
+/// alphabet to recognized keywords with always-valid-ASCII integer args: now
+/// every rejection is a position-independent conflict/expire-time error, so full
+/// reply+digest equivalence holds and the check can only fire on a *genuine*
+/// order-dependence bug, never on a fabricated expectation.
+#[derive(Debug, Arbitrary)]
+struct SetOptionsCase {
+    target: SetTarget,
+    options: Vec<SetOpt>,
+    swaps: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Arbitrary)]
+enum SetTarget {
+    /// Pre-seeded string key `scan:str` (exercises XX-hit / GET-old-value).
+    ExistingString,
+    /// Absent key (exercises NX-set / XX-miss).
+    Missing,
+    /// Pre-seeded hash key `h` (exercises GET-wrongtype precedence).
+    WrongType,
+}
+
+#[derive(Debug, Clone, Arbitrary)]
+enum SetOpt {
+    Nx,
+    Xx,
+    Get,
+    Ex(i32),
+    Px(i64),
+    Exat(i64),
+    Pxat(i64),
+    KeepTtl,
+}
+
 #[derive(Debug, Arbitrary)]
 enum TimeoutArg {
     Integer(u16),
@@ -288,6 +336,7 @@ fn fuzz_command_option_parsers(input: FuzzInput) {
             ParserCase::Scan(case) => fuzz_scan(case, now_ms),
             ParserCase::Eval(case) => fuzz_eval(case, now_ms),
             ParserCase::BlockingTimeout(case) => fuzz_blocking_timeout(case, now_ms),
+            ParserCase::Set(case) => fuzz_set_options(case, now_ms),
         }
         now_ms = now_ms.saturating_add(7);
     }
@@ -629,6 +678,110 @@ fn fuzz_blocking_timeout(case: BlockingTimeoutCase, now_ms: u64) {
             }
         }
     }
+}
+
+fn fuzz_set_options(case: SetOptionsCase, now_ms: u64) {
+    let key: &[u8] = match case.target {
+        SetTarget::ExistingString => b"scan:str",
+        SetTarget::Missing => b"set:absent",
+        SetTarget::WrongType => b"h",
+    };
+
+    // Render each option into an intact token unit (a keyword plus its argument,
+    // if any). Permuting whole units — never splitting a keyword from its value —
+    // is the order-invariance the parser must honour.
+    //
+    // Dedupe by expiry KIND: upstream (and fr, see set()'s ExpiryKind scan)
+    // permits the *same* expiry kind to repeat with LAST-VALUE-WINS — that is
+    // a legitimately order-SENSITIVE behaviour (`EX 5 EX 10` ⇒ 10 vs `EX 10
+    // EX 5` ⇒ 5), so it would defeat permutation-equivalence. Emitting each
+    // expiry kind at most once removes the only by-design order dependence:
+    // a lone expiry value is order-free, two *different* kinds conflict-reject
+    // identically in any order, and NX/XX/GET are value-less idempotent flags.
+    let mut units: Vec<Vec<Vec<u8>>> = Vec::new();
+    let mut seen = SeenExpiry::default();
+    for opt in case.options.iter().take(8) {
+        let unit: Vec<Vec<u8>> = match opt {
+            SetOpt::Nx => vec![b"NX".to_vec()],
+            SetOpt::Xx => vec![b"XX".to_vec()],
+            SetOpt::Get => vec![b"GET".to_vec()],
+            SetOpt::Ex(n) => {
+                if seen.ex {
+                    continue;
+                }
+                seen.ex = true;
+                vec![b"EX".to_vec(), n.to_string().into_bytes()]
+            }
+            SetOpt::Px(n) => {
+                if seen.px {
+                    continue;
+                }
+                seen.px = true;
+                vec![b"PX".to_vec(), n.to_string().into_bytes()]
+            }
+            SetOpt::Exat(n) => {
+                if seen.exat {
+                    continue;
+                }
+                seen.exat = true;
+                vec![b"EXAT".to_vec(), n.to_string().into_bytes()]
+            }
+            SetOpt::Pxat(n) => {
+                if seen.pxat {
+                    continue;
+                }
+                seen.pxat = true;
+                vec![b"PXAT".to_vec(), n.to_string().into_bytes()]
+            }
+            SetOpt::KeepTtl => {
+                if seen.keepttl {
+                    continue;
+                }
+                seen.keepttl = true;
+                vec![b"KEEPTTL".to_vec()]
+            }
+        };
+        units.push(unit);
+    }
+
+    let canonical_units = units.clone();
+    let scrambled_units = permute_units(units, &case.swaps);
+
+    // Identical multiset of units in two orders ⇒ identical reply + keyspace.
+    let canonical = build_set_argv(key, &canonical_units);
+    let scrambled = build_set_argv(key, &scrambled_units);
+    assert_equivalent(scrambled, canonical, now_ms, false);
+}
+
+#[derive(Default)]
+struct SeenExpiry {
+    ex: bool,
+    px: bool,
+    exat: bool,
+    pxat: bool,
+    keepttl: bool,
+}
+
+fn build_set_argv(key: &[u8], units: &[Vec<Vec<u8>>]) -> Vec<Vec<u8>> {
+    let mut argv = vec![b"SET".to_vec(), key.to_vec(), b"newval".to_vec()];
+    for unit in units {
+        argv.extend(unit.iter().cloned());
+    }
+    argv
+}
+
+/// Deterministically permute `units` (keeping each unit intact) using the
+/// arbitrary `swaps` bytes as a sequence of index swaps.
+fn permute_units(mut units: Vec<Vec<Vec<u8>>>, swaps: &[u8]) -> Vec<Vec<Vec<u8>>> {
+    let len = units.len();
+    if len < 2 {
+        return units;
+    }
+    for (i, &b) in swaps.iter().enumerate().take(len) {
+        let j = (b as usize) % len;
+        units.swap(i % len, j);
+    }
+    units
 }
 
 fn assert_equivalent(
