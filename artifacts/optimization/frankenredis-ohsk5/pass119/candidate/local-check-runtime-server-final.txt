@@ -1,0 +1,71 @@
+    Checking cfg-if v1.0.4
+    Checking typenum v1.20.0
+   Compiling memchr v2.8.0
+   Compiling itoa v1.0.18
+    Checking fr-protocol v0.1.0 (/data/projects/.scratch/frankenredis-pass119.xIz6X2/crates/fr-protocol)
+    Checking equivalent v1.0.2
+    Checking hashbrown v0.17.0
+    Checking const-oid v0.10.2
+    Checking foldhash v0.1.5
+    Checking fr-expire v0.1.0 (/data/projects/.scratch/frankenredis-pass119.xIz6X2/crates/fr-expire)
+    Checking cpufeatures v0.3.0
+    Checking fr-repl v0.1.0 (/data/projects/.scratch/frankenredis-pass119.xIz6X2/crates/fr-repl)
+    Checking hex v0.4.3
+    Checking fr-config v0.1.0 (/data/projects/.scratch/frankenredis-pass119.xIz6X2/crates/fr-config)
+    Checking fr-eventloop v0.1.0 (/data/projects/.scratch/frankenredis-pass119.xIz6X2/crates/fr-eventloop)
+    Checking bitflags v2.11.1
+    Checking linux-raw-sys v0.12.1
+    Checking fastrand v2.4.1
+    Checking once_cell v1.21.4
+    Checking libc v0.2.185
+    Checking bit-vec v0.8.0
+    Checking quick-error v1.2.3
+    Checking fnv v1.0.7
+    Checking unarray v0.1.4
+    Checking regex-syntax v0.8.10
+    Checking log v0.4.29
+   Compiling serde_core v1.0.228
+   Compiling zmij v1.0.21
+    Checking zerocopy v0.8.48
+    Checking num-traits v0.2.19
+    Checking libmimalloc-sys v0.1.46
+    Checking mimalloc v0.1.49
+    Checking bit-set v0.8.0
+    Checking fr-persist v0.1.0 (/data/projects/.scratch/frankenredis-pass119.xIz6X2/crates/fr-persist)
+    Checking fr-sentinel v0.1.0 (/data/projects/.scratch/frankenredis-pass119.xIz6X2/crates/fr-sentinel)
+    Checking rustix v1.1.4
+    Checking indexmap v2.14.0
+    Checking hybrid-array v0.4.10
+    Checking getrandom v0.3.4
+    Checking getrandom v0.4.2
+    Checking wait-timeout v0.2.1
+    Checking mio v1.2.0
+    Checking rand_core v0.9.5
+    Checking fr-store v0.1.0 (/data/projects/.scratch/frankenredis-pass119.xIz6X2/crates/fr-store)
+    Checking rand v0.9.4
+    Checking rand_xorshift v0.4.0
+    Checking block-buffer v0.12.0
+    Checking crypto-common v0.2.1
+    Checking tempfile v3.27.0
+    Checking rusty-fork v0.3.1
+    Checking digest v0.11.2
+    Checking serde_json v1.0.149
+    Checking sha2 v0.11.0
+   Compiling fr-command v0.1.0 (/data/projects/.scratch/frankenredis-pass119.xIz6X2/crates/fr-command)
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.9.0
+    Checking proptest v1.11.0
+    Checking fr-runtime v0.1.0 (/data/projects/.scratch/frankenredis-pass119.xIz6X2/crates/fr-runtime)
+    Checking fr-server v0.1.0 (/data/projects/.scratch/frankenredis-pass119.xIz6X2/crates/fr-server)
+warning: variable does not need to be mutable
+     --> crates/fr-runtime/src/lib.rs:20499:13
+      |
+20499 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `fr-runtime` (lib test) generated 1 warning (run `cargo fix --lib -p fr-runtime --tests` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.16s

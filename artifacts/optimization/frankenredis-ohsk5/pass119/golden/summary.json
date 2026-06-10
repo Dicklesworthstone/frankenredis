@@ -1,0 +1,7 @@
+{
+  "request_sha256": "14a42bc4c9c744ee28ca89f4167c42309f4acff12743e030ab13efa9fc111b36",
+  "baseline_sha256": "ed6eb02107fc024f5a903539daaaac99d2123b8b194fdcbf0cd7cdefa305230a",
+  "candidate_sha256": "ed6eb02107fc024f5a903539daaaac99d2123b8b194fdcbf0cd7cdefa305230a",
+  "transcripts_match": true,
+  "bytes": 519
+}

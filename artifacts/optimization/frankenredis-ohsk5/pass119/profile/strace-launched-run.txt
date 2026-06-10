@@ -1,0 +1,27 @@
+  [2m2026-06-10T05:45:15.916558Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: bash -lc 'set -euo pipefail
+OUT=artifacts/optimization/frankenredis-ohsk5/pass119/profile
+SERVER=/tmp/rch_target_fr_ohsk5_p119_current/release-perf/frankenredis
+BENCH=/tmp/rch_target_fr_ohsk5_p119_current/release-perf/fr-bench
+PORT=6613
+LOG="$OUT/strace-launched-server-set-${PORT}.log"
+strace -f -c -o "$OUT/strace-launched-server-set-p16-c50-300k.txt" "$SERVER" --port "$PORT" --mode strict >"$LOG" 2>&1 &
+spid=$!
+cleanup() {
+  kill "$spid" 2>/dev/null || true
+  wait "$spid" 2>/dev/null || true
+}
+trap cleanup EXIT
+for _ in {1..120}; do
+  if grep -q ready "$LOG"; then
+    break
+  fi
+  kill -0 "$spid" 2>/dev/null
+  sleep 0.05
+done
+grep -q ready "$LOG"
+"$BENCH" --host 127.0.0.1 --port "$PORT" --clients 50 --requests 300000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out "$OUT/strace-launched-set-p16-c50-300k-last.json" --key-prefix p119-strace2 >"$OUT/strace-launched-fr-bench.stdout" 2>"$OUT/strace-launched-fr-bench.stderr"
+kill -INT "$spid" 2>/dev/null || true
+wait "$spid" 2>/dev/null || true
+trap - EXIT
+'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)

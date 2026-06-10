@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:6613
+workload: set
+clients: 50  requests: 300000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 3625 ms  throughput: 82741.21 ops/sec
+latency(us): min=4944 p50=9583 p95=11295 p99=12255 p999=24959 max=27327 mean=9635.74
+bytes: sent=16116627 received=1500000 key_prefix=p119-strace2

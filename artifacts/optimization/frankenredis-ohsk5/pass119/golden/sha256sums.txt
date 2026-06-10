@@ -1,0 +1,3 @@
+14a42bc4c9c744ee28ca89f4167c42309f4acff12743e030ab13efa9fc111b36  artifacts/optimization/frankenredis-ohsk5/pass119/golden/request.resp
+ed6eb02107fc024f5a903539daaaac99d2123b8b194fdcbf0cd7cdefa305230a  artifacts/optimization/frankenredis-ohsk5/pass119/golden/baseline-transcript.bin
+ed6eb02107fc024f5a903539daaaac99d2123b8b194fdcbf0cd7cdefa305230a  artifacts/optimization/frankenredis-ohsk5/pass119/golden/candidate-transcript.bin

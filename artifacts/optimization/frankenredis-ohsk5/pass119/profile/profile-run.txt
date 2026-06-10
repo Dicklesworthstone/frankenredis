@@ -1,0 +1,53 @@
+  [2m2026-06-10T05:44:27.788764Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: bash -lc 'set -euo pipefail
+OUT=artifacts/optimization/frankenredis-ohsk5/pass119/profile
+SERVER=/tmp/rch_target_fr_ohsk5_p119_current/release-perf/frankenredis
+BENCH=/tmp/rch_target_fr_ohsk5_p119_current/release-perf/fr-bench
+PORT=6611
+LOG="$OUT/server-set-${PORT}.log"
+DATA="$OUT/perf-server-set-p16-c50-3m.data"
+"$SERVER" --port "$PORT" --mode strict >"$LOG" 2>&1 &
+spid=$!
+cleanup() {
+  kill "$spid" 2>/dev/null || true
+  wait "$spid" 2>/dev/null || true
+}
+trap cleanup EXIT
+for _ in {1..100}; do
+  if grep -q ready "$LOG"; then
+    break
+  fi
+  kill -0 "$spid" 2>/dev/null
+  sleep 0.05
+done
+grep -q ready "$LOG"
+printf "%s\n" "$spid" >"$OUT/server-pid.txt"
+perf record -F 499 -g -p "$spid" -o "$DATA" -- sleep 20 >"$OUT/perf-record.stdout" 2>"$OUT/perf-record.stderr" &
+pidperf=$!
+sleep 0.4
+"$BENCH" --host 127.0.0.1 --port "$PORT" --clients 50 --requests 3000000 --pipeline 16 --workload set --keyspace 10000 --datasize 3 --json-out "$OUT/profile-set-p16-c50-3m-last.json" --key-prefix p119-prof >"$OUT/profile-fr-bench.stdout" 2>"$OUT/profile-fr-bench.stderr"
+kill -INT "$pidperf" 2>/dev/null || true
+wait "$pidperf" 2>/dev/null || true
+perf report -i "$DATA" --stdio --no-children >"$OUT/perf-server-set-p16-c50-3m-report-flat.txt"
+perf report -i "$DATA" --stdio --children >"$OUT/perf-server-set-p16-c50-3m-report-children.txt"
+'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+Warning:
+Kernel address maps (/proc/{kallsyms,modules}) were restricted.
+
+Check /proc/sys/kernel/kptr_restrict before running 'perf record'.
+
+As no suitable kallsyms nor vmlinux was found, kernel samples
+can't be resolved.
+
+Samples in kernel modules can't be resolved as well.
+
+Warning:
+Kernel address maps (/proc/{kallsyms,modules}) were restricted.
+
+Check /proc/sys/kernel/kptr_restrict before running 'perf record'.
+
+As no suitable kallsyms nor vmlinux was found, kernel samples
+can't be resolved.
+
+Samples in kernel modules can't be resolved as well.

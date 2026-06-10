@@ -1,0 +1,292 @@
+diff --git a/crates/fr-runtime/src/lib.rs b/crates/fr-runtime/src/lib.rs
+index da1e3224a..3d04c2626 100644
+--- a/crates/fr-runtime/src/lib.rs
++++ b/crates/fr-runtime/src/lib.rs
+@@ -6293,7 +6293,46 @@ impl Runtime {
+         if !self.can_execute_plain_set_borrowed(key, value, now_ms) {
+             return None;
+         }
++        Some(self.execute_plain_set_borrowed_after_gate(key, value, now_ms))
++    }
++
++    /// Execute a plain SET whose RESP packet was already validated by the
++    /// direct server packet parser. This keeps the write-policy gate while
++    /// avoiding duplicate parser limit checks on that exact hot path.
++    pub fn execute_validated_plain_set_borrowed(
++        &mut self,
++        key: &[u8],
++        value: &[u8],
++        now_ms: u64,
++    ) -> Option<RespFrame> {
++        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
++        self.execute_validated_plain_set_borrowed_with_default_write_allowed(
++            key,
++            value,
++            now_ms,
++            default_write_allowed,
++        )
++    }
++
++    pub fn execute_validated_plain_set_borrowed_with_default_write_allowed(
++        &mut self,
++        key: &[u8],
++        value: &[u8],
++        now_ms: u64,
++        default_write_allowed: bool,
++    ) -> Option<RespFrame> {
++        if !default_write_allowed {
++            return None;
++        }
++        Some(self.execute_plain_set_borrowed_after_gate(key, value, now_ms))
++    }
+
++    fn execute_plain_set_borrowed_after_gate(
++        &mut self,
++        key: &[u8],
++        value: &[u8],
++        now_ms: u64,
++    ) -> RespFrame {
+         self.server.store.stat_total_commands_processed += 1;
+         if self.session.connected_at_ms == 0 {
+             self.session.connected_at_ms = now_ms;
+@@ -6317,7 +6356,7 @@ impl Runtime {
+         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+         self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+-        Some(RespFrame::SimpleString("OK".to_string()))
++        RespFrame::SimpleString("OK".to_string())
+     }
+
+     fn can_execute_plain_set_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
+@@ -6331,6 +6370,10 @@ impl Runtime {
+         self.plain_borrowed_default_key_write_allows(now_ms)
+     }
+
++    pub fn plain_borrowed_default_key_write_fast_path_allows(&mut self, now_ms: u64) -> bool {
++        self.plain_borrowed_default_key_write_allows(now_ms)
++    }
++
+     /// Shared disabling predicate for the conservative borrowed WRITE fast paths
+     /// (SET, INCR, …): the read predicate's conditions PLUS the write-only gates
+     /// — no active disk-write denial, no min-replicas-to-write requirement — so a
+@@ -20496,7 +20539,7 @@ mod tests {
+             st
+         };
+         let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
+-        let mut fnv = |g: &mut u64, b: &[u8]| {
++        let fnv = |g: &mut u64, b: &[u8]| {
+             for &byte in b {
+                 *g ^= u64::from(byte);
+                 *g = g.wrapping_mul(0x0000_0100_0000_01b3);
+@@ -20651,6 +20694,52 @@ mod tests {
+         );
+     }
+
++    #[test]
++    fn validated_plain_set_borrowed_matches_default_fast_path() {
++        let mut validated = Runtime::default_strict();
++        let mut regular = Runtime::default_strict();
++
++        let validated_reply = validated
++            .execute_validated_plain_set_borrowed(b"set-key", b"123", 1)
++            .expect("validated SET should take default borrowed path");
++        let regular_reply = regular
++            .execute_plain_set_borrowed(b"set-key", b"123", 1)
++            .expect("regular SET should take default borrowed path");
++        assert_eq!(validated_reply, regular_reply);
++        assert_eq!(
++            validated.execute_frame(command(&[b"GET", b"set-key"]), 2),
++            regular.execute_frame(command(&[b"GET", b"set-key"]), 2)
++        );
++        assert_eq!(
++            validated.server.store.stat_total_commands_processed,
++            regular.server.store.stat_total_commands_processed
++        );
++        assert_eq!(
++            validated.session.last_command_name,
++            regular.session.last_command_name
++        );
++        assert_eq!(
++            validated.session.last_argv_len_sum,
++            regular.session.last_argv_len_sum
++        );
++    }
++
++    #[test]
++    fn validated_plain_set_borrowed_keeps_write_policy_gate() {
++        let mut rt = Runtime::default_strict();
++        rt.set_aof_path(std::path::PathBuf::from("appendonly.aof"));
++
++        assert_eq!(
++            rt.execute_validated_plain_set_borrowed(b"aof-key", b"value", 1),
++            None
++        );
++        assert!(rt.aof_records().is_empty());
++        assert_eq!(
++            rt.execute_frame(command(&[b"GET", b"aof-key"]), 2),
++            RespFrame::BulkString(None)
++        );
++    }
++
+     #[test]
+     fn plain_set_borrowed_fast_path_applies_existing_reply_suppression() {
+         let mut rt = Runtime::default_strict();
+diff --git a/crates/fr-server/src/main.rs b/crates/fr-server/src/main.rs
+index 2f8dd4bab..63b4533e6 100644
+--- a/crates/fr-server/src/main.rs
++++ b/crates/fr-server/src/main.rs
+@@ -2012,6 +2012,7 @@ fn process_buffered_frames(
+     let mut processed_frames = 0usize;
+     let mut budget_exhausted = false;
+     let mut argv_scratch: Vec<Vec<u8>> = Vec::new();
++    let mut plain_write_fast_path_allows: Option<bool> = None;
+
+     loop {
+         if consumed_total >= conn.read_buf.len() || conn.closing {
+@@ -2061,6 +2062,7 @@ fn process_buffered_frames(
+                 Ok(InlineParseResult::Command(frame, consumed)) => {
+                     processed_frames = processed_frames.saturating_add(1);
+                     if !command_frame_can_move_to_argv(&frame) {
++                        plain_write_fast_path_allows = None;
+                         let response = runtime.execute_frame_with_unix_time_us(&frame, ts, ts_us);
+                         let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                         encode_client_reply(&response, client_resp3, &mut conn.write_buf);
+@@ -2069,6 +2071,7 @@ fn process_buffered_frames(
+                     }
+                     let argv = fr_command::argv_from_frame(frame)
+                         .expect("command frame prevalidated for argv move");
++                    plain_write_fast_path_allows = None;
+                     match process_argv_frame(
+                         token,
+                         &argv,
+@@ -2120,8 +2123,23 @@ fn process_buffered_frames(
+                 let unparsed = &conn.read_buf[consumed_total..];
+                 let parser_config = runtime.parser_config();
+                 if let Some(packet) = parse_borrowed_plain_set_packet(unparsed, &parser_config)
+-                    && let Some(response) =
+-                        runtime.execute_plain_set_borrowed(packet.key, packet.value, ts)
++                    && let Some(response) = {
++                        let default_write_allowed = match plain_write_fast_path_allows {
++                            Some(value) => value,
++                            None => {
++                                let value =
++                                    runtime.plain_borrowed_default_key_write_fast_path_allows(ts);
++                                plain_write_fast_path_allows = Some(value);
++                                value
++                            }
++                        };
++                        runtime.execute_validated_plain_set_borrowed_with_default_write_allowed(
++                            packet.key,
++                            packet.value,
++                            ts,
++                            default_write_allowed,
++                        )
++                    }
+                 {
+                     Ok(BorrowedMultibulkAction::FastReply {
+                         consumed: packet.consumed,
+@@ -2426,6 +2444,7 @@ fn process_buffered_frames(
+                         continue;
+                     }
+                     let argv = &argv_scratch[..argv_len];
++                    plain_write_fast_path_allows = None;
+                     match process_argv_frame(
+                         token,
+                         argv,
+@@ -2487,6 +2506,7 @@ fn process_buffered_frames(
+                     continue;
+                 }
+                 if !command_frame_can_move_to_argv(&frame) {
++                    plain_write_fast_path_allows = None;
+                     let response = runtime.execute_frame_with_unix_time_us(&frame, ts, ts_us);
+                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                     encode_client_reply(&response, client_resp3, &mut conn.write_buf);
+@@ -2495,6 +2515,7 @@ fn process_buffered_frames(
+                 }
+                 let argv = fr_command::argv_from_frame(frame)
+                     .expect("command frame prevalidated for argv move");
++                plain_write_fast_path_allows = None;
+                 match process_argv_frame(
+                     token,
+                     &argv,
+@@ -8119,6 +8140,80 @@ mod tests {
+         assert!(paused_tokens.is_empty());
+     }
+
++    #[test]
++    fn process_buffered_frames_invalidates_fast_write_cache_after_generic_command() {
++        use crate::ClientConnection;
++        use fr_runtime::Runtime;
++        use mio::Token;
++        use std::collections::HashSet;
++        use std::net::{TcpListener, TcpStream};
++
++        fn bulk(bytes: &[u8]) -> RespFrame {
++            RespFrame::BulkString(Some(bytes.to_vec()))
++        }
++
++        fn command(args: &[&[u8]]) -> RespFrame {
++            RespFrame::Array(Some(args.iter().map(|arg| bulk(arg)).collect()))
++        }
++
++        let mut runtime = Runtime::default_strict();
++        let ts = 1_000;
++        let session = runtime.new_session();
++
++        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++        let addr = listener.local_addr().unwrap();
++        let stream = TcpStream::connect(addr).unwrap();
++        let (_server_stream, _server_addr) = listener.accept().unwrap();
++        let mut conn = ClientConnection::new(mio::net::TcpStream::from_std(stream), session, ts);
++
++        conn.read_buf.extend_from_slice(
++            &command(&[&b"SET"[..], &b"cache:key"[..], &b"zero"[..]]).to_bytes(),
++        );
++        conn.read_buf
++            .extend_from_slice(&command(&[&b"SELECT"[..], &b"1"[..]]).to_bytes());
++        conn.read_buf
++            .extend_from_slice(&command(&[&b"SET"[..], &b"cache:key"[..], &b"one"[..]]).to_bytes());
++
++        let token = Token(1); // ubs:ignore
++        let mut blocked_tokens = HashSet::new();
++        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
++        let mut closing_tokens = HashSet::new();
++        let mut write_tokens = HashSet::new();
++        let mut paused_tokens = HashSet::new();
++
++        let prev = runtime.swap_session(std::mem::take(&mut conn.session));
++        let budget_exhausted = crate::process_buffered_frames(
++            token,
++            &mut conn,
++            &mut runtime,
++            &mut blocked_tokens,
++            &mut blocked_wake_index,
++            &mut closing_tokens,
++            &mut write_tokens,
++            &mut paused_tokens,
++            ts,
++            ts.saturating_mul(1000),
++        );
++        conn.session = runtime.swap_session(prev);
++
++        assert!(!budget_exhausted);
++        assert!(conn.read_buf.is_empty());
++        assert_eq!(conn.write_buf, b"+OK\r\n+OK\r\n+OK\r\n");
++        assert!(write_tokens.contains(&token));
++
++        assert_eq!(
++            runtime.execute_frame(command(&[&b"GET"[..], &b"cache:key"[..]]), ts + 1),
++            bulk(b"zero")
++        );
++
++        let prev = runtime.swap_session(std::mem::take(&mut conn.session));
++        assert_eq!(
++            runtime.execute_frame(command(&[&b"GET"[..], &b"cache:key"[..]]), ts + 2),
++            bulk(b"one")
++        );
++        conn.session = runtime.swap_session(prev);
++    }
++
+     #[test]
+     fn master_to_replica_streaming_propagate_writes() {
+         use crate::{ClientConnection, propagate_writes_to_replicas, replication_follow_up_bytes};

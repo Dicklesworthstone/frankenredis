@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781070319628,
+  "host": "127.0.0.1",
+  "port": 6613,
+  "workload": "set",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "p119-strace2",
+  "total_time_ms": 3625,
+  "ops_per_sec": 82741.2085384297,
+  "bytes_sent": 16116627,
+  "bytes_received": 1500000,
+  "latency_us": {
+    "min": 4944,
+    "p50": 9583,
+    "p95": 11295,
+    "p99": 12255,
+    "p999": 24959,
+    "max": 27327,
+    "mean": 9635.74043999999,
+    "samples": 300000
+  }
+}

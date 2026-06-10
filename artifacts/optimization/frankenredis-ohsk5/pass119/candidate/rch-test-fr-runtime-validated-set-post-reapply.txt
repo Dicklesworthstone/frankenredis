@@ -1,0 +1,87 @@
+[RCH] local (no admissible workers: critical_pressure=1,insufficient_slots=1)
+   Compiling fr-runtime v0.1.0 (/data/projects/.scratch/frankenredis-pass119.xIz6X2/crates/fr-runtime)
+warning: variable does not need to be mutable
+     --> crates/fr-runtime/src/lib.rs:20542:13
+      |
+20542 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `fr-runtime` (lib test) generated 1 warning (run `cargo fix --lib -p fr-runtime --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.39s
+     Running unittests src/lib.rs (/data/tmp/cargo-target/debug/deps/fr_runtime-8637ce160d2be751)
+
+running 2 tests
+test tests::validated_plain_set_borrowed_keeps_write_policy_gate ... ok
+test tests::validated_plain_set_borrowed_matches_default_fast_path ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 501 filtered out; finished in 0.00s
+
+     Running tests/admin_commands_test.rs (/data/tmp/cargo-target/debug/deps/admin_commands_test-bbc533f0a81fcfe3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 43 filtered out; finished in 0.00s
+
+     Running tests/aof_roundtrip_test.rs (/data/tmp/cargo-target/debug/deps/aof_roundtrip_test-1a833e8fffcb2fc0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/client_pause_test.rs (/data/tmp/cargo-target/debug/deps/client_pause_test-e68194e88fee08fb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/dump_restore_roundtrip.rs (/data/tmp/cargo-target/debug/deps/dump_restore_roundtrip-a6a9a4ed11126f30)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+     Running tests/lua_edge_cases_test.rs (/data/tmp/cargo-target/debug/deps/lua_edge_cases_test-a364cae74b304ba5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_test.rs (/data/tmp/cargo-target/debug/deps/metamorphic_test-b2723741b91d4068)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/multi_exec_linearizability.rs (/data/tmp/cargo-target/debug/deps/multi_exec_linearizability-06de3f4ce0ef1c94)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/noreplicas_test.rs (/data/tmp/cargo-target/debug/deps/noreplicas_test-86d078dbb781adbe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/scan_iteration_test.rs (/data/tmp/cargo-target/debug/deps/scan_iteration_test-7f7dc9c487b884e5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/stale_replica_test.rs (/data/tmp/cargo-target/debug/deps/stale_replica_test-bb74813b131e3fad)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/watch_cross_client_test.rs (/data/tmp/cargo-target/debug/deps/watch_cross_client_test-51c6d9ac3bde595d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s

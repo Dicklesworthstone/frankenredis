@@ -1,0 +1,46 @@
+[RCH] local (no admissible workers: critical_pressure=1,insufficient_slots=1)
+   Compiling fr-runtime v0.1.0 (/data/projects/.scratch/frankenredis-pass119.xIz6X2/crates/fr-runtime)
+   Compiling fr-server v0.1.0 (/data/projects/.scratch/frankenredis-pass119.xIz6X2/crates/fr-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.94s
+     Running unittests src/lib.rs (/data/tmp/cargo-target/debug/deps/fr_server-d09a9ab06b612d37)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/data/tmp/cargo-target/debug/deps/frankenredis-f8779d87274b519f)
+
+running 1 test
+test tests::process_buffered_frames_invalidates_fast_write_cache_after_generic_command ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 79 filtered out; finished in 0.00s
+
+     Running tests/client_kill_test.rs (/data/tmp/cargo-target/debug/deps/client_kill_test-705072ebf1e0dc3d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/config_rewrite_test.rs (/data/tmp/cargo-target/debug/deps/config_rewrite_test-14c1e3151e81c632)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/fuzz_corpus_smoke.rs (/data/tmp/cargo-target/debug/deps/fuzz_corpus_smoke-f99a23df76d505c4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/noreplicas_test.rs (/data/tmp/cargo-target/debug/deps/noreplicas_test-2a2201a898606aa6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/tcp_e2e_test.rs (/data/tmp/cargo-target/debug/deps/tcp_e2e_test-5dd2e4c9d3fc5c63)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
