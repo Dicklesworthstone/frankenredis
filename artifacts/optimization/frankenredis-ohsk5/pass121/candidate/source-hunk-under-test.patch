@@ -1,0 +1,165 @@
+diff --git a/crates/fr-server/src/main.rs b/crates/fr-server/src/main.rs
+index 2f8dd4bab..66816764a 100644
+--- a/crates/fr-server/src/main.rs
++++ b/crates/fr-server/src/main.rs
+@@ -2116,9 +2116,62 @@ fn process_buffered_frames(
+         // ordering unchanged while replacing per-command argv allocation churn
+         // with one scratch arena per buffered processing pass.
+         if matches!(first_byte, b'*') {
++            let parser_config = runtime.parser_config();
++            if let Some((mut consumed, mut response)) = try_execute_borrowed_plain_set_packet(
++                conn.read_buf.as_slice(),
++                consumed_total,
++                &parser_config,
++                runtime,
++                ts,
++            ) {
++                loop {
++                    processed_frames = processed_frames.saturating_add(1);
++                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
++                    if !runtime.suppress_current_network_reply() {
++                        encode_client_reply(&response, client_resp3, &mut conn.write_buf);
++                    }
++                    drain_pending_pubsub_to_connection(runtime, conn);
++                    consumed_total += consumed;
++                    if disconnect_if_output_limit_exceeded(
++                        conn,
++                        runtime.effective_output_hard_limit(conn.session.client_id),
++                        closing_tokens,
++                        token,
++                    ) {
++                        break;
++                    }
++                    if consumed_total >= conn.read_buf.len()
++                        || conn.closing
++                        || processed_frames >= MAX_FRAMES_PER_CLIENT_TICK
++                        || conn
++                            .read_buf
++                            .get(consumed_total)
++                            .is_none_or(|byte| *byte != b'*')
++                    {
++                        if processed_frames >= MAX_FRAMES_PER_CLIENT_TICK {
++                            budget_exhausted = consumed_total < conn.read_buf.len();
++                        }
++                        break;
++                    }
++                    let Some((next_consumed, next_response)) =
++                        try_execute_borrowed_plain_set_packet(
++                            conn.read_buf.as_slice(),
++                            consumed_total,
++                            &parser_config,
++                            runtime,
++                            ts,
++                        )
++                    else {
++                        break;
++                    };
++                    consumed = next_consumed;
++                    response = next_response;
++                }
++                continue;
++            }
++
+             let borrowed_parse_result = {
+                 let unparsed = &conn.read_buf[consumed_total..];
+-                let parser_config = runtime.parser_config();
+                 if let Some(packet) = parse_borrowed_plain_set_packet(unparsed, &parser_config)
+                     && let Some(response) =
+                         runtime.execute_plain_set_borrowed(packet.key, packet.value, ts)
+@@ -2571,6 +2624,18 @@ struct BorrowedPlainSetPacket<'a> {
+     value: &'a [u8],
+ }
+ 
++fn try_execute_borrowed_plain_set_packet(
++    input: &[u8],
++    offset: usize,
++    config: &ParserConfig,
++    runtime: &mut Runtime,
++    ts: u64,
++) -> Option<(usize, RespFrame)> {
++    let packet = parse_borrowed_plain_set_packet(input.get(offset..)?, config)?;
++    let response = runtime.execute_plain_set_borrowed(packet.key, packet.value, ts)?;
++    Some((packet.consumed, response))
++}
++
+ fn parse_borrowed_plain_set_packet<'a>(
+     input: &'a [u8],
+     config: &ParserConfig,
+@@ -5457,6 +5522,77 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn process_buffered_frames_sub_batches_consecutive_direct_sets() {
++        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
++        let addr = listener.local_addr().unwrap();
++        let _client = StdTcpStream::connect(addr).unwrap();
++        let (server, _) = listener.accept().unwrap();
++        server.set_nonblocking(true).unwrap();
++
++        let mut runtime = Runtime::default_strict();
++        let session = runtime.new_session();
++        let mut conn =
++            crate::ClientConnection::new(mio::net::TcpStream::from_std(server), session, 1);
++
++        for frame in [
++            RespFrame::Array(Some(vec![
++                RespFrame::BulkString(Some(b"SET".to_vec())),
++                RespFrame::BulkString(Some(b"a".to_vec())),
++                RespFrame::BulkString(Some(b"1".to_vec())),
++            ])),
++            RespFrame::Array(Some(vec![
++                RespFrame::BulkString(Some(b"SET".to_vec())),
++                RespFrame::BulkString(Some(b"b".to_vec())),
++                RespFrame::BulkString(Some(b"2".to_vec())),
++            ])),
++            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"PING".to_vec()))])),
++        ] {
++            conn.read_buf.extend_from_slice(&frame.to_bytes());
++        }
++
++        let token = Token(1); // ubs:ignore
++        let mut blocked_tokens = std::collections::HashSet::new();
++        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
++        let mut closing_tokens = std::collections::HashSet::new();
++        let mut write_tokens = std::collections::HashSet::new();
++        let mut paused_tokens = std::collections::HashSet::new();
++
++        let prev = runtime.swap_session(std::mem::take(&mut conn.session));
++        let budget_exhausted = crate::process_buffered_frames(
++            token,
++            &mut conn,
++            &mut runtime,
++            &mut blocked_tokens,
++            &mut blocked_wake_index,
++            &mut closing_tokens,
++            &mut write_tokens,
++            &mut paused_tokens,
++            1,
++            1_000,
++        );
++        conn.session = runtime.swap_session(prev);
++
++        assert!(!budget_exhausted);
++        assert!(conn.read_buf.is_empty());
++        assert_eq!(conn.write_buf, b"+OK\r\n+OK\r\n+PONG\r\n");
++        assert!(write_tokens.contains(&token));
++        assert_eq!(
++            runtime.execute_frame(
++                RespFrame::Array(Some(vec![
++                    RespFrame::BulkString(Some(b"MGET".to_vec())),
++                    RespFrame::BulkString(Some(b"a".to_vec())),
++                    RespFrame::BulkString(Some(b"b".to_vec())),
++                ])),
++                2,
++            ),
++            RespFrame::Array(Some(vec![
++                RespFrame::BulkString(Some(b"1".to_vec())),
++                RespFrame::BulkString(Some(b"2".to_vec())),
++            ]))
++        );
++    }
++
+     #[test]
+     fn any_key_ready_matches_keys_membership_for_every_blocking_op() {
+         use std::collections::HashSet;

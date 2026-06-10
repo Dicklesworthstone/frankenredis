@@ -1,0 +1,11 @@
+Benchmark 1: OUT=artifacts/optimization/frankenredis-ohsk5/pass121/reversed SERVER=/tmp/rch_target_fr_ohsk5_p121_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p121_candidate/release-perf/fr-bench PORT=6646 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass121/reversed/candidate-set-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p121:reversed:cand artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh
+  Time (mean ± σ):     685.0 ms ±  35.9 ms    [User: 1158.7 ms, System: 2146.3 ms]
+  Range (min … max):   641.3 ms … 744.9 ms    7 runs
+ 
+Benchmark 2: OUT=artifacts/optimization/frankenredis-ohsk5/pass121/reversed SERVER=/tmp/rch_target_fr_ohsk5_p121_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p121_current/release-perf/fr-bench PORT=6647 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass121/reversed/baseline-set-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p121:reversed:base artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh
+  Time (mean ± σ):     646.4 ms ±  25.9 ms    [User: 1103.1 ms, System: 2124.6 ms]
+  Range (min … max):   597.6 ms … 670.5 ms    7 runs
+ 
+Summary
+  OUT=artifacts/optimization/frankenredis-ohsk5/pass121/reversed SERVER=/tmp/rch_target_fr_ohsk5_p121_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p121_current/release-perf/fr-bench PORT=6647 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass121/reversed/baseline-set-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p121:reversed:base artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh ran
+    1.06 ± 0.07 times faster than OUT=artifacts/optimization/frankenredis-ohsk5/pass121/reversed SERVER=/tmp/rch_target_fr_ohsk5_p121_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p121_candidate/release-perf/fr-bench PORT=6646 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass121/reversed/candidate-set-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p121:reversed:cand artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh

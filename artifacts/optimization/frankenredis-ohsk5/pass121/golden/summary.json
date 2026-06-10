@@ -1,0 +1,7 @@
+{
+  "request_sha256": "f8005a59ce8c45b8eca01efaf6b042967d05fa9f2688eb1b7dccd7ac850f9d68",
+  "baseline_sha256": "447297a82ed8f8aa3b76483daa451bf4cb5c309b63200687da7f93084ffc5e32",
+  "candidate_sha256": "447297a82ed8f8aa3b76483daa451bf4cb5c309b63200687da7f93084ffc5e32",
+  "transcripts_match": true,
+  "bytes": 536
+}

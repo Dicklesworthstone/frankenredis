@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:6641
+workload: set
+clients: 50  requests: 3000000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 1777 ms  throughput: 1687913.79 ops/sec
+latency(us): min=36 p50=429 p95=676 p99=897 p999=1851 max=24239 mean=464.32
+bytes: sent=182116888 received=15000000 key_prefix=ohsk5:p121:profile
