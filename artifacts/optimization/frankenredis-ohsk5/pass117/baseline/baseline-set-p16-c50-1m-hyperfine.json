@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-ohsk5/pass117/baseline SERVER=/tmp/rch_target_fr_ohsk5_p117_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p117_current/release-perf/fr-bench PORT=6590 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass117/baseline/baseline-set-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p117:baseline artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 0.6410279532600001,
+      "stddev": 0.03616123234623585,
+      "median": 0.64353723646,
+      "user": 1.1128250999999998,
+      "system": 2.1277023599999993,
+      "min": 0.58238429346,
+      "max": 0.67997592746,
+      "times": [
+        0.67997592746,
+        0.64353723646,
+        0.58238429346,
+        0.64185801546,
+        0.65738429346
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

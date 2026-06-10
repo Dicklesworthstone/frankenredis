@@ -1,0 +1,84 @@
+diff --git a/crates/fr-server/src/main.rs b/crates/fr-server/src/main.rs
+index 2f8dd4bab..5c04a548c 100644
+--- a/crates/fr-server/src/main.rs
++++ b/crates/fr-server/src/main.rs
+@@ -24,7 +24,11 @@ use std::net::{SocketAddr, TcpStream as StdTcpStream};
+ #[cfg(unix)]
+ use std::os::fd::{AsFd, AsRawFd};
+ use std::process::ExitCode;
+-use std::sync::{Arc, Mutex, mpsc};
++use std::sync::{
++    Arc, Mutex,
++    atomic::{AtomicBool, Ordering},
++    mpsc,
++};
+ use std::thread;
+ use std::time::Duration;
+ 
+@@ -464,6 +468,7 @@ enum WriterCompletionStatus {
+ struct WriterPool {
+     jobs: mpsc::SyncSender<WriterJob>,
+     completions: mpsc::Receiver<WriterCompletion>,
++    completion_wake_queued: Arc<AtomicBool>,
+ }
+ 
+ impl WriterPool {
+@@ -472,11 +477,13 @@ impl WriterPool {
+         let (completion_tx, completion_rx) = mpsc::channel();
+         let shared_rx = Arc::new(Mutex::new(job_rx));
+         let waker = Arc::new(Waker::new(poll.registry(), WRITER_WAKE_TOKEN)?);
++        let completion_wake_queued = Arc::new(AtomicBool::new(false));
+ 
+         for worker_idx in 0..WRITER_POOL_WORKERS {
+             let rx = Arc::clone(&shared_rx);
+             let tx = completion_tx.clone();
+             let wake = Arc::clone(&waker);
++            let wake_queued = Arc::clone(&completion_wake_queued);
+             thread::Builder::new()
+                 .name(format!("fr-writer-{worker_idx}"))
+                 .spawn(move || {
+@@ -494,7 +501,9 @@ impl WriterPool {
+                         if tx.send(completion).is_err() {
+                             return;
+                         }
+-                        let _ = wake.wake();
++                        if !wake_queued.swap(true, Ordering::AcqRel) {
++                            let _ = wake.wake();
++                        }
+                     }
+                 })?;
+         }
+@@ -502,6 +511,7 @@ impl WriterPool {
+         Ok(Self {
+             jobs: job_tx,
+             completions: completion_rx,
++            completion_wake_queued,
+         })
+     }
+ 
+@@ -521,6 +531,10 @@ impl WriterPool {
+     fn try_recv(&self) -> Result<WriterCompletion, mpsc::TryRecvError> {
+         self.completions.try_recv()
+     }
++
++    fn disarm_completion_wake(&self) {
++        self.completion_wake_queued.store(false, Ordering::Release);
++    }
+ }
+ 
+ fn flush_writer_job(job: WriterJob) -> WriterCompletion {
+@@ -5288,7 +5302,13 @@ fn drain_writer_completions(
+     loop {
+         let completion = match pool.try_recv() {
+             Ok(completion) => completion,
+-            Err(mpsc::TryRecvError::Empty) => break,
++            Err(mpsc::TryRecvError::Empty) => {
++                pool.disarm_completion_wake();
++                match pool.try_recv() {
++                    Ok(completion) => completion,
++                    Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
++                }
++            }
+             Err(mpsc::TryRecvError::Disconnected) => break,
+         };
+         let Some(conn) = clients.get_mut(&completion.token) else {

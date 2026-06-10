@@ -1,0 +1,4 @@
+Benchmark 1: OUT=artifacts/optimization/frankenredis-ohsk5/pass117/baseline SERVER=/tmp/rch_target_fr_ohsk5_p117_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p117_current/release-perf/fr-bench PORT=6590 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass117/baseline/baseline-set-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p117:baseline artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh
+  Time (mean ± σ):     641.0 ms ±  36.2 ms    [User: 1112.8 ms, System: 2127.7 ms]
+  Range (min … max):   582.4 ms … 680.0 ms    5 runs
+ 
