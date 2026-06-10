@@ -973,6 +973,11 @@ pub enum RespParseError {
     /// string. Carries the offending type byte for the upstream wording
     /// "expected '$', got 'X'".
     ExpectedBulk(u8),
+    /// An inline request exceeded `PROTO_INLINE_MAX_SIZE` (64 KiB) before a
+    /// terminating newline arrived. Upstream networking.c::processInlineBuffer
+    /// (line 2146) replies "Protocol error: too big inline request" and closes
+    /// the connection via setProtocolError.
+    InlineRequestTooBig,
 }
 
 impl Display for RespParseError {
@@ -996,6 +1001,7 @@ impl Display for RespParseError {
             Self::RecursionLimitExceeded => write!(f, "nested array depth limit exceeded"),
             Self::LineTooLong => write!(f, "RESP line too long"),
             Self::ExpectedBulk(got) => write!(f, "expected '$', got '{}'", char::from(*got)),
+            Self::InlineRequestTooBig => write!(f, "too big inline request"),
         }
     }
 }

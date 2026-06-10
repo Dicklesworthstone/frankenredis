@@ -28,12 +28,27 @@ pub fn should_try_inline_parsing(first_byte: u8) -> bool {
     first_byte != b'*'
 }
 
+/// Upstream `server.h::PROTO_INLINE_MAX_SIZE` — the largest inline request the
+/// server will buffer before a `\n` arrives. A never-terminated inline line
+/// must not grow the query buffer without bound.
+const PROTO_INLINE_MAX_SIZE: usize = 64 * 1024;
+
 /// Try to parse an inline command (non-RESP). Inline commands are
 /// space-separated tokens terminated by \r\n or \n.
 /// Returns the parse result on success, or Incomplete if more data is needed.
 pub fn try_parse_inline(buf: &[u8]) -> Result<InlineParseResult, fr_protocol::RespParseError> {
     let newline_pos = buf.iter().position(|&b| b == b'\n');
     let Some(nl) = newline_pos else {
+        // Upstream networking.c::processInlineBuffer (line 2146): with no `\n`
+        // yet, an unconsumed buffer already past PROTO_INLINE_MAX_SIZE is the
+        // "too big inline request" protocol error. Returning it as an Err routes
+        // through the caller's handle_parse_error, which replies
+        // "ERR Protocol error: too big inline request" and closes the
+        // connection — mirroring upstream's addReplyError + setProtocolError.
+        // Below the cap, keep waiting for more data.
+        if buf.len() > PROTO_INLINE_MAX_SIZE {
+            return Err(fr_protocol::RespParseError::InlineRequestTooBig);
+        }
         return Err(fr_protocol::RespParseError::Incomplete);
     };
     let consumed = nl + 1;
@@ -206,6 +221,41 @@ mod tests {
     fn inline_simple() {
         let result = try_parse_inline(b"SET key value\r\n").unwrap();
         assert!(matches!(result, InlineParseResult::Command(_, 15)));
+    }
+
+    #[test]
+    fn inline_no_newline_below_cap_is_incomplete() {
+        // No `\n` yet and at/under PROTO_INLINE_MAX_SIZE: wait for more data.
+        let buf = vec![b'a'; PROTO_INLINE_MAX_SIZE];
+        assert_eq!(
+            try_parse_inline(&buf),
+            Err(fr_protocol::RespParseError::Incomplete)
+        );
+    }
+
+    #[test]
+    fn inline_too_big_request_is_protocol_error() {
+        // Upstream networking.c:2146 — no `\n` and unconsumed buffer exceeds
+        // PROTO_INLINE_MAX_SIZE is the "too big inline request" protocol error.
+        // It surfaces as an Err so the caller (handle_parse_error) replies and
+        // closes the connection like setProtocolError.
+        let buf = vec![b'a'; PROTO_INLINE_MAX_SIZE + 1];
+        assert_eq!(
+            try_parse_inline(&buf),
+            Err(fr_protocol::RespParseError::InlineRequestTooBig)
+        );
+        // The Display wording matches upstream's reply body after "ERR ".
+        assert_eq!(
+            fr_protocol::RespParseError::InlineRequestTooBig.to_string(),
+            "too big inline request"
+        );
+        // A newline within the cap is still a normal command even when long.
+        let mut ok = vec![b'a'; 8];
+        ok.extend_from_slice(b"\r\n");
+        assert!(matches!(
+            try_parse_inline(&ok).unwrap(),
+            InlineParseResult::Command(_, _)
+        ));
     }
 
     #[test]
