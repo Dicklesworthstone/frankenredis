@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-ohsk5/pass118/paired SERVER=/tmp/rch_target_fr_ohsk5_p118_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p118_current/release-perf/fr-bench PORT=6603 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass118/paired/baseline-set-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p118:paired:base artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 0.6923422405400002,
+      "stddev": 0.020399544415368117,
+      "median": 0.69715367054,
+      "user": 1.1722020599999998,
+      "system": 2.15651282,
+      "min": 0.66160103954,
+      "max": 0.7162198105400001,
+      "times": [
+        0.66160103954,
+        0.70124711754,
+        0.68548956454,
+        0.69715367054,
+        0.7162198105400001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-ohsk5/pass118/paired SERVER=/tmp/rch_target_fr_ohsk5_p118_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p118_candidate/release-perf/fr-bench PORT=6604 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass118/paired/candidate-set-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p118:paired:cand artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 0.6863875055399999,
+      "stddev": 0.052416229385124725,
+      "median": 0.6729366505400001,
+      "user": 1.15759306,
+      "system": 2.17939042,
+      "min": 0.63561145954,
+      "max": 0.75584122154,
+      "times": [
+        0.64258408954,
+        0.72496410654,
+        0.75584122154,
+        0.6729366505400001,
+        0.63561145954
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

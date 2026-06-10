@@ -1,0 +1,11 @@
+Benchmark 1: OUT=artifacts/optimization/frankenredis-ohsk5/pass118/reversed SERVER=/tmp/rch_target_fr_ohsk5_p118_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p118_candidate/release-perf/fr-bench PORT=6605 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass118/reversed/candidate-set-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p118:rev:cand artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh
+  Time (mean ± σ):     660.9 ms ±  43.9 ms    [User: 1144.5 ms, System: 2171.9 ms]
+  Range (min … max):   589.8 ms … 708.8 ms    5 runs
+ 
+Benchmark 2: OUT=artifacts/optimization/frankenredis-ohsk5/pass118/reversed SERVER=/tmp/rch_target_fr_ohsk5_p118_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p118_current/release-perf/fr-bench PORT=6606 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass118/reversed/baseline-set-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p118:rev:base artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh
+  Time (mean ± σ):     670.9 ms ±  18.4 ms    [User: 1141.0 ms, System: 2140.9 ms]
+  Range (min … max):   645.1 ms … 693.7 ms    5 runs
+ 
+Summary
+  OUT=artifacts/optimization/frankenredis-ohsk5/pass118/reversed SERVER=/tmp/rch_target_fr_ohsk5_p118_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p118_candidate/release-perf/fr-bench PORT=6605 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass118/reversed/candidate-set-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p118:rev:cand artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh ran
+    1.02 ± 0.07 times faster than OUT=artifacts/optimization/frankenredis-ohsk5/pass118/reversed SERVER=/tmp/rch_target_fr_ohsk5_p118_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p118_current/release-perf/fr-bench PORT=6606 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass118/reversed/baseline-set-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p118:rev:base artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh

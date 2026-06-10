@@ -1,0 +1,181 @@
+diff --git a/crates/fr-store/src/lib.rs b/crates/fr-store/src/lib.rs
+index 0f8842c1d..b198c8b65 100644
+--- a/crates/fr-store/src/lib.rs
++++ b/crates/fr-store/src/lib.rs
+@@ -4767,55 +4767,78 @@ impl Store {
+         self.dirty = self.dirty.saturating_add(1);
+     }
+ 
+-    pub fn set_plain_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) {
+-        if !self.drop_if_expired(key, now_ms) {
+-            let mut entry = Entry::new(canonical_string_value_from_slice(value), None, now_ms);
+-            entry.lfu_freq = if self.lfu_tracking_enabled() {
+-                LFU_INIT_VAL
+-            } else {
+-                0
+-            };
+-            entry.lfu_last_touch_min = now_ms / 60_000;
+-            self.internal_entries_insert(key.to_vec(), entry);
+-            self.dirty = self.dirty.saturating_add(1);
+-            return;
+-        }
++    fn insert_plain_borrowed_new(
++        &mut self,
++        key: &[u8],
++        value: &[u8],
++        now_ms: u64,
++        lfu_tracking_enabled: bool,
++    ) {
++        let mut entry = Entry::new(canonical_string_value_from_slice(value), None, now_ms);
++        entry.lfu_freq = if lfu_tracking_enabled {
++            LFU_INIT_VAL
++        } else {
++            0
++        };
++        entry.lfu_last_touch_min = now_ms / 60_000;
++        self.internal_entries_insert(key.to_vec(), entry);
++        self.dirty = self.dirty.saturating_add(1);
++    }
+ 
+-        let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
++    pub fn set_plain_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) {
+         let lfu_tracking_enabled = self.lfu_tracking_enabled();
+         let lfu_decay_time = self.lfu_decay_time;
+-        let (old_expiry, old_was_stream) = {
++
++        let (old_expiry, old_was_stream, old_was_expired) = {
+             let Some(entry) = self.entries.get_mut(key) else {
+-                self.set(key.to_vec(), value.to_vec(), None, now_ms);
++                self.insert_plain_borrowed_new(key, value, now_ms, lfu_tracking_enabled);
+                 return;
+             };
+             let old_expiry = entry.expiry_ms();
+-            let old_was_stream = matches!(&entry.value, Value::Stream(_));
+-            let next_lfu_freq = if lfu_tracking_enabled {
+-                entry
+-                    .current_lfu_freq(now_ms, lfu_decay_time)
+-                    .saturating_add(1)
++            if old_expiry.is_some_and(|expires_at_ms| expires_at_ms <= now_ms) {
++                (old_expiry, false, true)
+             } else {
+-                0
+-            };
+-            entry.value = canonical_string_value_from_slice(value);
+-            entry.set_expiry_ms(None);
+-            entry.last_access_ms = now_ms;
+-            entry.lfu_freq = next_lfu_freq;
+-            entry.lfu_last_touch_min = now_ms / 60_000;
+-            entry.modification_count = entry.modification_count.wrapping_add(1);
+-            entry.force_raw_encoding = false;
+-            entry.force_string_encoding = false;
+-            entry.force_set_listpack_encoding = false;
+-            entry.force_set_hashtable_encoding = false;
+-            entry.force_hash_hashtable_encoding = false;
+-            entry.force_zset_skiplist_encoding = false;
+-            entry.int_copy_not_shared = false;
+-            (old_expiry, old_was_stream)
+-        };
++                let old_was_stream = matches!(&entry.value, Value::Stream(_));
++                let next_lfu_freq = if lfu_tracking_enabled {
++                    entry
++                        .current_lfu_freq(now_ms, lfu_decay_time)
++                        .saturating_add(1)
++                } else {
++                    0
++                };
++                entry.value = canonical_string_value_from_slice(value);
++                entry.set_expiry_ms(None);
++                entry.last_access_ms = now_ms;
++                entry.lfu_freq = next_lfu_freq;
++                entry.lfu_last_touch_min = now_ms / 60_000;
++                entry.modification_count = entry.modification_count.wrapping_add(1);
++                entry.force_raw_encoding = false;
++                entry.force_string_encoding = false;
++                entry.force_set_listpack_encoding = false;
++                entry.force_set_hashtable_encoding = false;
++                entry.force_hash_hashtable_encoding = false;
++                entry.force_zset_skiplist_encoding = false;
++                entry.int_copy_not_shared = false;
++                (old_expiry, old_was_stream, false)
++            }
++        };
++
++        if old_was_expired {
++            let _ = self.drop_if_expired(key, now_ms);
++            self.insert_plain_borrowed_new(key, value, now_ms, lfu_tracking_enabled);
++            return;
++        }
++
++        if let Some(old_expiry) = old_expiry {
++            let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
++            self.forget_volatile_key(key);
++            self.update_expiry_deadline(Some(old_expiry), None);
++            self.expires_count = self.expires_count.saturating_sub(1);
++            if db < self.database_count {
++                self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
++            }
++        }
+ 
+-        self.forget_volatile_key(key);
+-        self.update_expiry_deadline(old_expiry, None);
+         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+         if old_was_stream {
+             self.stream_groups.remove(key);
+@@ -4823,12 +4846,6 @@ impl Store {
+             self.stream_entries_added.remove(key);
+             self.stream_max_deleted_ids.remove(key);
+         }
+-        if old_expiry.is_some() {
+-            self.expires_count = self.expires_count.saturating_sub(1);
+-            if db < self.database_count {
+-                self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
+-            }
+-        }
+         self.dirty = self.dirty.saturating_add(1);
+     }
+ 
+@@ -23618,6 +23635,44 @@ mod tests {
+         assert_eq!(actual.state_digest(), expected.state_digest());
+     }
+ 
++    #[test]
++    fn set_plain_borrowed_matches_set_for_existing_persistent_values() {
++        for value in [
++            b"123".as_slice(),
++            b"x42".as_slice(),
++            b"007".as_slice(),
++            b"-42".as_slice(),
++        ] {
++            let mut expected = Store::new();
++            let mut actual = Store::new();
++
++            expected.set(b"k".to_vec(), b"old".to_vec(), None, 100);
++            actual.set(b"k".to_vec(), b"old".to_vec(), None, 100);
++            expected.set(b"k".to_vec(), value.to_vec(), None, 400);
++            actual.set_plain_borrowed(b"k", value, 400);
++
++            assert_eq!(actual.get(b"k", 401), expected.get(b"k", 401));
++            assert_eq!(
++                actual.object_encoding(b"k", 401),
++                expected.object_encoding(b"k", 401),
++                "encoding mismatch for {value:?}"
++            );
++            assert_eq!(
++                actual.memory_usage_for_key(b"k", 401),
++                expected.memory_usage_for_key(b"k", 401),
++                "memory usage mismatch for {value:?}"
++            );
++            assert_eq!(actual.expires_count, expected.expires_count);
++            assert_eq!(actual.db_expires_counts, expected.db_expires_counts);
++            assert_eq!(actual.dirty, expected.dirty, "dirty mismatch for {value:?}");
++            assert_eq!(
++                actual.state_digest(),
++                expected.state_digest(),
++                "digest mismatch for {value:?}"
++            );
++        }
++    }
++
+     #[test]
+     fn set_plain_borrowed_matches_set_for_new_integer_and_string_values() {
+         for value in [
