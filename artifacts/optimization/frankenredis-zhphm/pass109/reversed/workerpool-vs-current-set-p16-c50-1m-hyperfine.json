@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-zhphm/pass109/reversed/workerpool SERVER=/tmp/rch_target_fr_zhphm_workerpool_candidate_release/release-perf/frankenredis BENCH=/tmp/rch_target_fr_zhphm_workerpool_baseline_release2/release-perf/fr-bench PORT=32112 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-zhphm/pass109/reversed/workerpool-set-p16-c50-1m-last.json KEY_PREFIX=zhphm-p109-rev-workerpool artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 0.9813081227200001,
+      "stddev": 0.03205508339610591,
+      "median": 0.9747472777200001,
+      "user": 1.5528958400000001,
+      "system": 2.70172308,
+      "min": 0.9469557587200002,
+      "max": 1.03296530272,
+      "times": [
+        1.03296530272,
+        0.9849028307200001,
+        0.9747472777200001,
+        0.9669694437200002,
+        0.9469557587200002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-zhphm/pass109/reversed/current SERVER=/tmp/rch_target_fr_zhphm_workerpool_baseline_release2/release-perf/frankenredis BENCH=/tmp/rch_target_fr_zhphm_workerpool_baseline_release2/release-perf/fr-bench PORT=32113 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-zhphm/pass109/reversed/current-set-p16-c50-1m-last.json KEY_PREFIX=zhphm-p109-rev-current artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 1.12881418112,
+      "stddev": 0.0439369089955957,
+      "median": 1.14708576572,
+      "user": 1.6534692400000002,
+      "system": 3.0796048799999993,
+      "min": 1.06983377472,
+      "max": 1.1731128317200001,
+      "times": [
+        1.1731128317200001,
+        1.1581677407200002,
+        1.09587079272,
+        1.06983377472,
+        1.14708576572
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

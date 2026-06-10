@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-zhphm/pass109/paired/current SERVER=/tmp/rch_target_fr_zhphm_workerpool_baseline_release2/release-perf/frankenredis BENCH=/tmp/rch_target_fr_zhphm_workerpool_baseline_release2/release-perf/fr-bench PORT=32110 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-zhphm/pass109/paired/current-set-p16-c50-1m-last.json KEY_PREFIX=zhphm-p109-current artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 1.12620941084,
+      "stddev": 0.08320210031586027,
+      "median": 1.1130808860399999,
+      "user": 1.6024538799999999,
+      "system": 2.97284018,
+      "min": 1.03772789704,
+      "max": 1.26172262804,
+      "times": [
+        1.1130808860399999,
+        1.0898867510399999,
+        1.26172262804,
+        1.12862889204,
+        1.03772789704
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-zhphm/pass109/paired/workerpool SERVER=/tmp/rch_target_fr_zhphm_workerpool_candidate_release/release-perf/frankenredis BENCH=/tmp/rch_target_fr_zhphm_workerpool_baseline_release2/release-perf/fr-bench PORT=32111 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-zhphm/pass109/paired/workerpool-set-p16-c50-1m-last.json KEY_PREFIX=zhphm-p109-workerpool artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 0.8836509422399998,
+      "stddev": 0.0926924170452931,
+      "median": 0.8855975280400001,
+      "user": 1.4513564799999998,
+      "system": 2.55666178,
+      "min": 0.7924582630400001,
+      "max": 1.02147211004,
+      "times": [
+        0.8051730020400001,
+        0.7924582630400001,
+        0.9135538080400001,
+        0.8855975280400001,
+        1.02147211004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
