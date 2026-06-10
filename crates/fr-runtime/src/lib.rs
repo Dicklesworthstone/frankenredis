@@ -12248,6 +12248,35 @@ impl Runtime {
         if eq_ascii_token(command, b"CLIENT") {
             return Ok(self.handle_client_command(argv, now_ms));
         }
+        // (frankenredis-execpubsub) The (P)SUBSCRIBE / (P)UNSUBSCRIBE family are
+        // runtime-special: the normal path intercepts them in execute_frame and
+        // routes to these handlers, which mutate the server pubsub registry. A
+        // queued command in a transaction reaches THIS function directly
+        // (handle_exec_command's loop), bypassing that interception — so a queued
+        // SUBSCRIBE used to build a correct-looking reply via the generic
+        // dispatcher WITHOUT ever registering the subscription (PUBSUB CHANNELS
+        // stayed empty, the client never entered subscriber mode) and a queued
+        // UNSUBSCRIBE read stale state. Upstream execCommand call()s each queued
+        // command through its normal proc, so route them here too. Channels are
+        // global (never db-namespaced), so this stays above the namespacing.
+        //
+        // Scope: ONLY the plain/pattern subscribe family. SSUBSCRIBE/SUNSUBSCRIBE
+        // are DENY_BLOCKING (upstream rejects them inside MULTI/Lua with
+        // "SSUBSCRIBE isn't allowed for a DENY BLOCKING client"), and PUBLISH /
+        // PUBSUB have their own in-transaction semantics — those keep their
+        // existing dispatch and are out of scope for this fix.
+        if eq_ascii_token(command, b"SUBSCRIBE") {
+            return Ok(self.handle_subscribe_command(argv));
+        }
+        if eq_ascii_token(command, b"UNSUBSCRIBE") {
+            return Ok(self.handle_unsubscribe_command(argv));
+        }
+        if eq_ascii_token(command, b"PSUBSCRIBE") {
+            return Ok(self.handle_psubscribe_command(argv));
+        }
+        if eq_ascii_token(command, b"PUNSUBSCRIBE") {
+            return Ok(self.handle_punsubscribe_command(argv));
+        }
         let namespaced = self.namespace_argv_for_selected_db(argv);
         let mut reply = self.dispatch_with_client_context(&namespaced, now_ms)?;
         self.strip_db_prefixes_from_frame(&mut reply);
@@ -24978,6 +25007,56 @@ mod tests {
         );
 
         let _ = rt.swap_session(previous);
+    }
+
+    #[test]
+    fn subscribe_inside_multi_exec_registers_and_enters_subscriber_mode() {
+        // (frankenredis-execpubsub) A SUBSCRIBE queued in a transaction must
+        // ACTUALLY register (not just build a reply): after EXEC the client is
+        // in subscriber mode, the channel is in the pubsub registry, and a
+        // non-allowed command is rejected with the subscriber-context error —
+        // matching upstream execCommand call()ing the queued subscribeCommand.
+        let mut rt = Runtime::default_strict();
+        let c = rt.new_session();
+        let previous = rt.swap_session(c);
+        rt.execute_frame(command(&[b"MULTI"]), 0);
+        rt.execute_frame(command(&[b"SUBSCRIBE", b"chan"]), 1);
+        let _exec = rt.execute_frame(command(&[b"EXEC"]), 2);
+        assert!(
+            rt.is_in_subscription_mode(),
+            "client must be in subscriber mode after EXEC[SUBSCRIBE]"
+        );
+        assert!(
+            rt.server.store.subscribed_channels.contains(b"chan".as_slice()),
+            "EXEC[SUBSCRIBE] must register the channel in the pubsub store"
+        );
+        match rt.execute_frame(command(&[b"GET", b"k"]), 3) {
+            RespFrame::Error(e) => assert!(
+                e.contains("only (P|S)SUBSCRIBE"),
+                "GET after EXEC[SUBSCRIBE] must be subscriber-context-blocked, got {e:?}"
+            ),
+            other => panic!("expected subscriber-context error, got {other:?}"),
+        }
+        let _ = rt.swap_session(previous);
+
+        // (frankenredis-execpubsub) A fresh (never-subscribed) client doing
+        // MULTI; UNSUBSCRIBE; EXEC must reply a NIL channel with count 0, not a
+        // stale channel name from prior server-wide pubsub state.
+        let c2 = rt.new_session();
+        let prev2 = rt.swap_session(c2);
+        rt.execute_frame(command(&[b"MULTI"]), 4);
+        rt.execute_frame(command(&[b"UNSUBSCRIBE"]), 5);
+        let exec2 = rt.execute_frame(command(&[b"EXEC"]), 6);
+        let RespFrame::Array(Some(outer)) = exec2 else {
+            panic!("EXEC reply must be an array, got {exec2:?}");
+        };
+        let RespFrame::Array(Some(inner)) = &outer[0] else {
+            panic!("queued UNSUBSCRIBE reply must be an array, got {:?}", outer[0]);
+        };
+        assert_eq!(inner[0], RespFrame::BulkString(Some(b"unsubscribe".to_vec())));
+        assert_eq!(inner[1], RespFrame::BulkString(None), "channel must be nil");
+        assert_eq!(inner[2], RespFrame::Integer(0));
+        let _ = rt.swap_session(prev2);
     }
 
     #[test]
