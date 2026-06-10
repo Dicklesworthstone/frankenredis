@@ -17465,7 +17465,13 @@ impl Runtime {
                 .collect();
             channels.sort();
             if channels.is_empty() {
-                return self.current_pubsub_reply(b"unsubscribe", None, 0);
+                // (frankenredis-unsubcount) Upstream pubsubUnsubscribeAllChannels
+                // replies with clientTotalPubSubSubscriptionCount = channels +
+                // patterns, even when there are no channels to remove — so a
+                // client holding only pattern subscriptions sees that pattern
+                // count here, not a hardcoded 0.
+                let count = self.pubsub_sub_count(self.session.client_id);
+                return self.current_pubsub_reply(b"unsubscribe", None, count);
             }
             let mut replies = Vec::new();
             for ch in channels {
@@ -17505,7 +17511,11 @@ impl Runtime {
                 .collect();
             patterns.sort();
             if patterns.is_empty() {
-                return self.current_pubsub_reply(b"punsubscribe", None, 0);
+                // (frankenredis-unsubcount) Same as UNSUBSCRIBE: the reply count
+                // is the total channels + patterns, so a client holding only
+                // channel subscriptions reports that channel count here, not 0.
+                let count = self.pubsub_sub_count(self.session.client_id);
+                return self.current_pubsub_reply(b"punsubscribe", None, count);
             }
             let mut replies = Vec::new();
             for pat in patterns {
@@ -25133,6 +25143,45 @@ mod tests {
                 RespFrame::BulkString(Some(Vec::new())),
             ])),
             "PING after EXEC[SUBSCRIBE] must use the subscriber-mode 2-element form"
+        );
+        let _ = rt.swap_session(prev2);
+    }
+
+    #[test]
+    fn unsubscribe_all_reports_total_count_with_remaining_other_subscriptions() {
+        // (frankenredis-unsubcount) UNSUBSCRIBE with no channel args, on a client
+        // that holds ONLY pattern subscriptions, replies with a nil channel and
+        // the TOTAL remaining subscription count (channels + patterns) — upstream
+        // pubsubUnsubscribeAllChannels returns clientTotalPubSubSubscriptionCount,
+        // not a hardcoded 0. Symmetric for PUNSUBSCRIBE with channel-only state.
+        let mut rt = Runtime::default_strict();
+        let c = rt.new_session();
+        let prev = rt.swap_session(c);
+        rt.execute_frame(command(&[b"PSUBSCRIBE", b"p.*"]), 0);
+        let r = rt.execute_frame(command(&[b"UNSUBSCRIBE"]), 1);
+        assert_eq!(
+            r,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
+                RespFrame::BulkString(None),
+                RespFrame::Integer(1),
+            ])),
+            "UNSUBSCRIBE (no channels) with 1 pattern held must report count 1, not 0"
+        );
+        let _ = rt.swap_session(prev);
+
+        let c2 = rt.new_session();
+        let prev2 = rt.swap_session(c2);
+        rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 2);
+        let r2 = rt.execute_frame(command(&[b"PUNSUBSCRIBE"]), 3);
+        assert_eq!(
+            r2,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"punsubscribe".to_vec())),
+                RespFrame::BulkString(None),
+                RespFrame::Integer(1),
+            ])),
+            "PUNSUBSCRIBE (no patterns) with 1 channel held must report count 1, not 0"
         );
         let _ = rt.swap_session(prev2);
     }

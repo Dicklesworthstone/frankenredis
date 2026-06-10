@@ -19,17 +19,20 @@ RESULT: the data-command transaction CONTROL surface (queue/+QUEUED, EXEC array,
 EXECABORT on a queue-time error, runtime error frames inside EXEC, nested MULTI,
 DISCARD, WATCH cross-connection dirty → nil EXEC) is byte-exact (PASS).
 
-KNOWN-OPEN, INTENTIONALLY EXCLUDED — pub/sub commands run INSIDE a transaction.
-Found by an earlier (pubsub-inclusive) version of this fuzzer; both live in
-fr-runtime (handle_exec_command / handle_unsubscribe_command) and are tracked
-for a fix once that crate is free:
-  1. `MULTI; SUBSCRIBE ch; EXEC` executes the SUBSCRIBE (correct reply) but does
-     NOT transition the connection into subscriber mode — a following `GET` runs
-     instead of being rejected with "... only (P|S)SUBSCRIBE ... allowed ...".
-  2. `MULTI; UNSUBSCRIBE; EXEC` on a never-subscribed connection replies with a
-     stale/wrong channel name instead of the nil channel redis returns (the
-     direct, non-MULTI UNSUBSCRIBE is correct — only the EXEC path is wrong).
-SUBSCRIBE/UNSUBSCRIBE are therefore not in INNER below; re-add them once fixed.
+PUB/SUB INSIDE A TRANSACTION is now covered (INNER includes the full family).
+An earlier (pubsub-inclusive) version of this fuzzer found and the runtime now
+fixes (f9ce17af5, 6247c459a) a cluster of EXEC-bypass bugs — queued commands run
+via execute_db_scoped_command, which used to skip execute_frame's special
+handling:
+  - `MULTI; SUBSCRIBE ch; EXEC` now actually REGISTERS (PUBSUB sees ch, the
+    client enters subscriber mode); `MULTI; UNSUBSCRIBE; EXEC` on a never-
+    subscribed client returns a NIL channel (was a stale name).
+  - SSUBSCRIBE has no CLIENT_MULTI exemption (unlike SUBSCRIBE/PSUBSCRIBE) so a
+    queued SSUBSCRIBE deny-blocks; a queued PING after a SUBSCRIBE uses the RESP2
+    subscriber 2-element ["pong", msg] form.
+This gate exercises those paths as regression coverage. (Lua-context SSUBSCRIBE
+deny-blocking remains unhandled — fr has no Lua DENY_BLOCKING flag — and is not
+reachable from this transaction-only gate.)
 """
 import socket
 import sys
@@ -99,6 +102,10 @@ def _rv():
     return random.choice(["a", "10", "3.14"])
 
 
+def _rch():
+    return random.choice(["c1", "c2"])
+
+
 # Inner queue vocabulary: success paths, a runtime error (INCRBY non-int — error
 # frame INSIDE the EXEC array), and queue-time errors (arity / unknown command —
 # must abort the whole EXEC with EXECABORT). No pub/sub (see module docstring).
@@ -112,6 +119,15 @@ INNER = [
     lambda: ["GET"],                    # wrong arity at queue time -> EXECABORT
     lambda: ["NOSUCHCMD", _rk()],       # unknown command at queue time -> EXECABORT
     lambda: ["MULTI"],                  # nested MULTI -> error reply, stays in MULTI
+    # pub/sub family inside a transaction (regression coverage for f9ce17af5 /
+    # 6247c459a). SUBSCRIBE/PSUBSCRIBE register and (per upstream's CLIENT_MULTI
+    # exemption) run; SSUBSCRIBE deny-blocks; (P/S)UNSUBSCRIBE clear/no-op; PING
+    # picks up the subscriber-mode form once subscribed. RESET between scenarios
+    # clears any subscriber state so it doesn't leak across runs.
+    lambda: ["SUBSCRIBE", _rch()], lambda: ["UNSUBSCRIBE", _rch()], lambda: ["UNSUBSCRIBE"],
+    lambda: ["PSUBSCRIBE", _rch() + ".*"], lambda: ["PUNSUBSCRIBE"],
+    lambda: ["SSUBSCRIBE", _rch()], lambda: ["SUNSUBSCRIBE"],
+    lambda: ["PING"], lambda: ["PING", _rv()],
 ]
 
 
