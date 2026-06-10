@@ -80,7 +80,22 @@ pub fn split_inline_args(line: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
     // `SET k v`; fr previously kept "\r" inside the token and rejected it as an
     // unknown command. (Quotes still suppress separation inside a quoted run.)
     const UNBALANCED: &str = "ERR Protocol error: unbalanced quotes in request";
-    let n = line.len();
+    // Upstream sds.c::sdssplitargs scans with `while(*p)`, so a NUL byte is a
+    // hard end-of-input: in the unquoted state it ends the current token and
+    // returns the args gathered so far (`case '\0': done=1` then the outer
+    // `if(*p)` is false); inside quotes it is the unterminated-quote error
+    // (`else if (!*p) goto err`). fr previously scanned the whole line length
+    // and treated `\0` as an ordinary byte, so e.g. inline `SET\0x y` parsed to
+    // [`SET\0x`, `y`] (unknown command) instead of upstream's [`SET`] (arity
+    // error), and `"a\0b"` returned a token instead of "unbalanced quotes".
+    // Bounding `n` at the first NUL reproduces `while(*p)` exactly: every index
+    // access below is already `< n`-guarded, so the unquoted path stops the
+    // scan there and the quoted path falls through to the unterminated-quote
+    // branch. (frankenredis: sdssplitargs NUL termination)
+    let n = line
+        .iter()
+        .position(|&b| b == b'\0')
+        .unwrap_or(line.len());
     let is_sep = |b: u8| b == b' ' || b == b'\t' || b == b'\r' || b == b'\n';
 
     let mut args = Vec::new();
@@ -297,6 +312,45 @@ mod tests {
                 b"hello".to_vec(),
                 b"world".to_vec()
             ]
+        );
+    }
+
+    #[test]
+    fn inline_nul_terminates_scan_like_sdssplitargs() {
+        // Upstream sds.c::sdssplitargs scans with `while(*p)`, so an embedded
+        // NUL is a hard end-of-input. fr previously treated `\0` as an ordinary
+        // byte and kept parsing past it.
+
+        // Unquoted NUL ends the current token and returns the args so far
+        // (`case '\0': done=1`, then the outer `if(*p)` is false) — the bytes
+        // after the NUL are dropped, NOT folded into the token or split off.
+        assert_eq!(
+            split_inline_args(b"SET\0x y").unwrap(),
+            vec![b"SET".to_vec()]
+        );
+        assert_eq!(
+            split_inline_args(b"GET foo\0bar baz").unwrap(),
+            vec![b"GET".to_vec(), b"foo".to_vec()]
+        );
+        // A NUL right after a separator returns the prior tokens with no empty
+        // trailing arg (outer skip-blanks stops at the NUL, then `if(*p)` fails).
+        assert_eq!(
+            split_inline_args(b"PING \0ignored").unwrap(),
+            vec![b"PING".to_vec()]
+        );
+        // A leading/only NUL yields no args (an inline empty line).
+        assert!(split_inline_args(b"\0whatever").unwrap().is_empty());
+
+        // A NUL INSIDE quotes is the unterminated-quote error
+        // (`else if (!*p) goto err`), matching an unclosed quote at end-of-line.
+        assert!(split_inline_args(b"SET \"a\0b\"").is_err());
+        assert!(split_inline_args(b"SET 'a\0b'").is_err());
+
+        // A closing quote BEFORE the NUL is still a complete, valid token (the
+        // NUL only ends the scan, like a trailing newline would).
+        assert_eq!(
+            split_inline_args(b"SET k \"v\"\0junk").unwrap(),
+            vec![b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()]
         );
     }
 }
