@@ -978,6 +978,11 @@ pub enum RespParseError {
     /// (line 2146) replies "Protocol error: too big inline request" and closes
     /// the connection via setProtocolError.
     InlineRequestTooBig,
+    /// An inline request had unbalanced quotes (sdssplitargs returned NULL).
+    /// Upstream networking.c::processInlineBuffer (line 2161) replies
+    /// "Protocol error: unbalanced quotes in request" and closes the connection
+    /// via setProtocolError — like every other inline/multibulk protocol error.
+    UnbalancedInlineQuotes,
 }
 
 impl Display for RespParseError {
@@ -1002,6 +1007,7 @@ impl Display for RespParseError {
             Self::LineTooLong => write!(f, "RESP line too long"),
             Self::ExpectedBulk(got) => write!(f, "expected '$', got '{}'", char::from(*got)),
             Self::InlineRequestTooBig => write!(f, "too big inline request"),
+            Self::UnbalancedInlineQuotes => write!(f, "unbalanced quotes in request"),
         }
     }
 }

@@ -2051,13 +2051,6 @@ fn process_buffered_frames(
                     consumed_total += consumed;
                     continue;
                 }
-                Ok(InlineParseResult::ProtocolError(err_frame, consumed)) => {
-                    // Send the error directly to the client without executing.
-                    processed_frames = processed_frames.saturating_add(1);
-                    err_frame.encode_into(&mut conn.write_buf);
-                    consumed_total += consumed;
-                    continue;
-                }
                 Ok(InlineParseResult::Command(frame, consumed)) => {
                     processed_frames = processed_frames.saturating_add(1);
                     if !command_frame_can_move_to_argv(&frame) {
@@ -7283,17 +7276,18 @@ mod tests {
 
     #[test]
     fn inline_unbalanced_quotes_via_try_parse() {
-        let result =
-            fr_server::try_parse_inline(b"SET key \"unclosed\r\n").expect("should parse ok");
-        assert!(
-            matches!(result, InlineParseResult::ProtocolError(_, _)),
-            "expected ProtocolError"
+        // Unbalanced quotes is an inline protocol error: it surfaces as an Err
+        // so handle_parse_error replies and closes the connection, matching
+        // upstream processInlineBuffer's setProtocolError.
+        let result = fr_server::try_parse_inline(b"SET key \"unclosed\r\n");
+        assert_eq!(
+            result,
+            Err(fr_protocol::RespParseError::UnbalancedInlineQuotes)
         );
-        let InlineParseResult::ProtocolError(frame, consumed) = result else {
-            return;
-        };
-        assert_eq!(consumed, 19);
-        assert!(matches!(frame, RespFrame::Error(ref e) if e.contains("unbalanced")));
+        assert_eq!(
+            fr_protocol::RespParseError::UnbalancedInlineQuotes.to_string(),
+            "unbalanced quotes in request"
+        );
     }
 
     #[test]

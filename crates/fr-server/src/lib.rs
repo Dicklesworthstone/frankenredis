@@ -9,8 +9,6 @@ pub enum InlineParseResult {
     Command(RespFrame, usize),
     /// Empty line that should be silently consumed.
     EmptyLine(usize),
-    /// Protocol error (e.g., unbalanced quotes) — send error reply directly.
-    ProtocolError(RespFrame, usize),
 }
 
 /// Check if the first byte suggests inline command parsing should be attempted.
@@ -61,9 +59,15 @@ pub fn try_parse_inline(buf: &[u8]) -> Result<InlineParseResult, fr_protocol::Re
 
     let argv = match split_inline_args(line) {
         Ok(v) => v,
-        Err(msg) => {
-            let err_frame = RespFrame::Error(msg.to_string());
-            return Ok(InlineParseResult::ProtocolError(err_frame, consumed));
+        Err(_) => {
+            // Unbalanced quotes is an inline protocol error. Like the too-big
+            // case (and every multibulk protocol error), surface it as an Err
+            // so the caller's handle_parse_error replies
+            // "ERR Protocol error: unbalanced quotes in request" and closes the
+            // connection — matching upstream processInlineBuffer's
+            // setProtocolError. (split_inline_args keeps its &str message for
+            // its own unit tests; the wire wording comes from the Display.)
+            return Err(fr_protocol::RespParseError::UnbalancedInlineQuotes);
         }
     };
     if argv.is_empty() {

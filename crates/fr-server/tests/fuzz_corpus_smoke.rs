@@ -104,25 +104,22 @@ fn fuzz_inline_parser_routes_only_star_to_resp() {
     }
 }
 
-/// Confirm the unbalanced-quote seeds surface as ProtocolError rather
-/// than panicking or silently parsing as if balanced. Catches a future
-/// refactor that loosens the unbalanced-quote check in
-/// split_inline_args.
+/// Confirm the unbalanced-quote seeds surface as the UnbalancedInlineQuotes
+/// protocol error rather than panicking or silently parsing as if balanced.
+/// Like upstream processInlineBuffer's setProtocolError, an inline protocol
+/// error is an Err so the caller replies and closes the connection. Catches a
+/// future refactor that loosens the unbalanced-quote check in split_inline_args.
 #[test]
 fn fuzz_inline_parser_unbalanced_quote_seeds_yield_protocol_error() {
-    use fr_server::InlineParseResult;
-
     let dir = corpus_dir();
     for name in ["unbalanced_double_quote", "unbalanced_single_quote"] {
         let bytes =
             fs::read(dir.join(name)).unwrap_or_else(|err| panic!("missing seed {name}: {err}"));
         let payload = &bytes[..bytes.len() - 1];
-        let result = try_parse_inline(payload).unwrap_or_else(|err| {
-            panic!("unbalanced-quote seed {name} should not return Err({err:?}) at try_parse_inline level — it returns ProtocolError as Ok variant")
-        });
-        assert!(
-            matches!(result, InlineParseResult::ProtocolError(_, _)),
-            "unbalanced-quote seed {name} should yield ProtocolError, got {result:?}"
+        assert_eq!(
+            try_parse_inline(payload),
+            Err(fr_protocol::RespParseError::UnbalancedInlineQuotes),
+            "unbalanced-quote seed {name} should yield the unbalanced-quotes protocol error"
         );
     }
 }
