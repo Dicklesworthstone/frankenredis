@@ -1,0 +1,24 @@
+## mixed_case_set_direct_shape
++OK
+## get_direct_value
+$3
+123
+## set_option_fallback_nx_first
++OK
+## set_option_fallback_nx_second
+$-1
+## get_nx_value
+$3
+abc
+## pipeline_two_direct_sets
++OK
++OK
+## reply_off_command
+## reply_off_suppressed_direct_set
+## reply_on_command
++OK
+## reply_on_ping
++PONG
+## reply_on_get_suppressed_key
+$3
+777

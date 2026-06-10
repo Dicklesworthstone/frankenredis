@@ -1,0 +1,68 @@
+[
+  {
+    "reply_hex": "2b4f4b0d0a",
+    "reply_len": 5,
+    "sent_sha256": "943357d6330f2d9c124c0080a9c7affb29d19a392d87e385f44efc4c1bfd99e1",
+    "step": "mixed_case_set_direct_shape"
+  },
+  {
+    "reply_hex": "24330d0a3132330d0a",
+    "reply_len": 9,
+    "sent_sha256": "416f4f2cf52668b1fcda51cff12e4e9643270066b96ecc968499f1c5b4a62d19",
+    "step": "get_direct_value"
+  },
+  {
+    "reply_hex": "2b4f4b0d0a",
+    "reply_len": 5,
+    "sent_sha256": "c0c107123b077a3892f2a3529f7da5251e4e79c69fb3c06682acae344e18aaed",
+    "step": "set_option_fallback_nx_first"
+  },
+  {
+    "reply_hex": "242d310d0a",
+    "reply_len": 5,
+    "sent_sha256": "13ad7b6506bec2d61f47cccb34b978443af8eec2b71c775cd3bd626cbfc73383",
+    "step": "set_option_fallback_nx_second"
+  },
+  {
+    "reply_hex": "24330d0a6162630d0a",
+    "reply_len": 9,
+    "sent_sha256": "c4df997acdc123dd7d3369dbb6127b7c2d2d1e766b137c81f0538355214f9293",
+    "step": "get_nx_value"
+  },
+  {
+    "reply_hex": "2b4f4b0d0a2b4f4b0d0a",
+    "reply_len": 10,
+    "sent_sha256": "50fe66c330b30653fca2ed4b8e818dc76029a70df2583577b2f1dc8b713cb30c",
+    "step": "pipeline_two_direct_sets"
+  },
+  {
+    "reply_hex": "",
+    "reply_len": 0,
+    "sent_sha256": "0dd0baac478f7fad1ebcda61c1174d35bf0d0d7636acbbcc49f78a177ddee56a",
+    "step": "reply_off_command"
+  },
+  {
+    "reply_hex": "",
+    "reply_len": 0,
+    "sent_sha256": "5a26312f7ffaff72d54e8c9fdc5c42536285a5f6c083398fcee814ea2e31ef80",
+    "step": "reply_off_suppressed_direct_set"
+  },
+  {
+    "reply_hex": "2b4f4b0d0a",
+    "reply_len": 5,
+    "sent_sha256": "a11cc363b9396545f6a75cbc037ec8effb6e6e898c6d69cd9b557371096cdfa2",
+    "step": "reply_on_command"
+  },
+  {
+    "reply_hex": "2b504f4e470d0a",
+    "reply_len": 7,
+    "sent_sha256": "a43cb6a3b9d261112714d00e36b33106d1479eb1b3d8131a07684d4d477c5989",
+    "step": "reply_on_ping"
+  },
+  {
+    "reply_hex": "24330d0a3737370d0a",
+    "reply_len": 9,
+    "sent_sha256": "7fb3ce41d1828339640eecf2dce5a08e768e9fa1f367b392c25ce9c70b005a7f",
+    "step": "reply_on_get_suppressed_key"
+  }
+]
