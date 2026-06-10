@@ -1,0 +1,49 @@
+  [2m2026-06-10T18:21:44.422283Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mProject path normalization failed for /tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr: input resolves outside canonical root (input: /tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr, detail: resolved=/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr root=/data/projects)[0m
+    [2;3mat[0m rch/src/hook.rs:2880 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-10T18:21:44.422722Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ovh-a at ubuntu@51.222.245.56 (1 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-10T18:21:44.474315Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mRemote execution failed: Project path normalization failed for /tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr: input resolves outside canonical root (input: /tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr, detail: resolved=/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr root=/data/projects), running locally[0m
+    [2;3mat[0m rch/src/hook.rs:658 [2;3mon[0m ThreadId(1)
+
+[RCH] local (remote execution failed)
+   Compiling zmij v1.0.21
+   Compiling serde_core v1.0.228
+   Compiling serde_json v1.0.149
+    Checking typenum v1.20.0
+   Compiling libc v0.2.185
+   Compiling shlex v1.3.0
+    Checking fr-protocol v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-protocol)
+   Compiling itoa v1.0.18
+   Compiling find-msvc-tools v0.1.9
+   Compiling memchr v2.8.0
+    Checking equivalent v1.0.2
+    Checking const-oid v0.10.2
+    Checking hashbrown v0.17.0
+    Checking foldhash v0.1.5
+    Checking fr-expire v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-expire)
+    Checking cpufeatures v0.3.0
+    Checking cfg-if v1.0.4
+    Checking fr-repl v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-repl)
+    Checking fr-eventloop v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-eventloop)
+    Checking hex v0.4.3
+    Checking log v0.4.29
+    Checking fr-config v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-config)
+   Compiling cc v1.2.60
+    Checking fr-sentinel v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-sentinel)
+    Checking fr-persist v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-persist)
+    Checking indexmap v2.14.0
+    Checking hybrid-array v0.4.10
+   Compiling libmimalloc-sys v0.1.46
+    Checking fr-store v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-store)
+    Checking mio v1.2.0
+    Checking block-buffer v0.12.0
+    Checking crypto-common v0.2.1
+    Checking digest v0.11.2
+    Checking sha2 v0.11.0
+    Checking mimalloc v0.1.49
+   Compiling fr-command v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-command)
+    Checking fr-runtime v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-runtime)
+    Checking fr-server v0.1.0 (/tmp/frankenredis-tealotter-ohsk5-17-pass120.QZ5Bjr/crates/fr-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.40s

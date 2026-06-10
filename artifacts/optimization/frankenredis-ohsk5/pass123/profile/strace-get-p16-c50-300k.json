@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781115434544,
+  "host": "127.0.0.1",
+  "port": 6662,
+  "workload": "get",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "ohsk5:p123:strace",
+  "total_time_ms": 3598,
+  "ops_per_sec": 83362.15711905806,
+  "bytes_sent": 14666719,
+  "bytes_received": 2700000,
+  "latency_us": {
+    "min": 2746,
+    "p50": 9575,
+    "p95": 11503,
+    "p99": 12903,
+    "p999": 32175,
+    "max": 34879,
+    "mean": 9561.835366666666,
+    "samples": 300000
+  }
+}

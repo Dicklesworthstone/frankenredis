@@ -1,0 +1,10 @@
+{
+  "baseline_bytes": 18465,
+  "baseline_sha256": "6c61663c963aa6031093aa8691fec4a07a8542c43c78b1bbdc5ce9b26cc14c3b",
+  "byte_identical": true,
+  "candidate_bytes": 18465,
+  "candidate_sha256": "6c61663c963aa6031093aa8691fec4a07a8542c43c78b1bbdc5ce9b26cc14c3b",
+  "pipeline_get_count": 2049,
+  "request_bytes": 84101,
+  "request_sha256": "fcc1b082f9f35022a506bb7f29973ab484631322e61267e3e528416e2b27e9a4"
+}

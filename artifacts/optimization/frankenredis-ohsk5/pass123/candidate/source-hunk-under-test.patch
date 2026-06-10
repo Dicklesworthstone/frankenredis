@@ -1,0 +1,114 @@
+diff --git a/crates/fr-server/src/main.rs b/crates/fr-server/src/main.rs
+index 2f8dd4bab..b352d12f3 100644
+--- a/crates/fr-server/src/main.rs
++++ b/crates/fr-server/src/main.rs
+@@ -17,6 +17,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+ #[global_allocator]
+ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+ 
++use std::cell::Cell;
+ use std::cmp::Reverse;
+ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+ use std::io::{self, ErrorKind, Read, Write};
+@@ -24,7 +25,7 @@ use std::net::{SocketAddr, TcpStream as StdTcpStream};
+ #[cfg(unix)]
+ use std::os::fd::{AsFd, AsRawFd};
+ use std::process::ExitCode;
+-use std::sync::{Arc, Mutex, mpsc};
++use std::sync::{Arc, mpsc};
+ use std::thread;
+ use std::time::Duration;
+ 
+@@ -462,32 +463,27 @@ enum WriterCompletionStatus {
+ }
+ 
+ struct WriterPool {
+-    jobs: mpsc::SyncSender<WriterJob>,
++    job_shards: Vec<mpsc::SyncSender<WriterJob>>,
+     completions: mpsc::Receiver<WriterCompletion>,
++    next_job_shard: Cell<usize>,
+ }
+ 
+ impl WriterPool {
+     fn new(poll: &Poll) -> io::Result<Self> {
+-        let (job_tx, job_rx) = mpsc::sync_channel(WRITER_QUEUE_BOUND);
+         let (completion_tx, completion_rx) = mpsc::channel();
+-        let shared_rx = Arc::new(Mutex::new(job_rx));
+         let waker = Arc::new(Waker::new(poll.registry(), WRITER_WAKE_TOKEN)?);
++        let mut job_shards = Vec::with_capacity(WRITER_POOL_WORKERS);
+ 
+         for worker_idx in 0..WRITER_POOL_WORKERS {
+-            let rx = Arc::clone(&shared_rx);
++            let (job_tx, job_rx) = mpsc::sync_channel(WRITER_QUEUE_BOUND);
+             let tx = completion_tx.clone();
+             let wake = Arc::clone(&waker);
++            job_shards.push(job_tx);
+             thread::Builder::new()
+                 .name(format!("fr-writer-{worker_idx}"))
+                 .spawn(move || {
+                     loop {
+-                        let recv_result = {
+-                            let Ok(receiver) = rx.lock() else {
+-                                return;
+-                            };
+-                            receiver.recv()
+-                        };
+-                        let Ok(job) = recv_result else {
++                        let Ok(job) = job_rx.recv() else {
+                             return;
+                         };
+                         let completion = flush_writer_job(job);
+@@ -500,8 +496,9 @@ impl WriterPool {
+         }
+ 
+         Ok(Self {
+-            jobs: job_tx,
++            job_shards,
+             completions: completion_rx,
++            next_job_shard: Cell::new(0),
+         })
+     }
+ 
+@@ -511,11 +508,40 @@ impl WriterPool {
+         stream: StdTcpStream,
+         bytes: Vec<u8>,
+     ) -> Result<(), mpsc::TrySendError<WriterJob>> {
+-        self.jobs.try_send(WriterJob {
++        let mut job = WriterJob {
+             token,
+             stream,
+             bytes,
+-        })
++        };
++        let shard_count = self.job_shards.len();
++        if shard_count == 0 {
++            return Err(mpsc::TrySendError::Disconnected(job));
++        }
++
++        let start = self.next_job_shard.get() % shard_count;
++        let mut saw_full = false;
++        for offset in 0..shard_count {
++            let shard_idx = (start + offset) % shard_count;
++            match self.job_shards[shard_idx].try_send(job) {
++                Ok(()) => {
++                    self.next_job_shard.set((shard_idx + 1) % shard_count);
++                    return Ok(());
++                }
++                Err(mpsc::TrySendError::Full(returned)) => {
++                    saw_full = true;
++                    job = returned;
++                }
++                Err(mpsc::TrySendError::Disconnected(returned)) => {
++                    job = returned;
++                }
++            }
++        }
++
++        if saw_full {
++            Err(mpsc::TrySendError::Full(job))
++        } else {
++            Err(mpsc::TrySendError::Disconnected(job))
++        }
+     }
+ 
+     fn try_recv(&self) -> Result<WriterCompletion, mpsc::TryRecvError> {
