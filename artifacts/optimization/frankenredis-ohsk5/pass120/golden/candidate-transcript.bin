@@ -1,0 +1,38 @@
++OK
+$3
+123
+$3
+int
+:2147483647
+-ERR DEBUG command not allowed. If the enable-debug-command option is set to "local", you can run it from a local connection, otherwise you need to set this option in the configuration file, and then restart the server.
+:124
+$3
+124
+$3
+int
++OK
+$3
+007
+$6
+embstr
++OK
+$3
+-42
+$3
+int
+:-40
+$3
+-40
++OK
+$19
+9223372036854775807
+$3
+int
+-ERR increment or decrement would overflow
++OK
+$20
+-9223372036854775808
+$3
+int
+-ERR increment or decrement would overflow
++OK

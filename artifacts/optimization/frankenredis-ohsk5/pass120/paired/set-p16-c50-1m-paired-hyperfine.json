@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-ohsk5/pass120/paired SERVER=/tmp/rch_target_fr_ohsk5_p120_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p120_current/release-perf/fr-bench PORT=6634 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass120/paired/baseline-set-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p120:paired:base artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 0.7350594394428571,
+      "stddev": 0.022531457962014865,
+      "median": 0.7296716433,
+      "user": 1.1948503457142858,
+      "system": 2.172847094285714,
+      "min": 0.7110355663,
+      "max": 0.7654759173,
+      "times": [
+        0.7654759173,
+        0.7122171543,
+        0.7477677583,
+        0.7197529273,
+        0.7110355663,
+        0.7594951093,
+        0.7296716433
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-ohsk5/pass120/paired SERVER=/tmp/rch_target_fr_ohsk5_p120_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p120_candidate/release-perf/fr-bench PORT=6635 WORKLOAD=set REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass120/paired/candidate-set-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p120:paired:cand artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 0.6624623980142857,
+      "stddev": 0.062119100168361314,
+      "median": 0.6805386153,
+      "user": 1.14417106,
+      "system": 2.1107365228571426,
+      "min": 0.5603663763,
+      "max": 0.7299163263,
+      "times": [
+        0.6575709943,
+        0.7142355873,
+        0.6957213812999999,
+        0.7299163263,
+        0.6805386153,
+        0.5988875053,
+        0.5603663763
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

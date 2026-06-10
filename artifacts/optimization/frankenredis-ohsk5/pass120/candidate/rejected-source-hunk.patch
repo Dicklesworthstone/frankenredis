@@ -1,0 +1,60 @@
+diff --git a/crates/fr-server/src/main.rs b/crates/fr-server/src/main.rs
+index 2f8dd4bab..25dcaa097 100644
+--- a/crates/fr-server/src/main.rs
++++ b/crates/fr-server/src/main.rs
+@@ -5301,6 +5301,7 @@ fn drain_writer_completions(
+         match completion.status {
+             WriterCompletionStatus::Drained => {
+                 runtime.note_write_event();
++                recycle_drained_writer_buffer(conn, completion.bytes);
+                 if conn.write_buf.is_empty() {
+                     write_tokens.remove(&completion.token);
+                     let _ = poll.registry().reregister(
+@@ -5340,6 +5341,13 @@ fn drain_writer_completions(
+     }
+ }
+ 
++fn recycle_drained_writer_buffer(conn: &mut ClientConnection, bytes: Vec<u8>) {
++    debug_assert!(bytes.is_empty());
++    if conn.write_buf.is_empty() && bytes.capacity() > conn.write_buf.capacity() {
++        conn.write_buf = bytes;
++    }
++}
++
+ fn prefix_writer_unsent_bytes(conn: &mut ClientConnection, mut unsent: Vec<u8>) {
+     if unsent.is_empty() {
+         return;
+@@ -5411,6 +5419,33 @@ mod tests {
+         fr_command::frame_to_argv(&frame).expect("test command frame should produce argv")
+     }
+ 
++    #[test]
++    fn drained_writer_buffer_reuse_preserves_pending_output() {
++        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
++        let addr = listener.local_addr().unwrap();
++        let _client = StdTcpStream::connect(addr).unwrap();
++        let (server, _) = listener.accept().unwrap();
++        server.set_nonblocking(true).unwrap();
++
++        let runtime = Runtime::default_strict();
++        let session = runtime.new_session();
++        let mut conn =
++            crate::ClientConnection::new(mio::net::TcpStream::from_std(server), session, 1);
++
++        let mut drained = Vec::with_capacity(128);
++        drained.extend_from_slice(b"+OK\r\n");
++        drained.clear();
++        crate::recycle_drained_writer_buffer(&mut conn, drained);
++        assert!(conn.write_buf.is_empty());
++        assert!(conn.write_buf.capacity() >= 128);
++
++        conn.write_buf.extend_from_slice(b":1\r\n");
++        let queued = conn.write_buf.clone();
++        let larger_drained = Vec::with_capacity(conn.write_buf.capacity() + 64);
++        crate::recycle_drained_writer_buffer(&mut conn, larger_drained);
++        assert_eq!(conn.write_buf, queued);
++    }
++
+     #[test]
+     fn borrowed_plain_set_packet_parser_accepts_canonical_set() {
+         let input = b"*3\r\n$3\r\nsEt\r\n$3\r\nkey\r\n$5\r\nvalue\r\n*1\r\n$4\r\nPING\r\n";
