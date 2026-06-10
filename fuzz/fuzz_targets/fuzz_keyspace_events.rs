@@ -131,12 +131,13 @@ fn assert_success_invariants(flags: u32) {
          (with the documented `n`-when-A-set lossy drop accounted for)",
     );
 
-    if flags != 0 {
-        assert!(
-            flags & (NOTIFY_KEYSPACE | NOTIFY_KEYEVENT) != 0,
-            "nonzero notify-keyspace-events flags must keep K or E enabled",
-        );
-    }
+    // NOTE: upstream imposes NO "must contain K or E" requirement.
+    // keyspaceEventsStringToFlags (notify.c) simply ORs each class bit and only
+    // rejects unknown characters, so single-class strings like "m" (key-miss),
+    // "n" (new-key), or "g" (generic) are accepted and round-trip cleanly even
+    // though they deliver nothing without K/E. An earlier assertion here
+    // demanded K-or-E for any nonzero flag set; that is a fabricated invariant
+    // that does not hold against redis 7.2.4 and is removed.
 
     let canonical_bytes = canonical.as_bytes();
     assert_eq!(
@@ -192,15 +193,16 @@ fn render_invalid_case(case: InvalidKeyspaceCase) -> String {
 }
 
 fn expected_flags(classes: &[ValidClass]) -> u32 {
+    // Upstream keyspaceEventsStringToFlags simply ORs each class bit; there is
+    // NO "coerce to 0 unless K/E is present" rule. A string like "m" parses to
+    // NOTIFY_KEY_MISS even though it delivers nothing without K/E. (The earlier
+    // K/E coercion here mirrored a fabricated invariant since removed from
+    // assert_success_invariants.)
     let mut flags = 0u32;
     for class in classes.iter().take(MAX_TOKENS) {
         flags |= valid_class_flag(*class);
     }
-    if flags != 0 && (flags & (NOTIFY_KEYSPACE | NOTIFY_KEYEVENT)) == 0 {
-        0
-    } else {
-        flags
-    }
+    flags
 }
 
 fn valid_class_char(class: ValidClass) -> char {

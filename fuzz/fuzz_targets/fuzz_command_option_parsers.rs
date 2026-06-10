@@ -182,7 +182,11 @@ enum TimeoutArg {
 #[derive(Debug, Clone)]
 struct ZRangeByScoreModel {
     withscores: bool,
-    limit: Option<(u64, i16)>,
+    // offset is signed: ZRANGEBYSCORE's LIMIT parses both offset and count with
+    // the plain getLongFromObjectOrReply (no positivity check), so a negative
+    // offset is accepted — it simply skips past the end and yields an empty
+    // result. count is likewise signed (negative = unlimited).
+    limit: Option<(i64, i16)>,
 }
 
 #[derive(Debug, Clone)]
@@ -237,8 +241,18 @@ fn fuzz_text_seed(data: &[u8]) {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let Some((expectation, argv_text)) = line.split_once('|') else {
-            continue;
+        // The ACCEPT/REJECT prefix is part of the libFuzzer-mutable input and
+        // CANNOT be trusted as an oracle: a single-bit mutation can corrupt the
+        // argv (e.g. `SCAN ... TYPE string` -> `SCAN ... TYARGVPE string`) while
+        // leaving the `ACCEPT` tag intact, manufacturing a contradiction that is
+        // a harness artifact, not an fr bug. We therefore strip the tag only to
+        // recover the argv and assert the one property that holds for ANY argv
+        // regardless of how the seed was mutated: a command that fr rejects must
+        // be side-effect free (validation precedes execution in redis, so a
+        // rejected command never mutates the keyspace).
+        let argv_text = match line.split_once('|') {
+            Some((_tag, rest)) => rest,
+            None => line,
         };
         let argv: Vec<Vec<u8>> = argv_text
             .split_ascii_whitespace()
@@ -252,23 +266,12 @@ fn fuzz_text_seed(data: &[u8]) {
         let mut store = seeded_store(now_ms, true);
         let before = store.state_digest();
         let result = dispatch_argv(&argv, &mut store, now_ms);
-        match expectation {
-            "ACCEPT" => assert!(
-                !is_rejection(&result),
-                "seed command should be accepted: argv={argv:?}, result={result:?}"
-            ),
-            "REJECT" => {
-                assert!(
-                    is_rejection(&result),
-                    "seed command should reject: argv={argv:?}, result={result:?}"
-                );
-                assert_eq!(
-                    before,
-                    store.state_digest(),
-                    "rejected seed command must not mutate store: argv={argv:?}"
-                );
-            }
-            _ => {}
+        if is_rejection(&result) {
+            assert_eq!(
+                before,
+                store.state_digest(),
+                "rejected seed command must not mutate store: argv={argv:?}, result={result:?}"
+            );
         }
         now_ms = now_ms.saturating_add(7);
     }
@@ -316,7 +319,13 @@ fn fuzz_zrangebyscore(case: ZRangeByScoreCase, now_ms: u64) {
             }
             assert_equivalent(argv, canonical, now_ms, false);
         }
-        None => assert_rejected(argv, now_ms),
+        None => {
+            let blob_ambiguous = case
+                .tokens
+                .iter()
+                .any(|t| matches!(t, ZRangeToken::InvalidKeyword(_)));
+            assert_modeled_invalid(argv, blob_ambiguous, now_ms);
+        }
     }
 }
 
@@ -369,7 +378,13 @@ fn fuzz_geosearch(case: GeoSearchCase, now_ms: u64) {
             }
             assert_equivalent(argv, canonical, now_ms, false);
         }
-        None => assert_rejected(argv, now_ms),
+        None => {
+            let blob_ambiguous = case
+                .flags
+                .iter()
+                .any(|t| matches!(t, GeoFlagToken::InvalidKeyword(_)));
+            assert_modeled_invalid(argv, blob_ambiguous, now_ms);
+        }
     }
 }
 
@@ -381,10 +396,25 @@ fn fuzz_stream_case(case: StreamCase, now_ms: u64) {
                 b"XREAD".to_vec(),
                 b"STREAMS".to_vec(),
                 b"s".to_vec(),
-                raw.clone(),
+                raw,
             ];
-            match canonical_xread_id(&id) {
-                Some(canonical) => {
+            // Non-group XREAD parses the id with the STRICT stream-id parser,
+            // plus a special case for `$`:
+            //   * `$`            -> valid: resolves to the stream's last_id (or
+            //                       0-0 when missing); non-blocking XREAD then
+            //                       returns nil. No static canonical rewrite.
+            //   * explicit/bare  -> valid: `<ms>` is equivalent to `<ms>-0`.
+            //   * `-` / `+`      -> rejected: strict parsing treats the interval
+            //                       sentinels as invalid ids ("> is XREADGROUP
+            //                       only" is a separate path we do not emit).
+            //   * Invalid(blob)  -> ambiguous: arbitrary bytes may render a valid
+            //                       bare-ms id, so only the inert-on-reject
+            //                       invariant can be asserted.
+            match &id {
+                StreamIdArg::Dollar => assert_accepted(argv, now_ms),
+                StreamIdArg::Explicit { .. } | StreamIdArg::BareMs(_) => {
+                    let canonical = canonical_xread_id(&id)
+                        .expect("explicit and bare-ms ids always canonicalize");
                     let canonical_argv = vec![
                         b"XREAD".to_vec(),
                         b"STREAMS".to_vec(),
@@ -393,7 +423,8 @@ fn fuzz_stream_case(case: StreamCase, now_ms: u64) {
                     ];
                     assert_equivalent(argv, canonical_argv, now_ms, false);
                 }
-                None => assert_rejected(argv, now_ms),
+                StreamIdArg::Dash | StreamIdArg::Plus => assert_rejected(argv, now_ms),
+                StreamIdArg::Invalid(_) => assert_inert_on_reject(argv, now_ms),
             }
         }
         StreamCase::Xrange { start, end } => {
@@ -403,6 +434,12 @@ fn fuzz_stream_case(case: StreamCase, now_ms: u64) {
                 render_stream_bound_arg(&start),
                 render_stream_bound_arg(&end),
             ];
+            // XRANGE parses bounds with the NON-strict interval parser:
+            // explicit <ms>-<seq>, bare <ms>, `-` (min) and `+` (max) are ALL
+            // valid (and start>end just yields an empty reply). The only way to
+            // reach the None arm is a StreamBoundArg::Invalid(blob), whose
+            // arbitrary bytes may themselves render a valid bound (a number,
+            // "-", "+"), so assert only the inert-on-reject invariant.
             match (
                 canonical_stream_range_bound(&start, true),
                 canonical_stream_range_bound(&end, false),
@@ -411,7 +448,7 @@ fn fuzz_stream_case(case: StreamCase, now_ms: u64) {
                     let canonical_argv = vec![b"XRANGE".to_vec(), b"s".to_vec(), start, end];
                     assert_equivalent(argv, canonical_argv, now_ms, false);
                 }
-                _ => assert_rejected(argv, now_ms),
+                _ => assert_inert_on_reject(argv, now_ms),
             }
         }
         StreamCase::XgroupSetId { id } => {
@@ -422,10 +459,24 @@ fn fuzz_stream_case(case: StreamCase, now_ms: u64) {
                 b"g".to_vec(),
                 render_stream_id_arg(&id),
             ];
-            if matches!(id, StreamIdArg::Explicit { .. }) {
-                assert_accepted(argv, now_ms);
-            } else {
-                assert_rejected(argv, now_ms);
+            // XGROUP SETID parses the id with the NON-strict parser
+            // (streamParseIDOrReply) and special-cases `$`. The group "g" and
+            // stream "s" always exist in seeded_store, so every valid id form
+            // returns OK:
+            //   * `$`            -> stream last_id
+            //   * explicit/bare  -> <ms>-<seq> / <ms>-0
+            //   * `-` / `+`      -> 0-0 / max (non-strict accepts the interval
+            //                       sentinels, unlike XREAD's strict parser)
+            // Only a genuinely unparseable id is rejected, but Invalid(blob) is
+            // arbitrary and may render a valid id, so it gets the inert-on-reject
+            // invariant rather than an unconditional rejection assertion.
+            match id {
+                StreamIdArg::Explicit { .. }
+                | StreamIdArg::BareMs(_)
+                | StreamIdArg::Dollar
+                | StreamIdArg::Dash
+                | StreamIdArg::Plus => assert_accepted(argv, now_ms),
+                StreamIdArg::Invalid(_) => assert_inert_on_reject(argv, now_ms),
             }
         }
     }
@@ -460,7 +511,13 @@ fn fuzz_zstore(case: ZStoreCase, now_ms: u64) {
             }
             assert_equivalent(argv, canonical, now_ms, true);
         }
-        None => assert_rejected(argv, now_ms),
+        None => {
+            let blob_ambiguous = case
+                .tokens
+                .iter()
+                .any(|t| matches!(t, ZStoreToken::InvalidKeyword(_)));
+            assert_modeled_invalid(argv, blob_ambiguous, now_ms);
+        }
     }
 }
 
@@ -493,7 +550,13 @@ fn fuzz_scan(case: ScanCase, now_ms: u64) {
             }
             assert_equivalent(argv, canonical, now_ms, false);
         }
-        None => assert_rejected(argv, now_ms),
+        None => {
+            let blob_ambiguous = case
+                .tokens
+                .iter()
+                .any(|t| matches!(t, ScanToken::InvalidKeyword(_)));
+            assert_modeled_invalid(argv, blob_ambiguous, now_ms);
+        }
     }
 }
 
@@ -523,7 +586,13 @@ fn fuzz_eval(case: EvalCase, now_ms: u64) {
                 ])))
             );
         }
-        None => assert_rejected(argv, now_ms),
+        None => {
+            // NumkeysArg::Invalid(blob) may render a valid integer (e.g. "1"),
+            // making the command accepted; only Integer(negative) and
+            // keys>args are structurally rejectable.
+            let blob_ambiguous = matches!(case.numkeys, NumkeysArg::Invalid(_));
+            assert_modeled_invalid(argv, blob_ambiguous, now_ms);
+        }
     }
 }
 
@@ -546,11 +615,18 @@ fn fuzz_blocking_timeout(case: BlockingTimeoutCase, now_ms: u64) {
             assert_equivalent(argv, canonical, now_ms, case.has_source_value);
         }
         None => {
-            let mut store = seeded_store(now_ms, case.has_source_value);
-            let before = store.state_digest();
-            let result = dispatch_argv(&argv, &mut store, now_ms);
-            assert!(is_rejection(&result));
-            assert_eq!(before, store.state_digest());
+            // TimeoutArg::Invalid(blob) may render a valid timeout (e.g. "5" or
+            // "1.5"); Negative/Nan/Infinity are structurally rejectable.
+            let blob_ambiguous = matches!(case.timeout, TimeoutArg::Invalid(_));
+            if blob_ambiguous {
+                assert_inert_on_reject(argv, now_ms);
+            } else {
+                let mut store = seeded_store(now_ms, case.has_source_value);
+                let before = store.state_digest();
+                let result = dispatch_argv(&argv, &mut store, now_ms);
+                assert!(is_rejection(&result));
+                assert_eq!(before, store.state_digest());
+            }
         }
     }
 }
@@ -575,6 +651,36 @@ fn assert_rejected(argv: Vec<Vec<u8>>, now_ms: u64) {
     let result = dispatch_argv(&argv, &mut store, now_ms);
     assert!(is_rejection(&result));
     assert_eq!(before, store.state_digest());
+}
+
+/// For inputs whose validity cannot be determined a priori — an arbitrary
+/// `Invalid(Blob)` may coincidentally render a perfectly valid id such as `"5"`
+/// (a bare-ms id) — we cannot assert acceptance OR rejection. Assert only the
+/// mutation-proof property that holds either way: a command fr REJECTS must
+/// leave the keyspace untouched (argument validation precedes execution).
+fn assert_inert_on_reject(argv: Vec<Vec<u8>>, now_ms: u64) {
+    let mut store = seeded_store(now_ms, false);
+    let before = store.state_digest();
+    let result = dispatch_argv(&argv, &mut store, now_ms);
+    if is_rejection(&result) {
+        assert_eq!(before, store.state_digest());
+    }
+}
+
+/// Route a "modeled-as-invalid" command. When the input carried an
+/// arbitrary-blob token (`Invalid`/`InvalidKeyword`) the rendered bytes may
+/// coincidentally be a VALID keyword/value (e.g. a blob rendering "WITHSCORES",
+/// "-", or "5"), so we cannot assert rejection — only the mutation-proof
+/// inert-on-reject invariant. When the invalidity is structural (a dangling
+/// `Missing*` keyword, a non-positive COUNT, a negative numkeys, ...) the
+/// rejection IS guaranteed, so assert it hard to keep catching real
+/// over-acceptance regressions.
+fn assert_modeled_invalid(argv: Vec<Vec<u8>>, blob_ambiguous: bool, now_ms: u64) {
+    if blob_ambiguous {
+        assert_inert_on_reject(argv, now_ms);
+    } else {
+        assert_rejected(argv, now_ms);
+    }
 }
 
 fn assert_accepted(argv: Vec<Vec<u8>>, now_ms: u64) {
@@ -651,10 +757,11 @@ fn model_zrange_tokens(
                 argv.push(b"LIMIT".to_vec());
                 argv.push(offset.to_string().into_bytes());
                 argv.push(count.to_string().into_bytes());
-                if *offset < 0 {
-                    return None;
-                }
-                model.limit = Some((*offset as u64, *count));
+                // Negative offset/count are BOTH accepted by upstream (plain
+                // long parse). A negative offset skips beyond the end and yields
+                // an empty reply; it is not a rejection. Keep it in the model so
+                // the option-ordering equivalence check still runs.
+                model.limit = Some((i64::from(*offset), *count));
             }
             ZRangeToken::InvalidKeyword(blob) => {
                 argv.push(normalize_blob(blob.clone()));
