@@ -15840,6 +15840,15 @@ impl Store {
                 Value::SortedSet(zs) => {
                     let result = zs.iter_asc().map(|(m, _)| m.to_vec()).collect();
                     entry.touch(now_ms);
+                    // Upstream sort.c::sortCommand (line 320) DESTRUCTIVELY
+                    // converts a sorted set to OBJ_ENCODING_SKIPLIST before
+                    // sorting — unconditionally, including SORT_RO, BY-nosort,
+                    // LIMIT, and STORE (it needs dictSize + indexed access). fr
+                    // left a listpack zset unconverted, so OBJECT ENCODING after
+                    // a SORT diverged (listpack vs skiplist). Mirror the one-way
+                    // promotion here (encoding metadata only — no value/digest/
+                    // dirty change). (frankenredis-sortzsetenc)
+                    entry.force_zset_skiplist_encoding = true;
                     Ok(result)
                 }
                 _ => Err(StoreError::WrongType),
@@ -22347,6 +22356,27 @@ mod tests {
         );
         assert_eq!(store.stat_keyspace_hits, 2);
         assert_eq!(store.stat_keyspace_misses, 1);
+    }
+
+    #[test]
+    fn sort_destructively_converts_listpack_zset_to_skiplist() {
+        // Upstream sort.c::sortCommand converts a sorted set to skiplist before
+        // sorting (unconditionally, incl. SORT_RO). A small listpack zset must
+        // therefore report `skiplist` after any SORT read. Sets are unaffected.
+        let mut store = Store::new();
+        let _ = store.zadd(b"z", &[(1.0, b"a".to_vec()), (2.0, b"bb".to_vec())], 0);
+        assert_eq!(store.object_encoding(b"z", 0), Some("listpack"));
+        let _ = store.sort_elements(b"z", 0).expect("sort elements");
+        assert_eq!(
+            store.object_encoding(b"z", 0),
+            Some("skiplist"),
+            "SORT must destructively promote a listpack zset to skiplist"
+        );
+        // A set is NOT converted by SORT.
+        let _ = store.sadd(b"s", &[b"a".to_vec(), b"bb".to_vec()], 0);
+        let enc_before = store.object_encoding(b"s", 0);
+        let _ = store.sort_elements(b"s", 0).expect("sort set");
+        assert_eq!(store.object_encoding(b"s", 0), enc_before, "SORT must not convert a set");
     }
 
     #[test]

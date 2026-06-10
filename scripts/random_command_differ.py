@@ -179,6 +179,28 @@ GENERATORS = [
     # HLL
     # LCS
     lambda: ["LCS", _rk(), _rk(), random.choice(["IDX", "LEN", ""])],
+    # SORT numeric forms only (NO ALPHA — ALPHA uses strcoll, which is
+    # locale-dependent and tracked separately as jaezc; numeric SORT order is
+    # fully specified and still exercises the zset->skiplist conversion). STORE
+    # writes into an in-pool key; non-numeric members without ALPHA error in both.
+    lambda: ["SORT", _rk(), random.choice(["DESC", ""])],
+    lambda: ["SORT", _rk(), "LIMIT", _rint(), _rint()],
+    lambda: ["SORT", _rk(), "STORE", _rk()],
+    lambda: ["SORT_RO", _rk()],
+    # BITFIELD overflow modes (WRAP/SAT/FAIL) + signed/unsigned widths
+    lambda: ["BITFIELD", _rk(), "OVERFLOW", random.choice(["WRAP", "SAT", "FAIL", "BAD"]),
+             random.choice(["SET", "INCRBY"]), random.choice(["u8", "i16", "u64", "i64"]),
+             _rint(), _rint()],
+    # numkeys-prefixed pop/card
+    lambda: ["LMPOP", random.choice(["1", "2", "0", "-1"]), _rk(), _rk(),
+             random.choice(["LEFT", "RIGHT"]), "COUNT", _rint()],
+    lambda: ["ZMPOP", random.choice(["1", "2", "0"]), _rk(), _rk(), random.choice(["MIN", "MAX"])],
+    # membership / scores
+    lambda: ["SMISMEMBER", _rk(), _rval(), _rval()], lambda: ["ZMSCORE", _rk(), _rval(), _rval()],
+    lambda: ["SISMEMBER", _rk(), _rval()], lambda: ["ZSCORE", _rk(), _rval()], lambda: ["ZRANK", _rk(), _rval()],
+    # more string setters
+    lambda: ["SETEX", _rk(), "100000", _rval()], lambda: ["SETNX", _rk(), _rval()],
+    lambda: ["GETSET", _rk(), _rval()], lambda: ["SUBSTR", _rk(), _rint(), _rint()],
     # NOTE: PFADD/PFCOUNT/PFMERGE are intentionally NOT in this vocabulary.
     # The HLL SPARSE encoding diverges from redis by a couple of bytes on
     # certain incremental-register states (PFCOUNT/cardinality stays correct,
