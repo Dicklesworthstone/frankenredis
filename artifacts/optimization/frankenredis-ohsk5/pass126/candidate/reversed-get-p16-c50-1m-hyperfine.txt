@@ -1,0 +1,11 @@
+Benchmark 1: OUT=artifacts/optimization/frankenredis-ohsk5/pass126/candidate/reversed-candidate SERVER=/tmp/rch_target_fr_ohsk5_p126_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p126_current/release-perf/fr-bench PORT=6714 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass126/candidate/reversed-candidate-last.json KEY_PREFIX=ohsk5:p126:reversed:candidate artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh
+  Time (mean ± σ):     822.0 ms ±  46.8 ms    [User: 1269.3 ms, System: 2423.6 ms]
+  Range (min … max):   750.9 ms … 924.4 ms    10 runs
+ 
+Benchmark 2: OUT=artifacts/optimization/frankenredis-ohsk5/pass126/candidate/reversed-current SERVER=/tmp/rch_target_fr_ohsk5_p126_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p126_current/release-perf/fr-bench PORT=6715 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass126/candidate/reversed-current-last.json KEY_PREFIX=ohsk5:p126:reversed:current artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh
+  Time (mean ± σ):     826.8 ms ±  25.8 ms    [User: 1241.4 ms, System: 2403.5 ms]
+  Range (min … max):   780.2 ms … 859.8 ms    10 runs
+ 
+Summary
+  OUT=artifacts/optimization/frankenredis-ohsk5/pass126/candidate/reversed-candidate SERVER=/tmp/rch_target_fr_ohsk5_p126_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p126_current/release-perf/fr-bench PORT=6714 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass126/candidate/reversed-candidate-last.json KEY_PREFIX=ohsk5:p126:reversed:candidate artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh ran
+    1.01 ± 0.07 times faster than OUT=artifacts/optimization/frankenredis-ohsk5/pass126/candidate/reversed-current SERVER=/tmp/rch_target_fr_ohsk5_p126_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p126_current/release-perf/fr-bench PORT=6715 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass126/candidate/reversed-current-last.json KEY_PREFIX=ohsk5:p126:reversed:current artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh

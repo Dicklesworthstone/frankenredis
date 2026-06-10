@@ -1,0 +1,9 @@
+[RCH] local (no admissible workers: critical_pressure=1,insufficient_slots=1)
+   Compiling libmimalloc-sys v0.1.46
+   Compiling fr-command v0.1.0 (/data/projects/.scratch/frankenredis-pass126.zrSrkG/crates/fr-command)
+   Compiling serde v1.0.228
+   Compiling mimalloc v0.1.49
+   Compiling fr-bench v0.1.0 (/data/projects/.scratch/frankenredis-pass126.zrSrkG/crates/fr-bench)
+   Compiling fr-runtime v0.1.0 (/data/projects/.scratch/frankenredis-pass126.zrSrkG/crates/fr-runtime)
+   Compiling fr-server v0.1.0 (/data/projects/.scratch/frankenredis-pass126.zrSrkG/crates/fr-server)
+    Finished `release-perf` profile [optimized + debuginfo] target(s) in 28.30s

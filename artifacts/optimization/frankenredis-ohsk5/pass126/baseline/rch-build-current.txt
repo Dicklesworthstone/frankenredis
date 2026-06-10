@@ -1,0 +1,66 @@
+[RCH] local (no admissible workers: critical_pressure=1,insufficient_slots=1)
+   Compiling zmij v1.0.21
+   Compiling serde_json v1.0.149
+   Compiling serde_core v1.0.228
+   Compiling typenum v1.20.0
+   Compiling cfg-if v1.0.4
+   Compiling memchr v2.8.0
+   Compiling fr-protocol v0.1.0 (/data/projects/.scratch/frankenredis-pass126.zrSrkG/crates/fr-protocol)
+   Compiling libc v0.2.185
+   Compiling itoa v1.0.18
+   Compiling shlex v1.3.0
+   Compiling find-msvc-tools v0.1.9
+   Compiling proc-macro2 v1.0.106
+   Compiling hashbrown v0.17.0
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling const-oid v0.10.2
+   Compiling equivalent v1.0.2
+   Compiling fr-expire v0.1.0 (/data/projects/.scratch/frankenredis-pass126.zrSrkG/crates/fr-expire)
+   Compiling foldhash v0.1.5
+   Compiling crossbeam-utils v0.8.21
+   Compiling autocfg v1.5.0
+   Compiling cpufeatures v0.3.0
+   Compiling crc32fast v1.5.0
+   Compiling adler2 v2.0.1
+   Compiling simd-adler32 v0.3.9
+   Compiling hex v0.4.3
+   Compiling log v0.4.29
+   Compiling fr-eventloop v0.1.0 (/data/projects/.scratch/frankenredis-pass126.zrSrkG/crates/fr-eventloop)
+   Compiling minimal-lexical v0.2.1
+   Compiling fr-config v0.1.0 (/data/projects/.scratch/frankenredis-pass126.zrSrkG/crates/fr-config)
+   Compiling serde v1.0.228
+   Compiling fr-repl v0.1.0 (/data/projects/.scratch/frankenredis-pass126.zrSrkG/crates/fr-repl)
+   Compiling byteorder v1.5.0
+   Compiling base64 v0.21.7
+   Compiling cc v1.2.60
+   Compiling miniz_oxide v0.8.9
+   Compiling fr-sentinel v0.1.0 (/data/projects/.scratch/frankenredis-pass126.zrSrkG/crates/fr-sentinel)
+   Compiling fr-persist v0.1.0 (/data/projects/.scratch/frankenredis-pass126.zrSrkG/crates/fr-persist)
+   Compiling num-traits v0.2.19
+   Compiling nom v7.1.3
+   Compiling flate2 v1.1.9
+   Compiling crossbeam-channel v0.5.15
+   Compiling indexmap v2.14.0
+   Compiling syn v2.0.117
+   Compiling hybrid-array v0.4.10
+   Compiling libmimalloc-sys v0.1.46
+   Compiling mio v1.2.0
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.1
+   Compiling fr-store v0.1.0 (/data/projects/.scratch/frankenredis-pass126.zrSrkG/crates/fr-store)
+   Compiling digest v0.11.2
+   Compiling sha2 v0.11.0
+   Compiling hdrhistogram v7.5.4
+   Compiling serde_derive v1.0.228
+   Compiling fr-command v0.1.0 (/data/projects/.scratch/frankenredis-pass126.zrSrkG/crates/fr-command)
+error: failed to run custom build command for `fr-command v0.1.0 (/data/projects/.scratch/frankenredis-pass126.zrSrkG/crates/fr-command)`
+
+Caused by:
+  process didn't exit successfully: `/tmp/rch_target_fr_ohsk5_p126_current/release-perf/build/fr-command-67111641941e3c6b/build-script-build` (exit status: 1)
+  --- stdout
+  cargo:rerun-if-changed=/data/projects/.scratch/frankenredis-pass126.zrSrkG/crates/fr-command/../../legacy_redis_code/redis/src/commands
+
+  --- stderr
+  Error: Custom { kind: NotFound, error: "failed to read Redis commands dir /data/projects/.scratch/frankenredis-pass126.zrSrkG/crates/fr-command/../../legacy_redis_code/redis/src/commands: No such file or directory (os error 2)" }
+warning: build failed, waiting for other jobs to finish...
