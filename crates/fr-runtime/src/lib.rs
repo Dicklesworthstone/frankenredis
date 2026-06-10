@@ -12260,11 +12260,10 @@ impl Runtime {
         // command through its normal proc, so route them here too. Channels are
         // global (never db-namespaced), so this stays above the namespacing.
         //
-        // Scope: ONLY the plain/pattern subscribe family. SSUBSCRIBE/SUNSUBSCRIBE
-        // are DENY_BLOCKING (upstream rejects them inside MULTI/Lua with
-        // "SSUBSCRIBE isn't allowed for a DENY BLOCKING client"), and PUBLISH /
-        // PUBSUB have their own in-transaction semantics — those keep their
-        // existing dispatch and are out of scope for this fix.
+        // SSUBSCRIBE/SUNSUBSCRIBE are routed too: SSUBSCRIBE's handler rejects the
+        // DENY_BLOCKING context (executing_exec), and SUNSUBSCRIBE registers/clears
+        // shard state through the runtime registry just like the plain family.
+        // PUBLISH/PUBSUB keep their existing dispatch.
         if eq_ascii_token(command, b"SUBSCRIBE") {
             return Ok(self.handle_subscribe_command(argv));
         }
@@ -12276,6 +12275,29 @@ impl Runtime {
         }
         if eq_ascii_token(command, b"PUNSUBSCRIBE") {
             return Ok(self.handle_punsubscribe_command(argv));
+        }
+        if eq_ascii_token(command, b"SSUBSCRIBE") {
+            return Ok(self.handle_ssubscribe_command(argv));
+        }
+        if eq_ascii_token(command, b"SUNSUBSCRIBE") {
+            return Ok(self.handle_sunsubscribe_command(argv));
+        }
+        // (frankenredis-execpubsub) PING in subscriber mode is RESP2-special: the
+        // normal path (execute_frame) emits the 2-element ["pong", msg] form, but
+        // a queued PING after a queued SUBSCRIBE reaches this dispatch directly and
+        // would otherwise return the plain +PONG. Mirror execute_frame's guard:
+        // RESP2 + already in subscriber mode + argc<=2 (argc>2 falls through to the
+        // normal arity error). Upstream networking.c::pingCommand.
+        if eq_ascii_token(command, b"PING")
+            && self.session.resp_protocol_version != 3
+            && argv.len() <= 2
+            && self.is_in_subscription_mode()
+        {
+            let msg = argv.get(1).cloned().unwrap_or_default();
+            return Ok(RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"pong".to_vec())),
+                RespFrame::BulkString(Some(msg)),
+            ])));
         }
         let namespaced = self.namespace_argv_for_selected_db(argv);
         let mut reply = self.dispatch_with_client_context(&namespaced, now_ms)?;
@@ -17688,6 +17710,17 @@ impl Runtime {
     }
 
     fn handle_ssubscribe_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        // (frankenredis-execpubsub) Upstream pubsub.c::ssubscribeCommand rejects a
+        // CLIENT_DENY_BLOCKING client (set while executing a transaction). Unlike
+        // subscribeCommand/psubscribeCommand — which carry a `&& !(c->flags &
+        // CLIENT_MULTI)` backward-compat exemption so they run inside MULTI/EXEC —
+        // SSUBSCRIBE has no such exemption, so a queued SSUBSCRIBE aborts with this
+        // error instead of subscribing.
+        if self.session.transaction_state.executing_exec {
+            return RespFrame::Error(
+                "ERR SSUBSCRIBE isn't allowed for a DENY BLOCKING client".to_string(),
+            );
+        }
         if argv.len() < 2 {
             return CommandError::WrongArity("SSUBSCRIBE").to_resp();
         }
@@ -25056,6 +25089,51 @@ mod tests {
         assert_eq!(inner[0], RespFrame::BulkString(Some(b"unsubscribe".to_vec())));
         assert_eq!(inner[1], RespFrame::BulkString(None), "channel must be nil");
         assert_eq!(inner[2], RespFrame::Integer(0));
+        let _ = rt.swap_session(prev2);
+    }
+
+    #[test]
+    fn ssubscribe_deny_blocking_and_ping_subscriber_form_inside_exec() {
+        // (frankenredis-execpubsub) SSUBSCRIBE has no CLIENT_MULTI exemption
+        // (unlike SUBSCRIBE/PSUBSCRIBE), so a queued SSUBSCRIBE aborts with the
+        // DENY_BLOCKING error instead of subscribing.
+        let mut rt = Runtime::default_strict();
+        let c = rt.new_session();
+        let prev = rt.swap_session(c);
+        rt.execute_frame(command(&[b"MULTI"]), 0);
+        rt.execute_frame(command(&[b"SSUBSCRIBE", b"sc"]), 1);
+        let exec = rt.execute_frame(command(&[b"EXEC"]), 2);
+        let RespFrame::Array(Some(outer)) = exec else {
+            panic!("EXEC reply must be an array, got {exec:?}");
+        };
+        match &outer[0] {
+            RespFrame::Error(e) => assert!(
+                e.contains("SSUBSCRIBE isn't allowed for a DENY BLOCKING client"),
+                "queued SSUBSCRIBE must deny-block, got {e:?}"
+            ),
+            other => panic!("queued SSUBSCRIBE must be a DENY_BLOCKING error, got {other:?}"),
+        }
+        let _ = rt.swap_session(prev);
+
+        // PING after a queued SUBSCRIBE must use the RESP2 subscriber-mode form
+        // ["pong", ""], not a bare +PONG.
+        let c2 = rt.new_session();
+        let prev2 = rt.swap_session(c2);
+        rt.execute_frame(command(&[b"MULTI"]), 3);
+        rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 4);
+        rt.execute_frame(command(&[b"PING"]), 5);
+        let exec2 = rt.execute_frame(command(&[b"EXEC"]), 6);
+        let RespFrame::Array(Some(o2)) = exec2 else {
+            panic!("EXEC reply must be an array, got {exec2:?}");
+        };
+        assert_eq!(
+            o2[1],
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"pong".to_vec())),
+                RespFrame::BulkString(Some(Vec::new())),
+            ])),
+            "PING after EXEC[SUBSCRIBE] must use the subscriber-mode 2-element form"
+        );
         let _ = rt.swap_session(prev2);
     }
 
