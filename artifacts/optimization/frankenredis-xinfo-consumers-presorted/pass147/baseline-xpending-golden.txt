@@ -1,0 +1,10 @@
+mode=Golden
+pending=50000
+consumers=1000
+total=50000
+first=1-0
+last=50000-0
+consumer_first=c000000:50
+consumer_mid=c000500:50
+consumer_last=c000999:50
+summary_checksum=67105744901251934002101328022247659943

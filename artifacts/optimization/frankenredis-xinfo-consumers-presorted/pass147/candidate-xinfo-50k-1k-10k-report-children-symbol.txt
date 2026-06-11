@@ -1,0 +1,234 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 2K of event 'cycles:P'
+# Event count (approx.): 6307605218
+#
+# Children      Self  Command          Shared Object             Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            IPC   [IPC Coverage]
+# ........  ........  ...............  ........................  ................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    61.92%    42.74%  xpending-summar  xpending-summary-harness  [.] <fr_store::Store>::xinfo_consumers                                                                                                                                                                                                                                                                                                                                                                                                                                                                            -      -            
+            |          
+            |--38.53%--<fr_store::Store>::xinfo_consumers
+            |          |          
+            |          |--16.66%--__memcmp_avx2_movbe
+            |          |          |          
+            |          |           --0.73%--0xffffffff84c00f0b
+            |          |          
+            |          |--0.98%--__libc_malloc2
+            |          |          |          
+            |          |           --0.80%--__memcmp_avx2_movbe
+            |          |          
+            |          |--0.58%--0xffffffff84c00f0b
+            |          |          |          
+            |          |           --0.53%--0xffffffff86227724
+            |          |                     0xffffffff84fc4bc8
+            |          |                     0xffffffff85139f5d
+            |          |                     0xffffffff85139003
+            |          |                     0xffffffff851524f6
+            |          |          
+            |           --0.56%--__GI___libc_malloc (inlined)
+            |          
+            |--21.83%--0x270f
+            |          <fr_store::Store>::xinfo_consumers
+            |          
+             --1.06%--0x3e7
+                       <fr_store::Store>::xinfo_consumers
+
+    40.94%     0.00%  xpending-summar  [unknown]                 [.] 0x000000000000270f                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            -      -            
+            |
+            ---0x270f
+               <fr_store::Store>::xinfo_consumers
+               |          
+               |--16.66%--__memcmp_avx2_movbe
+               |          |          
+               |           --0.73%--0xffffffff84c00f0b
+               |          
+               |--1.04%--__libc_malloc2
+               |          |          
+               |           --0.80%--__memcmp_avx2_movbe
+               |          
+               |--0.56%--__GI___libc_malloc (inlined)
+               |          
+                --0.52%--0xffffffff84c00f0b
+
+    36.06%    35.21%  xpending-summar  libc.so.6                 [.] __memcmp_avx2_movbe                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           -      -            
+            |          
+            |--16.66%--0x270f
+            |          <fr_store::Store>::xinfo_consumers
+            |          |          
+            |          |--15.80%--__memcmp_avx2_movbe
+            |          |          
+            |           --0.86%--__libc_malloc2
+            |                     |          
+            |                      --0.80%--__memcmp_avx2_movbe
+            |          
+            |--15.21%--__memcmp_avx2_movbe
+            |          |          
+            |           --0.73%--0xffffffff84c00f0b
+            |          
+            |--2.36%--0x1
+            |          __memcmp_avx2_movbe
+            |          
+             --1.20%--0x2
+                       __memcmp_avx2_movbe
+
+    12.42%    10.72%  xpending-summar  xpending-summary-harness  [.] xpending_summary_harness::main                                                                                                                                                                                                                                                                                                                                                                                                                                                                                -      -            
+            |          
+             --12.42%--xpending_summary_harness::main
+                       |          
+                        --0.71%--__GI___libc_free (inlined)
+
+     2.87%     0.00%  xpending-summar  [unknown]                 [k] 0x0000000000000001                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            -      -            
+            |
+            ---0x1
+               |          
+                --2.36%--__memcmp_avx2_movbe
+
+     2.22%     1.91%  xpending-summar  libc.so.6                 [.] _int_malloc                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   -      -            
+            |          
+             --2.16%--_int_malloc
+                       |          
+                        --0.51%--tcache_put (inlined)
+                                  tcache_put_n (inlined)
+
+     1.51%     0.00%  xpending-summar  [unknown]                 [.] 0xffffffff84c00f0b                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            -      -            
+            |
+            ---0xffffffff84c00f0b
+               |          
+                --1.15%--0xffffffff86227724
+                          0xffffffff84fc4bc8
+                          0xffffffff85139f5d
+                          0xffffffff85139003
+                          0xffffffff851524f6
+                          |          
+                           --0.91%--0xffffffff85137e40
+                                     |          
+                                      --0.85%--0xffffffff85079cb1
+
+     1.48%     0.12%  xpending-summar  libc.so.6                 [.] __libc_malloc2                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                -      -            
+            |          
+             --1.42%--__libc_malloc2
+                       |          
+                        --0.80%--__memcmp_avx2_movbe
+
+     1.45%     1.45%  xpending-summar  libc.so.6                 [.] malloc                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        -      -            
+            |          
+            |--0.65%--__GI___libc_malloc (inlined)
+            |          
+             --0.56%--0x270f
+                       <fr_store::Store>::xinfo_consumers
+                       |          
+                        --0.56%--__GI___libc_malloc (inlined)
+
+     1.45%     0.00%  xpending-summar  libc.so.6                 [.] __GI___libc_malloc (inlined)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  -      -            
+            |
+            ---__GI___libc_malloc (inlined)
+
+     1.35%     1.35%  xpending-summar  libc.so.6                 [.] _int_free_chunk                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               -      -            
+            |          
+             --0.94%--_int_free_chunk
+
+     1.22%     0.00%  xpending-summar  libc.so.6                 [.] __GI___libc_free (inlined)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    -      -            
+            |
+            ---__GI___libc_free (inlined)
+
+     1.20%     0.00%  xpending-summar  [unknown]                 [.] 0x0000000000000002                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            -      -            
+            |
+            ---0x2
+               __memcmp_avx2_movbe
+
+     1.15%     0.00%  xpending-summar  [unknown]                 [.] 0xffffffff84fc4bc8                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            -      -            
+            |
+            ---0xffffffff84fc4bc8
+               |          
+                --1.15%--0xffffffff85139f5d
+                          0xffffffff85139003
+                          0xffffffff851524f6
+                          |          
+                           --0.91%--0xffffffff85137e40
+                                     |          
+                                      --0.85%--0xffffffff85079cb1
+
+     1.15%     0.00%  xpending-summar  [unknown]                 [.] 0xffffffff85139f5d                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            -      -            
+            |
+            ---0xffffffff85139f5d
+               0xffffffff85139003
+               0xffffffff851524f6
+               |          
+                --0.91%--0xffffffff85137e40
+                          |          
+                           --0.85%--0xffffffff85079cb1
+
+     1.15%     0.00%  xpending-summar  [unknown]                 [.] 0xffffffff85139003                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            -      -            
+            |
+            ---0xffffffff85139003
+               0xffffffff851524f6
+               |          
+                --0.91%--0xffffffff85137e40
+                          |          
+                           --0.85%--0xffffffff85079cb1
+
+     1.15%     0.00%  xpending-summar  [unknown]                 [.] 0xffffffff851524f6                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            -      -            
+            |
+            ---0xffffffff851524f6
+               |          
+                --0.91%--0xffffffff85137e40
+                          |          
+                           --0.85%--0xffffffff85079cb1
+
+     1.15%     0.00%  xpending-summar  [unknown]                 [.] 0xffffffff86227724                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            -      -            
+            |
+            ---0xffffffff86227724
+               0xffffffff84fc4bc8
+               0xffffffff85139f5d
+               0xffffffff85139003
+               0xffffffff851524f6
+               |          
+                --0.91%--0xffffffff85137e40
+                          |          
+                           --0.85%--0xffffffff85079cb1
+
+     1.12%     0.00%  xpending-summar  libc.so.6                 [.] __memcpy_avx_unaligned_erms (inlined)                                                                                                                                                                                                                                                                                                                                                                                                                                                                         -      -            
+            |
+            ---__memcpy_avx_unaligned_erms (inlined)
+
+     1.07%     0.00%  xpending-summar  [unknown]                 [k] 0x00000000000003e7                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            -      -            
+            |
+            ---0x3e7
+               |          
+                --1.06%--<fr_store::Store>::xinfo_consumers
+
+     1.05%     1.05%  xpending-summar  libc.so.6                 [.] __memmove_avx_unaligned_erms                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  -      -            
+            |          
+             --0.52%--__memcpy_avx_unaligned_erms (inlined)
+
+     0.91%     0.00%  xpending-summar  [unknown]                 [.] 0xffffffff85137e40                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            -      -            
+            |
+            ---0xffffffff85137e40
+               |          
+                --0.85%--0xffffffff85079cb1
+
+     0.85%     0.00%  xpending-summar  [unknown]                 [.] 0xffffffff85079cb1                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            -      -            
+            |
+            ---0xffffffff85079cb1
+
+     0.68%     0.50%  xpending-summar  xpending-summary-harness  [.] <fr_store::Store>::xreadgroup                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 -      -            
+     0.67%     0.67%  xpending-summar  libc.so.6                 [.] cfree@GLIBC_2.2.5                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             -      -            
+     0.54%     0.54%  xpending-summar  libc.so.6                 [.] cfree@GLIBC_2.2.5                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             -      -            
+     0.51%     0.00%  xpending-summar  libc.so.6                 [.] tcache_put (inlined)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          -      -            
+            |
+            ---tcache_put (inlined)
+               tcache_put_n (inlined)
+
+     0.51%     0.00%  xpending-summar  libc.so.6                 [.] tcache_put_n (inlined)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        -      -            
+            |
+            ---tcache_put_n (inlined)
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

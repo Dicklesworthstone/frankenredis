@@ -1,0 +1,8 @@
+mode=XinfoGolden
+pending=50000
+consumers=1000
+rows=1000
+consumer_first=c000000:50:90:90
+consumer_mid=c000500:50:0:0
+consumer_last=c000999:50:0:0
+xinfo_checksum=23204354743643482939705441765548887716

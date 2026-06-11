@@ -14340,7 +14340,6 @@ impl Store {
                             inactive_ms_or_neg_one,
                         ));
                     }
-                    result.sort_by(|a, b| a.0.cmp(&b.0));
                     Ok(Some(result))
                 }
                 _ => Err(StoreError::WrongType),
