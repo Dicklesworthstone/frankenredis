@@ -4713,6 +4713,28 @@ impl Store {
         entry
     }
 
+    /// (frankenredis-sunionstore-direct) Build a set Entry from an already-built
+    /// `SetValue` (e.g. a SUNION result), re-deriving the encoding from the final
+    /// membership exactly as `set_entry` does. An `Int` SetValue is already the
+    /// canonical sorted, ≤max-intset form; a `Generic` SetValue is routed through
+    /// `from_index_set` so a generic-but-all-int-small union collapses to `Int`
+    /// just like the prior `Vec -> GenericSet -> from_index_set` path — but
+    /// without the intermediate sorted Vec or the extra re-hash pass.
+    fn set_value_entry(&self, value: SetValue, expires_at_ms: Option<u64>, now_ms: u64) -> Entry {
+        let normalized = match value {
+            SetValue::Int(_) => value,
+            SetValue::Generic(g) => SetValue::from_index_set(g, self.set_max_intset_entries),
+        };
+        let mut entry = Entry::new(Value::Set(Box::new(normalized)), expires_at_ms, now_ms);
+        Self::refresh_set_encoding_flags(
+            &mut entry,
+            self.set_max_intset_entries,
+            self.set_max_listpack_entries,
+            self.set_max_listpack_value,
+        );
+        entry
+    }
+
     /// Get a string value. Returns `None` if the key doesn't exist.
     /// Returns `Err(WrongType)` if the key holds a non-string value.
     pub fn get(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
@@ -9944,6 +9966,27 @@ impl Store {
     }
 
     pub fn sunion(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+        let Some(result) = self.sunion_value(keys, now_ms)? else {
+            return Ok(Vec::new());
+        };
+        let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
+        v.sort();
+        Ok(v)
+    }
+
+    /// (frankenredis-sunionstore-direct) Build the SUNION result as a `SetValue`
+    /// without flattening to a sorted `Vec<Vec<u8>>`, so SUNIONSTORE can store it
+    /// directly instead of round-tripping the membership through a sorted Vec and
+    /// re-hashing it into a fresh set. The prior path built the set, flattened and
+    /// sorted it, then re-collected and re-derived encoding — three passes over
+    /// every element. Returns `None` for an empty union (no source set present).
+    /// The preamble (expiry drop, WRONGTYPE, LFU bump, touch, largest-as-base) is
+    /// identical to the prior inline `sunion` body, so SUNION's reply is unchanged.
+    fn sunion_value(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<Option<SetValue>, StoreError> {
         for key in keys {
             self.drop_if_expired(key, now_ms);
         }
@@ -9980,15 +10023,15 @@ impl Store {
         }
 
         let Some(base_idx) = base_idx else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
 
         let mut result = match self.entries.get(keys[base_idx]) {
             Some(entry) => match &entry.value {
-                Value::Set(s) => s.clone(),
+                Value::Set(s) => s.as_ref().clone(),
                 _ => return Err(StoreError::WrongType),
             },
-            None => return Ok(Vec::new()),
+            None => return Ok(None),
         };
         let max_intset_entries = self.set_max_intset_entries;
 
@@ -10003,9 +10046,7 @@ impl Store {
             }
         }
 
-        let mut v: Vec<Vec<u8>> = result.iter().map(|m| m.into_owned()).collect();
-        v.sort();
-        Ok(v)
+        Ok(Some(result))
     }
 
     pub fn sdiff(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
@@ -10447,14 +10488,17 @@ impl Store {
         keys: &[&[u8]],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        let result = self.sunion(keys, now_ms)?;
-        let count = result.len();
+        // (frankenredis-sunionstore-direct) Store the union SetValue directly
+        // rather than via sunion()'s sorted Vec round-trip: build once, store
+        // once. Encoding is re-derived from the final membership (set_value_entry)
+        // so OBJECT ENCODING is byte-identical to the prior path.
+        let value = self.sunion_value(keys, now_ms)?;
+        let count = value.as_ref().map_or(0, SetValue::len);
         let deleted = self.internal_entries_remove(destination).is_some();
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
-        if !result.is_empty() {
-            let set: GenericSet = result.into_iter().collect();
-            let entry = self.set_entry(set, None, now_ms);
+        if let Some(value) = value.filter(|v| !v.is_empty()) {
+            let entry = self.set_value_entry(value, None, now_ms);
             self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
