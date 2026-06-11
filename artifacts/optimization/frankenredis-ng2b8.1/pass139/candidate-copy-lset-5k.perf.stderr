@@ -1,0 +1,2 @@
+[ perf record: Woken up 1 times to write data ]
+[ perf record: Captured and wrote 0.058 MB artifacts/optimization/frankenredis-ng2b8.1/pass139/candidate-copy-lset-5k.perf.data (632 samples) ]

@@ -1,0 +1,18 @@
+{
+  "elapsed_sec": 0.7799830940784886,
+  "items_returned": 5000,
+  "list_len": 50000,
+  "llen": 50000,
+  "lrange_head": [
+    "yyyyyyyy",
+    "xxxxxxxx",
+    "xxxxxxxx"
+  ],
+  "mode": "copy_lset_dst",
+  "object_encoding": "quicklist",
+  "ops": 5000,
+  "ops_per_sec": 6410.395350821356,
+  "payload_size": 8,
+  "range_len": 5000,
+  "server_pid": 4181037
+}

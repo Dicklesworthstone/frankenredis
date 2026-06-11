@@ -1,0 +1,15 @@
+{
+  "items_returned": 5000,
+  "list_len": 50000,
+  "llen": 50000,
+  "lrange_head": [
+    "yyyyyyyy",
+    "xxxxxxxx",
+    "xxxxxxxx"
+  ],
+  "mode": "copy_lset_dst",
+  "object_encoding": "quicklist",
+  "ops": 5000,
+  "payload_size": 8,
+  "range_len": 5000
+}

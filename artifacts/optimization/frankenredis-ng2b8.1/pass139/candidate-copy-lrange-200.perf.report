@@ -1,0 +1,161 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 563  of event 'cycles:u'
+# Event count (approx.): 130863892
+#
+# Overhead  Symbol                                                                                                                                                                                                                   IPC   [IPC Coverage]
+# ........  .......................................................................................................................................................................................................................  ....................
+#
+    17.70%  [.] <fr_protocol::RespFrame>::encode_into                                                                                                                                                                                -      -            
+    13.42%  [.] fr_command::lrange                                                                                                                                                                                                   -      -            
+     9.88%  [.] __memmove_avx_unaligned_erms                                                                                                                                                                                         -      -            
+            |          
+             --5.36%--__memmove_avx_unaligned_erms
+                       |          
+                        --3.90%--<alloc::raw_vec::RawVecInner>::finish_grow
+
+     8.38%  [.] mi_free                                                                                                                                                                                                              -      -            
+     7.91%  [.] <fr_runtime::Runtime>::strip_db_prefixes_from_frame                                                                                                                                                                  -      -            
+     5.16%  [.] _mi_page_malloc_zero                                                                                                                                                                                                 -      -            
+            |          
+             --2.79%--mi_theap_malloc_zero_aligned_at_overalloc
+                       fr_command::lrange
+
+     4.69%  [.] __memset_avx2_unaligned_erms                                                                                                                                                                                         -      -            
+            |
+            ---0
+
+     3.62%  [.] <fr_runtime::ServerState>::run_active_expire_cycle                                                                                                                                                                   -      -            
+     3.20%  [.] <fr_store::packed_set::ListValueIter as core::iter::traits::iterator::Iterator>::next                                                                                                                                -      -            
+     2.97%  [.] <fr_runtime::Runtime>::execute_db_scoped_command                                                                                                                                                                     -      -            
+     2.15%  [k] 0xffffffff854aff10                                                                                                                                                                                                   -      -            
+            |          
+            |--1.41%--0xffffffff855004f7
+            |          0xffffffff85500e5c
+            |          0xffffffff84f2515e
+            |          0xffffffff86220551
+            |          0xffffffff84c0012b
+            |          epoll_ctl
+            |          
+             --0.74%--0xffffffff854feb44
+                       0xffffffff854ff5bc
+                       0xffffffff84f24855
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __syscall_cancel_arch_end
+                       epoll_wait
+                       frankenredis::main
+                       0
+
+     2.00%  [.] mi_theap_malloc_aligned                                                                                                                                                                                              -      -            
+     1.96%  [.] <fr_store::Store>::lrange                                                                                                                                                                                            -      -            
+     1.80%  [.] _mi_bin_size                                                                                                                                                                                                         -      -            
+            |          
+            |--0.89%--fr_command::lrange
+            |          
+             --0.86%--<alloc::raw_vec::RawVecInner>::finish_grow
+                       <alloc::raw_vec::RawVec<gimli::read::unit::AttributeValue<gimli::read::endian_slice::EndianSlice<gimli::endianity::LittleEndian>, usize>>>::grow_one
+                       frankenredis::copy_borrowed_argv_into_scratch
+
+     1.78%  [.] mi_malloc_aligned                                                                                                                                                                                                    -      -            
+     1.37%  [.] core::ptr::drop_glue::<fr_protocol::RespFrame>                                                                                                                                                                       -      -            
+     1.23%  [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>                                                                                                                      -      -            
+     1.20%  [.] fr_protocol::write_u64_digits                                                                                                                                                                                        -      -            
+     1.16%  [.] frankenredis::main                                                                                                                                                                                                   -      -            
+            |          
+             --1.13%--frankenredis::main
+
+     1.06%  [.] mi_find_page                                                                                                                                                                                                         -      -            
+            |
+            ---_mi_malloc_generic
+               _mi_theap_realloc_zero
+               <alloc::raw_vec::RawVecInner>::finish_grow
+
+     0.95%  [.] mi_bbitmap_try_find_and_clear                                                                                                                                                                                        -      -            
+            |
+            ---mi_arena_try_alloc_at
+               mi_arenas_try_find_free
+               mi_arenas_try_alloc
+               mi_arenas_page_alloc_fresh
+               mi_arenas_page_regular_alloc
+               mi_page_fresh_alloc
+               mi_page_queue_find_free_ex
+               _mi_malloc_generic
+               mi_theap_malloc_zero_aligned_at_overalloc
+               <hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+
+     0.89%  [.] clock_gettime@@GLIBC_2.17                                                                                                                                                                                            -      -            
+            |          
+             --0.89%--frankenredis::main
+
+     0.81%  [.] core::ptr::drop_glue::<core::option::Option<frankenredis::ReplicaPrimaryConnection>>                                                                                                                                 -      -            
+     0.74%  [.] <fr_runtime::Runtime>::is_in_subscription_mode                                                                                                                                                                       -      -            
+     0.71%  [.] <std::sys::pal::unix::time::Timespec>::now                                                                                                                                                                           -      -            
+     0.69%  [.] <fr_runtime::Runtime>::pubsub_clients_with_pending                                                                                                                                                                   -      -            
+     0.56%  [.] frankenredis::parse_borrowed_multibulk_action                                                                                                                                                                        -      -            
+     0.45%  [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>                                                                                                                                       -      -            
+     0.30%  [.] <fr_runtime::Runtime>::run_active_expire_cycle                                                                                                                                                                       -      -            
+     0.18%  [.] frankenredis::drain_writer_completions                                                                                                                                                                               -      -            
+     0.12%  [k] 0xffffffff84d04109                                                                                                                                                                                                   -      -            
+     0.12%  [.] <fr_runtime::Runtime>::check_child_processes                                                                                                                                                                         -      -            
+     0.09%  [.] <fr_runtime::Runtime>::is_pubsub_client                                                                                                                                                                              -      -            
+     0.06%  [.] __memcmp_avx2_movbe                                                                                                                                                                                                  -      -            
+     0.05%  [.] <fr_runtime::Runtime>::pubsub_sub_count                                                                                                                                                                              -      -            
+     0.05%  [.] <fr_runtime::Runtime>::dispatch_with_client_context                                                                                                                                                                  -      -            
+     0.05%  [.] <alloc::string::String>::from_utf8_lossy                                                                                                                                                                             -      -            
+     0.04%  [.] <core::iter::adapters::copied::Copied<core::iter::adapters::filter::Filter<std::collections::hash::set::Iter<mio::token::Token>, frankenredis::main::{closure#0}>> as core::iter::traits::iterator::Iterator>::next  -      -            
+     0.04%  [.] fr_command::is_write_command                                                                                                                                                                                         -      -            
+     0.04%  [.] __syscall_cancel                                                                                                                                                                                                     -      -            
+     0.04%  [.] 0x0000000000000930                                                                                                                                                                                                   -      -            
+     0.04%  [.] mi_theap_malloc_zero_aligned_at_overalloc                                                                                                                                                                            -      -            
+     0.03%  [.] <fr_runtime::AclUser>::acl_permission_error_for_argv                                                                                                                                                                 -      -            
+     0.03%  [k] 0xffffffff84f24604                                                                                                                                                                                                   -      -            
+     0.03%  [.] core::str::converts::from_utf8                                                                                                                                                                                       -      -            
+     0.03%  [.] <alloc::raw_vec::RawVecInner>::finish_grow                                                                                                                                                                           -      -            
+     0.03%  [.] frankenredis::copy_borrowed_argv_into_scratch                                                                                                                                                                        -      -            
+     0.02%  [.] 0x0000000000000969                                                                                                                                                                                                   -      -            
+     0.02%  [.] frankenredis::borrowed_plain_zscore_args                                                                                                                                                                             -      -            
+     0.02%  [.] mi_good_size                                                                                                                                                                                                         -      -            
+     0.02%  [.] <fr_runtime::Runtime>::replica_sync_target                                                                                                                                                                           -      -            
+     0.02%  [.] <fr_runtime::Runtime>::execute_frame_internal                                                                                                                                                                        -      -            
+     0.02%  [.] <fr_runtime::Runtime>::clear_ready_keys                                                                                                                                                                              -      -            
+     0.01%  [.] <alloc::raw_vec::RawVecInner>::finish_grow                                                                                                                                                                           -      -            
+     0.01%  [.] <fr_runtime::Runtime>::flush_aof_to_disk                                                                                                                                                                             -      -            
+     0.01%  [k] 0xffffffff854afe66                                                                                                                                                                                                   -      -            
+     0.01%  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write                                                                                                                                 -      -            
+     0.00%  [.] frankenredis::handle_readable                                                                                                                                                                                        -      -            
+     0.00%  [.] 0x0000000000000986                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff851524ed                                                                                                                                                                                                   -      -            
+     0.00%  [.] fr_protocol::parse_command_args_borrowed_into                                                                                                                                                                        -      -            
+     0.00%  [.] <std::sys::pal::unix::time::Timespec>::sub_timespec                                                                                                                                                                  -      -            
+     0.00%  [k] 0xffffffff84f23915                                                                                                                                                                                                   -      -            
+     0.00%  [.] fr_store::read_rss_bytes                                                                                                                                                                                             -      -            
+     0.00%  [k] 0xffffffff854a04ed                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff854ff556                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff862276e1                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff85138695                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff85f0cc84                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff8622f1cf                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff850b6a68                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff85138f6b                                                                                                                                                                                                   -      -            
+     0.00%  [.] 0x0000000000000994                                                                                                                                                                                                   -      -            
+     0.00%  [.] epoll_wait                                                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff84f87bc3                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff84c00ef0                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff85138e83                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff851a2985                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff854afe50                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff86223c8e                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff8622f1c3                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff8622f240                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff8622f940                                                                                                                                                                                                   -      -            
+     0.00%  [.] 0x0000000000000931                                                                                                                                                                                                   -      -            
+     0.00%  [.] 0x00000000000009c2                                                                                                                                                                                                   -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

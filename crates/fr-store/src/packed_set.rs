@@ -902,30 +902,236 @@ impl<'a> Iterator for PackedListIter<'a> {
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-/// Storage for a list: a packed buffer while small, promoting to a
-/// `VecDeque<Vec<u8>>` (which keeps O(1) ends for large lists, redis's quicklist
-/// regime) past the threshold. Drop-in for the former `VecDeque` — same
-/// front-to-back order and identical push/pop/get/insert/remove/retain
-/// semantics, so LRANGE/LINDEX/LPOP/etc. output is byte-for-byte unchanged.
+/// Storage for a list: a packed buffer while small, promoting to a chunked COW
+/// deque (which keeps O(1) ends for large lists, redis's quicklist regime) past
+/// the threshold. Drop-in for the former `VecDeque` — same front-to-back order
+/// and identical push/pop/get/insert/remove/retain semantics, so
+/// LRANGE/LINDEX/LPOP/etc. output is byte-for-byte unchanged.
 /// (frankenredis-9mh3o step 4)
 ///
 /// The large `Deque` payload is `Arc`-wrapped so that cloning a `ListValue`
 /// (COPY, eviction sampling, any `Value::clone`) is an O(1) refcount bump
 /// instead of a per-element heap clone of every `Vec<u8>` — redis pays a bulk
-/// per-listpack-node memcpy at COPY time; we defer the copy lazily to the first
+/// per-listpack-node memcpy at COPY time; we defer copying lazily to the first
 /// mutation via `Arc::make_mut`. A uniquely-owned list (the normal push-built
-/// path, refcount 1) make_mut's for free, so LPUSH/RPUSH do NOT regress; only
-/// the first write to a list that is currently *shared* (post-COPY) pays the
-/// deep clone — exactly when correctness demands isolation. (frankenredis-k8yfq)
+/// path, refcount 1) make_mut's for free. A post-COPY write clones the outer
+/// chunk directory and only the touched chunk (128 elements), not the whole
+/// 50k-element list. (frankenredis-k8yfq / frankenredis-ng2b8.1)
 #[derive(Clone, Debug)]
 enum ListRepr {
     Packed(PackedList),
-    Deque(Arc<VecDeque<Vec<u8>>>),
+    Deque(Arc<ChunkedList>),
 }
 
 impl Default for ListRepr {
     fn default() -> Self {
         ListRepr::Packed(PackedList::new())
+    }
+}
+
+const LIST_CHUNK_TARGET: usize = 128;
+
+#[derive(Clone, Debug)]
+struct ListChunk {
+    elems: Arc<Vec<Vec<u8>>>,
+}
+
+impl ListChunk {
+    fn from_vec(elems: Vec<Vec<u8>>) -> Self {
+        Self {
+            elems: Arc::new(elems),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.elems.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.elems.is_empty()
+    }
+
+    fn get(&self, idx: usize) -> Option<&[u8]> {
+        self.elems.get(idx).map(Vec::as_slice)
+    }
+
+    fn make_mut(&mut self) -> &mut Vec<Vec<u8>> {
+        Arc::make_mut(&mut self.elems)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ChunkedList {
+    chunks: VecDeque<ListChunk>,
+    len: usize,
+}
+
+impl ChunkedList {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn get(&self, idx: usize) -> Option<&[u8]> {
+        let (chunk_idx, local_idx) = self.locate(idx)?;
+        self.chunks.get(chunk_idx)?.get(local_idx)
+    }
+
+    fn locate(&self, idx: usize) -> Option<(usize, usize)> {
+        if idx >= self.len {
+            return None;
+        }
+        let mut base = 0usize;
+        for (chunk_idx, chunk) in self.chunks.iter().enumerate() {
+            let next = base + chunk.len();
+            if idx < next {
+                return Some((chunk_idx, idx - base));
+            }
+            base = next;
+        }
+        None
+    }
+
+    fn push_back(&mut self, elem: Vec<u8>) {
+        if let Some(back) = self.chunks.back_mut()
+            && back.len() < LIST_CHUNK_TARGET
+        {
+            back.make_mut().push(elem);
+            self.len += 1;
+            return;
+        }
+        self.chunks
+            .push_back(ListChunk::from_vec(Vec::from([elem])));
+        self.len += 1;
+    }
+
+    fn push_front(&mut self, elem: Vec<u8>) {
+        if let Some(front) = self.chunks.front_mut()
+            && front.len() < LIST_CHUNK_TARGET
+        {
+            front.make_mut().insert(0, elem);
+            self.len += 1;
+            return;
+        }
+        self.chunks
+            .push_front(ListChunk::from_vec(Vec::from([elem])));
+        self.len += 1;
+    }
+
+    fn pop_front(&mut self) -> Option<Vec<u8>> {
+        let out = self.chunks.front_mut()?.make_mut().remove(0);
+        self.len -= 1;
+        if self.chunks.front().is_some_and(ListChunk::is_empty) {
+            self.chunks.pop_front();
+        }
+        Some(out)
+    }
+
+    fn pop_back(&mut self) -> Option<Vec<u8>> {
+        let out = self.chunks.back_mut()?.make_mut().pop()?;
+        self.len -= 1;
+        if self.chunks.back().is_some_and(ListChunk::is_empty) {
+            self.chunks.pop_back();
+        }
+        Some(out)
+    }
+
+    fn set(&mut self, idx: usize, elem: Vec<u8>) -> bool {
+        let Some((chunk_idx, local_idx)) = self.locate(idx) else {
+            return false;
+        };
+        let Some(chunk) = self.chunks.get_mut(chunk_idx) else {
+            return false;
+        };
+        chunk.make_mut()[local_idx] = elem;
+        true
+    }
+
+    fn insert(&mut self, idx: usize, elem: Vec<u8>) {
+        if idx >= self.len {
+            self.push_back(elem);
+            return;
+        }
+        let Some((chunk_idx, local_idx)) = self.locate(idx) else {
+            self.push_back(elem);
+            return;
+        };
+        let chunk = &mut self.chunks[chunk_idx];
+        chunk.make_mut().insert(local_idx, elem);
+        self.len += 1;
+        if chunk.len() > LIST_CHUNK_TARGET {
+            let split_at = chunk.len() / 2;
+            let right = chunk.make_mut().split_off(split_at);
+            self.chunks
+                .insert(chunk_idx + 1, ListChunk::from_vec(right));
+        }
+    }
+
+    fn remove(&mut self, idx: usize) -> Option<Vec<u8>> {
+        let (chunk_idx, local_idx) = self.locate(idx)?;
+        let out = self.chunks[chunk_idx].make_mut().remove(local_idx);
+        self.len -= 1;
+        if self.chunks[chunk_idx].is_empty() {
+            self.chunks.remove(chunk_idx);
+        }
+        Some(out)
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
+        let mut next = ChunkedList::default();
+        for elem in self.iter() {
+            if keep(elem) {
+                next.push_back(elem.to_vec());
+            }
+        }
+        *self = next;
+    }
+
+    fn iter(&self) -> ChunkedListIter<'_> {
+        ChunkedListIter {
+            chunks: self.chunks.iter(),
+            current: None,
+        }
+    }
+}
+
+impl From<VecDeque<Vec<u8>>> for ChunkedList {
+    fn from(d: VecDeque<Vec<u8>>) -> Self {
+        let mut out = ChunkedList::default();
+        let mut chunk = Vec::with_capacity(LIST_CHUNK_TARGET);
+        for elem in d {
+            chunk.push(elem);
+            if chunk.len() == LIST_CHUNK_TARGET {
+                out.len += chunk.len();
+                out.chunks.push_back(ListChunk::from_vec(chunk));
+                chunk = Vec::with_capacity(LIST_CHUNK_TARGET);
+            }
+        }
+        if !chunk.is_empty() {
+            out.len += chunk.len();
+            out.chunks.push_back(ListChunk::from_vec(chunk));
+        }
+        out
+    }
+}
+
+pub struct ChunkedListIter<'a> {
+    chunks: std::collections::vec_deque::Iter<'a, ListChunk>,
+    current: Option<std::slice::Iter<'a, Vec<u8>>>,
+}
+
+impl<'a> Iterator for ChunkedListIter<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(current) = &mut self.current
+                && let Some(elem) = current.next()
+            {
+                return Some(elem.as_slice());
+            }
+            let chunk = self.chunks.next()?;
+            self.current = Some(chunk.elems.iter());
+        }
     }
 }
 
@@ -1222,7 +1428,7 @@ impl ListValue {
     pub fn get(&self, idx: usize) -> Option<&[u8]> {
         match &self.repr {
             ListRepr::Packed(p) => p.get(idx),
-            ListRepr::Deque(d) => d.get(idx).map(|v| v.as_slice()),
+            ListRepr::Deque(d) => d.get(idx),
         }
     }
 
@@ -1232,7 +1438,7 @@ impl ListValue {
             for e in p.iter() {
                 d.push_back(e.to_vec());
             }
-            self.repr = ListRepr::Deque(Arc::new(d));
+            self.repr = ListRepr::Deque(Arc::new(ChunkedList::from(d)));
         }
     }
 
@@ -1297,14 +1503,7 @@ impl ListValue {
         self.lp_bytes = base + list_lp_entry_bytes(&elem);
         match &mut self.repr {
             ListRepr::Packed(p) => p.set(idx, &elem),
-            ListRepr::Deque(d) => {
-                if let Some(slot) = Arc::make_mut(d).get_mut(idx) {
-                    *slot = elem;
-                    true
-                } else {
-                    false
-                }
-            }
+            ListRepr::Deque(d) => Arc::make_mut(d).set(idx, elem),
         }
     }
 
@@ -1334,7 +1533,7 @@ impl ListValue {
         let before = self.len();
         match &mut self.repr {
             ListRepr::Packed(p) => p.retain(&mut keep),
-            ListRepr::Deque(d) => Arc::make_mut(d).retain(|v| keep(v)),
+            ListRepr::Deque(d) => Arc::make_mut(d).retain(&mut keep),
         }
         if self.len() != before {
             self.on_remove_bulk();
@@ -1357,7 +1556,7 @@ impl ListValue {
 impl From<VecDeque<Vec<u8>>> for ListValue {
     fn from(d: VecDeque<Vec<u8>>) -> Self {
         let repr = if d.len() > PACKED_MAX_ENTRIES || d.iter().any(|e| e.len() > PACKED_MAX_VALUE) {
-            ListRepr::Deque(Arc::new(d))
+            ListRepr::Deque(Arc::new(ChunkedList::from(d)))
         } else {
             let mut p = PackedList::new();
             for e in &d {
@@ -1397,7 +1596,7 @@ impl Eq for ListValue {}
 /// Borrowing iterator over list elements, front to back.
 pub enum ListValueIter<'a> {
     Packed(PackedListIter<'a>),
-    Deque(std::collections::vec_deque::Iter<'a, Vec<u8>>),
+    Deque(ChunkedListIter<'a>),
 }
 
 impl<'a> Iterator for ListValueIter<'a> {
@@ -1405,7 +1604,7 @@ impl<'a> Iterator for ListValueIter<'a> {
     fn next(&mut self) -> Option<&'a [u8]> {
         match self {
             ListValueIter::Packed(it) => it.next(),
-            ListValueIter::Deque(it) => it.next().map(|v| v.as_slice()),
+            ListValueIter::Deque(it) => it.next(),
         }
     }
 }
@@ -1871,6 +2070,23 @@ mod tests {
             }
         };
         assert!(!std::sync::Arc::ptr_eq(source_deque, copy_deque));
+        match (
+            source_deque.chunks.front(),
+            copy_deque.chunks.front(),
+            source_deque.chunks.get(1),
+            copy_deque.chunks.get(1),
+        ) {
+            (Some(source_front), Some(copy_front), Some(source_tail), Some(copy_tail)) => {
+                assert!(!std::sync::Arc::ptr_eq(
+                    &source_front.elems,
+                    &copy_front.elems
+                ));
+                assert!(std::sync::Arc::ptr_eq(&source_tail.elems, &copy_tail.elems));
+            }
+            _ => {
+                assert!(false, "129-element deque must split into two chunks");
+            }
+        }
     }
 
     #[test]
@@ -1933,6 +2149,67 @@ mod tests {
                 let p: Vec<&[u8]> = packed.iter().collect();
                 let o: Vec<&[u8]> = oracle.iter().map(|v| v.as_slice()).collect();
                 prop_assert_eq!(p, o);
+            }
+        }
+
+        /// ListValue's promoted quicklist representation must remain a
+        /// front-to-back VecDeque isomorphism after the chunked COW change.
+        #[test]
+        fn list_value_deque_equivalent_to_vecdeque_after_promotion(ops in proptest::collection::vec(
+            (0u8..8, proptest::collection::vec(0u8..4, 0..4), any::<u8>()), 0..240)) {
+            let mut list = ListValue::default();
+            let mut oracle: VecDeque<Vec<u8>> = VecDeque::new();
+            for idx in 0..=PACKED_MAX_ENTRIES {
+                let elem = list_test_value(idx);
+                list.push_back(elem.clone());
+                oracle.push_back(elem);
+            }
+            prop_assert!(matches!(list.repr, ListRepr::Deque(_)));
+
+            for (op, elem, raw_idx) in ops {
+                let n = oracle.len();
+                let idx = if n == 0 { 0 } else { raw_idx as usize % n };
+                match op {
+                    0 => { list.push_back(elem.clone()); oracle.push_back(elem.clone()); }
+                    1 => { list.push_front(elem.clone()); oracle.push_front(elem.clone()); }
+                    2 => { prop_assert_eq!(list.pop_back(), oracle.pop_back()); }
+                    3 => { prop_assert_eq!(list.pop_front(), oracle.pop_front()); }
+                    4 => {
+                        if n > 0 {
+                            prop_assert!(list.set(idx, elem.clone()));
+                            oracle[idx] = elem.clone();
+                        }
+                    }
+                    5 => {
+                        let ins = if n == 0 { 0 } else { raw_idx as usize % (n + 1) };
+                        list.insert(ins, elem.clone());
+                        oracle.insert(ins, elem.clone());
+                    }
+                    6 => {
+                        if n > 0 {
+                            prop_assert_eq!(list.remove(idx), oracle.remove(idx));
+                        }
+                    }
+                    _ => {
+                        let keep_parity = raw_idx & 1;
+                        list.retain(|value| {
+                            value.first().copied().unwrap_or_default() & 1 == keep_parity
+                        });
+                        oracle.retain(|value| {
+                            value.first().copied().unwrap_or_default() & 1 == keep_parity
+                        });
+                    }
+                }
+                prop_assert_eq!(list.len(), oracle.len());
+                for check_idx in [0, idx, oracle.len().saturating_sub(1)] {
+                    prop_assert_eq!(
+                        list.get(check_idx),
+                        oracle.get(check_idx).map(Vec::as_slice)
+                    );
+                }
+                let got: Vec<&[u8]> = list.iter().collect();
+                let want: Vec<&[u8]> = oracle.iter().map(Vec::as_slice).collect();
+                prop_assert_eq!(got, want);
             }
         }
     }
