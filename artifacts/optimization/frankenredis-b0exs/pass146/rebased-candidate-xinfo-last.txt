@@ -1,0 +1,6 @@
+mode=Xinfo
+pending=50000
+consumers=1000
+iters=20
+elapsed_ns=3713267
+checksum=123804727951931195330734227879209542864

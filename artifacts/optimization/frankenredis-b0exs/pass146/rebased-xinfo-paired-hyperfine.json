@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/frankenredis-b0exs-origin-62f285cf8/target-b0exs-origin-peer-harness/release/xpending-summary-harness --mode xinfo --pending 50000 --consumers 1000 --iters 20",
+      "mean": 9.16553930978,
+      "stddev": 0.346439391719385,
+      "median": 9.07806865878,
+      "user": 9.14193452,
+      "system": 0.01278522,
+      "min": 8.75563044778,
+      "max": 9.66808596778,
+      "times": [
+        9.66808596778,
+        9.32394972078,
+        8.75563044778,
+        9.07806865878,
+        9.00196175378
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "target-b0exs-rebased-candidate-harness/release/xpending-summary-harness --mode xinfo --pending 50000 --consumers 1000 --iters 20",
+      "mean": 0.043570660580000004,
+      "stddev": 0.002973242860963633,
+      "median": 0.04309233078000001,
+      "user": 0.03480071999999999,
+      "system": 0.00867622,
+      "min": 0.040126788780000006,
+      "max": 0.04835243678000001,
+      "times": [
+        0.04309233078000001,
+        0.04835243678000001,
+        0.043005185779999996,
+        0.040126788780000006,
+        0.04327656078
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

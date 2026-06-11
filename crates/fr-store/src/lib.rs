@@ -419,6 +419,54 @@ pub struct StreamGroup {
     /// every consumer create/touch path.
     pub consumer_metadata: BTreeMap<Vec<u8>, StreamConsumerMetadata>,
     pub pending: StreamPendingEntries,
+    pending_by_consumer: BTreeMap<Vec<u8>, usize>,
+}
+
+impl StreamGroup {
+    fn pending_counts_from_entries(pending: &StreamPendingEntries) -> BTreeMap<Vec<u8>, usize> {
+        let mut counts = BTreeMap::new();
+        for pending_entry in pending.values() {
+            *counts.entry(pending_entry.consumer.clone()).or_default() += 1;
+        }
+        counts
+    }
+
+    fn increment_pending_consumer(&mut self, consumer: &[u8]) {
+        *self
+            .pending_by_consumer
+            .entry(consumer.to_vec())
+            .or_default() += 1;
+    }
+
+    fn decrement_pending_consumer(&mut self, consumer: &[u8]) {
+        let Some(count) = self.pending_by_consumer.get_mut(consumer) else {
+            debug_assert!(false, "pending consumer count missing");
+            return;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            self.pending_by_consumer.remove(consumer);
+        }
+    }
+
+    fn pending_count_for_consumer(&self, consumer: &[u8]) -> usize {
+        self.pending_by_consumer
+            .get(consumer)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn pending_summary_consumers(&self) -> Vec<StreamPendingSummaryConsumer> {
+        debug_assert_eq!(
+            self.pending_by_consumer,
+            Self::pending_counts_from_entries(&self.pending),
+            "stream PEL per-consumer count drift"
+        );
+        self.pending_by_consumer
+            .iter()
+            .map(|(consumer, &count)| (consumer.clone(), count))
+            .collect()
+    }
 }
 
 /// (frankenredis-377jl) Append the AOF/RDB rewrite commands that reconstruct a
@@ -486,6 +534,8 @@ pub type StreamGroupInfo = (Vec<u8>, usize, usize, StreamId, Option<u64>);
 /// idle_ms (since last seen), and inactive_ms_or_neg_one (-1 when
 /// the consumer was never active).
 pub type StreamConsumerInfoEx = (Vec<u8>, usize, u64, i64);
+type StreamPelSummaryCacheKey = (Vec<u8>, Vec<u8>);
+type StreamPelSummaryCacheValue = Vec<StreamPendingSummaryConsumer>;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ZaddOptions {
@@ -3545,7 +3595,7 @@ pub struct Store {
     /// change, so repeated XPENDING (dashboard/monitoring polling) is O(1) after
     /// the first call. Invalidation over-clears (safe); a debug_assert in
     /// xpending_summary cross-checks the cache against a fresh scan in test/dev.
-    stream_pel_summary_cache: HashMap<(Vec<u8>, Vec<u8>), Vec<(Vec<u8>, usize)>>,
+    stream_pel_summary_cache: HashMap<StreamPelSummaryCacheKey, StreamPelSummaryCacheValue>,
     /// Per-stream last-generated-id set by XSETID (may be higher than max entry).
     stream_last_ids: HashMap<Vec<u8>, StreamId>,
     /// Per-stream cumulative entries-added counter used by XINFO.
@@ -12860,6 +12910,7 @@ impl Store {
                 entries_read,
                 consumers,
                 consumer_metadata,
+                pending_by_consumer: StreamGroup::pending_counts_from_entries(&pending),
                 pending,
             },
         );
@@ -13412,18 +13463,17 @@ impl Store {
                     // `nack->delivery_count = 1` (t_stream.c) rather than bumping.
                     // So set the counter to 1 in both cases — re-delivery tracking
                     // belongs to XCLAIM/XAUTOCLAIM and history reads, not '>'.
-                    let pending_entry =
-                        group_state
-                            .pending
-                            .entry(*id)
-                            .or_insert_with(|| StreamPendingEntry {
-                                consumer: consumer.clone(),
-                                deliveries: 1,
-                                last_delivered_ms: now_ms,
-                            });
-                    pending_entry.consumer = consumer.clone();
-                    pending_entry.deliveries = 1;
-                    pending_entry.last_delivered_ms = now_ms;
+                    if let Some(old) = group_state.pending.insert(
+                        *id,
+                        StreamPendingEntry {
+                            consumer: consumer.clone(),
+                            deliveries: 1,
+                            last_delivered_ms: now_ms,
+                        },
+                    ) {
+                        group_state.decrement_pending_consumer(&old.consumer);
+                    }
+                    group_state.increment_pending_consumer(&consumer);
                 }
             }
             // Consumer group state was mutated — mark dirty for AOF persistence
@@ -13514,55 +13564,25 @@ impl Store {
         }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
-                Value::Stream(_) => {}
-                _ => return Err(StoreError::WrongType),
+                Value::Stream(_) => {
+                    let Some(groups) = self.stream_groups.get(key) else {
+                        return Ok(None);
+                    };
+                    let Some(group_state) = groups.get(group) else {
+                        return Ok(None);
+                    };
+
+                    Ok(Some((
+                        group_state.pending.len(),
+                        group_state.pending.first_key_value().map(|(id, _)| *id),
+                        group_state.pending.last_key_value().map(|(id, _)| *id),
+                        group_state.pending_summary_consumers(),
+                    )))
+                }
+                _ => Err(StoreError::WrongType),
             },
-            None => return Ok(None),
+            None => Ok(None),
         }
-        let Some(groups) = self.stream_groups.get(key) else {
-            return Ok(None);
-        };
-        let Some(group_state) = groups.get(group) else {
-            return Ok(None);
-        };
-
-        let len = group_state.pending.len();
-        let first = group_state.pending.first_key_value().map(|(id, _)| *id);
-        let last = group_state.pending.last_key_value().map(|(id, _)| *id);
-
-        // (frankenredis-b0exs) Per-consumer histogram. Counting BORROWS each
-        // entry's consumer name (clone only the few distinct keys); a
-        // `BTreeMap<&[u8]>` orders keys by the same byte comparison as a
-        // `BTreeMap<Vec<u8>>`, so the output order is unchanged.
-        let compute = |gs: &StreamGroup| -> Vec<(Vec<u8>, usize)> {
-            let mut per: BTreeMap<&[u8], usize> = BTreeMap::new();
-            for pe in gs.pending.values() {
-                *per.entry(pe.consumer.as_slice()).or_default() += 1;
-            }
-            per.into_iter()
-                .map(|(consumer, count)| (consumer.to_vec(), count))
-                .collect()
-        };
-
-        // Serve the cached histogram for this (key, group) when present —
-        // invalidated by every PEL-mutating command — else compute O(P) once and
-        // memoize, so repeated XPENDING is O(consumers) like redis.
-        let cache_key = (key.to_vec(), group.to_vec());
-        let per_consumer = if let Some(cached) = self.stream_pel_summary_cache.get(&cache_key) {
-            debug_assert_eq!(
-                *cached,
-                compute(group_state),
-                "stale XPENDING per-consumer cache for {key:?}/{group:?}"
-            );
-            cached.clone()
-        } else {
-            let computed = compute(group_state);
-            self.stream_pel_summary_cache
-                .insert(cache_key, computed.clone());
-            computed
-        };
-
-        Ok(Some((len, first, last, per_consumer)))
     }
 
     /// (frankenredis-b0exs) Drop the memoized XPENDING summary for `(key, group)`.
@@ -13704,7 +13724,9 @@ impl Store {
 
         for id in ids {
             let Some(fields) = stream_records.get(id) else {
-                group_state.pending.remove(id);
+                if let Some(removed) = group_state.pending.remove(id) {
+                    group_state.decrement_pending_consumer(&removed.consumer);
+                }
                 continue;
             };
 
@@ -13719,14 +13741,17 @@ impl Store {
                 // `= retrycount` / no-op (JUSTID). So a default XCLAIM FORCE that
                 // creates the entry lands at 2, JUSTID at 1, RETRYCOUNT at n.
                 // Seeding at 0 here under-counted the default/JUSTID cases by one.
-                group_state.pending.insert(
+                if let Some(old) = group_state.pending.insert(
                     *id,
                     StreamPendingEntry {
                         consumer: consumer_vec.clone(),
                         deliveries: 1,
                         last_delivered_ms: now_ms,
                     },
-                );
+                ) {
+                    group_state.decrement_pending_consumer(&old.consumer);
+                }
+                group_state.increment_pending_consumer(&consumer_vec);
                 created_by_force = true;
             }
 
@@ -13740,6 +13765,7 @@ impl Store {
                 }
             }
 
+            let old_consumer = pending_entry.consumer.clone();
             pending_entry.consumer = consumer_vec.clone();
             pending_entry.last_delivered_ms = if let Some(time_ms) = options.time_ms {
                 time_ms
@@ -13753,6 +13779,10 @@ impl Store {
                 pending_entry.deliveries = retry_count;
             } else if !options.justid {
                 pending_entry.deliveries = pending_entry.deliveries.saturating_add(1);
+            }
+            if !created_by_force && old_consumer != consumer_vec {
+                group_state.decrement_pending_consumer(&old_consumer);
+                group_state.increment_pending_consumer(&consumer_vec);
             }
 
             claimed_ids.push(*id);
@@ -13868,7 +13898,9 @@ impl Store {
         };
 
         for id in &deleted_ids {
-            group_state.pending.remove(id);
+            if let Some(removed) = group_state.pending.remove(id) {
+                group_state.decrement_pending_consumer(&removed.consumer);
+            }
         }
 
         let consumer_vec = consumer.to_vec();
@@ -13897,10 +13929,15 @@ impl Store {
 
         for id in &claimed_ids {
             if let Some(pending_entry) = group_state.pending.get_mut(id) {
+                let old_consumer = pending_entry.consumer.clone();
                 pending_entry.consumer = consumer_vec.clone();
                 pending_entry.last_delivered_ms = now_ms;
                 if !options.justid {
                     pending_entry.deliveries = pending_entry.deliveries.saturating_add(1);
+                }
+                if old_consumer != consumer_vec {
+                    group_state.decrement_pending_consumer(&old_consumer);
+                    group_state.increment_pending_consumer(&consumer_vec);
                 }
             }
         }
@@ -14057,6 +14094,7 @@ impl Store {
                 entries_read,
                 consumers: BTreeSet::new(),
                 consumer_metadata: BTreeMap::new(),
+                pending_by_consumer: BTreeMap::new(),
                 pending: BTreeMap::new(),
             },
         );
@@ -14259,27 +14297,22 @@ impl Store {
                     };
                     let mut result: Vec<StreamConsumerInfoEx> = Vec::new();
                     for consumer_name in &group_state.consumers {
-                        // Count pending entries for this consumer
-                        let pending_count = group_state
-                            .pending
-                            .values()
-                            .filter(|pe| pe.consumer == *consumer_name)
-                            .count();
+                        let pending_count = group_state.pending_count_for_consumer(consumer_name);
                         // (frankenredis-p4dpj) Idle = ms since seen_time;
                         // for legacy compatibility (consumers restored
                         // from RDB with seen_time = 0) fall back to
                         // the last_delivered_ms across pending entries.
                         let meta = group_state.consumer_metadata.get(consumer_name);
-                        let last_delivery = group_state
-                            .pending
-                            .values()
-                            .filter(|pe| pe.consumer == *consumer_name)
-                            .map(|pe| pe.last_delivered_ms)
-                            .max()
-                            .unwrap_or(0);
                         let idle_ms = match meta {
                             Some(m) if m.seen_time_ms > 0 => now_ms.saturating_sub(m.seen_time_ms),
                             _ => {
+                                let last_delivery = group_state
+                                    .pending
+                                    .values()
+                                    .filter(|pe| pe.consumer == *consumer_name)
+                                    .map(|pe| pe.last_delivered_ms)
+                                    .max()
+                                    .unwrap_or(0);
                                 if last_delivery > 0 {
                                     now_ms.saturating_sub(last_delivery)
                                 } else {
@@ -14338,6 +14371,7 @@ impl Store {
                     // (frankenredis-p4dpj) Drop the metadata alongside.
                     group_state.consumer_metadata.remove(consumer);
                     let mut removed_pending = 0_u64;
+                    let cached_removed_pending = group_state.pending_count_for_consumer(consumer);
                     group_state.pending.retain(|_, pending_entry| {
                         let keep = pending_entry.consumer.as_slice() != consumer;
                         if !keep {
@@ -14345,6 +14379,10 @@ impl Store {
                         }
                         keep
                     });
+                    if cached_removed_pending > 0 {
+                        group_state.pending_by_consumer.remove(consumer);
+                    }
+                    debug_assert_eq!(removed_pending as usize, cached_removed_pending);
                     // (frankenredis-xgdelcon-dirty) Upstream t_stream.c::
                     // xgroupCommand bumps server.dirty (and fires the
                     // "xgroup-delconsumer" event) once whenever the consumer
@@ -14387,7 +14425,8 @@ impl Store {
                     };
                     let mut acked = 0usize;
                     for id in ids {
-                        if group_state.pending.remove(id).is_some() {
+                        if let Some(removed) = group_state.pending.remove(id) {
+                            group_state.decrement_pending_consumer(&removed.consumer);
                             acked += 1;
                         }
                     }
@@ -18660,6 +18699,7 @@ fn restore_stream_groups(
             entries_read: group.entries_read,
             consumers: consumers_set,
             consumer_metadata,
+            pending_by_consumer: StreamGroup::pending_counts_from_entries(&pending),
             pending,
         };
         if restored.insert(group_name, restored_group).is_some() {
@@ -29493,6 +29533,7 @@ mod tests {
                 entries_read: None,
                 consumers: cset,
                 consumer_metadata: BTreeMap::new(),
+                pending_by_consumer: StreamGroup::pending_counts_from_entries(&pending),
                 pending,
             };
             let mut got = Vec::new();
@@ -29538,6 +29579,7 @@ mod tests {
             entries_read: None,
             consumers: cset,
             consumer_metadata: BTreeMap::new(),
+            pending_by_consumer: StreamGroup::pending_counts_from_entries(&pending),
             pending,
         };
         let reps = 200;
@@ -32338,6 +32380,7 @@ mod tests {
                     last_delivered_ms: 10,
                 },
             );
+            group_state.increment_pending_consumer(b"c1");
         }
 
         let first = store

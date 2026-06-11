@@ -1,0 +1,6 @@
+mode=Summary
+pending=50000
+consumers=1000
+iters=1000
+elapsed_ns=35882448
+checksum=70118617827056699816530358189322286168
