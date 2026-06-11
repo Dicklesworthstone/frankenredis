@@ -1,0 +1,4 @@
+Benchmark 1: OUT=artifacts/optimization/frankenredis-3cc4w/pass130/baseline/run SERVER=/tmp/rch_target_fr_3cc4w_p130_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_3cc4w_p130_current/release-perf/fr-bench PORT=6750 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-3cc4w/pass130/baseline/baseline-get-p16-c50-1m-last.json KEY_PREFIX=3cc4w:p130:baseline artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh
+  Time (mean ± σ):     654.8 ms ±  31.0 ms    [User: 1065.0 ms, System: 2228.2 ms]
+  Range (min … max):   617.0 ms … 705.6 ms    10 runs
+ 

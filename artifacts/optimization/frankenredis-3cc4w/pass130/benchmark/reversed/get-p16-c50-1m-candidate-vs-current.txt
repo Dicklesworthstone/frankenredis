@@ -1,0 +1,11 @@
+Benchmark 1: OUT=artifacts/optimization/frankenredis-3cc4w/pass130/benchmark/reversed/candidate-run SERVER=/tmp/rch_target_fr_3cc4w_p130_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_3cc4w_p130_candidate/release-perf/fr-bench PORT=6756 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-3cc4w/pass130/benchmark/reversed/candidate-get-p16-c50-1m-last.json KEY_PREFIX=3cc4w:p130:reversed:candidate artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh
+  Time (mean ± σ):     641.3 ms ±  34.0 ms    [User: 1021.3 ms, System: 2142.2 ms]
+  Range (min … max):   594.5 ms … 704.7 ms    10 runs
+ 
+Benchmark 2: OUT=artifacts/optimization/frankenredis-3cc4w/pass130/benchmark/reversed/current-run SERVER=/tmp/rch_target_fr_3cc4w_p130_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_3cc4w_p130_current/release-perf/fr-bench PORT=6757 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-3cc4w/pass130/benchmark/reversed/current-get-p16-c50-1m-last.json KEY_PREFIX=3cc4w:p130:reversed:current artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh
+  Time (mean ± σ):     677.3 ms ±  31.3 ms    [User: 1040.8 ms, System: 2168.5 ms]
+  Range (min … max):   628.7 ms … 711.6 ms    10 runs
+ 
+Summary
+  OUT=artifacts/optimization/frankenredis-3cc4w/pass130/benchmark/reversed/candidate-run SERVER=/tmp/rch_target_fr_3cc4w_p130_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_3cc4w_p130_candidate/release-perf/fr-bench PORT=6756 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-3cc4w/pass130/benchmark/reversed/candidate-get-p16-c50-1m-last.json KEY_PREFIX=3cc4w:p130:reversed:candidate artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh ran
+    1.06 ± 0.07 times faster than OUT=artifacts/optimization/frankenredis-3cc4w/pass130/benchmark/reversed/current-run SERVER=/tmp/rch_target_fr_3cc4w_p130_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_3cc4w_p130_current/release-perf/fr-bench PORT=6757 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-3cc4w/pass130/benchmark/reversed/current-get-p16-c50-1m-last.json KEY_PREFIX=3cc4w:p130:reversed:current artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh

@@ -1,0 +1,2 @@
+8587a57563629a5f0674c348760cd25ad54b43ad6b4179b0f05c7cfda49c031a  artifacts/optimization/frankenredis-3cc4w/pass130/validation/current-golden.resp
+8587a57563629a5f0674c348760cd25ad54b43ad6b4179b0f05c7cfda49c031a  artifacts/optimization/frankenredis-3cc4w/pass130/validation/candidate-golden.resp
