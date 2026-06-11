@@ -19946,10 +19946,36 @@ fn estimate_listpack_entry_bytes(bytes: &[u8]) -> usize {
 }
 
 fn estimate_listpack_score_bytes(score: f64) -> usize {
-    if score.is_finite() && score.fract() == 0.0 {
-        format!("{score:.0}").len().max(1)
+    // (frankenredis-zset-lp-score-memusage) A zset listpack stores the score
+    // as a FULL listpack entry, not just its digits. lpAppend auto-encodes an
+    // integer-looking element with listpack integer encoding (total 1..=9
+    // bytes by magnitude); other scores become a string entry. Either way a
+    // 1-byte backlen trailer follows (every score entry is <= ~21 bytes).
+    // Returning only the string length undercounted every score, skewing
+    // MEMORY USAGE near jemalloc size-class boundaries (e.g. n=3/5/8 by -8).
+    // Use the exact bytes redis would append (d2string): integer-valued
+    // doubles that fit i64 render as a plain integer (ll2string), everything
+    // else via %.17g — so e.g. 1e20 is "1e+20", which lpStringToInt64 rejects
+    // and listpack stores as a string entry, matching redis.
+    let s = redis_score_to_string(score);
+    if let Ok(value) = s.parse::<i64>() {
+        // Mirror lpEncodeIntegerGetType's width buckets (listpack.c).
+        let encoded = if (0..=127).contains(&value) {
+            1
+        } else if (-4096..=4095).contains(&value) {
+            2
+        } else if (-32768..=32767).contains(&value) {
+            3
+        } else if (-8_388_608..=8_388_607).contains(&value) {
+            4
+        } else if (i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&value) {
+            5
+        } else {
+            9
+        };
+        encoded + 1
     } else {
-        redis_score_to_string(score).len().max(1)
+        estimate_listpack_entry_bytes(s.as_bytes())
     }
 }
 
@@ -22532,8 +22558,9 @@ mod tests {
         StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value,
         REDIS_OBJECT_OVERHEAD_BYTES, REDIS_SCORE_BYTES, SetValue, ValueType, decode_length,
         decode_listpack_strings, decode_rdb_string, encode_db_key, encode_intset, encode_length,
-        encode_listpack_strings, estimate_set_memory_usage_bytes, hll_sparse_decode,
-        redis_allocation_size,
+        encode_listpack_strings, estimate_listpack_entry_bytes, estimate_listpack_score_bytes,
+        estimate_set_memory_usage_bytes, hll_sparse_decode, redis_allocation_size,
+        redis_score_to_string,
     };
 
     fn group_read_options(
@@ -23707,6 +23734,40 @@ mod tests {
             estimate_set_memory_usage_bytes(&SetValue::Int(vec![1, 2, 3]))
                 < REDIS_OBJECT_OVERHEAD_BYTES + redis_allocation_size(8 + 3 * REDIS_SCORE_BYTES)
         );
+    }
+
+    #[test]
+    fn zset_listpack_score_entry_models_listpack_encoding() {
+        // (frankenredis-zset-lp-score-memusage) A zset listpack stores the
+        // score as a full listpack entry: integer-looking scores use listpack
+        // integer encoding (total 1..=9 bytes by magnitude), others a string
+        // entry, plus a 1-byte backlen. Previously only the digit/string length
+        // was counted, undercounting every score.
+        // 7-bit ints (0..=127): 1-byte encoding + 1 backlen = 2
+        assert_eq!(estimate_listpack_score_bytes(0.0), 2);
+        assert_eq!(estimate_listpack_score_bytes(127.0), 2);
+        // 13-bit (|v| <= 4095): 2 + 1 = 3
+        assert_eq!(estimate_listpack_score_bytes(128.0), 3);
+        assert_eq!(estimate_listpack_score_bytes(-4096.0), 3);
+        // 16-bit: 3 + 1 = 4
+        assert_eq!(estimate_listpack_score_bytes(30000.0), 4);
+        // 24-bit: 4 + 1 = 5
+        assert_eq!(estimate_listpack_score_bytes(1_000_000.0), 5);
+        // 32-bit: 5 + 1 = 6
+        assert_eq!(estimate_listpack_score_bytes(2_000_000_000.0), 6);
+        // 64-bit: 9 + 1 = 10
+        assert_eq!(estimate_listpack_score_bytes(5_000_000_000.0), 10);
+        // non-integer score -> string entry (d2string bytes + 2)
+        let frac = redis_score_to_string(3.14159);
+        assert_eq!(
+            estimate_listpack_score_bytes(3.14159),
+            estimate_listpack_entry_bytes(frac.as_bytes())
+        );
+        // 1e20 renders as "1e+20" (d2string), a 5-byte string entry -> 5 + 2
+        assert_eq!(redis_score_to_string(1e20), "1e+20");
+        assert_eq!(estimate_listpack_score_bytes(1e20), 7);
+        // every variant is strictly larger than the old length-only model
+        assert!(estimate_listpack_score_bytes(0.0) > "0".len());
     }
 
     #[test]
