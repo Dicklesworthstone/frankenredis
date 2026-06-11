@@ -23579,11 +23579,14 @@ fn eval_cmd(
     // eval_script_error_reply only recognises a handful of compile-error
     // string prefixes; lua_eval Parser also emits "<X> expected near …",
     // "malformed number near …", etc. that previously fell through.
-    if let Err(parse_err) = lua_eval::compile_check(script) {
-        return Ok(RespFrame::Error(format!(
-            "ERR Error compiling script (new function): user_script:1: {parse_err}"
-        )));
-    }
+    let compiled = match lua_eval::compile_lua_chunk_cached(script) {
+        Ok(compiled) => compiled,
+        Err(parse_err) => {
+            return Ok(RespFrame::Error(format!(
+                "ERR Error compiling script (new function): user_script:1: {parse_err}"
+            )));
+        }
+    };
 
     // Cache the script (Redis caches on EVAL too)
     store.script_load(script);
@@ -23596,7 +23599,8 @@ fn eval_cmd(
     let previous_read_only = store.script_read_only;
     store.script_read_only = read_only_script || script_shebang_has_no_writes_flag(script);
     store.script_nesting_level += 1;
-    let result = match lua_eval::eval_script(script, &keys_vec, &args_vec, store, now_ms) {
+    let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
+    {
         Ok(frame) => Ok(frame),
         Err(e) => Ok(eval_script_error_reply(script, e, store.lua_error_line)),
     };
@@ -23638,13 +23642,22 @@ fn evalsha_cmd(
             ));
         }
     };
+    let compiled = match lua_eval::compile_lua_chunk_cached(&script) {
+        Ok(compiled) => compiled,
+        Err(parse_err) => {
+            return Ok(RespFrame::Error(format!(
+                "ERR Error compiling script (new function): user_script:1: {parse_err}"
+            )));
+        }
+    };
 
     let keys_vec: Vec<Vec<u8>> = keys.to_vec();
     let args_vec: Vec<Vec<u8>> = args.to_vec();
     let previous_read_only = store.script_read_only;
     store.script_read_only = read_only_script || script_shebang_has_no_writes_flag(&script);
     store.script_nesting_level += 1;
-    let result = match lua_eval::eval_script(&script, &keys_vec, &args_vec, store, now_ms) {
+    let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
+    {
         Ok(frame) => Ok(frame),
         Err(e) => Ok(eval_script_error_reply(&script, e, store.lua_error_line)),
     };

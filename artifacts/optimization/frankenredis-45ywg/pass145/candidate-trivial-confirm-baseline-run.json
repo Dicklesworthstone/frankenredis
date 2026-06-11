@@ -1,0 +1,28 @@
+{
+  "elapsed_seconds": 3.681590824970044,
+  "golden": {
+    "sha256": "6e20e28314978053709dee6ae7958ababe6c7c76b73e7e136152696cabceda08",
+    "transcript": [
+      {
+        "name": "trivial",
+        "raw_hex": "3a310d0a"
+      },
+      {
+        "name": "loop1000",
+        "raw_hex": "3a3530303530300d0a"
+      },
+      {
+        "name": "table200",
+        "raw_hex": "3a32303130300d0a"
+      },
+      {
+        "name": "closures",
+        "raw_hex": "2a330d0a3a310d0a3a320d0a3a330d0a"
+      }
+    ]
+  },
+  "iterations": 50000,
+  "mode": "trivial",
+  "ops_per_second": 13581.085562491,
+  "response_sha256": "88f83877fa95bf37809dee3cc81b091304de68a38e721e1c629e290645dfcdad"
+}

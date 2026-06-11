@@ -5,6 +5,7 @@
 // while, repeat/until, tables, function calls/definitions, redis.call/pcall,
 // KEYS/ARGV, and standard library functions.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
@@ -3622,17 +3623,11 @@ impl<'a> LuaState<'a> {
     }
 
     pub fn execute(&mut self, source: &[u8]) -> Result<LuaValue, String> {
-        let mut lexer = Lexer::new(source);
-        let (tokens, lines) = lexer.tokenize_all_with_lines()?;
-        let mut parser = Parser::with_lines(tokens, lines);
-        let mut stmts = parser.parse_block()?;
-        if !parser.check(&Token::Eof) {
-            return Err(format!(
-                "'<eof>' expected near '{}'",
-                token_display(parser.peek())
-            ));
-        }
-        resolve_lua_local_slots(&mut stmts);
+        let stmts = compile_lua_chunk_cached(source)?;
+        self.execute_compiled(stmts.as_ref())
+    }
+
+    fn execute_compiled(&mut self, stmts: &Block) -> Result<LuaValue, String> {
         // (frankenredis-j02x9) Lock the globals table — from this point
         // forward any user-script write to globals raises a readonly-
         // table error and any read of an undefined global raises the
@@ -3665,7 +3660,7 @@ impl<'a> LuaState<'a> {
         // frame for the purposes of luaL_where; push before exec_block so
         // error(msg, N) at the bottom of the call stack can find it.
         self.lua_frame_kinds.push(true);
-        let outcome = self.exec_block(&stmts, &mut env, &mut varargs);
+        let outcome = self.exec_block(stmts, &mut env, &mut varargs);
         self.lua_frame_kinds.pop();
         match outcome {
             Ok(ControlFlow::Return(vals)) => Ok(vals.into_iter().next().unwrap_or(LuaValue::Nil)),
@@ -12303,10 +12298,83 @@ impl Drop for LuaState<'_> {
     }
 }
 
+// ── Compiled chunk cache ────────────────────────────────────────────────
+
+const LUA_COMPILED_CHUNK_CACHE_MAX: usize = 256;
+
+thread_local! {
+    static LUA_COMPILED_CHUNK_CACHE: RefCell<HashMap<Vec<u8>, Rc<Block>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn lua_execution_source(script: &[u8]) -> Cow<'_, [u8]> {
+    if script.starts_with(b"#!") {
+        let line_end = script
+            .iter()
+            .position(|&b| b == b'\n')
+            .unwrap_or(script.len());
+        let mut stripped = Vec::with_capacity(script.len());
+        stripped.extend(std::iter::repeat_n(b' ', line_end));
+        stripped.extend_from_slice(&script[line_end..]);
+        Cow::Owned(stripped)
+    } else {
+        Cow::Borrowed(script)
+    }
+}
+
+fn parse_lua_chunk(source: &[u8]) -> Result<Block, String> {
+    let mut lexer = Lexer::new(source);
+    let (tokens, lines) = lexer.tokenize_all_with_lines()?;
+    let mut parser = Parser::with_lines(tokens, lines);
+    let mut stmts = parser.parse_block()?;
+    if !parser.check(&Token::Eof) {
+        return Err(format!(
+            "'<eof>' expected near '{}'",
+            token_display(parser.peek())
+        ));
+    }
+    resolve_lua_local_slots(&mut stmts);
+    Ok(stmts)
+}
+
+pub(crate) fn compile_lua_chunk_cached(script: &[u8]) -> Result<Rc<Block>, String> {
+    let source = lua_execution_source(script);
+    if let Some(cached) =
+        LUA_COMPILED_CHUNK_CACHE.with(|cache| cache.borrow().get(source.as_ref()).cloned())
+    {
+        return Ok(cached);
+    }
+
+    let compiled = Rc::new(parse_lua_chunk(source.as_ref())?);
+    let cached = LUA_COMPILED_CHUNK_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(cached) = cache.get(source.as_ref()) {
+            return cached.clone();
+        }
+        if cache.len() >= LUA_COMPILED_CHUNK_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(source.as_ref().to_vec(), compiled.clone());
+        compiled
+    });
+    Ok(cached)
+}
+
 // ── Public entry point ──────────────────────────────────────────────────
 
 pub fn eval_script(
     script: &[u8],
+    keys: &[Vec<u8>],
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, String> {
+    let compiled = compile_lua_chunk_cached(script)?;
+    eval_compiled_script(compiled, keys, argv, store, now_ms)
+}
+
+pub(crate) fn eval_compiled_script(
+    compiled: Rc<Block>,
     keys: &[Vec<u8>],
     argv: &[Vec<u8>],
     store: &mut Store,
@@ -12324,32 +12392,10 @@ pub fn eval_script(
     let argv_vals: Vec<LuaValue> = argv.iter().map(|a| LuaValue::Str(a.clone())).collect();
     state.set_keys_argv(keys_vals, argv_vals);
 
-    // Strip a Redis 7.0+ Lua shebang line if present; upstream Lua
-    // parses `#!...\n` as a comment, but our minimal interpreter
-    // doesn't. The flag-honouring side of the shebang is handled
-    // upstream of this call in fr-command::eval_cmd. Replace the
-    // shebang line with whitespace of the same length so reported
-    // line numbers stay aligned with the user's script.
-    // (br-frankenredis-r75v)
-    let stripped: Vec<u8>;
-    let executed_script: &[u8] = if script.starts_with(b"#!") {
-        let line_end = script
-            .iter()
-            .position(|&b| b == b'\n')
-            .unwrap_or(script.len());
-        let mut tmp = Vec::with_capacity(script.len());
-        tmp.extend(std::iter::repeat_n(b' ', line_end));
-        tmp.extend_from_slice(&script[line_end..]);
-        stripped = tmp;
-        &stripped
-    } else {
-        script
-    };
-
     // (frankenredis-m7oy8) On error, record the failing statement's source line
     // so the command layer can stamp it into the `on @user_script:N.` envelope
     // suffix (covers prefix-less errors like "invalid key to 'next'" too).
-    let result = match state.execute(executed_script) {
+    let result = match state.execute_compiled(compiled.as_ref()) {
         Ok(value) => value,
         Err(err) => {
             let line = state.current_line;
@@ -12428,31 +12474,7 @@ pub(crate) fn downconvert_lua_reply_to_resp2(frame: RespFrame) -> RespFrame {
 /// performed by `eval_script` so SCRIPT LOAD validates the same source
 /// EVAL would later run. (frankenredis-scrldch)
 pub fn compile_check(script: &[u8]) -> Result<(), String> {
-    let stripped: Vec<u8>;
-    let source: &[u8] = if script.starts_with(b"#!") {
-        let line_end = script
-            .iter()
-            .position(|&b| b == b'\n')
-            .unwrap_or(script.len());
-        let mut tmp = Vec::with_capacity(script.len());
-        tmp.extend(std::iter::repeat_n(b' ', line_end));
-        tmp.extend_from_slice(&script[line_end..]);
-        stripped = tmp;
-        &stripped
-    } else {
-        script
-    };
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.tokenize_all()?;
-    let mut parser = Parser::new(tokens);
-    let _ = parser.parse_block()?;
-    if !parser.check(&Token::Eof) {
-        return Err(format!(
-            "'<eof>' expected near '{}'",
-            token_display(parser.peek())
-        ));
-    }
-    Ok(())
+    compile_lua_chunk_cached(script).map(|_| ())
 }
 
 #[cfg(test)]
@@ -15147,6 +15169,23 @@ end
         for src in ["f()", "(function() end)()", "f(1)", "obj:m()"] {
             compile_check(src.as_bytes()).unwrap_or_else(|e| panic!("{src:?} should compile: {e}"));
         }
+    }
+
+    #[test]
+    fn compiled_chunk_cache_reuses_ast_but_rebinds_call_state_45ywg() {
+        let script = b"local arg = ARGV[1]; return arg";
+        let first = super::compile_lua_chunk_cached(script).expect("compile first");
+        let second = super::compile_lua_chunk_cached(script).expect("compile second");
+        assert!(
+            std::rc::Rc::ptr_eq(&first, &second),
+            "expected repeated compile to reuse cached AST"
+        );
+
+        let mut store = Store::new();
+        let one = eval_script(script, &[], &[b"one".to_vec()], &mut store, 0).unwrap();
+        let two = eval_script(script, &[], &[b"two".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(one, RespFrame::BulkString(Some(b"one".to_vec())));
+        assert_eq!(two, RespFrame::BulkString(Some(b"two".to_vec())));
     }
 
     #[test]
