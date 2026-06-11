@@ -5238,6 +5238,42 @@ fn drive_client_output(
         return;
     }
 
+    // (frankenredis-fi8qp) Write-readiness scheduling: try ONE inline
+    // non-blocking write before the writer-pool handoff. For the overwhelmingly
+    // common small-reply case the socket accepts the whole buffer in a single
+    // `write`, so we skip the writer-pool channel enqueue, the worker wakeup, and
+    // its eventfd `Waker::wake()` syscall — the per-batch overhead the pipelined
+    // GET/SET path pays on every reply today. A partial / `WouldBlock` write
+    // falls through to hand the unwritten suffix to the writer pool (below) or to
+    // arm WRITABLE: identical bytes, identical per-client ordering (nothing is in
+    // flight — `writer_in_flight()` was false above). Gated on `allow_sync_fallback`
+    // so callers that must not write synchronously keep the prior behaviour.
+    if allow_sync_fallback {
+        match conn.try_flush() {
+            Ok(true) => {
+                ctx.runtime.note_write_event();
+                ctx.write_tokens.remove(&token);
+                conn.session.output_buffer_bytes = 0;
+                let _ = ctx.poll.registry().reregister(
+                    &mut conn.stream,
+                    token,
+                    Interest::READABLE,
+                );
+                return;
+            }
+            Ok(false) => {
+                // Partial write: `conn.write_buf` now holds the unwritten suffix;
+                // fall through to offload that remainder (writer pool / WRITABLE).
+            }
+            Err(_) => {
+                conn.write_failed = true;
+                conn.closing = true;
+                ctx.closing_tokens.insert(token);
+                return;
+            }
+        }
+    }
+
     if let Some(pool) = ctx.writer_pool
         && let Some(writer_stream) = conn.writer_stream.take()
     {
