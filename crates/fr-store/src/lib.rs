@@ -1778,6 +1778,27 @@ impl SetValue {
         }
     }
 
+    /// (frankenredis-spopfast) Remove and return the member at encoding index
+    /// `idx` — the by-position counterpart of `shift_remove`, used by SPOP to
+    /// avoid the `iter().nth(idx)` O(idx) scan (and, for intsets, the
+    /// i64→bytes→i64 round-trip plus binary search that `get_index` +
+    /// `shift_remove` would pay to re-find a member we already located). The
+    /// removed element and the post-removal order are identical to
+    /// `let m = get_index(idx); shift_remove(&m)`: `Vec::remove` keeps the
+    /// intset ascending, and the generic path still shifts.
+    pub(crate) fn pop_index(&mut self, idx: usize) -> Option<Vec<u8>> {
+        match self {
+            SetValue::Int(v) => {
+                if idx < v.len() {
+                    Some(set_int_to_bytes(v.remove(idx)))
+                } else {
+                    None
+                }
+            }
+            SetValue::Generic(s) => s.pop_index(idx),
+        }
+    }
+
     /// The underlying `IndexSet` for the generic encoding (used by the
     /// listpack-vs-hashtable encoding helpers); `None` for an intset.
     pub(crate) fn as_generic(&self) -> Option<&GenericSet> {
@@ -10157,10 +10178,11 @@ impl Store {
                             return Ok(None);
                         }
                         let idx = (rand_val as usize) % s.len();
-                        let member = s.iter().nth(idx).map(|m| m.into_owned());
-                        if let Some(ref m) = member {
-                            s.shift_remove(m);
-                        }
+                        // (frankenredis-spopfast) Remove by position: O(1) locate
+                        // instead of `iter().nth(idx)`, and no intset
+                        // bytes→i64→bytes round-trip. Same element, same residual
+                        // order as the prior get-then-shift_remove.
+                        let member = s.pop_index(idx);
                         if s.is_empty() {
                             should_remove_key = true;
                         }

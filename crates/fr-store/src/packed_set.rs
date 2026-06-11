@@ -278,6 +278,24 @@ impl GenericSet {
         }
     }
 
+    /// (frankenredis-spopfast) Remove and return the member at `idx`. For the
+    /// `Hash` (hashtable) encoding this is an O(1) `swap_remove_index` instead
+    /// of an O(n) shift: a hashtable-encoded set's iteration order is already
+    /// unspecified (redis's `dict` is unordered too), so SPOP's random removal
+    /// need not preserve order — turning SPOP on a large set from O(n) into O(1)
+    /// per element. The `Packed` (listpack) encoding keeps the order-preserving
+    /// remove, matching redis's ordered listpack delete on small sets.
+    pub fn pop_index(&mut self, idx: usize) -> Option<Vec<u8>> {
+        match self {
+            GenericSet::Packed(p) => {
+                let member = p.iter().nth(idx)?.to_vec();
+                p.remove(&member);
+                Some(member)
+            }
+            GenericSet::Hash(h) => h.swap_remove_index(idx),
+        }
+    }
+
     pub fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
         match self {
             GenericSet::Packed(p) => {
