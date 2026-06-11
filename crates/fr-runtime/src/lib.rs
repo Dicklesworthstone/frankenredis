@@ -20250,7 +20250,15 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
             Value::Set(s) => {
                 let mut members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
                 members.sort();
-                RdbValue::Set(members)
+                // (frankenredis-39is8) Save by ACTUAL encoding: a hashtable set
+                // emits the plain RDB_TYPE_SET so the encoding survives a
+                // save/load even when its content would otherwise re-derive to a
+                // smaller encoding. intset/listpack sets keep `Set` (re-derived).
+                if store.set_is_hashtable_encoded(&key) {
+                    RdbValue::SetHashtable(members)
+                } else {
+                    RdbValue::Set(members)
+                }
             }
             Value::Hash(h) => {
                 // Probe the per-field TTL map with a (physical_key, _) prefix
@@ -20401,6 +20409,22 @@ fn apply_rdb_entries_to_store(
                 store
                     .sadd(&key, members, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
+                if let Some(expires_at_ms) = entry.expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+            }
+            RdbValue::SetHashtable(members) => {
+                // (frankenredis-39is8) Plain RDB_TYPE_SET decodes to a hashtable
+                // set: replay the members, then pin the encoding so the load does
+                // not re-derive a smaller one from content.
+                store
+                    .sadd(&key, members, now_ms)
+                    .map_err(|_| PersistError::InvalidFrame)?;
+                store.force_set_hashtable_encoding(&key);
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
                         &key,
@@ -36651,6 +36675,73 @@ mod tests {
         assert_eq!(
             cluster,
             RespFrame::BulkString(Some(run_id.as_bytes().to_vec()))
+        );
+    }
+
+    #[test]
+    fn rdb_hashtable_set_survives_save_load_when_content_fits_listpack() {
+        // (frankenredis-39is8) A set that is HASHTABLE-encoded because it
+        // int-overflowed its intset limit, but whose final content (8 small ints)
+        // would re-derive to listpack under the larger listpack limit, must
+        // round-trip a whole-DB save/load as `hashtable` — the save emits the
+        // plain RDB_TYPE_SET (SetHashtable) by ACTUAL encoding, and the load pins
+        // it. Without the fix the rebuild re-derives `listpack`.
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"set-max-intset-entries", b"4"]),
+            1,
+        );
+        rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"set-max-listpack-entries", b"128"]),
+            1,
+        );
+        // Incremental adds so the intset overflow (-> hashtable) actually fires.
+        for i in 0..8 {
+            rt.execute_frame(command(&[b"SADD", b"s", format!("{i}").as_bytes()]), 1);
+        }
+        assert_eq!(
+            rt.execute_frame(command(&[b"OBJECT", b"ENCODING", b"s"]), 1),
+            RespFrame::BulkString(Some(b"hashtable".to_vec())),
+            "8 ints over set-max-intset-entries=4 must be hashtable"
+        );
+
+        // CONSTRUCT must emit SetHashtable (save by encoding, not re-derive).
+        let entries = store_to_rdb_entries(&mut rt.server.store, 1);
+        let set_entry = entries
+            .iter()
+            .find(|e| e.key == b"s")
+            .expect("set entry present");
+        assert!(
+            matches!(set_entry.value, RdbValue::SetHashtable(_)),
+            "hashtable set must encode as SetHashtable, got {:?}",
+            set_entry.value
+        );
+
+        // Full whole-DB save/load round-trip (the DEBUG RELOAD / restart path).
+        let dir = std::env::temp_dir().join("fr_runtime_rdb_set_ht_roundtrip_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let rdb_path = dir.join("set_ht.rdb");
+        write_rdb_file(&rdb_path, &entries, &[]).expect("write rdb");
+
+        let mut rt2 = Runtime::default_strict();
+        rt2.execute_frame(
+            command(&[b"CONFIG", b"SET", b"set-max-intset-entries", b"4"]),
+            1,
+        );
+        rt2.execute_frame(
+            command(&[b"CONFIG", b"SET", b"set-max-listpack-entries", b"128"]),
+            1,
+        );
+        rt2.set_rdb_path(rdb_path);
+        assert_eq!(rt2.load_rdb(50).expect("load should succeed"), 1);
+        assert_eq!(
+            rt2.execute_frame(command(&[b"OBJECT", b"ENCODING", b"s"]), 100),
+            RespFrame::BulkString(Some(b"hashtable".to_vec())),
+            "hashtable set must reload as hashtable, not listpack"
+        );
+        assert_eq!(
+            rt2.execute_frame(command(&[b"SCARD", b"s"]), 100),
+            RespFrame::Integer(8),
         );
     }
 

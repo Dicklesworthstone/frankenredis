@@ -9440,6 +9440,41 @@ impl Store {
 
     // ── Set operations ──────────────────────────────────────────
 
+    /// Whether the set at `key` is currently HASHTABLE-encoded (non-mutating, no
+    /// keyspace-stat side effects). Mirrors the `Value::Set` arm of
+    /// `object_encoding`. Used by the RDB save path to record the encoding so a
+    /// hashtable set whose content happens to fit listpack survives a save/load
+    /// round-trip. (frankenredis-39is8)
+    #[must_use]
+    pub fn set_is_hashtable_encoded(&self, key: &[u8]) -> bool {
+        self.entries.get(key).is_some_and(|entry| {
+            let Value::Set(s) = &entry.value else {
+                return false;
+            };
+            entry.force_set_hashtable_encoding
+                || (!entry.force_set_listpack_encoding
+                    && !Self::set_fits_intset(s, self.set_max_intset_entries)
+                    && !Self::set_fits_listpack(
+                        s,
+                        self.set_max_listpack_entries,
+                        self.set_max_listpack_value,
+                    ))
+        })
+    }
+
+    /// Force the set at `key` to report `hashtable` encoding (sticky). Used by the
+    /// RDB load path to restore a set decoded from `RDB_TYPE_SET` (the plain,
+    /// hashtable-encoded type) after its members are replayed via `sadd`, so the
+    /// load does not re-derive a smaller encoding from content. (frankenredis-39is8)
+    pub fn force_set_hashtable_encoding(&mut self, key: &[u8]) {
+        if let Some(entry) = self.entries.get_mut(key)
+            && matches!(entry.value, Value::Set(_))
+        {
+            entry.force_set_hashtable_encoding = true;
+            entry.force_set_listpack_encoding = false;
+        }
+    }
+
     pub fn sadd<M: AsRef<[u8]>>(
         &mut self,
         key: &[u8],

@@ -1014,6 +1014,13 @@ pub enum RdbValue {
     String(Vec<u8>),
     List(Vec<Vec<u8>>),
     Set(Vec<Vec<u8>>),
+    /// A set that is HASHTABLE-encoded (upstream `RDB_TYPE_SET`, the plain
+    /// count-prefixed member list). Distinct from `Set` (which re-derives
+    /// intset/listpack/hashtable from content+thresholds) so a sticky hashtable
+    /// set whose final content happens to fit listpack still round-trips as
+    /// `hashtable` across a whole-DB save/load — upstream saves by ENCODING, not
+    /// by re-deriving from content. (frankenredis-39is8)
+    SetHashtable(Vec<Vec<u8>>),
     Hash(Vec<(Vec<u8>, Vec<u8>)>),
     /// Redis 7.4 hash with per-field TTLs. Each tuple is
     /// (field, value, Some(abs_deadline_ms)) for a TTL'd field or
@@ -1507,6 +1514,18 @@ fn encode_rdb_internal(
                         for member in members {
                             rdb_encode_string(&mut buf, member);
                         }
+                    }
+                }
+                RdbValue::SetHashtable(members) => {
+                    // (frankenredis-39is8) A hashtable-encoded set always emits
+                    // the plain RDB_TYPE_SET, regardless of whether its content
+                    // would otherwise fit intset/listpack — matching upstream's
+                    // save-by-encoding so the encoding survives a save/load.
+                    buf.push(RDB_TYPE_SET);
+                    rdb_encode_string(&mut buf, &entry.key);
+                    rdb_encode_length(&mut buf, members.len());
+                    for member in members {
+                        rdb_encode_string(&mut buf, member);
                     }
                 }
                 RdbValue::Hash(fields) => {
@@ -2803,7 +2822,11 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                             cursor += c;
                             members.push(m);
                         }
-                        RdbValue::Set(members)
+                        // (frankenredis-39is8) Plain RDB_TYPE_SET is the hashtable
+                        // encoding; preserve it so the load doesn't re-derive a
+                        // smaller encoding from content. INTSET/LISTPACK arms keep
+                        // the plain `Set` (re-derive intset/listpack).
+                        RdbValue::SetHashtable(members)
                     }
                     RDB_TYPE_HASH => {
                         let (count, c) =
@@ -5921,7 +5944,14 @@ mod tests {
                     (RdbValue::List(a), RdbValue::List(b)) => {
                         assert_eq!(a, b, "[{label}] {name}: list drift")
                     }
-                    (RdbValue::Set(a), RdbValue::Set(b)) => {
+                    // A plain-RDB_TYPE_SET set decodes to SetHashtable, so a `Set`
+                    // input that didn't fit listpack/intset round-trips to
+                    // SetHashtable; compare members regardless of which set
+                    // variant each side is. (frankenredis-39is8)
+                    (
+                        RdbValue::Set(a) | RdbValue::SetHashtable(a),
+                        RdbValue::Set(b) | RdbValue::SetHashtable(b),
+                    ) => {
                         let mut x = a.clone();
                         let mut y = b.clone();
                         x.sort();
@@ -6266,7 +6296,9 @@ mod tests {
             let (kind, len) = match &entries[0].value {
                 RdbValue::String(_) => ("String", 1),
                 RdbValue::List(items) => ("List", items.len()),
-                RdbValue::Set(members) => ("Set", members.len()),
+                // A plain RDB_TYPE_SET now decodes to SetHashtable; both are
+                // "Set" for this round-trip kind check. (frankenredis-39is8)
+                RdbValue::Set(members) | RdbValue::SetHashtable(members) => ("Set", members.len()),
                 RdbValue::Hash(fields) => ("Hash", fields.len()),
                 RdbValue::SortedSet(members) => ("SortedSet", members.len()),
                 _ => ("Other", 0),
