@@ -32,19 +32,6 @@ allocator-internal / data-dependent classes that are normalised below:
   - LOLWUT art is version/impl-specific (documented WONTFIX) — reply kind only
   - both-error replies compare by error CODE word
 
-KNOWN ISSUE (allowlisted, reported as KNOWN-ISSUE, not a failure):
-  - MEMORY USAGE on an intset-encoded set over-reports vs redis 7.2.4
-    (e.g. {1,2,3} -> redis 64, fr 80). Root cause: fr-store
-    estimate_set_memory_usage_bytes() models every integer member at 8 bytes
-    (REDIS_SCORE_BYTES) but a redis intset packs all members at ONE minimal
-    width (INT16=2 / INT32=4 / INT64=8, the widest member). Fix: in the
-    `members.len() <= 512 && all-int` branch, replace the `* REDIS_SCORE_BYTES`
-    payload with `8 + len * width`, where `width` is computed exactly like
-    encode_intset() (2 if all fit i16, else 4 if all fit i32, else 8). Verified:
-    that reproduces redis 64 (3xi16: alloc(8+6=14)=16, +48) and 80 (10xi16:
-    alloc(8+20=28)=32, +48). fr-store/src/lib.rs is owned by another agent;
-    fix handed off. Remove this allowlist entry once it lands.
-
 Usage: cluster_admin_parity_gate.py [--bin PATH] [--redis-bin PATH]
 Exit 0 if the surface matches redis 7.2.4 (modulo the normalisations), else 1.
 """
@@ -183,11 +170,10 @@ TESTS = [
     (["MEMORY", "USAGE", "list1"], "exact"),
     (["MEMORY", "USAGE", "h1"], "exact"),
     (["MEMORY", "USAGE", "s1"], "exact"),
-    # KNOWN ISSUE: intset-encoded sets over-report MEMORY USAGE — fr models every
-    # member at 8 bytes (REDIS_SCORE_BYTES) but redis's intset packs members at
-    # the single minimal width (INT16=2/INT32=4/INT64=8). e.g. {1,2,3} → redis 64,
-    # fr 80. Root cause + verified fix handed to fr-store owner (see gate header).
-    (["MEMORY", "USAGE", "iset"], "known_intset_memusage"),
+    # intset-encoded set MEMORY USAGE now byte-exact after the width fix
+    # (frankenredis-intset-memusage-width): redis packs members at the single
+    # minimal width (INT16=2/INT32=4/INT64=8), matched by fr-store.
+    (["MEMORY", "USAGE", "iset"], "exact"),
     (["MEMORY", "USAGE", "z1"], "exact"),
     (["MEMORY", "USAGE", "stream1"], "exact"),
     (["MEMORY", "USAGE", "nokey"], "exact"),
@@ -229,10 +215,6 @@ def _members(reply):
 
 def equivalent(tag, ro, rf):
     if ro == rf:
-        return True
-    if tag == "known_intset_memusage":
-        # Allowlisted divergence (intset MEMORY USAGE width) — reported, not failed.
-        # When the fr-store size model is fixed, ro == rf above makes this exact.
         return True
     if ro[0] == 'error' and rf[0] == 'error':
         if ro[1].split(' ', 1)[0] == rf[1].split(' ', 1)[0]:

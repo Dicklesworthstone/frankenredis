@@ -19800,7 +19800,34 @@ fn estimate_set_memory_usage_bytes(members: &SetValue) -> usize {
             .iter()
             .all(|member| parse_i64(member.as_ref()).is_ok())
     {
-        let payload = 8usize.saturating_add(members.len().saturating_mul(REDIS_SCORE_BYTES));
+        // A redis intset stores every member at ONE encoding width — the
+        // minimal width that fits the widest member (INT16=2, INT32=4,
+        // INT64=8) — not 8 bytes each. Mirror encode_intset()'s selection so
+        // MEMORY USAGE matches redis 7.2.4's intsetBlobLen (sizeof(intset) +
+        // encoding * length). Hard-coding REDIS_SCORE_BYTES (8) over-reported
+        // small-int sets (e.g. {1,2,3} -> 80 vs redis 64).
+        // (frankenredis-intset-memusage-width)
+        let mut all_i16 = true;
+        let mut all_i32 = true;
+        for member in members.iter() {
+            // The guard above proved every member parses as i64.
+            if let Ok(value) = parse_i64(member.as_ref()) {
+                if i16::try_from(value).is_err() {
+                    all_i16 = false;
+                }
+                if i32::try_from(value).is_err() {
+                    all_i32 = false;
+                }
+            }
+        }
+        let intset_width = if all_i16 {
+            2usize
+        } else if all_i32 {
+            4usize
+        } else {
+            8usize
+        };
+        let payload = 8usize.saturating_add(members.len().saturating_mul(intset_width));
         return REDIS_OBJECT_OVERHEAD_BYTES.saturating_add(redis_allocation_size(payload));
     }
     if members.len() <= 128 && members.iter().all(|member| member.len() <= 64) {
@@ -22503,8 +22530,10 @@ mod tests {
         RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, ScoreBound, Store,
         StoreError, StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions,
         StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value,
-        ValueType, decode_length, decode_listpack_strings, decode_rdb_string, encode_db_key,
-        encode_intset, encode_length, encode_listpack_strings, hll_sparse_decode,
+        REDIS_OBJECT_OVERHEAD_BYTES, REDIS_SCORE_BYTES, SetValue, ValueType, decode_length,
+        decode_listpack_strings, decode_rdb_string, encode_db_key, encode_intset, encode_length,
+        encode_listpack_strings, estimate_set_memory_usage_bytes, hll_sparse_decode,
+        redis_allocation_size,
     };
 
     fn group_read_options(
@@ -23641,6 +23670,43 @@ mod tests {
         let mut store = Store::new();
         store.sadd(b"t", &[b"1".to_vec()], 0).expect("sadd");
         assert_eq!(store.object_encoding(b"t", 0), Some("intset"));
+    }
+
+    #[test]
+    fn intset_memory_usage_uses_minimal_encoding_width() {
+        // (frankenredis-intset-memusage-width) A redis intset packs every
+        // member at ONE width = the widest member's minimal int encoding
+        // (INT16=2 / INT32=4 / INT64=8), so the VALUE estimate is
+        // REDIS_OBJECT_OVERHEAD + redis_allocation_size(8 + len*width).
+        // Previously fr used 8 bytes/member, over-reporting small-int sets.
+        let val = |width: usize, len: usize| {
+            REDIS_OBJECT_OVERHEAD_BYTES + redis_allocation_size(8 + len * width)
+        };
+        // {1,2,3}: all fit i16 -> width 2 -> 16 + alloc(14)=16 -> 32
+        assert_eq!(
+            estimate_set_memory_usage_bytes(&SetValue::Int(vec![1, 2, 3])),
+            val(2, 3)
+        );
+        // 10 small ints -> width 2 -> 16 + alloc(28)=32 -> 48
+        assert_eq!(
+            estimate_set_memory_usage_bytes(&SetValue::Int((0..10).collect())),
+            val(2, 10)
+        );
+        // a value needing INT32 -> width 4
+        assert_eq!(
+            estimate_set_memory_usage_bytes(&SetValue::Int(vec![1, 100_000])),
+            val(4, 2)
+        );
+        // a value needing INT64 -> width 8
+        assert_eq!(
+            estimate_set_memory_usage_bytes(&SetValue::Int(vec![1, 5_000_000_000])),
+            val(8, 2)
+        );
+        // sanity: small-int width is strictly smaller than the old 8-wide model
+        assert!(
+            estimate_set_memory_usage_bytes(&SetValue::Int(vec![1, 2, 3]))
+                < REDIS_OBJECT_OVERHEAD_BYTES + redis_allocation_size(8 + 3 * REDIS_SCORE_BYTES)
+        );
     }
 
     #[test]
