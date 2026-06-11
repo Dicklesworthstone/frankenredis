@@ -1321,6 +1321,29 @@ impl SortedSet {
                 .filter(|(_, score)| score_in_range(*score, min, max))
                 .count(),
             SortedSetInner::Full(full) => {
+                // (frankenredis-i5896) O(log n) rank-difference count when the
+                // order-statistic treap is warm — mirrors redis's
+                // zslGetRank(max) - zslGetRank(min). The never-stored min/max
+                // sentinels make `rank_of` land exactly on the inclusive/
+                // exclusive boundary `score_bounds()` uses, so no presence test
+                // is needed: `below` = members the lower bound excludes,
+                // `atorbelow` = members the upper bound includes. The size guard
+                // skips this path if `ordered` holds injected corrupted sentinel
+                // entries (test-only) that `dict` does not, deferring to the
+                // filtering scan. Cold treap also falls back — no regression.
+                if let Some(tree) = &full.rank_tree
+                    && tree.len() == full.dict.len()
+                {
+                    let below = match min {
+                        ScoreBound::Inclusive(s) => tree.rank_of(&ScoreMember::min_for_score(s)),
+                        ScoreBound::Exclusive(s) => tree.rank_of(&ScoreMember::max_for_score(s)),
+                    };
+                    let atorbelow = match max {
+                        ScoreBound::Inclusive(s) => tree.rank_of(&ScoreMember::max_for_score(s)),
+                        ScoreBound::Exclusive(s) => tree.rank_of(&ScoreMember::min_for_score(s)),
+                    };
+                    return atorbelow.saturating_sub(below);
+                }
                 let (lower, upper) = Self::score_bounds(min, max);
                 full.ordered
                     .range((lower, upper))
@@ -1492,6 +1515,11 @@ impl ZRankTreap {
         } else {
             self.nodes[n].size
         }
+    }
+
+    /// Total number of keys in the treap (root subtree size). (frankenredis-i5896)
+    fn len(&self) -> usize {
+        self.size(self.root) as usize
     }
 
     #[inline]
@@ -29496,6 +29524,88 @@ mod tests {
                     "warm edge mn={mn:?} mx={mx:?}"
                 );
             }
+        }
+    }
+
+    // (frankenredis-i5896) The warm-treap O(log n) rank-diff path of
+    // `score_bound_count` (ZCOUNT) must agree byte-for-byte with the cold range
+    // scan and the brute filter across inclusive/exclusive bounds, ±inf, and
+    // inverted/empty ranges.
+    #[test]
+    fn score_bound_count_warm_treap_rank_diff_isomorphic_i5896() {
+        use super::{ScoreBound, SortedSet};
+        fn brute(zs: &SortedSet, min: ScoreBound, max: ScoreBound) -> usize {
+            zs.iter_asc()
+                .filter(|(_, score)| min.check_min(*score) && max.check_max(*score))
+                .count()
+        }
+        let mut s: u64 = 0xD1B5_4A32_D192_ED03;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let bnd = |meta: u64, v: f64| -> ScoreBound {
+            if meta % 2 == 0 {
+                ScoreBound::Inclusive(v)
+            } else {
+                ScoreBound::Exclusive(v)
+            }
+        };
+        for _ in 0..400 {
+            let n = 160 + (next() % 90) as usize; // > Packed threshold → Full
+            let mut warm = SortedSet::new();
+            let mut cold = SortedSet::new();
+            for _ in 0..n {
+                let klen = 1 + (next() % 4) as usize;
+                let member: Vec<u8> =
+                    (0..klen).map(|_| b"abcde"[(next() % 5) as usize]).collect();
+                // small integer scores so many members share scores (ties)
+                let score = (next() % 7) as f64;
+                warm.insert(member.clone(), score);
+                cold.insert(member, score);
+            }
+            // Warm ONLY `warm`'s treap.
+            let _ = warm.rank(b"a");
+            for _ in 0..14 {
+                let a = (next() % 9) as f64 - 1.0; // -1..=7, brackets the score span
+                let b = (next() % 9) as f64 - 1.0;
+                // The warm rank-diff path handles ANY bounds (incl inverted/
+                // equal, which `score_bounds` maps to an empty BTree range that
+                // the cold scan would PANIC on — production guards that in
+                // Store::zcount). So check warm vs brute on arbitrary bounds...
+                let mn = bnd(next(), a);
+                let mx = bnd(next(), b);
+                assert_eq!(
+                    warm.score_bound_count(mn, mx),
+                    brute(&cold, mn, mx),
+                    "warm rank-diff != brute min={mn:?} max={mx:?}"
+                );
+                // ...and warm == cold == brute on strictly-ordered bounds, where
+                // the cold scan is well-defined.
+                let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                let mn2 = ScoreBound::Inclusive(lo);
+                let mx2 = ScoreBound::Inclusive(hi);
+                let r = brute(&cold, mn2, mx2);
+                assert_eq!(warm.score_bound_count(mn2, mx2), r, "warm incl");
+                assert_eq!(cold.score_bound_count(mn2, mx2), r, "cold incl");
+            }
+            // ±inf whole-set + inverted empties.
+            let all = ScoreBound::Inclusive(f64::NEG_INFINITY);
+            let allmax = ScoreBound::Inclusive(f64::INFINITY);
+            assert_eq!(
+                warm.score_bound_count(all, allmax),
+                brute(&cold, all, allmax)
+            );
+            assert_eq!(
+                warm.score_bound_count(ScoreBound::Inclusive(5.0), ScoreBound::Inclusive(2.0)),
+                0
+            );
+            assert_eq!(
+                warm.score_bound_count(ScoreBound::Exclusive(3.0), ScoreBound::Exclusive(3.0)),
+                0
+            );
         }
     }
 
