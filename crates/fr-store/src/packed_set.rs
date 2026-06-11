@@ -900,6 +900,7 @@ impl<'a> Iterator for PackedListIter<'a> {
 }
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 /// Storage for a list: a packed buffer while small, promoting to a
 /// `VecDeque<Vec<u8>>` (which keeps O(1) ends for large lists, redis's quicklist
@@ -907,10 +908,19 @@ use std::collections::VecDeque;
 /// front-to-back order and identical push/pop/get/insert/remove/retain
 /// semantics, so LRANGE/LINDEX/LPOP/etc. output is byte-for-byte unchanged.
 /// (frankenredis-9mh3o step 4)
+///
+/// The large `Deque` payload is `Arc`-wrapped so that cloning a `ListValue`
+/// (COPY, eviction sampling, any `Value::clone`) is an O(1) refcount bump
+/// instead of a per-element heap clone of every `Vec<u8>` — redis pays a bulk
+/// per-listpack-node memcpy at COPY time; we defer the copy lazily to the first
+/// mutation via `Arc::make_mut`. A uniquely-owned list (the normal push-built
+/// path, refcount 1) make_mut's for free, so LPUSH/RPUSH do NOT regress; only
+/// the first write to a list that is currently *shared* (post-COPY) pays the
+/// deep clone — exactly when correctness demands isolation. (frankenredis-k8yfq)
 #[derive(Clone, Debug)]
 enum ListRepr {
     Packed(PackedList),
-    Deque(VecDeque<Vec<u8>>),
+    Deque(Arc<VecDeque<Vec<u8>>>),
 }
 
 impl Default for ListRepr {
@@ -1222,7 +1232,7 @@ impl ListValue {
             for e in p.iter() {
                 d.push_back(e.to_vec());
             }
-            self.repr = ListRepr::Deque(d);
+            self.repr = ListRepr::Deque(Arc::new(d));
         }
     }
 
@@ -1239,7 +1249,7 @@ impl ListValue {
         self.maybe_promote(elem.len());
         match &mut self.repr {
             ListRepr::Packed(p) => p.push_back(&elem),
-            ListRepr::Deque(d) => d.push_back(elem),
+            ListRepr::Deque(d) => Arc::make_mut(d).push_back(elem),
         }
     }
 
@@ -1248,14 +1258,14 @@ impl ListValue {
         self.maybe_promote(elem.len());
         match &mut self.repr {
             ListRepr::Packed(p) => p.push_front(&elem),
-            ListRepr::Deque(d) => d.push_front(elem),
+            ListRepr::Deque(d) => Arc::make_mut(d).push_front(elem),
         }
     }
 
     pub fn pop_front(&mut self) -> Option<Vec<u8>> {
         let removed = match &mut self.repr {
             ListRepr::Packed(p) => p.pop_front(),
-            ListRepr::Deque(d) => d.pop_front(),
+            ListRepr::Deque(d) => Arc::make_mut(d).pop_front(),
         };
         if let Some(ref r) = removed {
             self.on_remove_one(r);
@@ -1266,7 +1276,7 @@ impl ListValue {
     pub fn pop_back(&mut self) -> Option<Vec<u8>> {
         let removed = match &mut self.repr {
             ListRepr::Packed(p) => p.pop_back(),
-            ListRepr::Deque(d) => d.pop_back(),
+            ListRepr::Deque(d) => Arc::make_mut(d).pop_back(),
         };
         if let Some(ref r) = removed {
             self.on_remove_one(r);
@@ -1288,7 +1298,7 @@ impl ListValue {
         match &mut self.repr {
             ListRepr::Packed(p) => p.set(idx, &elem),
             ListRepr::Deque(d) => {
-                if let Some(slot) = d.get_mut(idx) {
+                if let Some(slot) = Arc::make_mut(d).get_mut(idx) {
                     *slot = elem;
                     true
                 } else {
@@ -1305,14 +1315,14 @@ impl ListValue {
         self.maybe_promote(elem.len());
         match &mut self.repr {
             ListRepr::Packed(p) => p.insert(idx, &elem),
-            ListRepr::Deque(d) => d.insert(idx, elem),
+            ListRepr::Deque(d) => Arc::make_mut(d).insert(idx, elem),
         }
     }
 
     pub fn remove(&mut self, idx: usize) -> Option<Vec<u8>> {
         let removed = match &mut self.repr {
             ListRepr::Packed(p) => p.remove(idx),
-            ListRepr::Deque(d) => d.remove(idx),
+            ListRepr::Deque(d) => Arc::make_mut(d).remove(idx),
         };
         if let Some(ref r) = removed {
             self.on_remove_one(r);
@@ -1324,7 +1334,7 @@ impl ListValue {
         let before = self.len();
         match &mut self.repr {
             ListRepr::Packed(p) => p.retain(&mut keep),
-            ListRepr::Deque(d) => d.retain(|v| keep(v)),
+            ListRepr::Deque(d) => Arc::make_mut(d).retain(|v| keep(v)),
         }
         if self.len() != before {
             self.on_remove_bulk();
@@ -1347,7 +1357,7 @@ impl ListValue {
 impl From<VecDeque<Vec<u8>>> for ListValue {
     fn from(d: VecDeque<Vec<u8>>) -> Self {
         let repr = if d.len() > PACKED_MAX_ENTRIES || d.iter().any(|e| e.len() > PACKED_MAX_VALUE) {
-            ListRepr::Deque(d)
+            ListRepr::Deque(Arc::new(d))
         } else {
             let mut p = PackedList::new();
             for e in &d {
@@ -1680,7 +1690,10 @@ impl<'a> Iterator for PackedZSetIter<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PackedList, PackedStrMap, PackedStrSet, PackedZSet, zset_cmp};
+    use super::{
+        ListRepr, ListValue, PACKED_MAX_ENTRIES, PackedList, PackedStrMap, PackedStrSet,
+        PackedZSet, zset_cmp,
+    };
     use indexmap::{IndexMap, IndexSet};
     use proptest::prelude::*;
     use std::collections::VecDeque;
@@ -1818,6 +1831,53 @@ mod tests {
         assert_eq!(l.pop_front(), Some(b"x".to_vec()));
         assert_eq!(l.iter().collect::<Vec<_>>(), vec![&b"BBBBB"[..]]);
         assert_eq!(l.len(), 1);
+    }
+
+    #[test]
+    fn list_value_clone_shares_large_deque_until_mutation() {
+        let mut source = ListValue::default();
+        for idx in 0..=PACKED_MAX_ENTRIES {
+            source.push_back(format!("{idx:08}").into_bytes());
+        }
+
+        let mut copy = source.clone();
+        let (ListRepr::Deque(source_deque), ListRepr::Deque(copy_deque)) =
+            (&source.repr, &copy.repr)
+        else {
+            panic!("large list must promote to deque storage");
+        };
+        assert!(std::sync::Arc::ptr_eq(source_deque, copy_deque));
+
+        assert!(copy.set(0, b"changed".to_vec()));
+        assert_eq!(source.get(0), Some(&b"00000000"[..]));
+        assert_eq!(copy.get(0), Some(&b"changed"[..]));
+
+        let (ListRepr::Deque(source_deque), ListRepr::Deque(copy_deque)) =
+            (&source.repr, &copy.repr)
+        else {
+            panic!("large list must stay in deque storage");
+        };
+        assert!(!std::sync::Arc::ptr_eq(source_deque, copy_deque));
+    }
+
+    #[test]
+    fn list_value_cow_mutations_preserve_independent_order() {
+        let mut left = ListValue::default();
+        let original_len = PACKED_MAX_ENTRIES + 1;
+        for idx in 0..original_len {
+            left.push_back(format!("{idx:08}").into_bytes());
+        }
+        let mut right = left.clone();
+
+        assert_eq!(left.pop_front(), Some(b"00000000".to_vec()));
+        right.push_front(b"prefix__".to_vec());
+        right.push_back(b"suffix__".to_vec());
+
+        assert_eq!(left.get(0), Some(&b"00000001"[..]));
+        assert_eq!(right.get(0), Some(&b"prefix__"[..]));
+        assert_eq!(right.get(right.len() - 1), Some(&b"suffix__"[..]));
+        assert_eq!(left.len(), original_len - 1);
+        assert_eq!(right.len(), original_len + 2);
     }
 
     proptest! {
