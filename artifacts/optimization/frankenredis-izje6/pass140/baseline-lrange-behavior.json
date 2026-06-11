@@ -1,0 +1,15 @@
+{
+  "items_returned": 500000,
+  "list_len": 50000,
+  "llen": 50000,
+  "lrange_head": [
+    "xxxxxxxx",
+    "xxxxxxxx",
+    "xxxxxxxx"
+  ],
+  "mode": "copy_lrange",
+  "object_encoding": "quicklist",
+  "ops": 100,
+  "payload_size": 8,
+  "range_len": 5000
+}
