@@ -4152,6 +4152,27 @@ fn preserve_store_load_context(replacement: &mut Store, original: &Store) {
     replacement.maxmemory_policy = original.maxmemory_policy;
     replacement.lfu_decay_time = original.lfu_decay_time;
     replacement.lfu_log_factor = original.lfu_log_factor;
+    copy_encoding_thresholds(replacement, original);
+    replacement.notify_keyspace_events = original.notify_keyspace_events;
+}
+
+/// Carry ONLY the encoding-threshold CONFIG SET state — the fields that govern
+/// OBJECT ENCODING when a collection is (re)built. Split out of
+/// `preserve_store_load_context` because these must also be applied to the fresh
+/// replacement store BEFORE an RDB rebuild, not just after: the rebuild replays
+/// each value through `sadd`/`hset`/`zadd`/`rpush`, and those make their
+/// listpack/intset/hashtable/quicklist decisions against the store's CURRENT
+/// config. If the rebuild runs under the fresh store's compiled defaults, a set
+/// whose member count exceeds the live `set-max-listpack-entries` rebuilds with a
+/// stuck `force_set_listpack` marker (the first non-integer member converts the
+/// default intset to listpack and the smaller live limit is never seen), so
+/// OBJECT ENCODING reports `listpack` where upstream keeps `hashtable` across
+/// DEBUG RELOAD / RDB load / replica full-sync. Hashes/zsets escaped this only
+/// because they re-derive encoding at report time. (frankenredis-63p1s) NOTE:
+/// deliberately excludes `notify_keyspace_events` — applying it before the
+/// rebuild would make the replay fire keyspace notifications, which an RDB load
+/// must not.
+fn copy_encoding_thresholds(replacement: &mut Store, original: &Store) {
     replacement.hash_max_listpack_entries = original.hash_max_listpack_entries;
     replacement.hash_max_listpack_value = original.hash_max_listpack_value;
     replacement.list_max_listpack_size = original.list_max_listpack_size;
@@ -4161,7 +4182,6 @@ fn preserve_store_load_context(replacement: &mut Store, original: &Store) {
     replacement.zset_max_listpack_entries = original.zset_max_listpack_entries;
     replacement.zset_max_listpack_value = original.zset_max_listpack_value;
     replacement.hll_sparse_max_bytes = original.hll_sparse_max_bytes;
-    replacement.notify_keyspace_events = original.notify_keyspace_events;
 }
 
 const MAX_COMMAND_ARITY: usize = 1024 * 1024;
@@ -4427,6 +4447,10 @@ impl Runtime {
         };
         let (entries, _aux, functions) = fr_persist::read_rdb_file_with_functions(&path)?;
         let mut store = Store::new();
+        // (frankenredis-63p1s) Apply the live encoding thresholds BEFORE the
+        // rebuild so replayed collections pick their encoding under the current
+        // config, not the fresh store's compiled defaults.
+        copy_encoding_thresholds(&mut store, &self.server.store);
         let counts = apply_rdb_entries_to_store(&mut store, &entries, now_ms)?;
         // Re-register FUNCTION libraries carried in the dump so FUNCTION LIST /
         // FCALL survive a restart, matching redis. (frankenredis-tm139)
@@ -4456,6 +4480,8 @@ impl Runtime {
             return match read_rdb_file(&path) {
                 Ok((entries, _aux)) => {
                     let mut store = Store::new();
+                    // (frankenredis-63p1s) live encoding thresholds before rebuild.
+                    copy_encoding_thresholds(&mut store, &self.server.store);
                     let counts = match apply_rdb_entries_to_store(
                         &mut store,
                         &entries,
@@ -4516,6 +4542,8 @@ impl Runtime {
             }
         };
         let mut store = Store::new();
+        // (frankenredis-63p1s) live encoding thresholds before rebuild.
+        copy_encoding_thresholds(&mut store, &self.server.store);
         let counts = match apply_rdb_entries_to_store(
             &mut store,
             &decoded.entries,
@@ -4798,6 +4826,8 @@ impl Runtime {
                     return Err(PersistError::InvalidFrame);
                 }
                 let mut store = Store::new();
+                // (frankenredis-63p1s) live encoding thresholds before rebuild.
+                copy_encoding_thresholds(&mut store, &self.server.store);
                 let counts = apply_rdb_entries_to_store(&mut store, &decoded.entries, now_ms)?;
                 // (frankenredis-t1yxa) Re-register FUNCTION libraries carried in
                 // the full-sync snapshot so FCALL / FUNCTION LIST work on the
@@ -36621,6 +36651,48 @@ mod tests {
         assert_eq!(
             cluster,
             RespFrame::BulkString(Some(run_id.as_bytes().to_vec()))
+        );
+    }
+
+    #[test]
+    fn load_rdb_set_encoding_honors_live_config_thresholds() {
+        // (frankenredis-63p1s) A set whose member count exceeds the LIVE
+        // set-max-listpack-entries must reload as `hashtable`, not `listpack`.
+        // The RDB (written with default thresholds) encodes the 8-member set as
+        // SET_LISTPACK; the rebuild's sadd must run under the live config (4), so
+        // OBJECT ENCODING reports `hashtable`. Pre-fix it reported `listpack`
+        // because the rebuild ran under the fresh store's compiled default (128).
+        let dir = std::env::temp_dir().join("fr_runtime_rdb_set_encoding_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let rdb_path = dir.join("set_encoding.rdb");
+        let members: Vec<Vec<u8>> = (0..8).map(|i| format!("m{i}").into_bytes()).collect();
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"s".to_vec(),
+            value: RdbValue::Set(members),
+            expire_ms: None,
+        }];
+        write_rdb_file(&rdb_path, &entries, &[]).expect("write test rdb");
+
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"set-max-listpack-entries", b"4"]),
+            1,
+        );
+        rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"set-max-intset-entries", b"4"]),
+            1,
+        );
+        rt.set_rdb_path(rdb_path);
+
+        assert_eq!(rt.load_rdb(50).expect("load should succeed"), 1);
+        assert_eq!(
+            rt.execute_frame(command(&[b"OBJECT", b"ENCODING", b"s"]), 100),
+            RespFrame::BulkString(Some(b"hashtable".to_vec())),
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SCARD", b"s"]), 100),
+            RespFrame::Integer(8),
         );
     }
 
