@@ -9312,10 +9312,14 @@ mod tests {
     /// comparison against vendored Redis 7.2.4 is byte-equal, so those
     /// cases are no longer XFAIL'd. (br-frankenredis-nz2v)
     ///
-    /// GEOHASH's 11-char base32 identifier still diverges at the last
-    /// char because our encoder rounds differently than upstream's at
-    /// the least-significant bit; tracked under br-frankenredis-kro2.
-    /// (br-frankenredis-ufar)
+    /// GEOHASH's 11-char base32 identifier previously diverged at the last
+    /// char (our encoder rounded the least-significant bit differently than
+    /// upstream, which forces the 11th char to '0' since it encodes only 52
+    /// of the standard 55 bits). That is RESOLVED (br-frankenredis-kro2
+    /// CLOSED): `geohash_known_members` is byte-exact vs vendored Redis 7.2.4
+    /// (Palermo -> sqc8b49rny0, Catania -> sqdtr74hyu0, incl. pole/dateline
+    /// edges), so the case is no longer XFAIL'd and the live oracle now
+    /// guards GEOHASH against regression. (br-frankenredis-ufar/kro2)
     #[test]
     fn live_redis_core_geo_matches_runtime() {
         let cfg = HarnessConfig::default_paths();
@@ -9330,7 +9334,7 @@ mod tests {
                 return;
             }
         };
-        const XFAIL: &[&str] = &["geohash_known_members"];
+        const XFAIL: &[&str] = &[];
         let stable: Vec<String> = fixture
             .cases
             .iter()
