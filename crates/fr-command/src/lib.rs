@@ -49417,6 +49417,13 @@ mod tests {
             let name = entry.file_name().into_string().map_err(|name| {
                 format!("fuzz_command_option_parsers seed filename is not UTF-8: {name:?}")
             })?;
+            // Only the curated `.seed` corpus is classified by this test; the
+            // same directory accumulates untracked `cargo fuzz` coverage
+            // artifacts (hex-named) that are not hand-authored seeds and must
+            // not fail the completeness check. (frankenredis-bwbrb)
+            if !name.ends_with(".seed") {
+                continue;
+            }
             assert!(
                 listed.contains(name.as_str()),
                 "seed {name} must be listed as accept or reject"
@@ -65104,8 +65111,12 @@ mod tests {
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
         // Key should exist at now=4999
         assert_eq!(store.get(b"k", 4999).unwrap(), Some(b"v".to_vec()));
-        // Key should be expired at now=5000
-        assert_eq!(store.get(b"k", 5000).unwrap(), None);
+        // Still alive at EXACTLY the deadline: upstream expires on `now > when`,
+        // not `now >= when` (db.c keyIsExpired), so 5000 == deadline is alive.
+        // (frankenredis-bwbrb, see project_expiry_boundary_semantics / dc37c1d17)
+        assert_eq!(store.get(b"k", 5000).unwrap(), Some(b"v".to_vec()));
+        // Expired one millisecond past the deadline.
+        assert_eq!(store.get(b"k", 5001).unwrap(), None);
     }
 
     #[test]
@@ -65128,8 +65139,11 @@ mod tests {
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
         // Key should exist at now=9999
         assert_eq!(store.get(b"k", 9999).unwrap(), Some(b"v".to_vec()));
-        // Key should be expired at now=10000
-        assert_eq!(store.get(b"k", 10000).unwrap(), None);
+        // Alive at EXACTLY the deadline (upstream expires on `now > when`).
+        // (frankenredis-bwbrb, see project_expiry_boundary_semantics / dc37c1d17)
+        assert_eq!(store.get(b"k", 10000).unwrap(), Some(b"v".to_vec()));
+        // Expired one millisecond past the deadline.
+        assert_eq!(store.get(b"k", 10001).unwrap(), None);
     }
 
     #[test]
@@ -65166,8 +65180,11 @@ mod tests {
         assert_eq!(store.get(b"k", now).unwrap(), Some(b"v2".to_vec()));
         // Original TTL should be preserved — still alive at 4999
         assert_eq!(store.get(b"k", 4999).unwrap(), Some(b"v2".to_vec()));
-        // Expired at 5000
-        assert_eq!(store.get(b"k", 5000).unwrap(), None);
+        // Alive at EXACTLY the preserved deadline (upstream expires on `now > when`).
+        // (frankenredis-bwbrb, see project_expiry_boundary_semantics / dc37c1d17)
+        assert_eq!(store.get(b"k", 5000).unwrap(), Some(b"v2".to_vec()));
+        // Expired one millisecond past the deadline.
+        assert_eq!(store.get(b"k", 5001).unwrap(), None);
     }
 
     #[test]
