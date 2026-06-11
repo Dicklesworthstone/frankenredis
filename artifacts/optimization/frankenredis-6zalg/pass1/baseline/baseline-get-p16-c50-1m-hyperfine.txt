@@ -1,0 +1,4 @@
+Benchmark 1: OUT=/data/projects/frankenredis/artifacts/optimization/frankenredis-6zalg/pass1/baseline/run SERVER=/tmp/rch_target_fr_6zalg_p1_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_6zalg_p1_current/release-perf/fr-bench PORT=6790 WORKLOAD=get REQUESTS=1000000 JSON_OUT=/data/projects/frankenredis/artifacts/optimization/frankenredis-6zalg/pass1/baseline/baseline-get-p16-c50-1m-last.json KEY_PREFIX=6zalg:p1:baseline /data/projects/frankenredis/artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh
+  Time (mean ± σ):     763.3 ms ±  47.9 ms    [User: 1226.0 ms, System: 2503.3 ms]
+  Range (min … max):   701.4 ms … 829.6 ms    8 runs
+ 

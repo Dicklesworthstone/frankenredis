@@ -1,0 +1,293 @@
+  [2m2026-06-11T04:34:54.349369Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1227854 at root@109.123.245.77 (2 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:34:54.507989Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenredis-6zalg-gentleotter-20260611T0430 (hash: f627838389b535af)[0m
+    [2;3mat[0m rch/src/hook.rs:5994 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:34:54.508038Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6016 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:34:57.861891Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker vmi1227854...[0m
+    [2;3mat[0m rch/src/hook.rs:6046 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:34:57.861967Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430 -> /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430 on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:05.051878Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 7189ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:05.052002Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-bench -> /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-bench on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:06.859921Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1807ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:06.860020Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-command -> /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-command on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:08.711811Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1851ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:08.711880Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-config -> /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-config on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:10.640791Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1928ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:10.640870Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-conformance -> /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-conformance on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:12.550394Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1909ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:12.550490Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-eventloop -> /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-eventloop on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:14.382453Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1831ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:14.382554Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-expire -> /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-expire on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:16.235626Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1853ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:16.235714Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-persist -> /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-persist on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:18.167563Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1931ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:18.167658Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-protocol -> /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-protocol on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:19.986857Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1819ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:19.986957Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-repl -> /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-repl on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:21.848360Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1861ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:21.848457Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-runtime -> /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-runtime on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:23.639684Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1791ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:23.639831Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-sentinel -> /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-sentinel on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:25.518183Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1878ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:25.518274Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-server -> /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-server on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:27.363978Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1845ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:27.364058Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-store -> /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-store on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:29.296579Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1932ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:29.296627Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 91738 files, 4685054 bytes in 31425ms[0m
+    [2;3mat[0m rch/src/hook.rs:6209 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:33.514295Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: env cargo check -p fr-store --all-targets[0m
+    [2;3mat[0m rch/src/hook.rs:6252 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:33.514344Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /tmp/rch_target_fr_6zalg_p1_candidate -> /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/.rch-target-vmi1227854-job-29879662679165907-1781152497861883078-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded equivalent v1.0.2
+  Downloaded cfg-if v1.0.4
+  Downloaded bitflags v2.11.1
+  Downloaded bit-set v0.8.0
+  Downloaded fnv v1.0.7
+  Downloaded bit-vec v0.8.0
+  Downloaded autocfg v1.5.0
+  Downloaded getrandom v0.4.2
+  Downloaded once_cell v1.21.4
+  Downloaded rand_chacha v0.9.0
+  Downloaded wait-timeout v0.2.1
+  Downloaded tempfile v3.27.0
+  Downloaded rand_xorshift v0.4.0
+  Downloaded getrandom v0.3.4
+  Downloaded errno v0.3.14
+  Downloaded quick-error v1.2.3
+  Downloaded rand_core v0.9.5
+  Downloaded rusty-fork v0.3.1
+  Downloaded num-traits v0.2.19
+  Downloaded foldhash v0.1.5
+  Downloaded unarray v0.1.4
+  Downloaded fastrand v2.4.1
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded serde_core v1.0.228
+  Downloaded indexmap v2.14.0
+  Downloaded rand v0.9.4
+  Downloaded hashbrown v0.17.0
+  Downloaded proptest v1.11.0
+  Downloaded zerocopy v0.8.48
+  Downloaded regex-syntax v0.8.10
+  Downloaded rustix v1.1.4
+  Downloaded libc v0.2.185
+  Downloaded linux-raw-sys v0.12.1
+   Compiling libc v0.2.185
+    Checking cfg-if v1.0.4
+   Compiling getrandom v0.3.4
+   Compiling getrandom v0.4.2
+   Compiling rustix v1.1.4
+   Compiling zerocopy v0.8.48
+    Checking linux-raw-sys v0.12.1
+   Compiling autocfg v1.5.0
+    Checking bitflags v2.11.1
+    Checking fastrand v2.4.1
+    Checking fr-protocol v0.1.0 (/data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-protocol)
+    Checking once_cell v1.21.4
+    Checking hashbrown v0.17.0
+    Checking fnv v1.0.7
+    Checking quick-error v1.2.3
+    Checking bit-vec v0.8.0
+    Checking equivalent v1.0.2
+    Checking unarray v0.1.4
+   Compiling num-traits v0.2.19
+    Checking fr-persist v0.1.0 (/data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-persist)
+    Checking fr-sentinel v0.1.0 (/data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-sentinel)
+    Checking fr-expire v0.1.0 (/data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-expire)
+    Checking foldhash v0.1.5
+    Checking bit-set v0.8.0
+    Checking regex-syntax v0.8.10
+    Checking indexmap v2.14.0
+    Checking wait-timeout v0.2.1
+    Checking rand_core v0.9.5
+    Checking rand v0.9.4
+    Checking rand_xorshift v0.4.0
+    Checking fr-store v0.1.0 (/data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/crates/fr-store)
+    Checking tempfile v3.27.0
+    Checking rusty-fork v0.3.1
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.9.0
+    Checking proptest v1.11.0
+warning: unused import: `SetValue`
+     --> crates/fr-store/src/lib.rs:28120:21
+      |
+28120 |         use super::{SetValue, intersect_sorted_i64};
+      |                     ^^^^^^^^
+      |
+      = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:28147:13
+      |
+28147 |         let mut fnv = |g: &mut u64, x: i64| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:28312:13
+      |
+28312 |         let mut fnv = |g: &mut u64, x: i64| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:28476:13
+      |
+28476 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:28624:13
+      |
+28624 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:29030:13
+      |
+29030 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:29173:13
+      |
+29173 |         let mut fnv = |g: &mut u64, n: u64| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:29329:13
+      |
+29329 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:29457:13
+      |
+29457 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:29625:13
+      |
+29625 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/fr-store/src/lib.rs:29773:13
+      |
+29773 |         let mut fnv = |g: &mut u64, b: &[u8]| {
+      |             ----^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: `fr-store` (lib test) generated 11 warnings (run `cargo fix --lib -p fr-store --tests` to apply 11 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.25s
+  [2m2026-06-11T04:35:45.263313Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 11748ms[0m
+    [2;3mat[0m rch/src/hook.rs:6376 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:45.263721Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6425 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:45.263739Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430 on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:47.251511Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 1987ms (1 files, 1202 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:47.251547Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 1202 bytes in 1987ms[0m
+    [2;3mat[0m rch/src/hook.rs:6458 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:47.251662Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenredis-6zalg-gentleotter-20260611T0430/.rch-target-vmi1227854-job-29879662679165907-1781152497861883078-0 on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:52.897462Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 5645ms (838 files, 197226 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-11T04:35:52.897494Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 838 files, 197226 bytes in 5645ms[0m
+    [2;3mat[0m rch/src/hook.rs:6582 [2;3mon[0m ThreadId(1)
+
+[RCH] remote vmi1227854 (58.6s)

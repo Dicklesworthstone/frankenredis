@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "command": "OUT=/data/projects/frankenredis/artifacts/optimization/frankenredis-6zalg/pass1/baseline/run SERVER=/tmp/rch_target_fr_6zalg_p1_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_6zalg_p1_current/release-perf/fr-bench PORT=6790 WORKLOAD=get REQUESTS=1000000 JSON_OUT=/data/projects/frankenredis/artifacts/optimization/frankenredis-6zalg/pass1/baseline/baseline-get-p16-c50-1m-last.json KEY_PREFIX=6zalg:p1:baseline /data/projects/frankenredis/artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 0.76326692098,
+      "stddev": 0.0478574683412959,
+      "median": 0.7527216459800001,
+      "user": 1.225973475,
+      "system": 2.50334,
+      "min": 0.7014102694800001,
+      "max": 0.8296198534800001,
+      "times": [
+        0.80083295748,
+        0.8296198534800001,
+        0.71361038448,
+        0.7385512374800001,
+        0.8166673734800001,
+        0.7637113284800001,
+        0.74173196348,
+        0.7014102694800001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

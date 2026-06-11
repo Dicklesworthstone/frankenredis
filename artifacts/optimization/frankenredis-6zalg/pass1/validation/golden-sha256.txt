@@ -1,0 +1,3 @@
+0cf4494a4d4a911e2134548645a6fb0e52b38a7133b9730bab40008f566209aa  /data/projects/frankenredis/artifacts/optimization/frankenredis-6zalg/pass1/validation/request.resp
+6430c62cb8dbaba71289812f9cabaf9714a4d2717565c2f14a3fb81f63d46752  /data/projects/frankenredis/artifacts/optimization/frankenredis-6zalg/pass1/validation/current-golden.resp
+6430c62cb8dbaba71289812f9cabaf9714a4d2717565c2f14a3fb81f63d46752  /data/projects/frankenredis/artifacts/optimization/frankenredis-6zalg/pass1/validation/candidate-golden.resp
