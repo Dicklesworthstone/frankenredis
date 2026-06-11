@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-yurn2/pass141/zrandmember_ranktree_harness.py --server-bin /data/projects/frankenredis/target-yurn2-baseline/release-perf/frankenredis --out-dir artifacts/optimization/frankenredis-yurn2/pass141 --artifact-prefix baseline --port 26461 --zset-len 100000 --chunk-size 1000 --count -100 --ops 1000 --warmup-ops 20 --trials 1",
+      "mean": 5.510416816826667,
+      "stddev": 0.11669973213826317,
+      "median": 5.54084409216,
+      "user": 4.0381193600000005,
+      "system": 1.2491520466666666,
+      "min": 5.38151737016,
+      "max": 5.60888898816,
+      "times": [
+        5.54084409216,
+        5.60888898816,
+        5.38151737016
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

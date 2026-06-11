@@ -929,13 +929,24 @@ impl SortedSet {
     /// ascending indices, preserving `indices` order and duplicates. A single
     /// ordered pass clones ONLY the distinct requested positions (stopping once
     /// all are found), so the allocation cost is O(distinct indices) rather than
-    /// O(n) — the key to making ZRANDMEMBER-with-small-count over a large zset
-    /// cheap, since the BTreeMap backing has no O(1) nth accessor. The output is
+    /// O(n). If the full zset has already built its rank tree, use O(log n)
+    /// order-statistic selects per requested index instead. The output is
     /// byte-identical to `let v: Vec<_> = iter_asc().collect(); indices.map(|i|
     /// v[i].clone())`.
     pub(crate) fn members_at_indices(&self, indices: &[usize]) -> Vec<(Vec<u8>, f64)> {
         if indices.is_empty() {
             return Vec::new();
+        }
+        if let SortedSetInner::Full(full) = &self.inner
+            && let Some(tree) = &full.rank_tree
+        {
+            return indices
+                .iter()
+                .filter_map(|idx| {
+                    tree.select(*idx)
+                        .and_then(|sm| sm.member.into_actual().map(|member| (member, sm.score)))
+                })
+                .collect();
         }
         let needed: HashSet<usize> = indices.iter().copied().collect();
         let mut by_idx: HashMap<usize, (Vec<u8>, f64)> = HashMap::with_capacity(needed.len());
@@ -29879,14 +29890,17 @@ mod tests {
 
         for _ in 0..4000 {
             let n = 1 + (next() % 200) as usize;
-            let zs = build(n);
+            let mut zs = build(n);
             // A pick list with arbitrary order, repeats, and out-of-range probes.
             let k = (next() % 12) as usize;
             let idxs: Vec<usize> = (0..k).map(|_| (next() as usize) % (n + 2)).collect();
+            let expected = reference(&zs, &idxs);
             let got = zs.members_at_indices(&idxs);
+            let warm_rank = zs.rank(b"m00000000");
+            let warm_got = zs.members_at_indices(&idxs);
             assert_eq!(
-                got,
-                reference(&zs, &idxs),
+                (got.as_slice(), warm_rank, warm_got.as_slice()),
+                (expected.as_slice(), Some(0), expected.as_slice()),
                 "members_at_indices mismatch n={n} idxs={idxs:?}"
             );
             for (m, s) in &got {
@@ -29923,7 +29937,8 @@ mod tests {
             return;
         }
         // Score: small count over a large zset — the materialise-all anti-pattern.
-        let big = build(100_000);
+        let mut big = build(100_000);
+        let warm_rank = big.rank(b"m00050000");
         let picks: Vec<usize> = (0..4).map(|_| (next() as usize) % 100_000).collect();
         let reps = 2000;
         let old_index = |zs: &SortedSet, idxs: &[usize]| -> Vec<(Vec<u8>, f64)> {
@@ -29944,7 +29959,11 @@ mod tests {
         }
         let new_ns = t1.elapsed().as_nanos().max(1);
         std::hint::black_box(acc2);
-        assert_eq!(acc, acc2, "old/new disagree on pick count");
+        assert_eq!(
+            (warm_rank, acc),
+            (Some(50_000), acc2),
+            "rank warmup failed or old/new disagree on pick count"
+        );
         let score = old_ns as f64 / new_ns as f64;
         eprintln!("ZRND1 zrandmember 4-of-100k: old={old_ns}ns new={new_ns}ns score={score:.2}x");
         assert!(

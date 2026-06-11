@@ -1,0 +1,38 @@
+{
+  "behavior": {
+    "object_encoding": "skiplist",
+    "raw_transcript_sha256": "6feaa20692bb5f67ae546ff28a0b921657e5b6a045b9aa35875e829b88a7d9e3",
+    "zcard": 100000
+  },
+  "count": -100,
+  "mode": "zrandmember_count_warm_rank_tree",
+  "ops_per_trial": 1000,
+  "server_log": "artifacts/optimization/frankenredis-yurn2/pass141/candidate.server.log",
+  "setup_sec": 0.11766471702139825,
+  "summary": {
+    "max_per_op_us": 1805.265067028813,
+    "mean_ops_per_sec": 553.9352742508031,
+    "median_ops_per_sec": 553.9352742508031,
+    "min_per_op_us": 1805.265067028813,
+    "p50_per_op_us": 1805.265067028813,
+    "p95_per_op_us": 1805.265067028813,
+    "p99_per_op_us": 1805.265067028813
+  },
+  "trials": [
+    {
+      "elapsed_sec": 1.805265067028813,
+      "ops_per_sec": 553.9352742508031,
+      "per_op_us": 1805.265067028813,
+      "raw_transcript_sha256": "2f0ea2079cff21531893345c5309efdfed2634036070a367fc0f62206d3603d0",
+      "reply_lengths": [
+        100,
+        100,
+        100,
+        100,
+        100
+      ]
+    }
+  ],
+  "warmup_ops": 20,
+  "zset_len": 100000
+}

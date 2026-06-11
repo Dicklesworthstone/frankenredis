@@ -1,0 +1,28 @@
+{
+  "project": "/data/projects/.scratch/frankenredis-yurn2-ubsbase",
+  "timestamp": "2026-06-11 11:46:51",
+  "scanners": [
+    {
+      "project": "/data/projects/.scratch/frankenredis-yurn2-ubsbase",
+      "files": 1,
+      "critical": 208,
+      "warning": 5474,
+      "info": 917,
+      "timestamp": "2026-06-11T15:46:51Z",
+      "format": "json",
+      "language": "rust"
+    }
+  ],
+  "totals": {
+    "critical": 208,
+    "warning": 5474,
+    "info": 917,
+    "files": 1
+  },
+  "generated_at": "2026-06-11 11:46:51",
+  "git": {
+    "repository": "https://github.com/Dicklesworthstone/frankenredis",
+    "commit": "6a660fa99d1aed4546f59b350a45be0fed0b47fa",
+    "blob_base": "https://github.com/Dicklesworthstone/frankenredis/blob/6a660fa99d1aed4546f59b350a45be0fed0b47fa"
+  }
+}

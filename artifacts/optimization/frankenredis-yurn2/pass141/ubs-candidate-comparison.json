@@ -1,0 +1,42 @@
+{
+  "project": "/data/projects/.scratch/frankenredis-yurn2-codex",
+  "timestamp": "2026-06-11 11:56:33",
+  "scanners": [
+    {
+      "project": "/data/projects/.scratch/frankenredis-yurn2-codex",
+      "files": 1,
+      "critical": 208,
+      "warning": 5474,
+      "info": 917,
+      "timestamp": "2026-06-11T15:56:33Z",
+      "format": "json",
+      "language": "rust"
+    }
+  ],
+  "totals": {
+    "critical": 208,
+    "warning": 5474,
+    "info": 917,
+    "files": 1
+  },
+  "generated_at": "2026-06-11 11:56:33",
+  "git": {
+    "repository": "https://github.com/Dicklesworthstone/frankenredis",
+    "commit": "6a660fa99d1aed4546f59b350a45be0fed0b47fa",
+    "blob_base": "https://github.com/Dicklesworthstone/frankenredis/blob/6a660fa99d1aed4546f59b350a45be0fed0b47fa"
+  },
+  "comparison": {
+    "baseline_path": "artifacts/optimization/frankenredis-yurn2/pass141/ubs-baseline.json",
+    "delta": {
+      "critical": 0,
+      "warning": 0,
+      "info": 0
+    },
+    "baseline_totals": {
+      "files": 1,
+      "critical": 208,
+      "warning": 5474,
+      "info": 917
+    }
+  }
+}
