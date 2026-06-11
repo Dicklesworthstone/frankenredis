@@ -101,6 +101,38 @@ SCRIPTS = [
     "return redis.sha1hex('')", "return redis.sha1hex('abc')",
     # table.remove / length
     "return table.remove({1,2,3})", "return #({1,2,3})",
+    # ── slot-resolved locals (frankenredis-iror0/v0u4b, commit b456ecd72) ──
+    # Pin the parse-time slot-resolution against regressions: lexical shadowing,
+    # per-iteration fresh loop-var cells captured by closures, `local x = x`
+    # reading the outer binding, local-function recursion cell predeclare,
+    # upvalue mutation, varargs, and deep nesting must stay byte-exact.
+    # (All return concrete values — no non-deterministic function/table address.)
+    "local x=1 do local x=2 do local x=3 end end return x",
+    "local x=1 local x=2 local x=3 return x",
+    "local x=5 local x=x+1 return x",
+    "x=100 local x=x+1 return x",
+    "local x=10 local function f() return x end local x=20 return f()..','..x",
+    "local t={} for i=1,4 do t[i]=function() return i end end return {t[1](),t[2](),t[3](),t[4]()}",
+    "local a={10,20,30} local t={} for _,v in ipairs(a) do t[#t+1]=function() return v end end return {t[1](),t[2](),t[3]()}",
+    "local t={} local i=0 while i<3 do i=i+1 local j=i t[i]=function() return j end end return {t[1](),t[2](),t[3]()}",
+    "local t={} for i=1,2 do for j=1,2 do t[#t+1]=function() return i*10+j end end end return {t[1](),t[2](),t[3](),t[4]()}",
+    "local x=1 local f=function() return x end x=2 return f()",
+    "local function fib(n) if n<2 then return n else return fib(n-1)+fib(n-2) end end return fib(10)",
+    "local c=0 local function inc() c=c+1 return c end inc() inc() return inc()",
+    "local function counter() local n=0 return function() n=n+1 return n end end local f=counter() f() f() return f()",
+    "local x=1 local function g(x) return x*2 end return g(5)+x",
+    "local s=0 for i=1,3 do s=s+i end return type(i)",
+    "local i=0 repeat i=i+1 local done=(i>=3) until done return i",
+    "local a=1 do local b=2 do local c=3 do local d=4 return a+b+c+d end end end",
+    "local s='' for i=1,3 do i=i*10 s=s..i end return s",
+    "local r=0 do local x=5 r=r+x end do local x=7 r=r+x end return r",
+    "local a,b,c,d,e,f,g,h=1,2,3,4,5,6,7,8 return a+b+c+d+e+f+g+h",
+    "local x=0 if true then local y=5 x=y end return x",
+    "if false then local z=1 end return type(z)",
+    "local function f(...) local t={...} return t[1]+t[2]+t[3] end return f(1,2,3)",
+    "local function f(a,...) local b,c=... return a+b+c end return f(1,2,3)",
+    "local function sum(n,acc) acc=acc or 0 if n==0 then return acc else return sum(n-1,acc+n) end end return sum(50)",
+    "local sum=0 for i=1,3 do redis.call('set','sk'..i,i) sum=sum+tonumber(redis.call('get','sk'..i)) end return sum",
 ]
 
 # Comparing-error scripts (Lua raises on number<string etc.) — both must error.
