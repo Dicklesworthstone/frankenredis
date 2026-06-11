@@ -1,0 +1,36 @@
+Traceback (most recent call last):
+  File "/data/projects/frankenredis/artifacts/optimization/frankenredis-ng2b8/pass138/fresh_post_cow_pass138_harness.py", line 297, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "/data/projects/frankenredis/artifacts/optimization/frankenredis-ng2b8/pass138/fresh_post_cow_pass138_harness.py", line 288, in main
+    result["workloads"][mode] = measure_workload(args, mode, ops, warmup, range_len)
+                                ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/projects/frankenredis/artifacts/optimization/frankenredis-ng2b8/pass138/fresh_post_cow_pass138_harness.py", line 187, in measure_workload
+    server = subprocess.Popen(
+        [args.server_bin, "--bind", args.host, "--port", str(args.port)],
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+  File "/usr/lib/python3.13/subprocess.py", line 1039, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                        pass_fds, cwd, env,
+                        ^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+                        gid, gids, uid, umask,
+                        ^^^^^^^^^^^^^^^^^^^^^^
+                        start_new_session, process_group)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/subprocess.py", line 1857, in _execute_child
+    self._posix_spawn(args, executable, env, restore_signals, close_fds,
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                      p2cread, p2cwrite,
+                      ^^^^^^^^^^^^^^^^^^
+                      c2pread, c2pwrite,
+                      ^^^^^^^^^^^^^^^^^^
+                      errread, errwrite)
+                      ^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/subprocess.py", line 1801, in _posix_spawn
+    self.pid = os.posix_spawn(executable, args, env, **kwargs)
+               ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'target/release-perf/frankenredis'

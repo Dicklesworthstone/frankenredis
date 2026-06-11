@@ -1,0 +1,81 @@
+Warning:
+Kernel address maps (/proc/{kallsyms,modules}) were restricted.
+
+Check /proc/sys/kernel/kptr_restrict before running 'perf record'.
+
+As no suitable kallsyms nor vmlinux was found, kernel samples
+can't be resolved.
+
+Samples in kernel modules can't be resolved as well.
+
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 4  of event 'cycles:P'
+# Event count (approx.): 2336
+#
+# Overhead  Symbol                  IPC   [IPC Coverage]
+# ........  ......................  ....................
+#
+    81.51%  [k] 0xffffffff862206a7  -      -            
+            |
+            ---0xffffffff853267c9
+               0xffffffff85326b38
+               0xffffffff85124156
+               0xffffffff86220691
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               epoll_wait
+               frankenredis::main
+               0
+
+     6.16%  [k] 0xffffffff85300b60  -      -            
+            |
+            ---0xffffffff8622f445
+               0xffffffff8622f947
+               0xffffffff862378d8
+               0xffffffff86237943
+               0xffffffff854feada
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               epoll_wait
+               frankenredis::main
+               0
+
+     6.16%  [k] 0xffffffff85300b80  -      -            
+            |
+            ---0xffffffff854febc3
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               epoll_wait
+               frankenredis::main
+               0
+
+     6.16%  [k] 0xffffffff8530d2bc  -      -            
+            |
+            ---0xffffffff86237943
+               0xffffffff854feada
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               epoll_wait
+               frankenredis::main
+               0
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

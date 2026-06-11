@@ -1,0 +1,18 @@
+{
+  "elapsed_sec": 13.418367296922952,
+  "items_returned": 1000000,
+  "list_len": 50000,
+  "llen": 50000,
+  "lrange_head": [
+    "xxxxxxxx",
+    "xxxxxxxx",
+    "xxxxxxxx"
+  ],
+  "mode": "copy_lrange",
+  "object_encoding": "quicklist",
+  "ops": 200,
+  "ops_per_sec": 14.904943021336376,
+  "payload_size": 8,
+  "range_len": 5000,
+  "server_pid": 3806466
+}

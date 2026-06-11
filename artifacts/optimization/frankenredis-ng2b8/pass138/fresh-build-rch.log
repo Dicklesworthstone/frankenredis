@@ -1,0 +1,3 @@
+[RCH] local (no admissible workers: critical_pressure=1,insufficient_slots=1)
+    Blocking waiting for file lock on build directory
+    Finished `release-perf` profile [optimized + debuginfo] target(s) in 25.78s

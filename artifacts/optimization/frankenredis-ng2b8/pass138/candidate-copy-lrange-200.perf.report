@@ -1,0 +1,153 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 502  of event 'cycles:u'
+# Event count (approx.): 133214693
+#
+# Overhead  Symbol                                                                                                                                                                                                                   IPC   [IPC Coverage]
+# ........  .......................................................................................................................................................................................................................  ....................
+#
+    22.57%  [.] <fr_protocol::RespFrame>::encode_into                                                                                                                                                                                -      -            
+    13.94%  [.] mi_free                                                                                                                                                                                                              -      -            
+    12.84%  [.] fr_command::lrange                                                                                                                                                                                                   -      -            
+    12.38%  [.] __memmove_avx_unaligned_erms                                                                                                                                                                                         -      -            
+            |          
+             --9.80%--__memmove_avx_unaligned_erms
+                       |          
+                        --8.69%--<alloc::raw_vec::RawVecInner>::finish_grow
+
+     4.65%  [.] frankenredis::main                                                                                                                                                                                                   -      -            
+            |          
+             --4.63%--frankenredis::main
+
+     4.01%  [.] mi_theap_malloc_aligned                                                                                                                                                                                              -      -            
+            |          
+             --0.55%--0
+
+     3.30%  [.] core::ptr::drop_glue::<fr_protocol::RespFrame>                                                                                                                                                                       -      -            
+     3.07%  [.] <fr_store::Store>::drop_if_expired                                                                                                                                                                                   -      -            
+            |          
+             --2.18%--0
+
+     2.86%  [.] _mi_page_malloc_zero                                                                                                                                                                                                 -      -            
+            |          
+             --1.88%--_mi_theap_realloc_zero
+                       <alloc::raw_vec::RawVecInner>::finish_grow
+
+     2.79%  [.] <fr_runtime::Runtime>::clear_ready_keys                                                                                                                                                                              -      -            
+     2.56%  [.] <fr_runtime::Runtime>::reject_stale_replica_read_request                                                                                                                                                             -      -            
+     2.28%  [.] <alloc::string::String>::from_utf8_lossy                                                                                                                                                                             -      -            
+     1.07%  [.] frankenredis::drain_writer_completions                                                                                                                                                                               -      -            
+     0.98%  [.] clock_gettime@@GLIBC_2.17                                                                                                                                                                                            -      -            
+            |          
+             --0.96%--frankenredis::main
+
+     0.93%  [.] _mi_bin_size                                                                                                                                                                                                         -      -            
+            |
+            ---<alloc::raw_vec::RawVecInner>::finish_grow
+               <alloc::raw_vec::RawVec<gimli::read::unit::AttributeValue<gimli::read::endian_slice::EndianSlice<gimli::endianity::LittleEndian>, usize>>>::grow_one
+               frankenredis::copy_borrowed_argv_into_scratch
+
+     0.91%  [.] mi_bin                                                                                                                                                                                                               -      -            
+            |
+            ---_mi_malloc_generic
+               |          
+                --0.91%--mi_theap_malloc_zero_aligned_at_overalloc
+                          fr_command::lrange
+
+     0.86%  [.] frankenredis::handle_readable                                                                                                                                                                                        -      -            
+     0.83%  [k] 0xffffffff84f87bc3                                                                                                                                                                                                   -      -            
+            |          
+             --0.83%--0xffffffff854fe9e2
+                       0xffffffff854feb78
+                       0xffffffff854ff5bc
+                       0xffffffff84f24855
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __syscall_cancel_arch_end
+                       epoll_wait
+                       frankenredis::main
+                       0
+
+     0.76%  [.] <fr_runtime::Runtime>::pubsub_clients_with_pending                                                                                                                                                                   -      -            
+     0.74%  [.] <core::iter::adapters::copied::Copied<core::iter::adapters::filter::Filter<std::collections::hash::set::Iter<mio::token::Token>, frankenredis::main::{closure#0}>> as core::iter::traits::iterator::Iterator>::next  -      -            
+     0.74%  [.] <hashbrown::map::HashMap<mio::token::Token, (), std::hash::random::RandomState>>::insert                                                                                                                             -      -            
+     0.74%  [k] 0xffffffff86232e91                                                                                                                                                                                                   -      -            
+            |
+            ---0xffffffff854b1b66
+               0xffffffff8547f86b
+               0xffffffff8547f959
+               0xffffffff84f252d5
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               read
+               fr_store::read_rss_bytes
+
+     0.64%  [.] <std::sys::pal::unix::time::Timespec>::sub_timespec                                                                                                                                                                  -      -            
+     0.55%  [.] <fr_runtime::Runtime>::execute_frame_internal                                                                                                                                                                        -      -            
+     0.54%  [.] <fr_runtime::Runtime>::strip_db_prefixes_from_frame                                                                                                                                                                  -      -            
+     0.43%  [.] <core::ffi::c_str::CStr>::from_bytes_with_nul                                                                                                                                                                        -      -            
+     0.36%  [.] __syscall_cancel                                                                                                                                                                                                     -      -            
+     0.33%  [.] mi_find_page                                                                                                                                                                                                         -      -            
+     0.31%  [.] mi_malloc_aligned                                                                                                                                                                                                    -      -            
+     0.17%  [.] 0x0000000000000986                                                                                                                                                                                                   -      -            
+     0.13%  [.] <fr_runtime::AclUser>::acl_permission_error_for_argv                                                                                                                                                                 -      -            
+     0.07%  [.] <core::str::lossy::Utf8Chunks as core::iter::traits::iterator::Iterator>::next                                                                                                                                       -      -            
+     0.07%  [.] <fr_runtime::Runtime>::execute_dispatch                                                                                                                                                                              -      -            
+     0.04%  [.] fr_command::check_full_command_arity                                                                                                                                                                                 -      -            
+     0.04%  [.] frankenredis::parse_borrowed_multibulk_action                                                                                                                                                                        -      -            
+     0.04%  [.] fr_runtime::push_ascii_lowercase_lossy                                                                                                                                                                               -      -            
+     0.03%  [.] __memset_avx2_unaligned_erms                                                                                                                                                                                         -      -            
+     0.03%  [.] _mi_theap_malloc_zero                                                                                                                                                                                                -      -            
+     0.03%  [.] <alloc::raw_vec::RawVecInner>::finish_grow                                                                                                                                                                           -      -            
+     0.03%  [.] fr_protocol::parse_command_args_borrowed_into                                                                                                                                                                        -      -            
+     0.03%  [.] <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>                                                                                                                             -      -            
+     0.03%  [.] _mi_page_retire                                                                                                                                                                                                      -      -            
+     0.03%  [.] <fr_runtime::Runtime>::refresh_dispatch_peer_addr_cache                                                                                                                                                              -      -            
+     0.03%  [k] 0xffffffff8547e725                                                                                                                                                                                                   -      -            
+     0.02%  [.] mi_good_size                                                                                                                                                                                                         -      -            
+     0.02%  [.] <fr_runtime::Runtime>::check_child_processes                                                                                                                                                                         -      -            
+     0.02%  [k] 0xffffffff8572a621                                                                                                                                                                                                   -      -            
+     0.02%  [k] 0xffffffff854afe66                                                                                                                                                                                                   -      -            
+     0.02%  [.] <fr_runtime::Runtime>::is_in_subscription_mode                                                                                                                                                                       -      -            
+     0.02%  [.] <fr_runtime::Runtime>::replica_sync_target                                                                                                                                                                           -      -            
+     0.02%  [.] <alloc::raw_vec::RawVec<gimli::read::unit::AttributeValue<gimli::read::endian_slice::EndianSlice<gimli::endianity::LittleEndian>, usize>>>::grow_one                                                                 -      -            
+     0.02%  [.] frankenredis::borrowed_plain_hget_args                                                                                                                                                                               -      -            
+     0.01%  [.] frankenredis::process_buffered_frames                                                                                                                                                                                -      -            
+     0.01%  [.] <fr_store::Store>::lrange                                                                                                                                                                                            -      -            
+     0.01%  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write                                                                                                                                 -      -            
+     0.01%  [k] 0xffffffff8572925a                                                                                                                                                                                                   -      -            
+     0.01%  [.] <fr_runtime::ServerState>::run_active_expire_cycle                                                                                                                                                                   -      -            
+     0.00%  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&mio::token::Token>                                                                                                                          -      -            
+     0.00%  [.] <fr_runtime::ClientSession as core::default::Default>::default                                                                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85eefcf9                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff84c00121                                                                                                                                                                                                   -      -            
+     0.00%  [.] <core::str::pattern::CharSearcher as core::str::pattern::Searcher>::next_match                                                                                                                                       -      -            
+     0.00%  [.] <fr_runtime::Runtime>::pubsub_sub_count                                                                                                                                                                              -      -            
+     0.00%  [k] 0xffffffff854aff10                                                                                                                                                                                                   -      -            
+     0.00%  [.] <fr_runtime::Runtime>::run_active_expire_cycle                                                                                                                                                                       -      -            
+     0.00%  [k] 0xffffffff85eefc89                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff854c04c5                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff8513aeb5                                                                                                                                                                                                   -      -            
+     0.00%  [.] 0x0000000000000969                                                                                                                                                                                                   -      -            
+     0.00%  [.] 0x0000000000000930                                                                                                                                                                                                   -      -            
+     0.00%  [k] 0xffffffff854afe64                                                                                                                                                                                                   -      -            
+     0.00%  [.] read                                                                                                                                                                                                                 -      -            
+     0.00%  [.] 0x0000000000000931                                                                                                                                                                                                   -      -            
+     0.00%  [.] 0x00000000000009ae                                                                                                                                                                                                   -      -            
+     0.00%  [.] 0x00000000000009ee                                                                                                                                                                                                   -      -            
+     0.00%  [.] <std::sys::pal::unix::time::Timespec>::now                                                                                                                                                                           -      -            
+     0.00%  [k] 0xffffffff8622f1cf                                                                                                                                                                                                   -      -            
+     0.00%  [.] <std::sys::fs::unix::File>::open_c                                                                                                                                                                                   -      -            
+     0.00%  [.] <std::time::Instant>::elapsed                                                                                                                                                                                        -      -            
+     0.00%  [.] epoll_wait                                                                                                                                                                                                           -      -            
+     0.00%  [.] frankenredis::borrowed_plain_exists_args                                                                                                                                                                             -      -            
+     0.00%  [.] 0x00000000000009aa                                                                                                                                                                                                   -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

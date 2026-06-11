@@ -1,0 +1,409 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 457  of event 'cycles:u'
+# Event count (approx.): 71573879
+#
+# Overhead  Symbol                                                                                                                              IPC   [IPC Coverage]
+# ........  ..................................................................................................................................  ....................
+#
+     9.73%  [.] <fr_runtime::Runtime>::execute_frame_internal                                                                                   -      -            
+     5.50%  [.] <fr_runtime::Runtime>::execute_dispatch                                                                                         -      -            
+            |          
+             --5.50%--<fr_runtime::Runtime>::execute_dispatch
+                       |          
+                        --2.94%--0x20000452620
+
+     4.63%  [.] fr_command::command_table_index                                                                                                 -      -            
+     4.38%  [.] <fr_store::Store>::drop_if_expired                                                                                              -      -            
+     4.09%  [k] 0xffffffff8603b83c                                                                                                              -      -            
+            |
+            ---0xffffffff860317ce
+               0xffffffff86025c77
+               0xffffffff86027511
+               0xffffffff86071a1f
+               0xffffffff85eec316
+               0xffffffff85eefd13
+               0xffffffff85eefdf4
+               0xffffffff84f25587
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               __libc_recv
+               frankenredis::handle_readable
+               0
+
+     3.75%  [.] frankenredis::process_argv_frame                                                                                                -      -            
+     3.34%  [.] <fr_store::CommandHistogramTracker>::record_canonical_with_kind                                                                 -      -            
+            |          
+             --3.31%--0xfec5000002d2820f
+
+     2.99%  [k] 0xffffffff84c000a9                                                                                                              -      -            
+            |
+            ---__syscall_cancel_arch_end
+               0x7ffc8f4a33c0
+
+     2.84%  [.] <fr_protocol::RespFrame>::encode_into                                                                                           -      -            
+     2.82%  [.] <hashbrown::map::HashMap<alloc::vec::Vec<u8>, u64, std::hash::random::RandomState>>::remove::<[u8]>                             -      -            
+            |
+            ---0
+
+     2.76%  [k] 0xffffffff854feaa8                                                                                                              -      -            
+            |
+            ---0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               epoll_wait
+               frankenredis::main
+               0
+
+     2.54%  [k] 0xffffffff8513867c                                                                                                              -      -            
+            |
+            ---0xffffffff851394a3
+               0xffffffff8513969b
+               0xffffffff862378cc
+               0xffffffff86237943
+               0xffffffff854feada
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               epoll_wait
+               frankenredis::main
+               0
+
+     2.50%  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write                                            -      -            
+            |
+            ---0
+
+     2.49%  [.] <fr_store::Store>::copy                                                                                                         -      -            
+            |          
+             --2.12%--0
+
+     2.18%  [.] <fr_runtime::Runtime>::feed_monitors                                                                                            -      -            
+     2.13%  [.] <fr_runtime::Runtime>::execute_db_scoped_command                                                                                -      -            
+     2.06%  [.] mi_free                                                                                                                         -      -            
+            |          
+             --0.76%--0
+
+     2.05%  [k] 0xffffffff854fe816                                                                                                              -      -            
+            |
+            ---0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               epoll_wait
+               frankenredis::main
+               0
+
+     1.65%  [k] 0xffffffff84c000b9                                                                                                              -      -            
+            |
+            ---__syscall_cancel_arch_end
+               0x7ffc8f4a33c0
+
+     1.63%  [k] 0xffffffff85eefb06                                                                                                              -      -            
+            |
+            ---0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0
+
+     1.54%  [.] <alloc::collections::btree::map::IntoIter<alloc::vec::Vec<u8>, alloc::collections::btree::set_val::SetValZST>>::dying_next      -      -            
+            |
+            ---0
+
+     1.54%  [.] fr_runtime::push_ascii_lowercase_lossy                                                                                          -      -            
+     1.52%  [k] 0xffffffff8519f58b                                                                                                              -      -            
+            |
+            ---0xffffffff851a2ab6
+               0xffffffff85124d3c
+               0xffffffff862206af
+               0xffffffff84c0012b
+               epoll_ctl
+
+     1.46%  [.] __syscall_cancel                                                                                                                -      -            
+            |          
+             --1.41%--__libc_recv
+                       frankenredis::handle_readable
+                       0
+
+     1.39%  [k] 0xffffffff856a20c1                                                                                                              -      -            
+            |
+            ---0xffffffff85eef9db
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0
+
+     1.30%  [.] mi_theap_malloc_aligned                                                                                                         -      -            
+            |          
+             --0.55%--0x35240a0d59504f43
+
+     1.18%  [.] _mi_page_malloc_zero                                                                                                            -      -            
+            |          
+             --0.86%--0
+
+     1.14%  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write                                            -      -            
+     1.13%  [.] __memmove_avx_unaligned_erms                                                                                                    -      -            
+     0.98%  [.] frankenredis::drain_pending_pubsub_to_connection                                                                                -      -            
+     0.97%  [k] 0xffffffff84fef63a                                                                                                              -      -            
+            |
+            ---0xffffffff8546fbbd
+               0xffffffff8546fd9f
+               0xffffffff8546fe41
+               0xffffffff85f0cb5e
+               0xffffffff85f0cd7b
+               0xffffffff85f0db23
+               0xffffffff86026096
+               0xffffffff86027511
+               0xffffffff86071a1f
+               0xffffffff85eec316
+               0xffffffff85eefd13
+               0xffffffff85eefdf4
+               0xffffffff84f25587
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               __libc_recv
+               frankenredis::handle_readable
+               0
+
+     0.95%  [.] frankenredis::parse_borrowed_multibulk_action                                                                                   -      -            
+     0.94%  [.] core::str::converts::from_utf8                                                                                                  -      -            
+            |          
+             --0.91%--0x20000452b58
+
+     0.91%  [.] fr_command::classify_command                                                                                                    -      -            
+     0.86%  [.] clock_gettime@@GLIBC_2.17                                                                                                       -      -            
+            |          
+             --0.86%--<fr_runtime::Runtime>::execute_frame_internal
+
+     0.86%  [k] 0xffffffff86073242                                                                                                              -      -            
+            |
+            ---0xffffffff86073392
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0
+
+     0.86%  [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>                                                  -      -            
+            |          
+             --0.83%--0x20000452b30
+
+     0.82%  [k] 0xffffffff860259b1                                                                                                              -      -            
+            |
+            ---0xffffffff86027511
+               0xffffffff86071a1f
+               0xffffffff85eec316
+               0xffffffff85eefd13
+               0xffffffff85eefdf4
+               0xffffffff84f25587
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               __libc_recv
+               frankenredis::handle_readable
+               0
+
+     0.81%  [.] <fr_store::Store>::internal_entries_insert                                                                                      -      -            
+            |
+            ---0
+
+     0.73%  [k] 0xffffffff854feb6a                                                                                                              -      -            
+            |
+            ---0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               epoll_wait
+               frankenredis::main
+               0
+
+     0.72%  [k] 0xffffffff84f87bc3                                                                                                              -      -            
+            |
+            ---0xffffffff854a04e9
+               0xffffffff854fe8f7
+               0xffffffff854feb78
+               0xffffffff854ff5bc
+               0xffffffff84f24855
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               epoll_wait
+               frankenredis::main
+               0
+
+     0.68%  [k] 0xffffffff84c00080                                                                                                              -      -            
+            |          
+             --0.68%--epoll_ctl
+
+     0.66%  [k] 0xffffffff8572a71b                                                                                                              -      -            
+            |          
+             --0.66%--0xffffffff857121d9
+                       0xffffffff856a20bf
+                       0xffffffff85eef9db
+                       0xffffffff85eefb24
+                       0xffffffff84f24d8f
+                       0xffffffff86220551
+                       0xffffffff84c0012b
+                       __syscall_cancel_arch_end
+                       __send
+                       <frankenredis::ClientConnection>::try_flush
+                       0
+
+     0.66%  [.] <fr_runtime::ServerState>::run_active_expire_cycle                                                                              -      -            
+     0.62%  [.] <alloc::collections::btree::map::BTreeMap<alloc::vec::Vec<u8>, alloc::collections::btree::set_val::SetValZST>>::remove::<[u8]>  -      -            
+            |
+            ---0
+
+     0.60%  [k] 0xffffffff860239aa                                                                                                              -      -            
+            |
+            ---0xffffffff860248f0
+               0xffffffff860733b6
+               0xffffffff85eefaba
+               0xffffffff85eefb24
+               0xffffffff84f24d8f
+               0xffffffff86220551
+               0xffffffff84c0012b
+               __syscall_cancel_arch_end
+               __send
+               <frankenredis::ClientConnection>::try_flush
+               0
+
+     0.50%  [.] fr_store::estimate_entry_memory_usage_bytes                                                                                     -      -            
+     0.48%  [k] 0xffffffff8546fe41                                                                                                              -      -            
+     0.44%  [.] mi_malloc_aligned                                                                                                               -      -            
+     0.44%  [k] 0xffffffff86023595                                                                                                              -      -            
+     0.44%  [.] <fr_store::Store>::update_expiry_deadline                                                                                       -      -            
+     0.43%  [.] <alloc::string::String>::from_utf8_lossy                                                                                        -      -            
+     0.41%  [.] frankenredis::borrowed_plain_getrange_args                                                                                      -      -            
+     0.37%  [.] <fr_runtime::ClientSession as core::clone::Clone>::clone                                                                        -      -            
+     0.36%  [.] _mi_malloc_generic                                                                                                              -      -            
+     0.35%  [k] 0xffffffff85124af8                                                                                                              -      -            
+     0.34%  [.] fr_command::is_write_command                                                                                                    -      -            
+     0.33%  [.] <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>                                        -      -            
+     0.31%  [k] 0xffffffff85ef6adb                                                                                                              -      -            
+     0.31%  [.] frankenredis::record_deferred_buffered_token                                                                                    -      -            
+     0.29%  [k] 0xffffffff84c000a7                                                                                                              -      -            
+     0.29%  [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>                                                  -      -            
+     0.28%  [k] 0xffffffff857121da                                                                                                              -      -            
+     0.21%  [k] 0xffffffff854fe6fb                                                                                                              -      -            
+     0.19%  [.] <alloc::collections::btree::map::BTreeMap<u64, fr_runtime::ClientSession>>::insert                                              -      -            
+     0.13%  [k] 0xffffffff8546fb81                                                                                                              -      -            
+     0.08%  [.] frankenredis::drain_writer_completions                                                                                          -      -            
+     0.08%  [.] <alloc::collections::btree::map::IntoIter<alloc::vec::Vec<u8>, alloc::collections::btree::set_val::SetValZST>>::dying_next      -      -            
+     0.07%  [.] frankenredis::process_buffered_frames                                                                                           -      -            
+     0.06%  [k] 0xffffffff84f240ca                                                                                                              -      -            
+     0.06%  [.] <fr_runtime::Runtime>::take_script_propagation_commands_for_capture                                                             -      -            
+     0.06%  [k] 0xffffffff8572925a                                                                                                              -      -            
+     0.06%  [k] 0xffffffff862204ea                                                                                                              -      -            
+     0.06%  [.] frankenredis::handle_readable                                                                                                   -      -            
+     0.05%  [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::vec::Vec<u8>>                                   -      -            
+     0.05%  [.] <fr_runtime::Runtime>::execute_frame_internal::{closure#3}                                                                      -      -            
+     0.05%  [k] 0xffffffff86220705                                                                                                              -      -            
+     0.05%  [.] epoll_wait                                                                                                                      -      -            
+     0.05%  [k] 0xffffffff854afe5d                                                                                                              -      -            
+     0.05%  [.] <hashbrown::map::HashMap<u64, alloc::vec::Vec<fr_store::PubSubMessage>, foldhash::quality::RandomState>>::remove::<u64>         -      -            
+     0.04%  [k] 0xffffffff851333b1                                                                                                              -      -            
+     0.04%  [.] core::ptr::drop_glue::<fr_runtime::TransactionState>                                                                            -      -            
+     0.03%  [.] core::ptr::drop_glue::<alloc::vec::Vec<alloc::vec::Vec<u8>>>                                                                    -      -            
+     0.03%  [.] <fr_runtime::Runtime>::refresh_dispatch_peer_addr_cache                                                                         -      -            
+     0.02%  [.] <std::time::Instant>::elapsed                                                                                                   -      -            
+     0.02%  [.] <fr_runtime::Runtime>::is_pubsub_client                                                                                         -      -            
+     0.02%  [.] <fr_runtime::Runtime>::handle_copy_command                                                                                      -      -            
+     0.02%  [.] <fr_runtime::Runtime>::reject_due_to_replica_write_quorum                                                                       -      -            
+     0.02%  [.] <fr_runtime::Runtime>::reject_write_on_readonly_replica                                                                         -      -            
+     0.01%  [k] 0xffffffff854afefb                                                                                                              -      -            
+     0.01%  [.] <fr_runtime::AclUser>::acl_permission_error_for_argv                                                                            -      -            
+     0.01%  [.] __memset_avx2_unaligned_erms                                                                                                    -      -            
+     0.01%  [k] 0xffffffff8506f910                                                                                                              -      -            
+     0.01%  [.] __memcmp_avx2_movbe                                                                                                             -      -            
+     0.01%  [.] _mi_theap_malloc_zero                                                                                                           -      -            
+     0.01%  [.] <alloc::raw_vec::RawVecInner>::finish_grow                                                                                      -      -            
+     0.01%  [.] frankenredis::copy_borrowed_argv_into_scratch                                                                                   -      -            
+     0.00%  [.] <fr_runtime::Runtime>::pubsub_sub_count                                                                                         -      -            
+     0.00%  [k] 0xffffffff8583cac6                                                                                                              -      -            
+     0.00%  [.] fr_protocol::parse_command_args_borrowed_into                                                                                   -      -            
+     0.00%  [.] frankenredis::borrowed_plain_strlen_args                                                                                        -      -            
+     0.00%  [.] <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>                                        -      -            
+     0.00%  [.] mi_bin                                                                                                                          -      -            
+     0.00%  [.] frankenredis::borrowed_plain_hget_args                                                                                          -      -            
+     0.00%  [.] fr_command::command_acl_parent_has_subcommands                                                                                  -      -            
+     0.00%  [.] <alloc::raw_vec::RawVecInner>::finish_grow                                                                                      -      -            
+     0.00%  [.] frankenredis::main                                                                                                              -      -            
+     0.00%  [.] mi_good_size                                                                                                                    -      -            
+     0.00%  [.] frankenredis::borrowed_plain_zscore_args                                                                                        -      -            
+     0.00%  [.] <fr_runtime::ClientSession>::refresh_authentication_for_server                                                                  -      -            
+     0.00%  [.] frankenredis::borrowed_plain_exists_args                                                                                        -      -            
+     0.00%  [.] frankenredis::borrowed_plain_mget_args                                                                                          -      -            
+     0.00%  [k] 0xffffffff85f0cd21                                                                                                              -      -            
+     0.00%  [k] 0xffffffff8620a0eb                                                                                                              -      -            
+     0.00%  [.] <fr_runtime::ClientSession as core::default::Default>::default                                                                  -      -            
+     0.00%  [.] core::ptr::drop_glue::<fr_store::Value>                                                                                         -      -            
+     0.00%  [k] 0xffffffff85124a1c                                                                                                              -      -            
+     0.00%  [.] <fr_runtime::Runtime>::replica_sync_target                                                                                      -      -            
+     0.00%  [.] <std::sys::pal::unix::time::Timespec>::sub_timespec                                                                             -      -            
+     0.00%  [k] 0xffffffff8572a621                                                                                                              -      -            
+     0.00%  [k] 0xffffffff8572a5a6                                                                                                              -      -            
+     0.00%  [k] 0xffffffff86220708                                                                                                              -      -            
+     0.00%  [.] _mi_bin_size                                                                                                                    -      -            
+     0.00%  [k] 0xffffffff84d04104                                                                                                              -      -            
+     0.00%  [k] 0xffffffff851a2909                                                                                                              -      -            
+     0.00%  [k] 0xffffffff85729256                                                                                                              -      -            
+     0.00%  [k] 0xffffffff8572a5a5                                                                                                              -      -            
+     0.00%  [.] 0x0000000000000969                                                                                                              -      -            
+     0.00%  [k] 0xffffffff854afe66                                                                                                              -      -            
+     0.00%  [.] 0x0000000000000986                                                                                                              -      -            
+     0.00%  [.] <std::sys::pal::unix::time::Timespec>::now                                                                                      -      -            
+     0.00%  [.] __libc_recv                                                                                                                     -      -            
+     0.00%  [.] frankenredis::drive_client_output                                                                                               -      -            
+     0.00%  [k] 0xffffffff84c00083                                                                                                              -      -            
+     0.00%  [.] 0x0000000000000931                                                                                                              -      -            
+     0.00%  [.] 0x00000000000009ee                                                                                                              -      -            
+     0.00%  [.] fr_command::acl_command_selectors_for_argv                                                                                      -      -            
+     0.00%  [.] frankenredis::borrowed_plain_scard_args                                                                                         -      -            
+     0.00%  [k] 0xffffffff84fef585                                                                                                              -      -            
+     0.00%  [k] 0xffffffff85124aca                                                                                                              -      -            
+     0.00%  [k] 0xffffffff85138ffa                                                                                                              -      -            
+     0.00%  [k] 0xffffffff8513aec1                                                                                                              -      -            
+     0.00%  [k] 0xffffffff851a2a03                                                                                                              -      -            
+     0.00%  [k] 0xffffffff854afef9                                                                                                              -      -            
+     0.00%  [k] 0xffffffff856a2100                                                                                                              -      -            
+     0.00%  [k] 0xffffffff85eefc45                                                                                                              -      -            
+     0.00%  [k] 0xffffffff85eefc89                                                                                                              -      -            
+     0.00%  [k] 0xffffffff85eefc98                                                                                                              -      -            
+     0.00%  [k] 0xffffffff85eefdd6                                                                                                              -      -            
+     0.00%  [k] 0xffffffff85f0cca1                                                                                                              -      -            
+     0.00%  [k] 0xffffffff86025845                                                                                                              -      -            
+     0.00%  [k] 0xffffffff860719d5                                                                                                              -      -            
+     0.00%  [k] 0xffffffff862204d0                                                                                                              -      -            
+     0.00%  [k] 0xffffffff8622f1cf                                                                                                              -      -            
+     0.00%  [k] 0xffffffff86239b8f                                                                                                              -      -            
+     0.00%  [k] 0xffffffff8623a4b5                                                                                                              -      -            
+     0.00%  [.] 0x0000000000000930                                                                                                              -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
