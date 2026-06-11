@@ -3537,6 +3537,15 @@ pub struct Store {
     pub cluster_current_epoch: u64,
     pub cluster_my_config_epoch: u64,
     stream_groups: HashMap<Vec<u8>, StreamGroupState>,
+    /// (frankenredis-b0exs) Memoized XPENDING-summary per-consumer histograms,
+    /// keyed by (stream key, group name). Building the histogram is an O(P) scan
+    /// of the whole pending-entries-list; redis keeps per-consumer PELs and
+    /// answers in O(consumers). We cache the computed `[(consumer, count), ...]`
+    /// and invalidate the (key, group) entry whenever that group's PEL can
+    /// change, so repeated XPENDING (dashboard/monitoring polling) is O(1) after
+    /// the first call. Invalidation over-clears (safe); a debug_assert in
+    /// xpending_summary cross-checks the cache against a fresh scan in test/dev.
+    stream_pel_summary_cache: HashMap<(Vec<u8>, Vec<u8>), Vec<(Vec<u8>, usize)>>,
     /// Per-stream last-generated-id set by XSETID (may be higher than max entry).
     stream_last_ids: HashMap<Vec<u8>, StreamId>,
     /// Per-stream cumulative entries-added counter used by XINFO.
@@ -3983,6 +3992,7 @@ impl Default for Store {
             cluster_current_epoch: 0,
             cluster_my_config_epoch: 0,
             stream_groups: HashMap::new(),
+            stream_pel_summary_cache: HashMap::new(),
             stream_last_ids: HashMap::new(),
             stream_entries_added: HashMap::new(),
             stream_max_deleted_ids: HashMap::new(),
@@ -7527,6 +7537,7 @@ impl Store {
     pub fn flushdb(&mut self) {
         self.entries.clear();
         self.stream_groups.clear();
+        self.stream_pel_summary_cache.clear();
         self.stream_last_ids.clear();
         self.stream_entries_added.clear();
         self.stream_max_deleted_ids.clear();
@@ -7599,6 +7610,9 @@ impl Store {
     }
 
     pub fn swap_prefixes(&mut self, left_prefix: &[u8], right_prefix: &[u8]) -> u64 {
+        // (frankenredis-b0exs) Group PELs move between keys here; drop all cached
+        // XPENDING summaries rather than re-key them (a rare, bulk operation).
+        self.stream_pel_summary_cache.clear();
         if left_prefix == right_prefix {
             self.dirty = self.dirty.saturating_add(1);
             return 0;
@@ -7740,6 +7754,8 @@ impl Store {
     }
 
     pub fn swap_databases(&mut self, left_db: usize, right_db: usize) -> u64 {
+        // (frankenredis-b0exs) See swap_prefixes: bulk key movement, drop cache.
+        self.stream_pel_summary_cache.clear();
         if left_db == right_db {
             self.dirty = self.dirty.saturating_add(1);
             return 0;
@@ -13264,6 +13280,7 @@ impl Store {
         options: StreamGroupReadOptions,
         now_ms: u64,
     ) -> Result<Option<Vec<StreamRecord>>, StoreError> {
+        self.invalidate_stream_pel_summary(key, group);
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
         }
@@ -13497,41 +13514,64 @@ impl Store {
         }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
-                Value::Stream(_) => {
-                    let Some(groups) = self.stream_groups.get(key) else {
-                        return Ok(None);
-                    };
-                    let Some(group_state) = groups.get(group) else {
-                        return Ok(None);
-                    };
-
-                    // (frankenredis-b0exs) Count per consumer by BORROWING each
-                    // pending entry's consumer name, cloning only the (few)
-                    // distinct keys at the end instead of allocating a Vec<u8>
-                    // for every pending entry — the per-entry clone+free was the
-                    // dominant cost of the O(P) scan on a large PEL. Output is
-                    // byte-identical (a `BTreeMap<&[u8]>` orders keys by the same
-                    // byte comparison as `BTreeMap<Vec<u8>>`).
-                    let mut per_consumer: BTreeMap<&[u8], usize> = BTreeMap::new();
-                    for pending_entry in group_state.pending.values() {
-                        *per_consumer
-                            .entry(pending_entry.consumer.as_slice())
-                            .or_default() += 1;
-                    }
-
-                    Ok(Some((
-                        group_state.pending.len(),
-                        group_state.pending.first_key_value().map(|(id, _)| *id),
-                        group_state.pending.last_key_value().map(|(id, _)| *id),
-                        per_consumer
-                            .into_iter()
-                            .map(|(consumer, count)| (consumer.to_vec(), count))
-                            .collect(),
-                    )))
-                }
-                _ => Err(StoreError::WrongType),
+                Value::Stream(_) => {}
+                _ => return Err(StoreError::WrongType),
             },
-            None => Ok(None),
+            None => return Ok(None),
+        }
+        let Some(groups) = self.stream_groups.get(key) else {
+            return Ok(None);
+        };
+        let Some(group_state) = groups.get(group) else {
+            return Ok(None);
+        };
+
+        let len = group_state.pending.len();
+        let first = group_state.pending.first_key_value().map(|(id, _)| *id);
+        let last = group_state.pending.last_key_value().map(|(id, _)| *id);
+
+        // (frankenredis-b0exs) Per-consumer histogram. Counting BORROWS each
+        // entry's consumer name (clone only the few distinct keys); a
+        // `BTreeMap<&[u8]>` orders keys by the same byte comparison as a
+        // `BTreeMap<Vec<u8>>`, so the output order is unchanged.
+        let compute = |gs: &StreamGroup| -> Vec<(Vec<u8>, usize)> {
+            let mut per: BTreeMap<&[u8], usize> = BTreeMap::new();
+            for pe in gs.pending.values() {
+                *per.entry(pe.consumer.as_slice()).or_default() += 1;
+            }
+            per.into_iter()
+                .map(|(consumer, count)| (consumer.to_vec(), count))
+                .collect()
+        };
+
+        // Serve the cached histogram for this (key, group) when present —
+        // invalidated by every PEL-mutating command — else compute O(P) once and
+        // memoize, so repeated XPENDING is O(consumers) like redis.
+        let cache_key = (key.to_vec(), group.to_vec());
+        let per_consumer = if let Some(cached) = self.stream_pel_summary_cache.get(&cache_key) {
+            debug_assert_eq!(
+                *cached,
+                compute(group_state),
+                "stale XPENDING per-consumer cache for {key:?}/{group:?}"
+            );
+            cached.clone()
+        } else {
+            let computed = compute(group_state);
+            self.stream_pel_summary_cache
+                .insert(cache_key, computed.clone());
+            computed
+        };
+
+        Ok(Some((len, first, last, per_consumer)))
+    }
+
+    /// (frankenredis-b0exs) Drop the memoized XPENDING summary for `(key, group)`.
+    /// Called at the entry of every command that can change a group's PEL;
+    /// over-clearing is always correctness-safe (it only forces a recompute).
+    fn invalidate_stream_pel_summary(&mut self, key: &[u8], group: &[u8]) {
+        if !self.stream_pel_summary_cache.is_empty() {
+            self.stream_pel_summary_cache
+                .remove(&(key.to_vec(), group.to_vec()));
         }
     }
 
@@ -13603,6 +13643,7 @@ impl Store {
         options: StreamClaimOptions,
         now_ms: u64,
     ) -> Result<Option<StreamClaimReply>, StoreError> {
+        self.invalidate_stream_pel_summary(key, group);
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
         }
@@ -13754,6 +13795,7 @@ impl Store {
         options: StreamAutoClaimOptions,
         now_ms: u64,
     ) -> Result<Option<StreamAutoClaimReply>, StoreError> {
+        self.invalidate_stream_pel_summary(key, group);
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
         }
@@ -13979,6 +14021,9 @@ impl Store {
         mkstream: bool,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
+        // (frankenredis-b0exs) A re-created group must not inherit a stale
+        // summary left behind by a destroyed/DEL'd predecessor of the same name.
+        self.invalidate_stream_pel_summary(key, group);
         self.drop_if_expired(key, now_ms);
         let key_exists_as_stream = match self.entries.get(key) {
             Some(entry) => match &entry.value {
@@ -14025,6 +14070,7 @@ impl Store {
         group: &[u8],
         now_ms: u64,
     ) -> Result<bool, StoreError> {
+        self.invalidate_stream_pel_summary(key, group);
         self.drop_if_expired(key, now_ms);
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
@@ -14277,6 +14323,7 @@ impl Store {
         consumer: &[u8],
         now_ms: u64,
     ) -> Result<Option<u64>, StoreError> {
+        self.invalidate_stream_pel_summary(key, group);
         self.drop_if_expired(key, now_ms);
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
@@ -14327,6 +14374,7 @@ impl Store {
         ids: &[StreamId],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
+        self.invalidate_stream_pel_summary(key, group);
         self.drop_if_expired(key, now_ms);
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
