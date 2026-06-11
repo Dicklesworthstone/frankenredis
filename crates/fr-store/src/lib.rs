@@ -13425,10 +13425,17 @@ impl Store {
                         return Ok(None);
                     };
 
-                    let mut per_consumer: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+                    // (frankenredis-b0exs) Count per consumer by BORROWING each
+                    // pending entry's consumer name, cloning only the (few)
+                    // distinct keys at the end instead of allocating a Vec<u8>
+                    // for every pending entry — the per-entry clone+free was the
+                    // dominant cost of the O(P) scan on a large PEL. Output is
+                    // byte-identical (a `BTreeMap<&[u8]>` orders keys by the same
+                    // byte comparison as `BTreeMap<Vec<u8>>`).
+                    let mut per_consumer: BTreeMap<&[u8], usize> = BTreeMap::new();
                     for pending_entry in group_state.pending.values() {
                         *per_consumer
-                            .entry(pending_entry.consumer.clone())
+                            .entry(pending_entry.consumer.as_slice())
                             .or_default() += 1;
                     }
 
@@ -13436,7 +13443,10 @@ impl Store {
                         group_state.pending.len(),
                         group_state.pending.first_key_value().map(|(id, _)| *id),
                         group_state.pending.last_key_value().map(|(id, _)| *id),
-                        per_consumer.into_iter().collect(),
+                        per_consumer
+                            .into_iter()
+                            .map(|(consumer, count)| (consumer.to_vec(), count))
+                            .collect(),
                     )))
                 }
                 _ => Err(StoreError::WrongType),
