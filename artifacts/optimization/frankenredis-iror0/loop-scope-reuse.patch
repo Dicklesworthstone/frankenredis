@@ -1,0 +1,67 @@
+diff --git a/crates/fr-command/src/lua_eval.rs b/crates/fr-command/src/lua_eval.rs
+index 834626753..f668fcfae 100644
+--- a/crates/fr-command/src/lua_eval.rs
++++ b/crates/fr-command/src/lua_eval.rs
+@@ -2907,6 +2907,18 @@ impl Env {
+         }
+     }
+ 
++    /// (frankenredis-luaforloop) Reset the innermost scope to empty while keeping
++    /// its allocated `HashMap` backing — the per-iteration equivalent of a
++    /// pop+push that avoids freeing and re-allocating the bucket array every loop
++    /// turn. Dropping the old entries removes the previous iteration's locals
++    /// (fresh-block semantics); any cell a closure captured stays alive through
++    /// the closure's own `Rc`, so distinct-binding-per-iteration is preserved.
++    fn clear_top_scope(&mut self) {
++        if let Some(scope) = self.scopes.last_mut() {
++            scope.locals.clear();
++        }
++    }
++
+     fn set_local(&mut self, name: &str, value: LuaValue) {
+         if let Some(scope) = self.scopes.last_mut() {
+             let cell = Rc::new(RefCell::new(value));
+@@ -3574,25 +3586,39 @@ impl<'a> LuaState<'a> {
+                 // responsibility, same as `while true do end`). Vendored
+                 // does not reject step=0 at the runtime layer.
+                 let mut i = s;
++                // (frankenredis-luaforloop) Push the loop body's scope ONCE and
++                // reset it per iteration instead of pop+push every turn, so the
++                // scope's HashMap backing is allocated once for the whole loop.
++                env.push_scope();
+                 loop {
+                     self.iterations += 1;
+                     if self.iterations > MAX_ITERATIONS {
++                        env.pop_scope();
+                         return Err("script exceeded maximum iteration count".to_string());
+                     }
+                     if (st > 0.0 && i > e) || (st < 0.0 && i < e) {
+                         break;
+                     }
+-                    env.push_scope();
++                    env.clear_top_scope();
+                     env.set_local(name, LuaValue::Number(i));
+-                    let cf = self.exec_stmts(body, env, varargs)?;
+-                    env.pop_scope();
++                    let cf = match self.exec_stmts(body, env, varargs) {
++                        Ok(cf) => cf,
++                        Err(e) => {
++                            env.pop_scope();
++                            return Err(e);
++                        }
++                    };
+                     match cf {
+                         ControlFlow::Break => break,
+-                        ControlFlow::Return(v) => return Ok(ControlFlow::Return(v)),
++                        ControlFlow::Return(v) => {
++                            env.pop_scope();
++                            return Ok(ControlFlow::Return(v));
++                        }
+                         ControlFlow::None => {}
+                     }
+                     i += st;
+                 }
++                env.pop_scope();
+                 Ok(ControlFlow::None)
+             }
+             Stmt::GenericFor(names, iter_exprs, body) => {
