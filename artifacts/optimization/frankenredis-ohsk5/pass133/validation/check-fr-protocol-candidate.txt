@@ -1,0 +1,31 @@
+[RCH] local (no admissible workers: critical_pressure=1,insufficient_slots=1)
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Checking cfg-if v1.0.4
+    Checking linux-raw-sys v0.12.1
+    Checking bitflags v2.11.1
+    Checking fastrand v2.4.1
+    Checking once_cell v1.21.4
+    Checking fnv v1.0.7
+    Checking bit-vec v0.8.0
+    Checking quick-error v1.2.3
+    Checking regex-syntax v0.8.10
+    Checking unarray v0.1.4
+    Checking fr-protocol v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5-28-gentleotter-20260611T0412/crates/fr-protocol)
+    Checking libc v0.2.185
+    Checking zerocopy v0.8.48
+    Checking num-traits v0.2.19
+    Checking bit-set v0.8.0
+    Checking rustix v1.1.4
+    Checking getrandom v0.3.4
+    Checking getrandom v0.4.2
+    Checking wait-timeout v0.2.1
+    Checking rand_core v0.9.5
+    Checking rand v0.9.4
+    Checking rand_xorshift v0.4.0
+    Checking tempfile v3.27.0
+    Checking rusty-fork v0.3.1
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.9.0
+    Checking proptest v1.11.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.32s

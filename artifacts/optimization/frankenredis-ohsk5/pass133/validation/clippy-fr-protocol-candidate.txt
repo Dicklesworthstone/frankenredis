@@ -1,0 +1,6 @@
+[RCH] local (no admissible workers: critical_pressure=1,insufficient_slots=1)
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Checking fr-protocol v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5-28-gentleotter-20260611T0412/crates/fr-protocol)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.01s

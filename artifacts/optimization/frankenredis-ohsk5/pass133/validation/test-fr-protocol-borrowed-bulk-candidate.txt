@@ -1,0 +1,56 @@
+[RCH] local (no admissible workers: critical_pressure=1,insufficient_slots=1)
+   Compiling libc v0.2.185
+   Compiling cfg-if v1.0.4
+   Compiling getrandom v0.3.4
+   Compiling rustix v1.1.4
+   Compiling zerocopy v0.8.48
+   Compiling getrandom v0.4.2
+   Compiling autocfg v1.5.0
+   Compiling linux-raw-sys v0.12.1
+   Compiling bitflags v2.11.1
+   Compiling once_cell v1.21.4
+   Compiling fastrand v2.4.1
+   Compiling fnv v1.0.7
+   Compiling quick-error v1.2.3
+   Compiling bit-vec v0.8.0
+   Compiling unarray v0.1.4
+   Compiling regex-syntax v0.8.10
+   Compiling fr-protocol v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5-28-gentleotter-20260611T0412/crates/fr-protocol)
+   Compiling bit-set v0.8.0
+   Compiling num-traits v0.2.19
+   Compiling wait-timeout v0.2.1
+   Compiling rand_core v0.9.5
+   Compiling rand v0.9.4
+   Compiling rand_xorshift v0.4.0
+   Compiling tempfile v3.27.0
+   Compiling rusty-fork v0.3.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling proptest v1.11.0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.92s
+     Running unittests src/lib.rs (/tmp/rch_target_fr_ohsk5_p133_candidate/debug/deps/fr_protocol-806239963704b020)
+
+running 2 tests
+test tests::golden::borrowed_bulk_slice_encoder_matches_frame_encoder ... ok
+test tests::golden::borrowed_bulk_slice_encoder_matches_frame_encoder_for_one_digit_lengths ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 79 filtered out; finished in 0.00s
+
+     Running tests/fuzz_corpus_smoke.rs (/tmp/rch_target_fr_ohsk5_p133_candidate/debug/deps/fuzz_corpus_smoke-cac7930eb9d24257)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/golden.rs (/tmp/rch_target_fr_ohsk5_p133_candidate/debug/deps/golden-1918244dfb836a25)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out; finished in 0.00s
+
+     Running tests/live_oracle_diff.rs (/tmp/rch_target_fr_ohsk5_p133_candidate/debug/deps/live_oracle_diff-5aa37a2e1c96cc9e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
