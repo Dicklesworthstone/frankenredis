@@ -296,6 +296,18 @@ impl GenericSet {
         }
     }
 
+    /// (frankenredis-sremfast) Remove `member` without preserving iteration
+    /// order for the `Hash` encoding — an O(1) `swap_remove` rather than the
+    /// O(n) `shift_remove`. Safe because a hashtable-encoded set's order is
+    /// unspecified (redis's `dict` is unordered). `Packed` (listpack) keeps the
+    /// order-preserving remove to match redis's small-set listpack delete.
+    pub fn swap_remove(&mut self, member: &[u8]) -> bool {
+        match self {
+            GenericSet::Packed(p) => p.remove(member),
+            GenericSet::Hash(h) => h.swap_remove(member),
+        }
+    }
+
     pub fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
         match self {
             GenericSet::Packed(p) => {
@@ -458,6 +470,20 @@ impl HashFieldMap {
         match self {
             HashFieldMap::Packed(p) => p.shift_remove(field),
             HashFieldMap::Hash(h) => h.shift_remove(field),
+        }
+    }
+
+    /// (frankenredis-sremfast) Remove `field` without preserving iteration order
+    /// for the `Hash` encoding — an O(1) `swap_remove` rather than the O(n)
+    /// `shift_remove`. HDEL of k fields from a large hashtable-encoded hash was
+    /// O(k·n) on the insertion-ordered `IndexMap`; redis's `dict` does O(k). A
+    /// hashtable-encoded hash's field order is unspecified (redis's `dict` is
+    /// unordered too), so swapping is safe. `Packed` (listpack) keeps the
+    /// order-preserving remove to match redis's small-hash listpack delete.
+    pub fn swap_remove(&mut self, field: &[u8]) -> Option<Vec<u8>> {
+        match self {
+            HashFieldMap::Packed(p) => p.shift_remove(field),
+            HashFieldMap::Hash(h) => h.swap_remove(field),
         }
     }
 

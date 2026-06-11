@@ -1762,6 +1762,23 @@ impl SetValue {
         }
     }
 
+    /// (frankenredis-sremfast) Remove `member`, returning whether it was present,
+    /// WITHOUT preserving iteration order for the hashtable encoding. SREM on a
+    /// large (hashtable-encoded) set used the order-preserving `shift_remove`,
+    /// which is O(n) per member on the insertion-ordered `IndexSet` — so removing
+    /// k members was O(k·n) vs redis's O(k) unordered-`dict` deletes. A
+    /// hashtable-encoded set's order is already unspecified (redis's `dict` is
+    /// unordered too), so the `Hash` path here uses an O(1) `swap_remove`. The
+    /// intset stays sorted (bounded by set-max-intset-entries, so O(n) is cheap)
+    /// and the small listpack `Packed` set keeps its order-preserving remove to
+    /// match redis's ordered listpack delete.
+    pub(crate) fn swap_remove(&mut self, member: &[u8]) -> bool {
+        match self {
+            SetValue::Int(_) => self.shift_remove(member),
+            SetValue::Generic(s) => s.swap_remove(member),
+        }
+    }
+
     pub fn iter(&self) -> SetValueIter<'_> {
         match self {
             SetValue::Int(v) => SetValueIter::Int(v.iter()),
@@ -7759,7 +7776,9 @@ impl Store {
             };
             let mut removed = 0_u64;
             for field in fields {
-                if m.shift_remove(field).is_some() {
+                // (frankenredis-sremfast) Order-agnostic O(1) remove for
+                // hashtable-encoded hashes (was O(n) per field shift).
+                if m.swap_remove(field).is_some() {
                     removed += 1;
                 }
             }
@@ -9622,7 +9641,9 @@ impl Store {
                     Value::Set(s) => {
                         let mut removed = 0_u64;
                         for m in members {
-                            if s.shift_remove(m) {
+                            // (frankenredis-sremfast) Order-agnostic O(1) remove
+                            // for hashtable-encoded sets (was O(n) per member).
+                            if s.swap_remove(m) {
                                 removed += 1;
                             }
                         }
