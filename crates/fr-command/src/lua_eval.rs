@@ -1185,7 +1185,7 @@ fn lua_lvalue_first_token(expr: &Expr) -> String {
             }
         }
         Expr::Str(s) => format!("'{}'", String::from_utf8_lossy(s)),
-        Expr::Name(n) => n.clone(),
+        Expr::Name(n) | Expr::LocalName(n, _) => n.clone(),
         Expr::VarArgs => "...".to_string(),
         Expr::Call(_, _) | Expr::MethodCall(_, _, _) => "()".to_string(),
         Expr::TableConstructor(_) => "{".to_string(),
@@ -1819,6 +1819,7 @@ pub enum Expr {
     Number(f64),
     Str(Vec<u8>),
     Name(String),
+    LocalName(String, LocalSlotRef),
     VarArgs,
     BinOp(Box<Expr>, BinOp, Box<Expr>),
     UnaryOp(UnaryOp, Box<Expr>),
@@ -1828,6 +1829,12 @@ pub enum Expr {
     MethodCall(Box<Expr>, String, Vec<Expr>),
     TableConstructor(Vec<TableField>),
     FunctionDef(Vec<String>, bool, Block),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalSlotRef {
+    depth: usize,
+    slot: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -2237,7 +2244,7 @@ impl Parser {
             for lvalue in &lhs {
                 if !matches!(
                     lvalue,
-                    Expr::Name(_) | Expr::Index(_, _) | Expr::Field(_, _)
+                    Expr::Name(_) | Expr::LocalName(_, _) | Expr::Index(_, _) | Expr::Field(_, _)
                 ) {
                     return Err(format!(
                         "syntax error near '=': '{}' is not a valid assignment target",
@@ -2589,6 +2596,207 @@ impl Parser {
     }
 }
 
+// ── Local slot resolver ──────────────────────────────────────────────────
+
+#[derive(Default)]
+struct ResolveScope {
+    locals: Vec<String>,
+}
+
+struct LocalResolver {
+    scopes: Vec<ResolveScope>,
+}
+
+impl LocalResolver {
+    fn new() -> Self {
+        Self {
+            scopes: vec![ResolveScope::default()],
+        }
+    }
+
+    fn enter_scope(&mut self) {
+        self.scopes.push(ResolveScope::default());
+    }
+
+    fn exit_scope(&mut self) {
+        let _ = self.scopes.pop();
+    }
+
+    fn declare_local(&mut self, name: &str) {
+        let Some(scope) = self.scopes.last_mut() else {
+            return;
+        };
+        if scope
+            .locals
+            .iter()
+            .rposition(|local| local == name)
+            .is_none()
+        {
+            scope.locals.push(name.to_string());
+        }
+    }
+
+    fn resolve_local(&self, name: &str) -> Option<LocalSlotRef> {
+        for (scope_idx, scope) in self.scopes.iter().enumerate().rev() {
+            if let Some(slot) = scope.locals.iter().rposition(|local| local == name) {
+                return Some(LocalSlotRef {
+                    depth: self.scopes.len() - 1 - scope_idx,
+                    slot,
+                });
+            }
+        }
+        None
+    }
+
+    fn resolve_child_block(&mut self, body: &mut Block) {
+        self.enter_scope();
+        self.resolve_stmts(body);
+        self.exit_scope();
+    }
+
+    fn resolve_function_body(&mut self, params: &[String], body: &mut Block) {
+        self.enter_scope();
+        for param in params {
+            self.declare_local(param);
+        }
+        self.resolve_stmts(body);
+        self.exit_scope();
+    }
+
+    fn resolve_stmts(&mut self, stmts: &mut Block) {
+        for (_, stmt) in stmts {
+            self.resolve_stmt(stmt);
+        }
+    }
+
+    fn resolve_stmt(&mut self, stmt: &mut Stmt) {
+        match stmt {
+            Stmt::Assign(lhs, rhs) => {
+                for expr in lhs {
+                    self.resolve_expr(expr);
+                }
+                for expr in rhs {
+                    self.resolve_expr(expr);
+                }
+            }
+            Stmt::LocalAssign(names, exprs) => {
+                for expr in exprs {
+                    self.resolve_expr(expr);
+                }
+                for name in names {
+                    self.declare_local(name);
+                }
+            }
+            Stmt::Expression(expr) => self.resolve_expr(expr),
+            Stmt::If(branches, else_body) => {
+                for (cond, body) in branches {
+                    self.resolve_expr(cond);
+                    self.resolve_child_block(body);
+                }
+                if let Some(body) = else_body {
+                    self.resolve_child_block(body);
+                }
+            }
+            Stmt::NumericFor(name, start, stop, step, body) => {
+                self.resolve_expr(start);
+                self.resolve_expr(stop);
+                if let Some(step) = step {
+                    self.resolve_expr(step);
+                }
+                self.enter_scope();
+                self.declare_local(name);
+                self.resolve_stmts(body);
+                self.exit_scope();
+            }
+            Stmt::GenericFor(names, iter_exprs, body) => {
+                for expr in iter_exprs {
+                    self.resolve_expr(expr);
+                }
+                self.enter_scope();
+                for name in names {
+                    self.declare_local(name);
+                }
+                self.resolve_stmts(body);
+                self.exit_scope();
+            }
+            Stmt::While(cond, body) => {
+                self.resolve_expr(cond);
+                self.resolve_child_block(body);
+            }
+            Stmt::Repeat(body, cond) => {
+                self.enter_scope();
+                self.resolve_stmts(body);
+                self.resolve_expr(cond);
+                self.exit_scope();
+            }
+            Stmt::DoBlock(body) => self.resolve_child_block(body),
+            Stmt::Return(exprs) => {
+                for expr in exprs {
+                    self.resolve_expr(expr);
+                }
+            }
+            Stmt::FunctionDecl(_, params, _, body) => self.resolve_function_body(params, body),
+            Stmt::LocalFunctionDecl(name, params, _, body) => {
+                self.declare_local(name);
+                self.resolve_function_body(params, body);
+            }
+            Stmt::Break => {}
+        }
+    }
+
+    fn resolve_expr(&mut self, expr: &mut Expr) {
+        match expr {
+            Expr::Name(name) => {
+                if let Some(local) = self.resolve_local(name) {
+                    *expr = Expr::LocalName(name.clone(), local);
+                }
+            }
+            Expr::LocalName(_, _) | Expr::Nil | Expr::Bool(_) | Expr::Number(_) | Expr::Str(_) => {}
+            Expr::VarArgs => {}
+            Expr::BinOp(left, _, right) => {
+                self.resolve_expr(left);
+                self.resolve_expr(right);
+            }
+            Expr::UnaryOp(_, inner) => self.resolve_expr(inner),
+            Expr::Index(table, key) => {
+                self.resolve_expr(table);
+                self.resolve_expr(key);
+            }
+            Expr::Field(table, _) => self.resolve_expr(table),
+            Expr::Call(func, args) => {
+                self.resolve_expr(func);
+                for arg in args {
+                    self.resolve_expr(arg);
+                }
+            }
+            Expr::MethodCall(obj, _, args) => {
+                self.resolve_expr(obj);
+                for arg in args {
+                    self.resolve_expr(arg);
+                }
+            }
+            Expr::TableConstructor(fields) => {
+                for field in fields {
+                    match field {
+                        TableField::Index(key, val) => {
+                            self.resolve_expr(key);
+                            self.resolve_expr(val);
+                        }
+                        TableField::Named(_, val) | TableField::Positional(val) => {
+                            self.resolve_expr(val);
+                        }
+                    }
+                }
+            }
+            Expr::FunctionDef(params, _, body) => self.resolve_function_body(params, body),
+        }
+    }
+}
+
+fn resolve_lua_local_slots(stmts: &mut Block) {
+    LocalResolver::new().resolve_stmts(stmts);
+}
+
 // ── Evaluator ───────────────────────────────────────────────────────────
 
 const MAX_CALL_DEPTH: usize = 128;
@@ -2893,6 +3101,10 @@ impl Scope {
             .map(|local| &local.cell)
     }
 
+    fn get_local_cell_at(&self, slot: usize) -> Option<&LuaCell> {
+        self.locals.get(slot).map(|local| &local.cell)
+    }
+
     fn contains_local(&self, name: &str) -> bool {
         self.locals.iter().rev().any(|local| local.name == name)
     }
@@ -2977,6 +3189,37 @@ impl Env {
             }
         }
         false
+    }
+
+    fn scope_index_for_slot(&self, local: LocalSlotRef) -> Option<usize> {
+        let from_top = local.depth.checked_add(1)?;
+        self.scopes.len().checked_sub(from_top)
+    }
+
+    fn get_local_slot(&self, local: LocalSlotRef) -> Option<LuaValue> {
+        let scope_idx = self.scope_index_for_slot(local)?;
+        let cell = self.scopes.get(scope_idx)?.get_local_cell_at(local.slot)?;
+        Some(cell.borrow().clone())
+    }
+
+    fn set_existing_local_slot(&mut self, local: LocalSlotRef, value: LuaValue) -> bool {
+        let Some(scope_idx) = self.scope_index_for_slot(local) else {
+            return false;
+        };
+        let Some(cell) = self
+            .scopes
+            .get(scope_idx)
+            .and_then(|scope| scope.get_local_cell_at(local.slot))
+        else {
+            return false;
+        };
+        *cell.borrow_mut() = value;
+        true
+    }
+
+    fn classify_slot(&self, local: LocalSlotRef) -> Option<bool> {
+        let scope_idx = self.scope_index_for_slot(local)?;
+        Some(scope_idx >= self.local_floor)
     }
 
     /// Snapshot all current scope locals for upvalue capture.
@@ -3382,13 +3625,14 @@ impl<'a> LuaState<'a> {
         let mut lexer = Lexer::new(source);
         let (tokens, lines) = lexer.tokenize_all_with_lines()?;
         let mut parser = Parser::with_lines(tokens, lines);
-        let stmts = parser.parse_block()?;
+        let mut stmts = parser.parse_block()?;
         if !parser.check(&Token::Eof) {
             return Err(format!(
                 "'<eof>' expected near '{}'",
                 token_display(parser.peek())
             ));
         }
+        resolve_lua_local_slots(&mut stmts);
         // (frankenredis-j02x9) Lock the globals table — from this point
         // forward any user-script write to globals raises a readonly-
         // table error and any read of an undefined global raises the
@@ -3703,17 +3947,20 @@ impl<'a> LuaState<'a> {
                 Ok(ControlFlow::None)
             }
             Stmt::LocalFunctionDecl(name, params, is_variadic, body) => {
+                env.set_local(name, LuaValue::Nil);
                 let func = LuaValue::Function(LuaFunc {
                     params: params.clone(),
                     body: body.clone(),
                     is_variadic: *is_variadic,
                     captured_env: Some(env.snapshot()),
                     env_table: Rc::new(RefCell::new(env.current_global_env())),
-                    self_name: Some(name.clone()),
+                    self_name: None,
                     source_label: self.current_source_label.clone(),
                     identity: next_function_identity(),
                 });
-                env.set_local(name, func);
+                if !env.set_existing_local(name, func.clone()) {
+                    env.set_local(name, func);
+                }
                 Ok(ControlFlow::None)
             }
         }
@@ -3803,6 +4050,26 @@ impl<'a> LuaState<'a> {
         varargs: &mut Vec<LuaValue>,
     ) -> Result<(), String> {
         match lhs {
+            Expr::LocalName(name, local) => {
+                if !env.set_existing_local_slot(*local, value.clone())
+                    && !env.set_existing_local(name, value.clone())
+                {
+                    if let Some(global_env) = env.current_global_env() {
+                        self.table_assign_with_newindex(
+                            global_env,
+                            LuaValue::Str(name.as_bytes().to_vec()),
+                            value,
+                            env,
+                            varargs,
+                        )?;
+                        return Ok(());
+                    }
+                    if self.globals_locked {
+                        return Err("user_script:1: Attempt to modify a readonly table".to_string());
+                    }
+                    self.globals.insert(name.clone(), value);
+                }
+            }
             Expr::Name(name) => {
                 if !env.set_existing_local(name, value.clone()) {
                     if let Some(global_env) = env.current_global_env() {
@@ -3952,6 +4219,24 @@ impl<'a> LuaState<'a> {
         varargs: &mut Vec<LuaValue>,
     ) -> Result<(), String> {
         match table_expr {
+            Expr::LocalName(name, local) => {
+                if !env.set_existing_local_slot(*local, table.clone())
+                    && !env.set_existing_local(name, table.clone())
+                {
+                    if let Some(global_env) = env.current_global_env() {
+                        self.table_assign_with_newindex(
+                            global_env,
+                            LuaValue::Str(name.as_bytes().to_vec()),
+                            table,
+                            env,
+                            varargs,
+                        )?;
+                        return Ok(());
+                    }
+                    self.globals.insert(name.clone(), table);
+                }
+                Ok(())
+            }
             Expr::Name(name) => {
                 if !env.set_existing_local(name, table.clone()) {
                     if let Some(global_env) = env.current_global_env() {
@@ -3996,6 +4281,30 @@ impl<'a> LuaState<'a> {
             Expr::VarArgs => {
                 // Return first vararg; multi-value context handled in eval_expr_list
                 Ok(varargs.first().cloned().unwrap_or(LuaValue::Nil))
+            }
+            Expr::LocalName(name, local) => {
+                if let Some(val) = env.get_local_slot(*local) {
+                    Ok(val)
+                } else if let Some(val) = env.get_local(name) {
+                    Ok(val)
+                } else if let Some(global_env) = env.current_global_env() {
+                    self.table_lookup_with_index_meta(
+                        &global_env,
+                        &LuaValue::Str(name.as_bytes().to_vec()),
+                        env,
+                        varargs,
+                    )
+                } else if name == "_G" {
+                    Ok(LuaValue::Table(self.ensure_g_table()))
+                } else if let Some(val) = self.globals.get(name) {
+                    Ok(val.clone())
+                } else if self.globals_locked {
+                    Err(format!(
+                        "user_script:1: Script attempted to access nonexistent global variable '{name}'"
+                    ))
+                } else {
+                    Ok(LuaValue::Nil)
+                }
             }
             Expr::Name(name) => {
                 if let Some(val) = env.get_local(name) {
@@ -4360,10 +4669,24 @@ impl<'a> LuaState<'a> {
                         name.as_str(),
                         "table.sort" | "table.insert" | "table.remove" | "rawset"
                     )
-                    && let Some(Expr::Name(var_name)) = args.first()
                 {
-                    if !env.set_existing_local(var_name, arg_vals[0].clone()) {
-                        self.globals.insert(var_name.clone(), arg_vals[0].clone());
+                    match args.first() {
+                        Some(Expr::LocalName(var_name, local)) => {
+                            if !env.set_existing_local_slot(*local, arg_vals[0].clone())
+                                && !env.set_existing_local(var_name, arg_vals[0].clone())
+                            {
+                                self.globals.insert(var_name.clone(), arg_vals[0].clone());
+                            }
+                        }
+                        Some(Expr::Name(var_name)) => {
+                            match env.set_existing_local(var_name, arg_vals[0].clone()) {
+                                true => {}
+                                false => {
+                                    self.globals.insert(var_name.clone(), arg_vals[0].clone());
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Ok(results.into_iter().next().unwrap_or(LuaValue::Nil))
@@ -4989,6 +5312,14 @@ impl<'a> LuaState<'a> {
     /// (frankenredis-md71j)
     fn callee_label(&self, expr: &Expr, env: &Env) -> Option<String> {
         match expr {
+            Expr::LocalName(name, local) => match env
+                .classify_slot(*local)
+                .or_else(|| env.classify_name(name))
+            {
+                Some(true) => Some(format!("local '{name}'")),
+                Some(false) => Some(format!("upvalue '{name}'")),
+                None => None,
+            },
             Expr::Name(name) => match env.classify_name(name) {
                 Some(true) => Some(format!("local '{name}'")),
                 Some(false) => Some(format!("upvalue '{name}'")),
@@ -5056,7 +5387,7 @@ impl<'a> LuaState<'a> {
             return Some(m.to_string());
         }
         match callee_expr {
-            Expr::Name(n) => Some(n.clone()),
+            Expr::Name(n) | Expr::LocalName(n, _) => Some(n.clone()),
             Expr::Field(_, f) => Some(f.clone()),
             Expr::Index(_, key) => match key.as_ref() {
                 Expr::Str(s) if !s.is_empty() => std::str::from_utf8(s).ok().map(str::to_string),
@@ -5942,13 +6273,14 @@ impl<'a> LuaState<'a> {
                 let chunk_label = format_lua_chunk_label(chunkname.as_deref(), &src_bytes);
                 match Lexer::new(&src_bytes).tokenize_all().and_then(|tokens| {
                     let mut parser = Parser::new(tokens);
-                    let stmts = parser.parse_block()?;
+                    let mut stmts = parser.parse_block()?;
                     if !parser.check(&Token::Eof) {
                         return Err(format!(
                             "'<eof>' expected near '{}'",
                             token_display(parser.peek())
                         ));
                     }
+                    resolve_lua_local_slots(&mut stmts);
                     Ok(stmts)
                 }) {
                     Ok(body) => Ok(vec![LuaValue::Function(LuaFunc {
@@ -14364,6 +14696,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::Integer(42));
+    }
+
+    #[test]
+    fn lua_local_slot_resolution_preserves_lexical_semantics_v0u4b() {
+        let mut store = Store::new();
+        let frame = eval_script(
+            br#"
+local x = 'outer'
+local outer = function() return x end
+local t = {}
+local sum = 0
+for i = 1, 100 do
+    t[i] = i
+    sum = sum + t[i]
+end
+do
+    local x = x .. ':inner'
+    local function g(n)
+        if n <= 1 then return n end
+        return g(n - 1) + n
+    end
+    local loaded = loadstring('local a = 2; local b = a + 3; return b')
+    return outer() .. ':' .. x .. ':' .. sum .. ':' .. t[100] .. ':' .. g(4) .. ':' .. loaded()
+end
+"#,
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"outer:outer:inner:5050:100:10:5".to_vec()))
+        );
     }
 
     #[test]

@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-iror0/pass143/lua_eval_bench.py --server-bin /data/projects/.scratch/frankenredis-v0u4b-pass144-candidate-target/release-perf/frankenredis --port 7453 --mode table200 --iterations 2500 --json-out artifacts/optimization/frankenredis-v0u4b/pass144/reversed-candidate-table200-last.json --golden-out artifacts/optimization/frankenredis-v0u4b/pass144/reversed-candidate-table200-golden.json",
+      "mean": 0.67092790506,
+      "stddev": 0.03197029405471979,
+      "median": 0.6721573030600001,
+      "user": 0.49400044000000004,
+      "system": 0.15790361999999997,
+      "min": 0.6259449450600001,
+      "max": 0.71187056906,
+      "times": [
+        0.71187056906,
+        0.6259449450600001,
+        0.6335878410600001,
+        0.66093048306,
+        0.7009140970600001,
+        0.6354623220600001,
+        0.6661919890600001,
+        0.7102542590600001,
+        0.6781226170600001,
+        0.6859999280600001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-iror0/pass143/lua_eval_bench.py --server-bin /data/projects/.scratch/frankenredis-v0u4b-pass144-baseline-target/release-perf/frankenredis --port 7454 --mode table200 --iterations 2500 --json-out artifacts/optimization/frankenredis-v0u4b/pass144/reversed-baseline-table200-last.json --golden-out artifacts/optimization/frankenredis-v0u4b/pass144/reversed-baseline-table200-golden.json",
+      "mean": 0.73819031986,
+      "stddev": 0.022929712393130765,
+      "median": 0.74548120506,
+      "user": 0.55607344,
+      "system": 0.16702932000000004,
+      "min": 0.6914593010600001,
+      "max": 0.7664375790600001,
+      "times": [
+        0.75228212606,
+        0.7501306600600001,
+        0.7568221460600001,
+        0.71577868406,
+        0.7405463880600001,
+        0.74856761106,
+        0.7664375790600001,
+        0.6914593010600001,
+        0.7174839040600001,
+        0.74239479906
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
