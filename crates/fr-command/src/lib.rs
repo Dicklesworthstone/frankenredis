@@ -10047,9 +10047,12 @@ fn xack_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     // missing. The IDs are only parsed once both exist, so an
     // invalid ID against a missing key/group reports 0 rather than
     // 'Invalid stream ID specified...'. (br-frankenredis-xackorder)
-    match store.xpending_summary(key, group, now_ms) {
-        Ok(None) => return Ok(RespFrame::Integer(0)),
-        Ok(Some(_)) => {}
+    // (frankenredis-j9lgb) Use the O(log) existence check, NOT
+    // xpending_summary — XACK never needs the per-consumer histogram, and the
+    // O(P) scan made XACK ~20x slower than redis on a large pending list.
+    match store.stream_group_exists(key, group, now_ms) {
+        Ok(false) => return Ok(RespFrame::Integer(0)),
+        Ok(true) => {}
         Err(e) => return Err(CommandError::Store(e)),
     }
     let mut ids = Vec::with_capacity(argv.len() - 3);

@@ -13377,6 +13377,35 @@ impl Store {
         }
     }
 
+    /// (frankenredis-j9lgb) Whether `(key, group)` names an existing stream
+    /// consumer group, with the SAME preamble side effects as
+    /// `xpending_summary` (expiry drop via `record_keyspace_lookup`, WRONGTYPE
+    /// on a non-stream key) but WITHOUT the O(P) per-consumer pending scan —
+    /// `Ok(true)` mirrors `xpending_summary`'s `Ok(Some(_))`, `Ok(false)` mirrors
+    /// its `Ok(None)`. XACK only needs the existence short-circuit, not the
+    /// per-consumer histogram, so this keeps `XACK` at O(log) instead of O(P).
+    pub fn stream_group_exists(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(false);
+        }
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(_) => Ok(self
+                    .stream_groups
+                    .get(key)
+                    .and_then(|groups| groups.get(group))
+                    .is_some()),
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(false),
+        }
+    }
+
     pub fn xpending_summary(
         &mut self,
         key: &[u8],
