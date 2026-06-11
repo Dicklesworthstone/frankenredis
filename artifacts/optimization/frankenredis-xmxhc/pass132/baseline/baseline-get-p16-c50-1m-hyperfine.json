@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-xmxhc/pass132/baseline/current-run SERVER=/tmp/rch_target_fr_3cc4w_p130_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_3cc4w_p130_current/release-perf/fr-bench PORT=6766 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-xmxhc/pass132/baseline/baseline-get-p16-c50-1m-last.json KEY_PREFIX=xmxhc:p132:baseline artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 0.8479028380599999,
+      "stddev": 0.03104810829057812,
+      "median": 0.85197875246,
+      "user": 1.28716592,
+      "system": 2.40400564,
+      "min": 0.79941463146,
+      "max": 0.89736689546,
+      "times": [
+        0.8312581534600001,
+        0.8505312484600001,
+        0.8282241114600001,
+        0.89736689546,
+        0.8802591834600001,
+        0.85342625646,
+        0.87047718846,
+        0.80918376546,
+        0.79941463146,
+        0.8588869464600001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
