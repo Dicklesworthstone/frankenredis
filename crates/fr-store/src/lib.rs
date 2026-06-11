@@ -12327,10 +12327,17 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::SortedSet(zs) => {
+                    // (frankenredis-zremlex) Use the same indexed lex-range query
+                    // the read path (ZRANGEBYLEX) uses instead of a full
+                    // `iter_asc().filter()` scan: for the single-score sets where
+                    // lexicographic ranges are meaningful this walks the BTreeMap
+                    // range `O(log n + k)` rather than `O(n)`; multi-score sets
+                    // fall back to the identical exact iter+filter, so the removed
+                    // membership is byte-for-byte unchanged.
                     let to_remove: Vec<Vec<u8>> = zs
-                        .iter_asc()
-                        .filter(|(m, _)| lex_in_range(m, min, max))
-                        .map(|(m, _)| m.to_vec())
+                        .lex_range_asc(min, max)
+                        .into_iter()
+                        .map(|(m, _)| m)
                         .collect();
                     let removed_count = to_remove.len();
                     for m in &to_remove {
