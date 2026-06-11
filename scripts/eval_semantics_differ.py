@@ -24,6 +24,7 @@ NON-DETERMINISM: a script that returns a bare table/function reaches the client
 as `table: 0x<addr>` / `function: 0x<addr>` whose pointer differs per process —
 those are normalized away (not fr bugs).
 """
+import hashlib
 import socket
 import sys
 import re
@@ -141,6 +142,57 @@ ERROR_SCRIPTS = [
     "return redis.call('INCR','n','extra')", "return {err=1}",
 ]
 
+# Stateful EVAL/EVALSHA/SCRIPT sequences that pin the compiled-chunk CACHE
+# (frankenredis 83f3bb82c) against staleness: a cached chunk must rebind
+# KEYS/ARGV every call, never leak globals or closure state across invocations,
+# and EVALSHA must reproduce EVAL exactly. Each inner item is `(cmd-args, )`;
+# every reply is compared. `<SHA:script>` placeholders expand to the SHA1 of
+# `script` so EVALSHA/SCRIPT EXISTS lines stay in sync with the EVAL body.
+CACHE_SEQUENCES = [
+    # KEYS/ARGV must rebind on every cached call (not frozen from the first run)
+    [["EVAL", "return {KEYS[1],ARGV[1],#KEYS,#ARGV}", "1", "k1", "a1"],
+     ["EVAL", "return {KEYS[1],ARGV[1],#KEYS,#ARGV}", "2", "kA", "kB", "aX", "aY"],
+     ["EVAL", "return {KEYS[1],ARGV[1],#KEYS,#ARGV}", "0"]],
+    # EVALSHA reproduces EVAL for the same (cached) chunk, incl. side effects
+    [["EVAL", "return redis.call('incr','cseq_cc')", "0"],
+     ["EVALSHA", "<SHA:return redis.call('incr','cseq_cc')>", "0"],
+     ["EVAL", "return redis.call('incr','cseq_cc')", "0"],
+     ["EVALSHA", "<SHA:return redis.call('incr','cseq_cc')>", "0"]],
+    # no closure / local state persists across repeated cached calls
+    [["EVAL", "local n=0 local function inc() n=n+1 return n end inc() return inc()", "0"],
+     ["EVAL", "local n=0 local function inc() n=n+1 return n end inc() return inc()", "0"],
+     ["EVAL", "local n=0 local function inc() n=n+1 return n end inc() return inc()", "0"]],
+    # a runtime error must not poison the cache for later calls
+    [["EVAL", "return redis.call('INCR','cseq_sk','extra')", "0"],
+     ["EVAL", "return redis.call('INCR','cseq_sk','extra')", "0"],
+     ["EVAL", "return redis.call('SET','cseq_sk','1')", "0"],
+     ["EVAL", "return redis.call('GET','cseq_sk')", "0"]],
+    # interleave two distinct cached chunks — no cross-contamination
+    [["EVAL", "return 'AAA'..ARGV[1]", "0", "1"],
+     ["EVAL", "return 'BBB'..ARGV[1]", "0", "2"],
+     ["EVAL", "return 'AAA'..ARGV[1]", "0", "3"],
+     ["EVAL", "return 'BBB'..ARGV[1]", "0", "4"]],
+    # whitespace-different bodies are distinct cache entries, identical result
+    [["EVAL", "return 1+1", "0"], ["EVAL", "return  1+1", "0"],
+     ["EVAL", "return 1 + 1", "0"], ["EVAL", "return 1+1 ", "0"]],
+    # SCRIPT LOAD then EVALSHA / SCRIPT EXISTS
+    [["SCRIPT", "LOAD", "return 42+#KEYS"],
+     ["EVALSHA", "<SHA:return 42+#KEYS>", "2", "a", "b"],
+     ["EVALSHA", "<SHA:return 42+#KEYS>", "0"],
+     ["SCRIPT", "EXISTS", "<SHA:return 42+#KEYS>", "<SHA:return 999777>"]],
+    # local-heavy loop body re-run from cache with varying ARGV
+    [["EVAL", "local t={} for i=1,tonumber(ARGV[1]) do t[i]=i end return t", "0", "3"],
+     ["EVAL", "local t={} for i=1,tonumber(ARGV[1]) do t[i]=i end return t", "0", "5"],
+     ["EVAL", "local t={} for i=1,tonumber(ARGV[1]) do t[i]=i end return t", "0", "1"]],
+]
+
+
+def _expand_sha(arg):
+    if isinstance(arg, str) and arg.startswith("<SHA:") and arg.endswith(">"):
+        body = arg[len("<SHA:"):-1]
+        return hashlib.sha1(body.encode()).hexdigest()
+    return arg
+
 _ADDR = re.compile(rb"(table|function): 0x[0-9a-f]+")
 
 
@@ -229,9 +281,23 @@ def main():
         if eo != ef:
             div += 1
             print(f"DIVERGE(error-ness) {sc!r}: oracle_is_error={eo} fr_is_error={ef}")
-    total = len(SCRIPTS) + len(ERROR_SCRIPTS)
+    cache_steps = 0
+    for seq in CACHE_SEQUENCES:
+        for step in seq:
+            args = [_expand_sha(a) for a in step]
+            ro = _norm(send(o, *args))
+            rf = _norm(send(f, *args))
+            cache_steps += 1
+            same = ro == rf
+            if not same and ro[0] == "-" and rf[0] == "-":
+                # both errors: compare the leading error code word
+                same = ro[1].split(" ", 1)[0] == rf[1].split(" ", 1)[0]
+            if not same:
+                div += 1
+                print(f"DIVERGE(cache) {args!r}\n  oracle: {ro!r}\n  fr    : {rf!r}")
+    total = len(SCRIPTS) + len(ERROR_SCRIPTS) + cache_steps
     print("-" * 60)
-    print(f"checked {total} EVAL scripts; divergences: {div}")
+    print(f"checked {total} EVAL steps ({cache_steps} cache-sequence); divergences: {div}")
     if div == 0:
         print("PASS — fr EVAL/Lua core semantics match redis 7.2.4")
         return 0
