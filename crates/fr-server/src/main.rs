@@ -2112,7 +2112,32 @@ fn process_buffered_frames(
             let borrowed_parse_result = {
                 let unparsed = &conn.read_buf[consumed_total..];
                 let parser_config = runtime.parser_config();
-                if let Some(packet) = parse_borrowed_plain_set_packet(unparsed, &parser_config)
+                if let Some(packet) = parse_borrowed_plain_get_packet(unparsed, &parser_config) {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_get_borrowed_into(
+                            packet.key,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_set_packet(unparsed, &parser_config)
                     && let Some(response) =
                         runtime.execute_plain_set_borrowed(packet.key, packet.value, ts)
                 {
@@ -2121,258 +2146,14 @@ fn process_buffered_frames(
                         response,
                     })
                 } else {
-                    let mut borrowed_args = Vec::new();
-                    match fr_protocol::parse_command_args_borrowed_into(
+                    parse_borrowed_multibulk_action(
                         unparsed,
-                        &parser_config,
-                        &mut borrowed_args,
-                    ) {
-                        Ok(parsed) => {
-                            let argv_len = borrowed_args.len();
-                            if matches!(parsed.kind, BorrowedCommandArgsKind::Arguments)
-                                && argv_len > 0
-                            {
-                                if let Some(key) = borrowed_plain_get_args(&borrowed_args) {
-                                    let client_resp3 =
-                                        runtime.client_session().resp_protocol_version() == 3;
-                                    if runtime
-                                        .execute_plain_get_borrowed_into(
-                                            key,
-                                            ts,
-                                            client_resp3,
-                                            &mut conn.write_buf,
-                                        )
-                                        .is_some()
-                                    {
-                                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                                            consumed: parsed.consumed,
-                                        })
-                                    } else {
-                                        copy_borrowed_argv_into_scratch(
-                                            &borrowed_args,
-                                            &mut argv_scratch,
-                                        );
-                                        Ok(BorrowedMultibulkAction::Parsed {
-                                            kind: parsed.kind,
-                                            consumed: parsed.consumed,
-                                            argv_len,
-                                        })
-                                    }
-                                } else if let Some((key, value)) =
-                                    borrowed_plain_set_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_set_borrowed(key, value, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some(key) = borrowed_plain_incr_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_incr_borrowed(key, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some((key, delta)) =
-                                    borrowed_plain_incrby_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_incrby_borrowed(key, delta, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some(key) = borrowed_plain_decr_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_decr_borrowed(key, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some((key, delta)) =
-                                    borrowed_plain_decrby_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_decrby_borrowed(key, delta, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some((key, value)) =
-                                    borrowed_plain_append_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_append_borrowed(key, value, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some((cmd, key, values)) =
-                                    borrowed_plain_keyed_values_args(&borrowed_args)
-                                    && let Some(response) = runtime
-                                        .execute_plain_keyed_values_write_borrowed(
-                                            cmd, key, values, ts,
-                                        )
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some((key, pairs)) =
-                                    borrowed_plain_hset_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_hset_borrowed(key, pairs, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some((key, pairs)) =
-                                    borrowed_plain_zadd_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_zadd_borrowed(key, pairs, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some((cmd, key)) =
-                                    borrowed_plain_keyed_pop_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_keyed_pop_borrowed(cmd, key, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some((key, field)) =
-                                    borrowed_plain_hget_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_hget_borrowed(key, field, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some(keys) = borrowed_plain_mget_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_mget_borrowed(keys, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some(keys) =
-                                    borrowed_plain_exists_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_exists_borrowed(keys, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some(key) = borrowed_plain_strlen_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_strlen_borrowed(key, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some(key) = borrowed_plain_llen_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_llen_borrowed(key, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some(key) = borrowed_plain_scard_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_scard_borrowed(key, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some((key, index)) =
-                                    borrowed_plain_lindex_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_lindex_borrowed(key, index, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some((key, member)) =
-                                    borrowed_plain_zscore_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_zscore_borrowed(key, member, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some((key, start, end)) =
-                                    borrowed_plain_getrange_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_getrange_borrowed(key, start, end, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some((key, fields)) =
-                                    borrowed_plain_hmget_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_hmget_borrowed(key, fields, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some((key, member)) =
-                                    borrowed_plain_sismember_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_sismember_borrowed(key, member, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else if let Some((key, field)) =
-                                    borrowed_plain_hexists_args(&borrowed_args)
-                                    && let Some(response) =
-                                        runtime.execute_plain_hexists_borrowed(key, field, ts)
-                                {
-                                    Ok(BorrowedMultibulkAction::FastReply {
-                                        consumed: parsed.consumed,
-                                        response,
-                                    })
-                                } else {
-                                    copy_borrowed_argv_into_scratch(
-                                        &borrowed_args,
-                                        &mut argv_scratch,
-                                    );
-                                    Ok(BorrowedMultibulkAction::Parsed {
-                                        kind: parsed.kind,
-                                        consumed: parsed.consumed,
-                                        argv_len,
-                                    })
-                                }
-                            } else {
-                                Ok(BorrowedMultibulkAction::Parsed {
-                                    kind: parsed.kind,
-                                    consumed: parsed.consumed,
-                                    argv_len,
-                                })
-                            }
-                        }
-                        Err(err) => Err(err),
-                    }
+                        parser_config,
+                        runtime,
+                        ts,
+                        &mut conn.write_buf,
+                        &mut argv_scratch,
+                    )
                 }
             };
             match borrowed_parse_result {
@@ -2543,6 +2324,233 @@ fn process_buffered_frames(
     budget_exhausted
 }
 
+fn parse_borrowed_multibulk_action(
+    unparsed: &[u8],
+    parser_config: ParserConfig,
+    runtime: &mut Runtime,
+    ts: u64,
+    out: &mut Vec<u8>,
+    argv_scratch: &mut Vec<Vec<u8>>,
+) -> Result<BorrowedMultibulkAction, RespParseError> {
+    let mut borrowed_args = Vec::new();
+    match fr_protocol::parse_command_args_borrowed_into(
+        unparsed,
+        &parser_config,
+        &mut borrowed_args,
+    ) {
+        Ok(parsed) => {
+            let argv_len = borrowed_args.len();
+            if matches!(parsed.kind, BorrowedCommandArgsKind::Arguments) && argv_len > 0 {
+                if let Some(key) = borrowed_plain_get_args(&borrowed_args) {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_get_borrowed_into(key, ts, client_resp3, out)
+                        .is_some()
+                    {
+                        return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: parsed.consumed,
+                        });
+                    }
+                    copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                    return Ok(BorrowedMultibulkAction::Parsed {
+                        kind: parsed.kind,
+                        consumed: parsed.consumed,
+                        argv_len,
+                    });
+                }
+                if let Some((key, value)) = borrowed_plain_set_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_set_borrowed(key, value, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some(key) = borrowed_plain_incr_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_incr_borrowed(key, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some((key, delta)) = borrowed_plain_incrby_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_incrby_borrowed(key, delta, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some(key) = borrowed_plain_decr_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_decr_borrowed(key, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some((key, delta)) = borrowed_plain_decrby_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_decrby_borrowed(key, delta, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some((key, value)) = borrowed_plain_append_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_append_borrowed(key, value, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some((cmd, key, values)) = borrowed_plain_keyed_values_args(&borrowed_args)
+                    && let Some(response) =
+                        runtime.execute_plain_keyed_values_write_borrowed(cmd, key, values, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some((key, pairs)) = borrowed_plain_hset_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_hset_borrowed(key, pairs, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some((key, pairs)) = borrowed_plain_zadd_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_zadd_borrowed(key, pairs, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_keyed_pop_borrowed(cmd, key, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some((key, field)) = borrowed_plain_hget_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_hget_borrowed(key, field, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some(keys) = borrowed_plain_mget_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_mget_borrowed(keys, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some(keys) = borrowed_plain_exists_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_exists_borrowed(keys, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some(key) = borrowed_plain_strlen_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_strlen_borrowed(key, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some(key) = borrowed_plain_llen_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_llen_borrowed(key, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some(key) = borrowed_plain_scard_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_scard_borrowed(key, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some((key, index)) = borrowed_plain_lindex_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_lindex_borrowed(key, index, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some((key, member)) = borrowed_plain_zscore_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_zscore_borrowed(key, member, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some((key, start, end)) = borrowed_plain_getrange_args(&borrowed_args)
+                    && let Some(response) =
+                        runtime.execute_plain_getrange_borrowed(key, start, end, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some((key, fields)) = borrowed_plain_hmget_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_hmget_borrowed(key, fields, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some((key, member)) = borrowed_plain_sismember_args(&borrowed_args)
+                    && let Some(response) =
+                        runtime.execute_plain_sismember_borrowed(key, member, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+                if let Some((key, field)) = borrowed_plain_hexists_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_hexists_borrowed(key, field, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
+
+                copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+            }
+
+            Ok(BorrowedMultibulkAction::Parsed {
+                kind: parsed.kind,
+                consumed: parsed.consumed,
+                argv_len,
+            })
+        }
+        Err(err) => Err(err),
+    }
+}
+
 enum BorrowedMultibulkAction {
     Parsed {
         kind: BorrowedCommandArgsKind,
@@ -2556,6 +2564,31 @@ enum BorrowedMultibulkAction {
     FastEncodedReply {
         consumed: usize,
     },
+}
+
+struct BorrowedPlainGetPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+fn parse_borrowed_plain_get_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainGetPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"GET".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$3\r\n").and_then(|rest| {
+        rest.get(..3)
+            .filter(|command| command.eq_ignore_ascii_case(b"GET"))
+            .map(|_| input.len() - rest.len() + 3)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainGetPacket { consumed, key })
 }
 
 struct BorrowedPlainSetPacket<'a> {
@@ -5402,6 +5435,42 @@ mod tests {
 
     fn test_argv(frame: RespFrame) -> Vec<Vec<u8>> {
         fr_command::frame_to_argv(&frame).expect("test command frame should produce argv")
+    }
+
+    #[test]
+    fn borrowed_plain_get_packet_parser_accepts_canonical_get() {
+        let input = b"*2\r\n$3\r\ngEt\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed = crate::parse_borrowed_plain_get_packet(input, &ParserConfig::default())
+            .expect("canonical GET packet should parse");
+
+        assert_eq!(parsed.key, b"key");
+        assert_eq!(parsed.consumed, b"*2\r\n$3\r\ngEt\r\n$3\r\nkey\r\n".len());
+    }
+
+    #[test]
+    fn borrowed_plain_get_packet_parser_defers_noncanonical_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_get_packet(b"*02\r\n$3\r\nGET\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_get_packet(
+                b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_array_len: 1,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_get_packet(b"*2\r\n$3\r\nGET\r\n$2\r\nk\r\n", &cfg)
+                .is_none(),
+            "malformed bulk bodies stay on the generic parser"
+        );
     }
 
     #[test]

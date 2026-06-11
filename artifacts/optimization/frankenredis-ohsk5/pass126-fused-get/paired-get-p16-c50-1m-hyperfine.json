@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "ART=artifacts/optimization/frankenredis-ohsk5/pass126-fused-get; PORT=6401; SERVER=\"$ART/frankenredis-baseline\"; BENCH=\"$ART/fr-bench-baseline\"; LOG=\"$ART/paired-baseline-server.log\"; JSON=\"$ART/paired-baseline-last.json\"; \"$SERVER\" --port \"$PORT\" >\"$LOG\" 2>&1 & srv=$!; sleep 0.15; \"$BENCH\" --port \"$PORT\" --workload get --clients 50 --requests 1000000 --pipeline 16 --json-out \"$JSON\" >/dev/null; rc=$?; kill \"$srv\" 2>/dev/null || true; wait \"$srv\" 2>/dev/null || true; exit $rc",
+      "mean": 0.96418216222,
+      "stddev": 0.05603226981981797,
+      "median": 0.9409131206200001,
+      "user": 1.3166835799999999,
+      "system": 2.4738696599999996,
+      "min": 0.9079587626200001,
+      "max": 1.0816642546200002,
+      "times": [
+        0.9227376166200001,
+        0.94263934662,
+        0.9079587626200001,
+        0.93918689462,
+        0.9730616726200001,
+        1.04118290162,
+        0.97397839762,
+        0.93140370462,
+        0.92800807062,
+        1.0816642546200002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "ART=artifacts/optimization/frankenredis-ohsk5/pass126-fused-get; PORT=6402; SERVER=/data/tmp/cargo-target/release-perf/frankenredis; BENCH=/data/tmp/cargo-target/release-perf/fr-bench; LOG=\"$ART/paired-candidate-server.log\"; JSON=\"$ART/paired-candidate-last.json\"; \"$SERVER\" --port \"$PORT\" >\"$LOG\" 2>&1 & srv=$!; sleep 0.15; \"$BENCH\" --port \"$PORT\" --workload get --clients 50 --requests 1000000 --pipeline 16 --json-out \"$JSON\" >/dev/null; rc=$?; kill \"$srv\" 2>/dev/null || true; wait \"$srv\" 2>/dev/null || true; exit $rc",
+      "mean": 0.86850379982,
+      "stddev": 0.037253905186848686,
+      "median": 0.86997615912,
+      "user": 1.1982594800000002,
+      "system": 2.38698116,
+      "min": 0.80731846762,
+      "max": 0.92071288462,
+      "times": [
+        0.92071288462,
+        0.83864596962,
+        0.8835639216200001,
+        0.9117264256200001,
+        0.87174256262,
+        0.89988861462,
+        0.80731846762,
+        0.8243937116200001,
+        0.85883568462,
+        0.86820975562
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

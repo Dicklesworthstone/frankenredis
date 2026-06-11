@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "ART=artifacts/optimization/frankenredis-ohsk5/pass126-fused-get; PORT=6403; SERVER=/data/tmp/cargo-target/release-perf/frankenredis; BENCH=/data/tmp/cargo-target/release-perf/fr-bench; LOG=\"$ART/reversed-candidate-server.log\"; JSON=\"$ART/reversed-candidate-last.json\"; \"$SERVER\" --port \"$PORT\" >\"$LOG\" 2>&1 & srv=$!; sleep 0.15; \"$BENCH\" --port \"$PORT\" --workload get --clients 50 --requests 1000000 --pipeline 16 --json-out \"$JSON\" >/dev/null; rc=$?; kill \"$srv\" 2>/dev/null || true; wait \"$srv\" 2>/dev/null || true; exit $rc",
+      "mean": 0.9246405857400003,
+      "stddev": 0.04596789423216764,
+      "median": 0.9107099313400001,
+      "user": 1.2708194800000001,
+      "system": 2.5644245,
+      "min": 0.8840613163400001,
+      "max": 1.02108532634,
+      "times": [
+        1.02108532634,
+        0.9743029713400001,
+        0.9249111713400001,
+        0.93287987934,
+        0.88672264034,
+        0.8840613163400001,
+        0.8919188153400001,
+        0.8965086913400001,
+        0.8844619143400001,
+        0.9495531313400001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "ART=artifacts/optimization/frankenredis-ohsk5/pass126-fused-get; PORT=6404; SERVER=\"$ART/frankenredis-baseline\"; BENCH=\"$ART/fr-bench-baseline\"; LOG=\"$ART/reversed-baseline-server.log\"; JSON=\"$ART/reversed-baseline-last.json\"; \"$SERVER\" --port \"$PORT\" >\"$LOG\" 2>&1 & srv=$!; sleep 0.15; \"$BENCH\" --port \"$PORT\" --workload get --clients 50 --requests 1000000 --pipeline 16 --json-out \"$JSON\" >/dev/null; rc=$?; kill \"$srv\" 2>/dev/null || true; wait \"$srv\" 2>/dev/null || true; exit $rc",
+      "mean": 1.07877365454,
+      "stddev": 0.019726149430457324,
+      "median": 1.08050315834,
+      "user": 1.45086128,
+      "system": 2.7161999999999997,
+      "min": 1.03965359334,
+      "max": 1.10254465134,
+      "times": [
+        1.07256921334,
+        1.03965359334,
+        1.10254465134,
+        1.0571322913399999,
+        1.09448917534,
+        1.07163603334,
+        1.0870665503399999,
+        1.0819722773399998,
+        1.07903403934,
+        1.10163872034
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,93 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 3K of event 'cycles:P'
+# Event count (approx.): 18121072507
+#
+# Overhead  Command       Shared Object     Symbol
+# ........  ............  ................  ......................................................................................................................................................................................................
+#
+     3.35%  frankenredis  libc.so.6         [.] clock_gettime@@GLIBC_2.17
+            |
+             --3.08%--__GI___clock_gettime (inlined)
+                       |
+                        --0.43%--0x9
+
+     2.21%  frankenredis  [unknown]         [k] 0xffffffff84c001bd
+     1.73%  frankenredis  [vdso]            [.] 0x0000000000000983
+            |
+            ---0x71e6c1d83983
+
+     1.64%  frankenredis  [vdso]            [.] 0x0000000000000934
+            |
+             --1.59%--0x71e6c1d83934
+
+     1.35%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::execute_plain_get_borrowed_into
+            |
+             --0.92%--<fr_runtime::Runtime>::execute_plain_get_borrowed_into
+
+     1.27%  fr-writer-1   [unknown]         [k] 0xffffffff84c001bd
+     1.17%  fr-writer-0   [unknown]         [k] 0xffffffff84c001bd
+     1.09%  frankenredis  [unknown]         [k] 0xffffffff84c00080
+     1.05%  frankenredis  [vdso]            [.] 0x0000000000000930
+            |
+             --1.01%--0x71e6c1d83930
+
+     0.84%  frankenredis  [vdso]            [.] __vdso_clock_gettime
+            |
+             --0.79%--__vdso_clock_gettime
+
+     0.83%  frankenredis  [unknown]         [k] 0xffffffff85835fd6
+     0.76%  frankenredis  frankenredis      [.] <fr_store::Store>::get_string_bytes
+            |
+             --0.64%--<fr_store::Store>::get_string_bytes
+
+     0.73%  fr-writer-1   frankenredis      [.] <std::sys::sync::mutex::futex::Mutex>::lock_contended
+     0.73%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::plain_borrowed_default_key_read_allows
+     0.73%  frankenredis  frankenredis      [.] fr_protocol::encode_bulk_string_slice
+            |
+             --0.55%--fr_protocol::encode_bulk_string_slice
+
+     0.72%  frankenredis  [unknown]         [k] 0xffffffff84d0410b
+     0.68%  fr-writer-0   [unknown]         [k] 0xffffffff84c00080
+     0.61%  frankenredis  [vdso]            [.] 0x0000000000000936
+            |
+             --0.55%--0x71e6c1d83936
+
+     0.61%  frankenredis  frankenredis      [.] <foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+            |
+             --0.41%--<foldhash::quality::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+
+     0.58%  fr-writer-1   [unknown]         [k] 0xffffffff84d0410b
+     0.57%  fr-writer-0   [unknown]         [k] 0xffffffff84d04109
+     0.56%  frankenredis  [unknown]         [k] 0xffffffff84d04109
+     0.55%  frankenredis  [unknown]         [k] 0xffffffff855005f6
+     0.54%  fr-writer-0   [unknown]         [k] 0xffffffff84f87bc0
+     0.53%  fr-writer-1   [unknown]         [k] 0xffffffff84c00080
+     0.52%  frankenredis  frankenredis      [.] frankenredis::process_buffered_frames
+            |
+             --0.48%--frankenredis::process_buffered_frames
+
+     0.51%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::refresh_client_memory_aggregates
+     0.48%  frankenredis  frankenredis      [.] frankenredis::drive_client_output
+     0.47%  fr-writer-0   frankenredis      [.] <std::sys::sync::mutex::futex::Mutex>::lock_contended
+     0.46%  frankenredis  frankenredis      [.] frankenredis::drain_writer_completions
+     0.45%  frankenredis  frankenredis      [.] <fr_runtime::Runtime>::drain_pending_pubsub
+     0.45%  frankenredis  frankenredis      [.] <fr_runtime::ServerState>::run_active_expire_cycle
+            |
+             --0.40%--<fr_runtime::ServerState>::run_active_expire_cycle
+
+     0.45%  frankenredis  [vdso]            [.] 0x0000000000000931
+            |
+            ---0x71e6c1d83931
+
+     0.44%  frankenredis  frankenredis      [.] <std::sys::pal::unix::time::Timespec>::now
+     0.43%  frankenredis  [unknown]         [k] 0xffffffff8546fd6a
+     0.41%  fr-writer-1   [unknown]         [k] 0xffffffff84d04109
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
