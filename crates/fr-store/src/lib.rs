@@ -3201,10 +3201,22 @@ impl CommandHistogramTracker {
                 .record_with_kind(latency_us, kind);
             return;
         }
-        self.histograms
-            .entry(command.to_string())
-            .or_default()
-            .record_with_kind(latency_us, kind);
+        // (frankenredis-igx7w follow-up) This runs on EVERY non-get/set command,
+        // so avoid the per-command `command.to_string()` heap allocation that the
+        // owned-key `entry` API forces. Probe with a borrowed key first (the
+        // common case — the command was already seen) and pay the owned-key
+        // allocation only on the first occurrence of each distinct command.
+        // Byte-identical histogram update in all cases; this was visible as
+        // ~7% self-time on the HSET hot path (get/set are already fast-pathed,
+        // which is why only the other commands carried it).
+        if let Some(histogram) = self.histograms.get_mut(command) {
+            histogram.record_with_kind(latency_us, kind);
+        } else {
+            self.histograms
+                .entry(command.to_string())
+                .or_default()
+                .record_with_kind(latency_us, kind);
+        }
     }
 
     /// Get histogram for a specific command.
