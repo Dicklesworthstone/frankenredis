@@ -269,6 +269,65 @@ def launch(cmdline, port):
     raise SystemExit(f"server on port {port} did not start: {cmdline[0]}")
 
 
+def memusage_sweep(o, f):
+    """MEMORY USAGE byte-exactness across DETERMINISTIC encodings at many sizes.
+
+    Locks in the intset-width (e3cb69ca4) and zset-listpack-score (6bb1319a9)
+    size-model fixes. Stays strictly within the listpack/intset thresholds
+    (compiled defaults: *-max-listpack-entries=128, value len<=64,
+    set-max-intset-entries=512) so encodings stay listpack/intset/embstr/raw/int.
+    Hashtable/skiplist/quicklist MEMORY USAGE is NOT byte-exact (dict bucket
+    array depends on redis's incremental-rehash dual-table state — see
+    frankenredis-ht-memusage-bucket-array-kv015) and is deliberately excluded.
+    """
+    failures = []
+
+    def build(key, cmds):
+        for c in (o, f):
+            c.cmd("DEL", key)
+            for parts in cmds:
+                c.cmd(*parts)
+
+    cases = []
+    # strings: int / embstr (<=44) / raw (>44)
+    for sval in ["7", "12345", "hello", "a" * 44, "a" * 45, "x" * 300]:
+        cases.append(("str", [["SET", "mk", sval]]))
+    # intset: i16 / i32 / i64 magnitudes, sizes up to the 512 cap
+    for n in [1, 2, 3, 5, 8, 16, 64, 200, 512]:
+        cases.append((f"iset{n}", [["SADD", "mk"] + [str(i) for i in range(n)]]))
+    cases.append(("iset_i32", [["SADD", "mk", "1", "100000", "70000"]]))
+    cases.append(("iset_i64", [["SADD", "mk", "1", "5000000000"]]))
+    # listpack set (small string members, <=128 entries, len<=64)
+    for n in [1, 4, 16, 64, 128]:
+        cases.append((f"lpset{n}", [["SADD", "mk"] + [f"m{i:03d}" for i in range(n)]]))
+    # listpack hash
+    for n in [1, 4, 16, 64, 128]:
+        cmds = [["HSET", "mk"] + sum(([f"f{i:03d}", f"v{i:03d}"] for i in range(n)), [])]
+        cases.append((f"lphash{n}", cmds))
+    # listpack list
+    for n in [1, 4, 16, 64, 128]:
+        cases.append((f"lplist{n}", [["RPUSH", "mk"] + [f"e{i:03d}" for i in range(n)]]))
+    # listpack zset: integer scores (various magnitudes) + fractional + negative
+    for n in [1, 2, 3, 5, 8, 16, 64, 128]:
+        cmds = [["ZADD", "mk"] + sum(([str(i * 1000), f"m{i:03d}"] for i in range(n)), [])]
+        cases.append((f"lpzset{n}", cmds))
+    cases.append(("lpzset_frac", [["ZADD", "mk", "3.14159", "a", "-2.5", "b", "0.001", "c"]]))
+    cases.append(("lpzset_big", [["ZADD", "mk", "1e20", "a", "5000000000", "b"]]))
+
+    for label, cmds in cases:
+        build("mk", cmds)
+        ro = o.cmd("MEMORY", "USAGE", "mk")
+        rf = f.cmd("MEMORY", "USAGE", "mk")
+        eo = o.cmd("OBJECT", "ENCODING", "mk")
+        ef = f.cmd("OBJECT", "ENCODING", "mk")
+        if eo != ef:
+            failures.append((f"memusage:{label}", "encoding",
+                             ("enc", eo), ("enc", ef)))
+        elif ro != rf:
+            failures.append((f"memusage:{label}", f"exact ({eo[1]!r})", ro, rf))
+    return failures
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bin", default=None)
@@ -312,6 +371,7 @@ def main():
                 failures.append((cmd, tag, ro, rf))
         for cmd, ro, rf in known:
             print(f"KNOWN-ISSUE {' '.join(cmd)}: redis={ro!r} fr={rf!r}")
+        failures.extend(memusage_sweep(o, f))
     finally:
         for p in (fproc, rproc):
             if p is None:
@@ -329,8 +389,9 @@ def main():
             print(f"      oracle: {ro!r:.300}")
             print(f"      fr    : {rf!r:.300}")
         sys.exit(1)
-    print(f"PASS: {len(TESTS)} CLUSTER/admin/FUNCTION/MEMORY surface checks "
-          "byte-exact vs redis 7.2.4 (allocator-internal + art classes normalised)")
+    print(f"PASS: {len(TESTS)} CLUSTER/admin/FUNCTION/MEMORY surface checks + "
+          "deterministic-encoding MEMORY USAGE size sweep byte-exact vs redis 7.2.4 "
+          "(allocator-internal + art classes normalised; hashtable/skiplist excluded)")
 
 
 if __name__ == "__main__":
