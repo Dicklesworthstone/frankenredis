@@ -9948,41 +9948,21 @@ impl Store {
         } else {
             0
         };
-        let mut result = match self.entries.get_mut(keys[min_idx]) {
+        match self.entries.get_mut(keys[min_idx]) {
             Some(entry) => match &entry.value {
-                Value::Set(s) => {
-                    let res = s.clone();
+                Value::Set(_) => {
                     if lfu_tracking_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
                     entry.touch(now_ms);
-                    res
                 }
                 _ => return Err(StoreError::WrongType),
             },
             None => return Ok(0),
-        };
+        }
 
         for (i, key) in keys.iter().enumerate() {
             if i == min_idx {
-                continue;
-            }
-            if result.is_empty() {
-                if self.entries.contains_key(*key) {
-                    let rand_sample = if lfu_tracking_enabled {
-                        self.next_rand()
-                    } else {
-                        0
-                    };
-                    if let Some(entry) = self.entries.get_mut(*key)
-                        && let Value::Set(_) = &entry.value
-                    {
-                        if lfu_tracking_enabled {
-                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                        }
-                        entry.touch(now_ms);
-                    }
-                }
                 continue;
             }
             let rand_sample = if lfu_tracking_enabled {
@@ -9990,28 +9970,54 @@ impl Store {
             } else {
                 0
             };
-            match self.entries.get_mut(*key) {
-                Some(entry) => match &entry.value {
-                    Value::Set(s) => {
-                        result.retain_intersect(s);
-                        if lfu_tracking_enabled {
-                            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                        }
-                        entry.touch(now_ms);
+            let Some(entry) = self.entries.get_mut(*key) else {
+                continue;
+            };
+            match &entry.value {
+                Value::Set(_) => {
+                    if lfu_tracking_enabled {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
-                    _ => return Err(StoreError::WrongType),
-                },
-                None => {
-                    result.clear();
+                    entry.touch(now_ms);
                 }
+                _ => return Err(StoreError::WrongType),
             }
         }
-        let count = u64::try_from(result.len()).unwrap_or(u64::MAX);
-        if limit > 0 && count > limit {
-            Ok(limit)
-        } else {
-            Ok(count)
+
+        if min_card == 0 {
+            return Ok(0);
         }
+
+        let min_set = match self.entries.get(keys[min_idx]) {
+            Some(entry) => match &entry.value {
+                Value::Set(s) => s,
+                _ => return Err(StoreError::WrongType),
+            },
+            None => return Ok(0),
+        };
+
+        let mut count = 0_u64;
+        'members: for member in min_set.iter() {
+            let member = member.as_ref();
+            for (i, key) in keys.iter().enumerate() {
+                if i == min_idx {
+                    continue;
+                }
+                match self.entries.get(*key) {
+                    Some(entry) => match &entry.value {
+                        Value::Set(s) if s.contains(member) => {}
+                        Value::Set(_) => continue 'members,
+                        _ => return Err(StoreError::WrongType),
+                    },
+                    None => return Ok(0),
+                }
+            }
+            count = count.saturating_add(1);
+            if limit > 0 && count >= limit {
+                return Ok(limit);
+            }
+        }
+        Ok(count)
     }
 
     pub fn sunion(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {

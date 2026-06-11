@@ -1,0 +1,44 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-k4d19/sintercard_limit_workload.py --server-bin target-k4d19-baseline/release-perf/frankenredis --port 6391 --ops 1000 --json-out artifacts/optimization/frankenredis-k4d19/pass141-baseline-final-last.json",
+      "mean": 4.395476094913334,
+      "stddev": 0.48576896706480316,
+      "median": 4.28227763758,
+      "user": 4.1673719,
+      "system": 0.12931998,
+      "min": 3.9763011425799997,
+      "max": 4.92784950458,
+      "times": [
+        4.92784950458,
+        4.28227763758,
+        3.9763011425799997
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-k4d19/sintercard_limit_workload.py --server-bin target-k4d19-candidate-final/release-perf/frankenredis --port 6392 --ops 1000 --json-out artifacts/optimization/frankenredis-k4d19/pass141-candidate-final-last.json",
+      "mean": 0.2339123332466667,
+      "stddev": 0.024155383462207036,
+      "median": 0.22056829058000002,
+      "user": 0.1365659,
+      "system": 0.07574898000000001,
+      "min": 0.21937268458,
+      "max": 0.26179602458,
+      "times": [
+        0.21937268458,
+        0.26179602458,
+        0.22056829058000002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "elapsed_sec": 0.06186550506390631,
+  "full_count": 100000,
+  "last_reply": 10,
+  "limit": 10,
+  "missing_count": 0,
+  "mode": "sintercard_limit",
+  "ops": 1000,
+  "ops_per_sec": 16164.096599017696,
+  "scard_a": 100000,
+  "scard_b": 100000,
+  "server_pid": 746906,
+  "set_size": 100000
+}
