@@ -5066,7 +5066,15 @@ impl Runtime {
         self.server
             .client_sessions
             .insert(session.client_id, session.clone());
-        self.refresh_client_memory_aggregates();
+        // (frankenredis-zfu61 perf) The clients.normal / clients.slaves memory
+        // aggregates were re-summed over EVERY live session here — once per
+        // pipelined batch, O(live-clients) plus a HashSet allocation, on the hot
+        // path — purely to feed the rarely-queried MEMORY STATS / MEMORY USAGE /
+        // INFO memory fields. Upstream samples client memory lazily (clientsCron
+        // / on the MEMORY command), so refresh is now deferred to those read
+        // sites (`refresh_client_memory_aggregates` is called from
+        // handle_info_command and the MEMORY dispatch). The per-command snapshot
+        // insert above is kept (CLIENT LIST/INFO still need it).
     }
 
     /// (frankenredis-zfu61) Recompute `stat_clients_normal_mem_bytes` and
@@ -5126,9 +5134,9 @@ impl Runtime {
         self.server.client_sessions.remove(&client_id);
         self.server.client_tracking_bcast_clients.remove(&client_id);
         self.remove_client_tracking_observer(client_id);
-        // (frankenredis-zfu61) Re-sum live sessions so MEMORY STATS'
-        // clients.normal / clients.slaves drop on disconnect.
-        self.refresh_client_memory_aggregates();
+        // (frankenredis-zfu61 perf) The dropped client's contribution is picked
+        // up by the lazy refresh at the next MEMORY STATS / INFO memory read
+        // (see record_client_session); no eager O(live-clients) re-sum here.
     }
 
     /// Track a new client connection for INFO stats.
@@ -12360,6 +12368,13 @@ impl Runtime {
                 RespFrame::BulkString(Some(msg)),
             ])));
         }
+        // (frankenredis-zfu61 perf) MEMORY (STATS/USAGE/DOCTOR) is the only
+        // consumer of the clients.normal / clients.slaves aggregates besides INFO
+        // memory; refresh them here, lazily, rather than on every command's
+        // record_client_session. Cheap byte-compare for all other commands.
+        if eq_ascii_token(command, b"MEMORY") {
+            self.refresh_client_memory_aggregates();
+        }
         let namespaced = self.namespace_argv_for_selected_db(argv);
         let mut reply = self.dispatch_with_client_context(&namespaced, now_ms)?;
         self.strip_db_prefixes_from_frame(&mut reply);
@@ -18234,6 +18249,12 @@ impl Runtime {
         let is_persistence = section_requested("persistence");
         let is_replication = section_requested("replication");
         let is_keyspace = section_requested("keyspace");
+        // (frankenredis-zfu61 perf) INFO memory reads the clients.normal /
+        // clients.slaves aggregates; refresh them lazily here (only when the
+        // memory section is actually requested) instead of on every command.
+        if section_requested("memory") {
+            self.refresh_client_memory_aggregates();
+        }
         // Upstream INFO emits Latencystats only when explicitly
         // requested or as part of `all`/`everything`. The bare
         // `INFO`/`default` form skips it. (br-frankenredis-infoorder)
