@@ -1,0 +1,324 @@
+{
+  "byte_identical": true,
+  "isomorphism_note": "Entry encoding booleans were packed into one byte; command semantics, ordering, tie-breaking, floating-point arithmetic, RNG, key hashing, and persistence payloads are unchanged. Transcript includes SET overwrite, APPEND raw flag reset, COPY int refcount, bit string raw flags, INCRBYFLOAT string flag, set/hash/zset sticky promotion flags, DUMP/RESTORE, and DEBUG DIGEST.",
+  "results": [
+    {
+      "binary": "/tmp/rch_target_fr_ohsk5_p127_current/release-perf/frankenredis",
+      "commands": [
+        {
+          "command": "FLUSHALL",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "SET",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24330d0a696e740d0a",
+          "sha256": "4eab9fefd0dcdd6e88fb3bbcbcba6994954bde8f925c8078cadb598cd5bb2a5e"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "3a323134373438333634370d0a",
+          "sha256": "3cb70388a4d7328d3017f58fc2b8a7b3b5a13604c8c4902017cf779ce2fe15ed"
+        },
+        {
+          "command": "APPEND",
+          "raw_hex_prefix": "3a320d0a",
+          "sha256": "b89b622c47fe6c01a8a4ad2f68bbab016691efc0b4366e603603c110b764cf44"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24330d0a7261770d0a",
+          "sha256": "99697adc922addd7481d3ab716f94c5cfaeb0cc17745c487ff9331cc61cfa43f"
+        },
+        {
+          "command": "SET",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "GET",
+          "raw_hex_prefix": "24310d0a320d0a",
+          "sha256": "a2d926b9196ebb3053e20102a56c40c1d914a2339b28021b2e5c8e7fdd59eccf"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24330d0a696e740d0a",
+          "sha256": "4eab9fefd0dcdd6e88fb3bbcbcba6994954bde8f925c8078cadb598cd5bb2a5e"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "3a323134373438333634370d0a",
+          "sha256": "3cb70388a4d7328d3017f58fc2b8a7b3b5a13604c8c4902017cf779ce2fe15ed"
+        },
+        {
+          "command": "COPY",
+          "raw_hex_prefix": "3a310d0a",
+          "sha256": "6d7dbcb27aa6e24f40bf1f4cb2cc8a36e2f3b7f1ae87edf906578a2936b756d2"
+        },
+        {
+          "command": "GET",
+          "raw_hex_prefix": "24310d0a320d0a",
+          "sha256": "a2d926b9196ebb3053e20102a56c40c1d914a2339b28021b2e5c8e7fdd59eccf"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24330d0a696e740d0a",
+          "sha256": "4eab9fefd0dcdd6e88fb3bbcbcba6994954bde8f925c8078cadb598cd5bb2a5e"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "3a310d0a",
+          "sha256": "6d7dbcb27aa6e24f40bf1f4cb2cc8a36e2f3b7f1ae87edf906578a2936b756d2"
+        },
+        {
+          "command": "SETBIT",
+          "raw_hex_prefix": "3a300d0a",
+          "sha256": "f3b4cb77478ec9e7388d907937dad039f9204482b7038f21ccabce096918ea23"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24330d0a7261770d0a",
+          "sha256": "99697adc922addd7481d3ab716f94c5cfaeb0cc17745c487ff9331cc61cfa43f"
+        },
+        {
+          "command": "BITFIELD",
+          "raw_hex_prefix": "2a320d0a3a300d0a3a370d0a",
+          "sha256": "2be659281483a1fd5fde4bc432d70c651b933ff820411ec535201bbf1bd922d7"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24330d0a7261770d0a",
+          "sha256": "99697adc922addd7481d3ab716f94c5cfaeb0cc17745c487ff9331cc61cfa43f"
+        },
+        {
+          "command": "INCRBYFLOAT",
+          "raw_hex_prefix": "24340d0a312e32350d0a",
+          "sha256": "bd26982b07a304e5a11f6ed5c5a4e825a4fdd0f60efb31c9ab72a92f29e2d239"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24360d0a656d627374720d0a",
+          "sha256": "dc208d61c96320c3feb467701d7234d0e285cce989195e6aea53df192a4b8183"
+        },
+        {
+          "command": "CONFIG",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "SADD",
+          "raw_hex_prefix": "3a330d0a",
+          "sha256": "deaa608819f0eab09b4df56859ebe44522c3988a16b214c7561138ff19754a45"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24390d0a686173687461626c650d0a",
+          "sha256": "44ec50ad231c9abf78a6150431202d080f9524956c2deb8849f6f2a7205414ec"
+        },
+        {
+          "command": "CONFIG",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "HSET",
+          "raw_hex_prefix": "3a320d0a",
+          "sha256": "b89b622c47fe6c01a8a4ad2f68bbab016691efc0b4366e603603c110b764cf44"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24390d0a686173687461626c650d0a",
+          "sha256": "44ec50ad231c9abf78a6150431202d080f9524956c2deb8849f6f2a7205414ec"
+        },
+        {
+          "command": "CONFIG",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "ZADD",
+          "raw_hex_prefix": "3a320d0a",
+          "sha256": "b89b622c47fe6c01a8a4ad2f68bbab016691efc0b4366e603603c110b764cf44"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24380d0a736b69706c6973740d0a",
+          "sha256": "e3667d93d95a382a71e3bf27269c2a8d5e74c060915dbd49b39ea76db42d6b6d"
+        },
+        {
+          "command": "DEBUG",
+          "raw_hex_prefix": "2434300d0a663238313932366262313430666161656336613030666362636139343032663066373164346632370d0a",
+          "sha256": "d43cbba8e32d10460bc5252250b965779a15e4f0c0ad2ab6ea3c4e9b6835dd99"
+        }
+      ],
+      "label": "current",
+      "port": 6820,
+      "transcript": "artifacts/optimization/frankenredis-ohsk5/pass127/validation/current-golden.resp",
+      "transcript_sha256": "f7679a51ed83f524e3597340ccf834e00cbe0cac09771608ecdba7bd97950a1d"
+    },
+    {
+      "binary": "/tmp/rch_target_fr_ohsk5_p127_candidate/release-perf/frankenredis",
+      "commands": [
+        {
+          "command": "FLUSHALL",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "SET",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24330d0a696e740d0a",
+          "sha256": "4eab9fefd0dcdd6e88fb3bbcbcba6994954bde8f925c8078cadb598cd5bb2a5e"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "3a323134373438333634370d0a",
+          "sha256": "3cb70388a4d7328d3017f58fc2b8a7b3b5a13604c8c4902017cf779ce2fe15ed"
+        },
+        {
+          "command": "APPEND",
+          "raw_hex_prefix": "3a320d0a",
+          "sha256": "b89b622c47fe6c01a8a4ad2f68bbab016691efc0b4366e603603c110b764cf44"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24330d0a7261770d0a",
+          "sha256": "99697adc922addd7481d3ab716f94c5cfaeb0cc17745c487ff9331cc61cfa43f"
+        },
+        {
+          "command": "SET",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "GET",
+          "raw_hex_prefix": "24310d0a320d0a",
+          "sha256": "a2d926b9196ebb3053e20102a56c40c1d914a2339b28021b2e5c8e7fdd59eccf"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24330d0a696e740d0a",
+          "sha256": "4eab9fefd0dcdd6e88fb3bbcbcba6994954bde8f925c8078cadb598cd5bb2a5e"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "3a323134373438333634370d0a",
+          "sha256": "3cb70388a4d7328d3017f58fc2b8a7b3b5a13604c8c4902017cf779ce2fe15ed"
+        },
+        {
+          "command": "COPY",
+          "raw_hex_prefix": "3a310d0a",
+          "sha256": "6d7dbcb27aa6e24f40bf1f4cb2cc8a36e2f3b7f1ae87edf906578a2936b756d2"
+        },
+        {
+          "command": "GET",
+          "raw_hex_prefix": "24310d0a320d0a",
+          "sha256": "a2d926b9196ebb3053e20102a56c40c1d914a2339b28021b2e5c8e7fdd59eccf"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24330d0a696e740d0a",
+          "sha256": "4eab9fefd0dcdd6e88fb3bbcbcba6994954bde8f925c8078cadb598cd5bb2a5e"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "3a310d0a",
+          "sha256": "6d7dbcb27aa6e24f40bf1f4cb2cc8a36e2f3b7f1ae87edf906578a2936b756d2"
+        },
+        {
+          "command": "SETBIT",
+          "raw_hex_prefix": "3a300d0a",
+          "sha256": "f3b4cb77478ec9e7388d907937dad039f9204482b7038f21ccabce096918ea23"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24330d0a7261770d0a",
+          "sha256": "99697adc922addd7481d3ab716f94c5cfaeb0cc17745c487ff9331cc61cfa43f"
+        },
+        {
+          "command": "BITFIELD",
+          "raw_hex_prefix": "2a320d0a3a300d0a3a370d0a",
+          "sha256": "2be659281483a1fd5fde4bc432d70c651b933ff820411ec535201bbf1bd922d7"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24330d0a7261770d0a",
+          "sha256": "99697adc922addd7481d3ab716f94c5cfaeb0cc17745c487ff9331cc61cfa43f"
+        },
+        {
+          "command": "INCRBYFLOAT",
+          "raw_hex_prefix": "24340d0a312e32350d0a",
+          "sha256": "bd26982b07a304e5a11f6ed5c5a4e825a4fdd0f60efb31c9ab72a92f29e2d239"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24360d0a656d627374720d0a",
+          "sha256": "dc208d61c96320c3feb467701d7234d0e285cce989195e6aea53df192a4b8183"
+        },
+        {
+          "command": "CONFIG",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "SADD",
+          "raw_hex_prefix": "3a330d0a",
+          "sha256": "deaa608819f0eab09b4df56859ebe44522c3988a16b214c7561138ff19754a45"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24390d0a686173687461626c650d0a",
+          "sha256": "44ec50ad231c9abf78a6150431202d080f9524956c2deb8849f6f2a7205414ec"
+        },
+        {
+          "command": "CONFIG",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "HSET",
+          "raw_hex_prefix": "3a320d0a",
+          "sha256": "b89b622c47fe6c01a8a4ad2f68bbab016691efc0b4366e603603c110b764cf44"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24390d0a686173687461626c650d0a",
+          "sha256": "44ec50ad231c9abf78a6150431202d080f9524956c2deb8849f6f2a7205414ec"
+        },
+        {
+          "command": "CONFIG",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "ZADD",
+          "raw_hex_prefix": "3a320d0a",
+          "sha256": "b89b622c47fe6c01a8a4ad2f68bbab016691efc0b4366e603603c110b764cf44"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "24380d0a736b69706c6973740d0a",
+          "sha256": "e3667d93d95a382a71e3bf27269c2a8d5e74c060915dbd49b39ea76db42d6b6d"
+        },
+        {
+          "command": "DEBUG",
+          "raw_hex_prefix": "2434300d0a663238313932366262313430666161656336613030666362636139343032663066373164346632370d0a",
+          "sha256": "d43cbba8e32d10460bc5252250b965779a15e4f0c0ad2ab6ea3c4e9b6835dd99"
+        }
+      ],
+      "label": "candidate",
+      "port": 6821,
+      "transcript": "artifacts/optimization/frankenredis-ohsk5/pass127/validation/candidate-golden.resp",
+      "transcript_sha256": "f7679a51ed83f524e3597340ccf834e00cbe0cac09771608ecdba7bd97950a1d"
+    }
+  ]
+}
