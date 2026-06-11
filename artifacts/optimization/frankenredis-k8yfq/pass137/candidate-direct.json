@@ -1,0 +1,14 @@
+{
+  "copies": 1000,
+  "copy_elapsed_sec": 0.06011249392759055,
+  "copy_ops_per_sec": 16635.476831231885,
+  "list_len": 50000,
+  "llen": 50000,
+  "lrange_head": [
+    "xxxxxxxx",
+    "xxxxxxxx",
+    "xxxxxxxx"
+  ],
+  "object_encoding": "quicklist",
+  "payload_size": 8
+}

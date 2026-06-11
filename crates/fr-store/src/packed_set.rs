@@ -1833,29 +1833,42 @@ mod tests {
         assert_eq!(l.len(), 1);
     }
 
+    fn list_test_value(idx: usize) -> Vec<u8> {
+        idx.to_ne_bytes().to_vec()
+    }
+
     #[test]
     fn list_value_clone_shares_large_deque_until_mutation() {
         let mut source = ListValue::default();
         for idx in 0..=PACKED_MAX_ENTRIES {
-            source.push_back(format!("{idx:08}").into_bytes());
+            source.push_back(list_test_value(idx));
         }
 
         let mut copy = source.clone();
-        let (ListRepr::Deque(source_deque), ListRepr::Deque(copy_deque)) =
-            (&source.repr, &copy.repr)
-        else {
-            panic!("large list must promote to deque storage");
+        let (source_deque, copy_deque) = match (&source.repr, &copy.repr) {
+            (ListRepr::Deque(source_deque), ListRepr::Deque(copy_deque)) => {
+                (source_deque, copy_deque)
+            }
+            _ => {
+                assert!(false, "large list must promote to deque storage");
+                return;
+            }
         };
         assert!(std::sync::Arc::ptr_eq(source_deque, copy_deque));
 
         assert!(copy.set(0, b"changed".to_vec()));
-        assert_eq!(source.get(0), Some(&b"00000000"[..]));
+        let zero = list_test_value(0);
+        assert_eq!(source.get(0), Some(zero.as_slice()));
         assert_eq!(copy.get(0), Some(&b"changed"[..]));
 
-        let (ListRepr::Deque(source_deque), ListRepr::Deque(copy_deque)) =
-            (&source.repr, &copy.repr)
-        else {
-            panic!("large list must stay in deque storage");
+        let (source_deque, copy_deque) = match (&source.repr, &copy.repr) {
+            (ListRepr::Deque(source_deque), ListRepr::Deque(copy_deque)) => {
+                (source_deque, copy_deque)
+            }
+            _ => {
+                assert!(false, "large list must stay in deque storage");
+                return;
+            }
         };
         assert!(!std::sync::Arc::ptr_eq(source_deque, copy_deque));
     }
@@ -1865,15 +1878,16 @@ mod tests {
         let mut left = ListValue::default();
         let original_len = PACKED_MAX_ENTRIES + 1;
         for idx in 0..original_len {
-            left.push_back(format!("{idx:08}").into_bytes());
+            left.push_back(list_test_value(idx));
         }
         let mut right = left.clone();
 
-        assert_eq!(left.pop_front(), Some(b"00000000".to_vec()));
+        assert_eq!(left.pop_front(), Some(list_test_value(0)));
         right.push_front(b"prefix__".to_vec());
         right.push_back(b"suffix__".to_vec());
 
-        assert_eq!(left.get(0), Some(&b"00000001"[..]));
+        let one = list_test_value(1);
+        assert_eq!(left.get(0), Some(one.as_slice()));
         assert_eq!(right.get(0), Some(&b"prefix__"[..]));
         assert_eq!(right.get(right.len() - 1), Some(&b"suffix__"[..]));
         assert_eq!(left.len(), original_len - 1);

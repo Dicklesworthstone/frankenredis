@@ -1023,8 +1023,10 @@ impl SortedSet {
         take: usize,
     ) -> Vec<(Vec<u8>, f64)> {
         if let SortedSetInner::Full(full) = &self.inner
-            && let (Some((first, _)), Some((last, _))) =
-                (full.ordered.first_key_value(), full.ordered.last_key_value())
+            && let (Some((first, _)), Some((last, _))) = (
+                full.ordered.first_key_value(),
+                full.ordered.last_key_value(),
+            )
             && first.score == last.score
         {
             let s = first.score;
@@ -1092,8 +1094,10 @@ impl SortedSet {
     /// the count is byte-for-byte identical (incl. the unequal-score handling).
     fn lex_count(&self, min: &[u8], max: &[u8]) -> usize {
         if let SortedSetInner::Full(full) = &self.inner
-            && let (Some((first, _)), Some((last, _))) =
-                (full.ordered.first_key_value(), full.ordered.last_key_value())
+            && let (Some((first, _)), Some((last, _))) = (
+                full.ordered.first_key_value(),
+                full.ordered.last_key_value(),
+            )
             && first.score == last.score
         {
             let s = first.score;
@@ -6567,7 +6571,10 @@ impl Store {
         let candidates: Vec<Vec<u8>> = if lit.is_empty() {
             self.ordered_keys.iter().cloned().collect()
         } else if let Some(end) = prefix_range_end(lit) {
-            self.ordered_keys.range(lit.to_vec()..end).cloned().collect()
+            self.ordered_keys
+                .range(lit.to_vec()..end)
+                .cloned()
+                .collect()
         } else {
             self.ordered_keys.range(lit.to_vec()..).cloned().collect()
         };
@@ -11948,8 +11955,11 @@ impl Store {
                 match &entry.value {
                     Value::SortedSet(zs) => {
                         // (frankenredis-yawte) Range-prune the single-score band.
-                        let result: Vec<Vec<u8>> =
-                            zs.lex_range_asc(min, max).into_iter().map(|(m, _)| m).collect();
+                        let result: Vec<Vec<u8>> = zs
+                            .lex_range_asc(min, max)
+                            .into_iter()
+                            .map(|(m, _)| m)
+                            .collect();
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -22539,7 +22549,11 @@ mod tests {
         let _ = store.sadd(b"s", &[b"a".to_vec(), b"bb".to_vec()], 0);
         let enc_before = store.object_encoding(b"s", 0);
         let _ = store.sort_elements(b"s", 0).expect("sort set");
-        assert_eq!(store.object_encoding(b"s", 0), enc_before, "SORT must not convert a set");
+        assert_eq!(
+            store.object_encoding(b"s", 0),
+            enc_before,
+            "SORT must not convert a set"
+        );
     }
 
     #[test]
@@ -22978,6 +22992,59 @@ mod tests {
         store.set(b"big".to_vec(), b"50000".to_vec(), None, 0);
         assert!(store.copy(b"big", b"bigdst", false, 0).unwrap());
         assert_eq!(store.object_refcount(b"bigdst", 0), Some(1));
+    }
+
+    #[test]
+    fn copy_large_deque_list_mutations_are_isolated() -> Result<(), StoreError> {
+        let mut store = Store::new();
+        let values: Vec<Vec<u8>> = (0..160u16)
+            .map(|idx| format!("v{idx:03}").into_bytes())
+            .collect();
+        store.rpush(b"src", &values, 0)?;
+        assert!(store.copy(b"src", b"dst", false, 0)?);
+
+        assert_eq!(store.lrange(b"src", 0, -1, 0)?, values);
+        assert_eq!(store.lrange(b"dst", 0, -1, 0)?, values);
+
+        store.lpush(b"src", &[b"src-head".to_vec()], 0)?;
+        store.rpush(b"src", &[b"src-tail".to_vec()], 0)?;
+        store.lset(b"src", 2, b"src-set".to_vec(), 0)?;
+        store.linsert_after(b"src", b"v005", b"src-after".to_vec(), 0)?;
+        assert_eq!(store.lrem(b"src", 1, b"v010", 0)?, 1);
+        assert_eq!(
+            store.lrange(b"dst", 0, -1, 0)?,
+            values,
+            "mutating the copied source must not affect the destination"
+        );
+
+        let mut dst_expected = values.clone();
+        dst_expected.pop();
+        dst_expected.remove(0);
+        let _ = store.rpop(b"dst", 0)?;
+        let _ = store.lpop(b"dst", 0)?;
+        assert_eq!(store.lrange(b"dst", 0, -1, 0)?, dst_expected);
+        assert_eq!(store.lindex(b"src", 0, 0)?, Some(b"src-head".to_vec()));
+        assert_eq!(store.lindex(b"src", -1, 0)?, Some(b"src-tail".to_vec()));
+
+        store.linsert_before(b"dst", b"v020", b"dst-before".to_vec(), 0)?;
+        store.lset(b"dst", 3, b"dst-set".to_vec(), 0)?;
+        store.ltrim(b"dst", 1, -2, 0)?;
+        assert_eq!(
+            store.lrange(b"src", 0, 8, 0)?,
+            vec![
+                b"src-head".to_vec(),
+                b"v000".to_vec(),
+                b"src-set".to_vec(),
+                b"v002".to_vec(),
+                b"v003".to_vec(),
+                b"v004".to_vec(),
+                b"v005".to_vec(),
+                b"src-after".to_vec(),
+                b"v006".to_vec(),
+            ],
+            "mutating the copied destination must not affect the source"
+        );
+        Ok(())
     }
 
     #[test]
@@ -28149,7 +28216,10 @@ mod tests {
         // Trivially-correct reference: keep ascending-unique `a` members present
         // in `b` via per-element binary search (the algorithm being replaced).
         let reference = |a: &[i64], b: &[i64]| -> Vec<i64> {
-            a.iter().copied().filter(|x| b.binary_search(x).is_ok()).collect()
+            a.iter()
+                .copied()
+                .filter(|x| b.binary_search(x).is_ok())
+                .collect()
         };
 
         let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -28183,7 +28253,11 @@ mod tests {
             let a = sorted_unique((0..na).map(|_| (next() % range as u64) as i64).collect());
             let b = sorted_unique((0..nb).map(|_| (next() % range as u64) as i64).collect());
             let got = intersect_sorted_i64(&a, &b);
-            assert_eq!(got, reference(&a, &b), "galloping intersect mismatch a={a:?} b={b:?}");
+            assert_eq!(
+                got,
+                reference(&a, &b),
+                "galloping intersect mismatch a={a:?} b={b:?}"
+            );
             // Symmetry: intersection of (b,a) yields the same set.
             assert_eq!(intersect_sorted_i64(&b, &a), got, "intersect not symmetric");
             for &v in &got {
@@ -28206,7 +28280,11 @@ mod tests {
             (&[-9, -1, 0, 1, 9], &[-9, 0, 9, 100]),
         ];
         for (a, b) in edge {
-            assert_eq!(intersect_sorted_i64(a, b), reference(a, b), "edge a={a:?} b={b:?}");
+            assert_eq!(
+                intersect_sorted_i64(a, b),
+                reference(a, b),
+                "edge a={a:?} b={b:?}"
+            );
         }
         assert_eq!(cases, 6000);
         // The per-case assert_eq! above is the isomorphism proof (output is
@@ -28251,7 +28329,10 @@ mod tests {
         assert_eq!(acc, acc2, "old/new disagree on similar-size count");
         let score = old_ns as f64 / new_ns as f64;
         eprintln!("GALP1 similar 100k_int_100k: old={old_ns}ns new={new_ns}ns score={score:.2}x");
-        assert!(score >= 2.0, "galloping must be >=2.0x on similar sizes; got {score:.2}x");
+        assert!(
+            score >= 2.0,
+            "galloping must be >=2.0x on similar sizes; got {score:.2}x"
+        );
 
         // Skewed case (small ∩ huge, ratio 100): the binary-search branch must
         // NOT regress vs the old full-array binary search. Sized so the search
@@ -28275,8 +28356,13 @@ mod tests {
         std::hint::black_box(sb);
         assert_eq!(sa, sb, "old/new disagree on skewed count");
         let skew_score = skew_old as f64 / skew_new as f64;
-        eprintln!("GALP1 skewed 20k_int_2M: old={skew_old}ns new={skew_new}ns score={skew_score:.2}x");
-        assert!(skew_score >= 0.85, "adaptive intersect regressed skewed case: {skew_score:.2}x");
+        eprintln!(
+            "GALP1 skewed 20k_int_2M: old={skew_old}ns new={skew_new}ns score={skew_score:.2}x"
+        );
+        assert!(
+            skew_score >= 0.85,
+            "adaptive intersect regressed skewed case: {skew_score:.2}x"
+        );
     }
 
     // (frankenredis-9s4kh) Frozen fingerprint of the adaptive set-difference
@@ -28295,7 +28381,10 @@ mod tests {
         // Trivially-correct reference: keep ascending-unique `a` members ABSENT
         // from `b` via per-element binary search (the algorithm being replaced).
         let reference = |a: &[i64], b: &[i64]| -> Vec<i64> {
-            a.iter().copied().filter(|x| b.binary_search(x).is_err()).collect()
+            a.iter()
+                .copied()
+                .filter(|x| b.binary_search(x).is_err())
+                .collect()
         };
 
         let mut state: u64 = 0x2545_F491_4F6C_DD1D;
@@ -28328,7 +28417,11 @@ mod tests {
             let a = sorted_unique((0..na).map(|_| (next() % range as u64) as i64).collect());
             let b = sorted_unique((0..nb).map(|_| (next() % range as u64) as i64).collect());
             let got = diff_sorted_i64(&a, &b);
-            assert_eq!(got, reference(&a, &b), "adaptive diff mismatch a={a:?} b={b:?}");
+            assert_eq!(
+                got,
+                reference(&a, &b),
+                "adaptive diff mismatch a={a:?} b={b:?}"
+            );
             // a\b ∪ a∩b == a, and a\b is disjoint from b.
             for &v in &got {
                 assert!(b.binary_search(&v).is_err(), "diff kept a member of b: {v}");
@@ -28353,7 +28446,11 @@ mod tests {
             (&[-9, -1, 0, 1, 9], &[-9, 0, 9, 100]),
         ];
         for (a, b) in edge {
-            assert_eq!(diff_sorted_i64(a, b), reference(a, b), "edge a={a:?} b={b:?}");
+            assert_eq!(
+                diff_sorted_i64(a, b),
+                reference(a, b),
+                "edge a={a:?} b={b:?}"
+            );
         }
         assert_eq!(cases, 6000);
         // The per-case assert_eq! above is the isomorphism proof (output is
@@ -28396,7 +28493,10 @@ mod tests {
         assert_eq!(acc, acc2, "old/new disagree on similar-size diff count");
         let score = old_ns as f64 / new_ns as f64;
         eprintln!("SDF2 similar 100k_diff_100k: old={old_ns}ns new={new_ns}ns score={score:.2}x");
-        assert!(score >= 2.0, "adaptive diff must be >=2.0x on similar sizes; got {score:.2}x");
+        assert!(
+            score >= 2.0,
+            "adaptive diff must be >=2.0x on similar sizes; got {score:.2}x"
+        );
 
         // Skewed case (small accumulator ∖ huge b): must NOT regress.
         let small: Vec<i64> = (0..20_000i64).map(|i| i * 100 + 1).collect();
@@ -28418,8 +28518,13 @@ mod tests {
         std::hint::black_box(sb);
         assert_eq!(sa, sb, "old/new disagree on skewed diff count");
         let skew_score = skew_old as f64 / skew_new as f64;
-        eprintln!("SDF2 skewed 20k_diff_2M: old={skew_old}ns new={skew_new}ns score={skew_score:.2}x");
-        assert!(skew_score >= 0.85, "adaptive diff regressed skewed case: {skew_score:.2}x");
+        eprintln!(
+            "SDF2 skewed 20k_diff_2M: old={skew_old}ns new={skew_new}ns score={skew_score:.2}x"
+        );
+        assert!(
+            skew_score >= 0.85,
+            "adaptive diff regressed skewed case: {skew_score:.2}x"
+        );
     }
 
     // (frankenredis-zkkn4) Frozen fingerprint of the full-ZSCAN sequence.
@@ -28435,7 +28540,12 @@ mod tests {
     fn zscan_treap_resume_isomorphic_and_faster_zscanrt() {
         use super::{Store, encode_db_key};
 
-        fn full_zscan(store: &mut Store, key: &[u8], pat: Option<&[u8]>, count: usize) -> Vec<(Vec<u8>, f64)> {
+        fn full_zscan(
+            store: &mut Store,
+            key: &[u8],
+            pat: Option<&[u8]>,
+            count: usize,
+        ) -> Vec<(Vec<u8>, f64)> {
             let mut all = Vec::new();
             let mut cursor = 0u64;
             for _ in 0..1_000_000 {
@@ -28468,8 +28578,9 @@ mod tests {
             // >128 members forces the skiplist/hashtable encoding (this path).
             let n = 130 + (next() % 140) as usize;
             // Distinct ascending scores => iter_asc order == insertion (i) order.
-            let members: Vec<(Vec<u8>, f64)> =
-                (0..n).map(|i| (format!("m{i:05}_{}", next() % 7).into_bytes(), i as f64)).collect();
+            let members: Vec<(Vec<u8>, f64)> = (0..n)
+                .map(|i| (format!("m{i:05}_{}", next() % 7).into_bytes(), i as f64))
+                .collect();
             let pat: Option<&[u8]> = match next() % 3 {
                 0 => None,
                 1 => Some(b"*_4"),
@@ -28487,7 +28598,11 @@ mod tests {
             for (m, sc) in &members {
                 s_cold.zadd(b"z", &[(*sc, m.clone())], 0).unwrap();
             }
-            assert_eq!(full_zscan(&mut s_cold, b"z", pat, count), reference, "ZSCAN cold diverged n={n} count={count}");
+            assert_eq!(
+                full_zscan(&mut s_cold, b"z", pat, count),
+                reference,
+                "ZSCAN cold diverged n={n} count={count}"
+            );
 
             // With the treap built (zrank triggers the build -> O(log N) resume).
             let mut s_hot = Store::new();
@@ -28495,7 +28610,11 @@ mod tests {
                 s_hot.zadd(b"z", &[(*sc, m.clone())], 0).unwrap();
             }
             s_hot.zrank(b"z", &members[0].0, 0).unwrap();
-            assert_eq!(full_zscan(&mut s_hot, b"z", pat, count), reference, "ZSCAN hot diverged n={n} count={count}");
+            assert_eq!(
+                full_zscan(&mut s_hot, b"z", pat, count),
+                reference,
+                "ZSCAN hot diverged n={n} count={count}"
+            );
 
             for (m, sc) in &reference {
                 fnv(&mut golden, m);
@@ -28517,7 +28636,8 @@ mod tests {
         let build = || {
             let mut s = Store::new();
             for i in 0..20_000u32 {
-                s.zadd(b"z", &[(i as f64, format!("m{i:06}").into_bytes())], 0).unwrap();
+                s.zadd(b"z", &[(i as f64, format!("m{i:06}").into_bytes())], 0)
+                    .unwrap();
             }
             s
         };
@@ -28541,8 +28661,13 @@ mod tests {
         std::hint::black_box(acc2);
         assert_eq!(acc, acc2, "old/new returned different totals");
         let score = old_ns as f64 / new_ns as f64;
-        eprintln!("ZSCANRT full ZSCAN 20k @ COUNT 10: cold(skip)={old_ns}ns hot(treap)={new_ns}ns score={score:.2}x");
-        assert!(score >= 2.0, "treap-resume ZSCAN must be >=2.0x; got {score:.2}x");
+        eprintln!(
+            "ZSCANRT full ZSCAN 20k @ COUNT 10: cold(skip)={old_ns}ns hot(treap)={new_ns}ns score={score:.2}x"
+        );
+        assert!(
+            score >= 2.0,
+            "treap-resume ZSCAN must be >=2.0x; got {score:.2}x"
+        );
     }
 
     // (frankenredis-3e92e) Frozen fingerprint of the full-SCAN key sequence.
@@ -28602,8 +28727,9 @@ mod tests {
             let mut store = Store::new();
             for _ in 0..nkeys {
                 let klen = 1 + (next() % 8) as usize;
-                let key: Vec<u8> =
-                    (0..klen).map(|_| b"abc:xyz_0123"[(next() % 12) as usize]).collect();
+                let key: Vec<u8> = (0..klen)
+                    .map(|_| b"abc:xyz_0123"[(next() % 12) as usize])
+                    .collect();
                 store.set(encode_db_key(0, &key), b"v".to_vec(), None, 0);
             }
             let pat: Option<&[u8]> = match next() % 3 {
@@ -28633,7 +28759,12 @@ mod tests {
             let build = || {
                 let mut s = Store::new();
                 for i in 0..500u32 {
-                    s.set(encode_db_key(0, format!("k{i:04}").as_bytes()), b"v".to_vec(), None, 0);
+                    s.set(
+                        encode_db_key(0, format!("k{i:04}").as_bytes()),
+                        b"v".to_vec(),
+                        None,
+                        0,
+                    );
                 }
                 s
             };
@@ -28680,7 +28811,12 @@ mod tests {
         // O(N²/batch) skip walk vs the O(N) resume cache.
         let mut store = Store::new();
         for i in 0..20_000u32 {
-            store.set(encode_db_key(0, format!("key:{i:06}").as_bytes()), b"v".to_vec(), None, 0);
+            store.set(
+                encode_db_key(0, format!("key:{i:06}").as_bytes()),
+                b"v".to_vec(),
+                None,
+                0,
+            );
         }
         let reps = 6;
         let t0 = std::time::Instant::now();
@@ -28699,8 +28835,13 @@ mod tests {
         std::hint::black_box(acc2);
         assert_eq!(acc, acc2, "old/new returned different totals");
         let score = old_ns as f64 / new_ns as f64;
-        eprintln!("SCANLIN full scan 20k @ COUNT 10: old={old_ns}ns new={new_ns}ns score={score:.2}x");
-        assert!(score >= 2.0, "resume-cache SCAN must be >=2.0x; got {score:.2}x");
+        eprintln!(
+            "SCANLIN full scan 20k @ COUNT 10: old={old_ns}ns new={new_ns}ns score={score:.2}x"
+        );
+        assert!(
+            score >= 2.0,
+            "resume-cache SCAN must be >=2.0x; got {score:.2}x"
+        );
     }
 
     // (frankenredis-3e92e) Correctness gate for the SCAN resume cache's
@@ -28716,12 +28857,18 @@ mod tests {
         let mut s = Store::new();
         let g0 = s.keyspace_generation;
         s.set(encode_db_key(0, b"k1"), b"v".to_vec(), None, 0);
-        assert_ne!(s.keyspace_generation, g0, "new-key insert must bump generation");
+        assert_ne!(
+            s.keyspace_generation, g0,
+            "new-key insert must bump generation"
+        );
         let g1 = s.keyspace_generation;
         // Value-only overwrite of an existing key: ordered_keys is unchanged, so
         // the resume cache stays valid — the generation must NOT bump.
         s.set(encode_db_key(0, b"k1"), b"v2".to_vec(), None, 0);
-        assert_eq!(s.keyspace_generation, g1, "in-place value update must NOT bump generation");
+        assert_eq!(
+            s.keyspace_generation, g1,
+            "in-place value update must NOT bump generation"
+        );
         s.del(&[encode_db_key(0, b"k1")], 0);
         assert_ne!(s.keyspace_generation, g1, "remove must bump generation");
         let g2 = s.keyspace_generation;
@@ -28735,7 +28882,12 @@ mod tests {
         let run = |disable_cache: bool| -> Vec<Vec<u8>> {
             let mut store = Store::new();
             for i in 0..200u32 {
-                store.set(encode_db_key(0, format!("a{i:04}").as_bytes()), b"v".to_vec(), None, 0);
+                store.set(
+                    encode_db_key(0, format!("a{i:04}").as_bytes()),
+                    b"v".to_vec(),
+                    None,
+                    0,
+                );
             }
             let mut out = Vec::new();
             let mut cursor = 0u64;
@@ -28750,7 +28902,12 @@ mod tests {
                 if step == 4 {
                     store.flushdb();
                     for i in 0..150u32 {
-                        store.set(encode_db_key(0, format!("b{i:04}").as_bytes()), b"v".to_vec(), None, 0);
+                        store.set(
+                            encode_db_key(0, format!("b{i:04}").as_bytes()),
+                            b"v".to_vec(),
+                            None,
+                            0,
+                        );
                     }
                 }
                 if next == 0 || step > 100_000 {
@@ -28760,7 +28917,11 @@ mod tests {
             }
             out
         };
-        assert_eq!(run(false), run(true), "flush+readd mid-scan: cache-on diverged from cache-off");
+        assert_eq!(
+            run(false),
+            run(true),
+            "flush+readd mid-scan: cache-on diverged from cache-off"
+        );
     }
 
     // (frankenredis-4kuqc) The SCAN resume cache is a small LRU, not a single
@@ -28817,7 +28978,12 @@ mod tests {
         {
             let mut store = Store::new();
             for i in 0..500u32 {
-                store.set(encode_db_key(0, format!("k{i:04}").as_bytes()), b"v".to_vec(), None, 0);
+                store.set(
+                    encode_db_key(0, format!("k{i:04}").as_bytes()),
+                    b"v".to_vec(),
+                    None,
+                    0,
+                );
             }
             let all: Vec<Vec<u8>> = store.ordered_keys.iter().cloned().collect();
             for &count in &[1usize, 3, 7, 16] {
@@ -28825,9 +28991,18 @@ mod tests {
                 let single = interleaved(&mut store, 5, count, 1);
                 let off = interleaved(&mut store, 5, count, 2);
                 for i in 0..5 {
-                    assert_eq!(lru[i], single[i], "LRU vs single-slot diverged scan={i} count={count}");
-                    assert_eq!(lru[i], off[i], "LRU vs no-cache diverged scan={i} count={count}");
-                    assert_eq!(lru[i], all, "scan {i} did not return the full keyspace count={count}");
+                    assert_eq!(
+                        lru[i], single[i],
+                        "LRU vs single-slot diverged scan={i} count={count}"
+                    );
+                    assert_eq!(
+                        lru[i], off[i],
+                        "LRU vs no-cache diverged scan={i} count={count}"
+                    );
+                    assert_eq!(
+                        lru[i], all,
+                        "scan {i} did not return the full keyspace count={count}"
+                    );
                 }
             }
         }
@@ -28840,27 +29015,47 @@ mod tests {
         // O(N^2/batch) skip), the LRU keeps all four O(N).
         let mut store = Store::new();
         for i in 0..12_000u32 {
-            store.set(encode_db_key(0, format!("key:{i:06}").as_bytes()), b"v".to_vec(), None, 0);
+            store.set(
+                encode_db_key(0, format!("key:{i:06}").as_bytes()),
+                b"v".to_vec(),
+                None,
+                0,
+            );
         }
         let reps = 4;
         let t0 = std::time::Instant::now();
         let mut acc = 0usize;
         for _ in 0..reps {
-            acc = acc.wrapping_add(interleaved(&mut store, 4, 10, 1).iter().map(Vec::len).sum::<usize>());
+            acc = acc.wrapping_add(
+                interleaved(&mut store, 4, 10, 1)
+                    .iter()
+                    .map(Vec::len)
+                    .sum::<usize>(),
+            );
         }
         let single_ns = t0.elapsed().as_nanos().max(1);
         std::hint::black_box(acc);
         let t1 = std::time::Instant::now();
         let mut acc2 = 0usize;
         for _ in 0..reps {
-            acc2 = acc2.wrapping_add(interleaved(&mut store, 4, 10, 0).iter().map(Vec::len).sum::<usize>());
+            acc2 = acc2.wrapping_add(
+                interleaved(&mut store, 4, 10, 0)
+                    .iter()
+                    .map(Vec::len)
+                    .sum::<usize>(),
+            );
         }
         let lru_ns = t1.elapsed().as_nanos().max(1);
         std::hint::black_box(acc2);
         assert_eq!(acc, acc2, "single-slot vs LRU returned different totals");
         let score = single_ns as f64 / lru_ns as f64;
-        eprintln!("SCANLRU 4 interleaved scans of 12k @ COUNT 10: single-slot={single_ns}ns lru={lru_ns}ns score={score:.2}x");
-        assert!(score >= 2.0, "LRU must be >=2.0x vs single-slot for concurrent scans; got {score:.2}x");
+        eprintln!(
+            "SCANLRU 4 interleaved scans of 12k @ COUNT 10: single-slot={single_ns}ns lru={lru_ns}ns score={score:.2}x"
+        );
+        assert!(
+            score >= 2.0,
+            "LRU must be >=2.0x vs single-slot for concurrent scans; got {score:.2}x"
+        );
     }
 
     // (frankenredis-377jl) Frozen fingerprint of the grouped PEL AOF corpus.
@@ -28876,7 +29071,11 @@ mod tests {
         use std::collections::{BTreeMap, BTreeSet};
 
         // Old behavior: nested per-consumer filter over the whole PEL.
-        fn old_ref(group: &StreamGroup, logical_key: &[u8], group_name: &[u8]) -> Vec<Vec<Vec<u8>>> {
+        fn old_ref(
+            group: &StreamGroup,
+            logical_key: &[u8],
+            group_name: &[u8],
+        ) -> Vec<Vec<Vec<u8>>> {
             let mut commands = Vec::new();
             for consumer in &group.consumers {
                 let mut emitted = false;
@@ -28931,8 +29130,9 @@ mod tests {
 
         for _ in 0..600 {
             let nc = (next() % 8) as usize; // consumers (incl. 0)
-            let consumers: Vec<Vec<u8>> =
-                (0..nc).map(|i| format!("c{}", i % 6).into_bytes()).collect();
+            let consumers: Vec<Vec<u8>> = (0..nc)
+                .map(|i| format!("c{}", i % 6).into_bytes())
+                .collect();
             let mut cset: BTreeSet<Vec<u8>> = BTreeSet::new();
             for c in &consumers {
                 cset.insert(c.clone());
@@ -29029,8 +29229,13 @@ mod tests {
         std::hint::black_box(acc2);
         assert_eq!(acc, acc2, "old/new disagree on command count");
         let score = old_ns as f64 / new_ns as f64;
-        eprintln!("AOFPEL 1000 consumers x 5000 PEL: old={old_ns}ns new={new_ns}ns score={score:.2}x");
-        assert!(score >= 2.0, "grouped PEL emit must be >=2.0x; got {score:.2}x");
+        eprintln!(
+            "AOFPEL 1000 consumers x 5000 PEL: old={old_ns}ns new={new_ns}ns score={score:.2}x"
+        );
+        assert!(
+            score >= 2.0,
+            "grouped PEL emit must be >=2.0x; got {score:.2}x"
+        );
     }
 
     // (frankenredis-7st86) Frozen fingerprint of the ZLEXCOUNT result corpus.
@@ -29046,7 +29251,9 @@ mod tests {
         use super::{SortedSet, lex_in_range};
 
         fn brute(zs: &SortedSet, min: &[u8], max: &[u8]) -> usize {
-            zs.iter_asc().filter(|(m, _)| lex_in_range(m, min, max)).count()
+            zs.iter_asc()
+                .filter(|(m, _)| lex_in_range(m, min, max))
+                .count()
         }
 
         let mut s: u64 = 0x3243F6A8885A308D;
@@ -29094,7 +29301,11 @@ mod tests {
                 let mn = bound(next(), &[b"abcde"[(next() % 5) as usize]]);
                 let mx = bound(next(), &[b"abcde"[(next() % 5) as usize]]);
                 let got = zs.lex_count(&mn, &mx);
-                assert_eq!(got, brute(&zs, &mn, &mx), "lex_count mismatch mn={mn:?} mx={mx:?} mode={mode} n={n}");
+                assert_eq!(
+                    got,
+                    brute(&zs, &mn, &mx),
+                    "lex_count mismatch mn={mn:?} mx={mx:?} mode={mode} n={n}"
+                );
                 fnv(&mut golden, got as u64);
             }
         }
@@ -29116,7 +29327,11 @@ mod tests {
                 (b"[zzzz", b"[aaaa"),
             ];
             for (mn, mx) in cases {
-                assert_eq!(zs.lex_count(mn, mx), brute(&zs, mn, mx), "edge mn={mn:?} mx={mx:?}");
+                assert_eq!(
+                    zs.lex_count(mn, mx),
+                    brute(&zs, mn, mx),
+                    "edge mn={mn:?} mx={mx:?}"
+                );
             }
         }
         assert_eq!(
@@ -29149,8 +29364,13 @@ mod tests {
         std::hint::black_box(acc2);
         assert_eq!(acc, acc2, "old/new disagree on lex count");
         let score = old_ns as f64 / new_ns as f64;
-        eprintln!("ZLXC selective ZLEXCOUNT over 100k single-score: old={old_ns}ns new={new_ns}ns score={score:.2}x");
-        assert!(score >= 2.0, "lex range-count must be >=2.0x; got {score:.2}x");
+        eprintln!(
+            "ZLXC selective ZLEXCOUNT over 100k single-score: old={old_ns}ns new={new_ns}ns score={score:.2}x"
+        );
+        assert!(
+            score >= 2.0,
+            "lex range-count must be >=2.0x; got {score:.2}x"
+        );
     }
 
     // (frankenredis-sp1qh) Frozen fingerprint of the windowed lex-range corpus.
@@ -29290,8 +29510,13 @@ mod tests {
         std::hint::black_box(acc2);
         assert_eq!(acc, acc2, "old/new disagree on windowed count");
         let score = old_ns as f64 / new_ns as f64;
-        eprintln!("ZLX2 deep reverse BYLEX window over 100k: old={old_ns}ns new={new_ns}ns score={score:.2}x");
-        assert!(score >= 2.0, "windowed lex range-prune must be >=2.0x; got {score:.2}x");
+        eprintln!(
+            "ZLX2 deep reverse BYLEX window over 100k: old={old_ns}ns new={new_ns}ns score={score:.2}x"
+        );
+        assert!(
+            score >= 2.0,
+            "windowed lex range-prune must be >=2.0x; got {score:.2}x"
+        );
     }
 
     // (frankenredis-yawte) Frozen fingerprint of the lex-range output corpus.
@@ -29358,8 +29583,7 @@ mod tests {
             let mut zs = SortedSet::new();
             for _ in 0..n {
                 let klen = 1 + (next() % 4) as usize;
-                let member: Vec<u8> =
-                    (0..klen).map(|_| b"abcde"[(next() % 5) as usize]).collect();
+                let member: Vec<u8> = (0..klen).map(|_| b"abcde"[(next() % 5) as usize]).collect();
                 let score = match mode {
                     0 => 0.0,
                     1 => 5.0,
@@ -29371,7 +29595,11 @@ mod tests {
                 let mn = bound(next(), &[b"abcde"[(next() % 5) as usize]]);
                 let mx = bound(next(), &[b"abcde"[(next() % 5) as usize]]);
                 let got = zs.lex_range_asc(&mn, &mx);
-                assert_eq!(got, brute(&zs, &mn, &mx), "lex_range mismatch mn={mn:?} mx={mx:?} mode={mode} n={n}");
+                assert_eq!(
+                    got,
+                    brute(&zs, &mn, &mx),
+                    "lex_range mismatch mn={mn:?} mx={mx:?} mode={mode} n={n}"
+                );
                 for (m, sc) in &got {
                     fnv(&mut golden, m);
                     fnv(&mut golden, &sc.to_bits().to_le_bytes());
@@ -29399,7 +29627,11 @@ mod tests {
                 (b"[zzzz", b"[aaaa"),
             ];
             for (mn, mx) in cases {
-                assert_eq!(zs.lex_range_asc(mn, mx), brute(&zs, mn, mx), "edge mn={mn:?} mx={mx:?}");
+                assert_eq!(
+                    zs.lex_range_asc(mn, mx),
+                    brute(&zs, mn, mx),
+                    "edge mn={mn:?} mx={mx:?}"
+                );
             }
         }
         assert_eq!(
@@ -29433,8 +29665,13 @@ mod tests {
         std::hint::black_box(acc2);
         assert_eq!(acc, acc2, "old/new disagree on lex count");
         let score = old_ns as f64 / new_ns as f64;
-        eprintln!("ZLEX1 selective BYLEX over 100k single-score: old={old_ns}ns new={new_ns}ns score={score:.2}x");
-        assert!(score >= 2.0, "lex range-prune must be >=2.0x; got {score:.2}x");
+        eprintln!(
+            "ZLEX1 selective BYLEX over 100k single-score: old={old_ns}ns new={new_ns}ns score={score:.2}x"
+        );
+        assert!(
+            score >= 2.0,
+            "lex range-prune must be >=2.0x; got {score:.2}x"
+        );
     }
 
     // (frankenredis-2wgom) Frozen fingerprint of the KEYS prefix-pruned output
@@ -29457,7 +29694,9 @@ mod tests {
                 .ordered_physical_keys_in_db(0)
                 .into_iter()
                 .filter_map(|key| {
-                    let logical = decode_db_key(&key).map(|(_, l)| l).unwrap_or(key.as_slice());
+                    let logical = decode_db_key(&key)
+                        .map(|(_, l)| l)
+                        .unwrap_or(key.as_slice());
                     if glob_match(pat, logical) {
                         Some(logical.to_vec())
                     } else {
@@ -29515,7 +29754,11 @@ mod tests {
                 assert_eq!(got, brute(&store, pat), "KEYS prune mismatch pat={pat:?}");
                 // keys_matching (db-agnostic) must agree with keys_matching_in_db
                 // on a pure db-0 keyspace.
-                assert_eq!(store.keys_matching(pat, 0), got, "keys_matching disagrees pat={pat:?}");
+                assert_eq!(
+                    store.keys_matching(pat, 0),
+                    got,
+                    "keys_matching disagrees pat={pat:?}"
+                );
                 for k in &got {
                     fnv(&mut golden, k);
                 }
@@ -29577,8 +29820,13 @@ mod tests {
         std::hint::black_box(acc2);
         assert_eq!(acc, acc2, "old/new disagree on match count");
         let score = old_ns as f64 / new_ns as f64;
-        eprintln!("KPRFX KEYS selective-prefix over 100k: old={old_ns}ns new={new_ns}ns score={score:.2}x");
-        assert!(score >= 2.0, "prefix prune must be >=2.0x for a selective prefix; got {score:.2}x");
+        eprintln!(
+            "KPRFX KEYS selective-prefix over 100k: old={old_ns}ns new={new_ns}ns score={score:.2}x"
+        );
+        assert!(
+            score >= 2.0,
+            "prefix prune must be >=2.0x for a selective prefix; got {score:.2}x"
+        );
     }
 
     // (frankenredis-4ywto) Frozen fingerprint of the members_at_indices output
@@ -29604,8 +29852,7 @@ mod tests {
         };
         // Reference: the old path — materialise EVERY (member,score) then index.
         let reference = |zs: &SortedSet, idxs: &[usize]| -> Vec<(Vec<u8>, f64)> {
-            let mat: Vec<(Vec<u8>, f64)> =
-                zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
+            let mat: Vec<(Vec<u8>, f64)> = zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
             idxs.iter().filter_map(|&i| mat.get(i).cloned()).collect()
         };
 
@@ -29631,7 +29878,11 @@ mod tests {
             let k = (next() % 12) as usize;
             let idxs: Vec<usize> = (0..k).map(|_| (next() as usize) % (n + 2)).collect();
             let got = zs.members_at_indices(&idxs);
-            assert_eq!(got, reference(&zs, &idxs), "members_at_indices mismatch n={n} idxs={idxs:?}");
+            assert_eq!(
+                got,
+                reference(&zs, &idxs),
+                "members_at_indices mismatch n={n} idxs={idxs:?}"
+            );
             for (m, s) in &got {
                 fnv(&mut golden, m);
                 fnv(&mut golden, &s.to_bits().to_le_bytes());
@@ -29651,7 +29902,11 @@ mod tests {
             &[2, 8, 2, 0, 100, 7],
         ];
         for idxs in edge {
-            assert_eq!(zs.members_at_indices(idxs), reference(&zs, idxs), "edge idxs={idxs:?}");
+            assert_eq!(
+                zs.members_at_indices(idxs),
+                reference(&zs, idxs),
+                "edge idxs={idxs:?}"
+            );
         }
         assert_eq!(
             golden, ZRND1_GOLDEN,
@@ -29666,8 +29921,7 @@ mod tests {
         let picks: Vec<usize> = (0..4).map(|_| (next() as usize) % 100_000).collect();
         let reps = 2000;
         let old_index = |zs: &SortedSet, idxs: &[usize]| -> Vec<(Vec<u8>, f64)> {
-            let mat: Vec<(Vec<u8>, f64)> =
-                zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
+            let mat: Vec<(Vec<u8>, f64)> = zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
             idxs.iter().filter_map(|&i| mat.get(i).cloned()).collect()
         };
         let t0 = std::time::Instant::now();
@@ -29687,7 +29941,10 @@ mod tests {
         assert_eq!(acc, acc2, "old/new disagree on pick count");
         let score = old_ns as f64 / new_ns as f64;
         eprintln!("ZRND1 zrandmember 4-of-100k: old={old_ns}ns new={new_ns}ns score={score:.2}x");
-        assert!(score >= 2.0, "single-pass fetch must be >=2.0x for small count; got {score:.2}x");
+        assert!(
+            score >= 2.0,
+            "single-pass fetch must be >=2.0x for small count; got {score:.2}x"
+        );
     }
 
     #[test]

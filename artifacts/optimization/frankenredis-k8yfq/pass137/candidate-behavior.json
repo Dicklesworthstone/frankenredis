@@ -1,0 +1,12 @@
+{
+  "copies": 1000,
+  "list_len": 50000,
+  "llen": 50000,
+  "lrange_head": [
+    "xxxxxxxx",
+    "xxxxxxxx",
+    "xxxxxxxx"
+  ],
+  "object_encoding": "quicklist",
+  "payload_size": 8
+}

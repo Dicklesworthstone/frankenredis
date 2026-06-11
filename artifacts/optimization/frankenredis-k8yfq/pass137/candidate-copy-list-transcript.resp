@@ -1,0 +1,85 @@
+# DEL blist cp
+:0
+# RPUSH blist chunk
+:500
+# RPUSH blist chunk
+:1000
+# RPUSH blist chunk
+:1500
+# RPUSH blist chunk
+:2000
+# OBJECT ENCODING blist
+$9
+quicklist
+# COPY blist cp REPLACE
+:1
+# LLEN cp
+:2000
+# LRANGE cp 0 3
+*4
+$8
+00000000
+$8
+00000001
+$8
+00000002
+$8
+00000003
+# LSET cp 0 dest0000
++OK
+# LSET blist 1 src00001
++OK
+# LRANGE blist 0 3
+*4
+$8
+00000000
+$8
+src00001
+$8
+00000002
+$8
+00000003
+# LRANGE cp 0 3
+*4
+$8
+dest0000
+$8
+00000001
+$8
+00000002
+$8
+00000003
+# LPOP blist
+$8
+00000000
+# RPOP cp
+$8
+00001999
+# LLEN blist
+:1999
+# LLEN cp
+:1999
+# LRANGE blist 0 2
+*3
+$8
+src00001
+$8
+00000002
+$8
+00000003
+# LRANGE cp 0 2
+*3
+$8
+dest0000
+$8
+00000001
+$8
+00000002
+# OBJECT ENCODING blist
+$9
+quicklist
+# OBJECT ENCODING cp
+$9
+quicklist
+# QUIT
++OK

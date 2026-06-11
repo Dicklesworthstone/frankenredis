@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-k8yfq/copy_list_bench.py --server-bin /data/tmp/fr-k8yfq-baseline-target-20260611/release-perf/frankenredis --port 21370 --list-len 50000 --payload-size 8 --copies 1000 --warmup-copies 20 --json-out artifacts/optimization/frankenredis-k8yfq/pass137/baseline-copy-list-last.json",
+      "mean": 0.788457918495,
+      "stddev": 0.15464799844102273,
+      "median": 0.78692291462,
+      "user": 0.611245865,
+      "system": 0.08648463499999999,
+      "min": 0.5855474441199999,
+      "max": 0.96319247712,
+      "times": [
+        0.67790790512,
+        0.5855474441199999,
+        0.6394288231199999,
+        0.68960469612,
+        0.96319247712,
+        0.93835580912,
+        0.92938506012,
+        0.88424113312
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
