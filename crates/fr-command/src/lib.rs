@@ -26648,6 +26648,39 @@ fn sort_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     sort_generic(argv, store, now_ms, /* readonly */ false, "SORT")
 }
 
+/// Place exactly the elements that a full sort would put in `v[start..end]` into
+/// `v[start..end]`, in sorted order, WITHOUT fully sorting the whole slice —
+/// mirroring redis's `pqsort` partial-sort-for-SORT+LIMIT (sort.c:513). `cmp`
+/// MUST be a strict total order (the callers append an original-index tiebreak),
+/// so the unstable selection lands the same window a stable full sort would and
+/// the output is byte-identical. Cost is O(n) for the two `select_nth` partitions
+/// plus O(k log k) to sort the window, vs O(n log n) for a full sort. Elements
+/// outside `[start, end)` are left partitioned (all `<=` the window before it,
+/// all `>=` after it) — exactly the rows the caller's LIMIT drain/truncate
+/// discards. (frankenredis-sortlim)
+fn partial_sort_window<T>(
+    v: &mut [T],
+    start: usize,
+    end: usize,
+    mut cmp: impl FnMut(&T, &T) -> std::cmp::Ordering,
+) {
+    let n = v.len();
+    if n == 0 || start >= end {
+        return;
+    }
+    // Isolate the `end` smallest into v[0..end] (unordered).
+    if end < n {
+        v.select_nth_unstable_by(end - 1, &mut cmp);
+    }
+    // Within v[0..end], push the `start` smallest into v[0..start], leaving the
+    // requested window in v[start..end] (unordered).
+    if start > 0 {
+        v[..end].select_nth_unstable_by(start, &mut cmp);
+    }
+    // Finally order just the window.
+    v[start..end].sort_unstable_by(&mut cmp);
+}
+
 fn sort_generic(
     argv: &[Vec<u8>],
     store: &mut Store,
@@ -26761,6 +26794,24 @@ fn sort_generic(
             .map(|el| sort_lookup_by_pattern(store, &by_pattern, el, now_ms))
             .collect();
 
+        // Compute the LIMIT window [start, end) up front so we can sort ONLY the
+        // requested slice (redis pqsort, sort.c:513) instead of the whole vector
+        // when LIMIT restricts the output. `full` keeps the original full-sort
+        // path when the window covers everything.
+        let total = elements.len();
+        let start = if limit_offset <= 0 {
+            0
+        } else {
+            (limit_offset as usize).min(total)
+        };
+        let count = if limit_count < 0 {
+            total - start
+        } else {
+            (limit_count as usize).min(total - start)
+        };
+        let end = start + count;
+        let full = start == 0 && end == total;
+
         if !alpha {
             // Numeric sort: parse sort keys as f64
             let mut scored: Vec<(f64, usize)> = Vec::with_capacity(elements.len());
@@ -26781,20 +26832,29 @@ fn sort_generic(
                 };
                 scored.push((score, idx));
             }
-            scored.sort_by(|a, b| {
-                // Upstream sortCompare: compare by score, and on a tie compare
-                // the elements themselves (so the order is deterministic), then
-                // negate the WHOLE comparison under DESC (`sort_desc ? -cmp :
-                // cmp`). The tiebreaker must follow `desc` too — applying it
-                // ascending-only reversed only the score and left tied runs in
-                // forward order. (frankenredis SORT numeric-tie DESC parity)
-                let cmp =
+            // Upstream sortCompare: compare by score, and on a tie compare the
+            // elements themselves (so the order is deterministic), then negate
+            // the WHOLE comparison under DESC (`sort_desc ? -cmp : cmp`). The
+            // trailing index compare makes this a STRICT TOTAL ORDER — it only
+            // separates byte-identical (truly-equal) rows, so it is unobservable
+            // in the output yet lets the unstable partial-sort reproduce the
+            // exact window a stable full sort would. (frankenredis-sortlim)
+            let mut cmp = |a: &(f64, usize), b: &(f64, usize)| {
+                let base =
                     a.0.partial_cmp(&b.0)
                         .unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| elements[a.1].cmp(&elements[b.1]));
-                if desc { cmp.reverse() } else { cmp }
-            });
-            let reordered: Vec<Vec<u8>> = scored
+                let base = if desc { base.reverse() } else { base };
+                base.then_with(|| a.1.cmp(&b.1))
+            };
+            if full {
+                scored.sort_unstable_by(&mut cmp);
+            } else {
+                partial_sort_window(&mut scored, start, end, &mut cmp);
+            }
+            // Materialise ONLY the window the LIMIT keeps; the rows outside
+            // [start, end) were exactly what the later drain/truncate discards.
+            let reordered: Vec<Vec<u8>> = scored[start..end]
                 .iter()
                 .map(|(_, idx)| elements[*idx].clone())
                 .collect();
@@ -26809,17 +26869,32 @@ fn sort_generic(
                     (idx, val)
                 })
                 .collect();
-            indexed.sort_by(|a, b| {
-                // NULL (empty) sorts before non-empty
-                let cmp = a.1.cmp(b.1);
-                if desc { cmp.reverse() } else { cmp }
-            });
-            let reordered: Vec<Vec<u8>> = indexed
+            // NULL (empty) sorts before non-empty; DESC negates the key compare.
+            // The trailing index compare (NOT reversed by DESC) reproduces the
+            // stable ordering of equal-key rows exactly while making `cmp` a
+            // strict total order for the partial sort. (frankenredis-sortlim)
+            let mut cmp = |a: &(usize, &[u8]), b: &(usize, &[u8])| {
+                let base = a.1.cmp(b.1);
+                let base = if desc { base.reverse() } else { base };
+                base.then_with(|| a.0.cmp(&b.0))
+            };
+            if full {
+                indexed.sort_unstable_by(&mut cmp);
+            } else {
+                partial_sort_window(&mut indexed, start, end, &mut cmp);
+            }
+            // Materialise ONLY the window the LIMIT keeps (see numeric arm).
+            let reordered: Vec<Vec<u8>> = indexed[start..end]
                 .iter()
                 .map(|(idx, _)| elements[*idx].clone())
                 .collect();
             elements = reordered;
         }
+
+        // `elements` now holds exactly the post-LIMIT window in final order, so
+        // neutralise the shared LIMIT application below (drain 0 / keep all).
+        limit_offset = 0;
+        limit_count = -1;
     }
 
     // ── Apply LIMIT ──────────────────────────────────────────────────
