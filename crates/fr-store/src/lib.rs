@@ -1112,6 +1112,47 @@ impl SortedSet {
             && first.score == last.score
         {
             let s = first.score;
+            // (frankenredis-7uonw) O(log n) rank-difference count when the
+            // order-statistic treap is already warm (a prior ZRANK / ZRANGE-by-
+            // index built it) — mirrors redis's zslLexCount, which subtracts two
+            // skiplist ranks instead of walking the band. All members share one
+            // score here, so treap rank == member lex rank. `below` = members
+            // failing `above_min`; `atorbelow` = members passing `below_max`;
+            // their difference is exactly the band size (see `lex_in_range`).
+            // Falls back to the O(range) BTreeMap scan below when the treap is
+            // cold, so cold zsets never regress and the scan stays the oracle.
+            if let Some(tree) = &full.rank_tree {
+                let total = full.dict.len();
+                let below = if min == b"-" {
+                    0
+                } else if min == b"+" {
+                    total
+                } else {
+                    let x = &min[1..];
+                    let r = tree.rank_of(&ScoreMember::actual(s, x.to_vec()));
+                    // `[x` excludes members < x (rank_of); `(x` also excludes x.
+                    if min[0] == b'(' {
+                        r + usize::from(full.get_score(x).is_some())
+                    } else {
+                        r
+                    }
+                };
+                let atorbelow = if max == b"+" {
+                    total
+                } else if max == b"-" {
+                    0
+                } else {
+                    let x = &max[1..];
+                    let r = tree.rank_of(&ScoreMember::actual(s, x.to_vec()));
+                    // `[x` includes x; `(x` stops before x.
+                    if max[0] == b'[' {
+                        r + usize::from(full.get_score(x).is_some())
+                    } else {
+                        r
+                    }
+                };
+                return atorbelow.saturating_sub(below);
+            }
             let lower = if min == b"-" {
                 ScoreMember::min_for_score(s)
             } else if min == b"+" {
@@ -29388,6 +29429,74 @@ mod tests {
             score >= 2.0,
             "lex range-count must be >=2.0x; got {score:.2}x"
         );
+    }
+
+    // (frankenredis-7uonw) The warm-treap O(log n) rank-diff path of `lex_count`
+    // must agree byte-for-byte with the cold range scan AND the brute iter_asc
+    // reference, across every bound shape and at the empty/whole-set edges.
+    #[test]
+    fn lex_count_warm_treap_rank_diff_isomorphic_7uonw() {
+        use super::{SortedSet, lex_in_range};
+        fn brute(zs: &SortedSet, min: &[u8], max: &[u8]) -> usize {
+            zs.iter_asc()
+                .filter(|(m, _)| lex_in_range(m, min, max))
+                .count()
+        }
+        let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let bound = |meta: u64, body: &[u8]| -> Vec<u8> {
+            match meta % 4 {
+                0 => b"-".to_vec(),
+                1 => b"+".to_vec(),
+                2 => [b"[".as_slice(), body].concat(),
+                _ => [b"(".as_slice(), body].concat(),
+            }
+        };
+        for _ in 0..400 {
+            // Single-score Full set (the canonical ZLEXCOUNT shape); >128 so it
+            // promotes past Packed and the treap is meaningful.
+            let n = 160 + (next() % 80) as usize;
+            let score = (next() % 3) as f64; // one score for the whole set
+            let mut warm = SortedSet::new();
+            let mut cold = SortedSet::new();
+            for _ in 0..n {
+                let klen = 1 + (next() % 4) as usize;
+                let member: Vec<u8> =
+                    (0..klen).map(|_| b"abcde"[(next() % 5) as usize]).collect();
+                warm.insert(member.clone(), score);
+                cold.insert(member, score);
+            }
+            // Warm ONLY `warm`'s treap; `cold` keeps rank_tree == None.
+            let probe: Vec<u8> = vec![b"abcde"[(next() % 5) as usize]];
+            let _ = warm.rank(&probe);
+            for _ in 0..12 {
+                let mn = bound(next(), &[b"abcde"[(next() % 5) as usize]]);
+                let mx = bound(next(), &[b"abcde"[(next() % 5) as usize]]);
+                let fast = warm.lex_count(&mn, &mx);
+                let slow = cold.lex_count(&mn, &mx);
+                let ref_ = brute(&cold, &mn, &mx);
+                assert_eq!(fast, ref_, "warm rank-diff != brute mn={mn:?} mx={mx:?}");
+                assert_eq!(slow, ref_, "cold scan != brute mn={mn:?} mx={mx:?}");
+            }
+            // Whole-set / empty edges (members may dedup, so compare to brute).
+            for (mn, mx) in [
+                (&b"-"[..], &b"+"[..]),
+                (b"+", b"-"),
+                (b"+", b"+"),
+                (b"-", b"-"),
+            ] {
+                assert_eq!(
+                    warm.lex_count(mn, mx),
+                    brute(&cold, mn, mx),
+                    "warm edge mn={mn:?} mx={mx:?}"
+                );
+            }
+        }
     }
 
     // (frankenredis-sp1qh) Frozen fingerprint of the windowed lex-range corpus.
