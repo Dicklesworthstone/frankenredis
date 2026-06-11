@@ -2012,6 +2012,7 @@ fn process_buffered_frames(
     let mut processed_frames = 0usize;
     let mut budget_exhausted = false;
     let mut argv_scratch: Vec<Vec<u8>> = Vec::new();
+    let mut plain_get_read_gate_cache: Option<bool> = None;
 
     loop {
         if consumed_total >= conn.read_buf.len() || conn.closing {
@@ -2054,6 +2055,7 @@ fn process_buffered_frames(
                 Ok(InlineParseResult::Command(frame, consumed)) => {
                     processed_frames = processed_frames.saturating_add(1);
                     if !command_frame_can_move_to_argv(&frame) {
+                        plain_get_read_gate_cache = None;
                         let response = runtime.execute_frame_with_unix_time_us(&frame, ts, ts_us);
                         let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                         encode_client_reply(&response, client_resp3, &mut conn.write_buf);
@@ -2062,6 +2064,7 @@ fn process_buffered_frames(
                     }
                     let argv = fr_command::argv_from_frame(frame)
                         .expect("command frame prevalidated for argv move");
+                    plain_get_read_gate_cache = None;
                     match process_argv_frame(
                         token,
                         &argv,
@@ -2114,12 +2117,15 @@ fn process_buffered_frames(
                 let parser_config = runtime.parser_config();
                 if let Some(packet) = parse_borrowed_plain_get_packet(unparsed, &parser_config) {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     if runtime
-                        .execute_plain_get_borrowed_into(
+                        .execute_plain_get_borrowed_into_with_default_read_gate(
                             packet.key,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -2173,6 +2179,7 @@ fn process_buffered_frames(
                 }
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response }) => {
                     processed_frames = processed_frames.saturating_add(1);
+                    plain_get_read_gate_cache = None;
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if !runtime.suppress_current_network_reply() {
                         encode_client_reply(&response, client_resp3, &mut conn.write_buf);
@@ -2200,6 +2207,7 @@ fn process_buffered_frames(
                         continue;
                     }
                     let argv = &argv_scratch[..argv_len];
+                    plain_get_read_gate_cache = None;
                     match process_argv_frame(
                         token,
                         argv,
@@ -2261,6 +2269,7 @@ fn process_buffered_frames(
                     continue;
                 }
                 if !command_frame_can_move_to_argv(&frame) {
+                    plain_get_read_gate_cache = None;
                     let response = runtime.execute_frame_with_unix_time_us(&frame, ts, ts_us);
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     encode_client_reply(&response, client_resp3, &mut conn.write_buf);
@@ -2269,6 +2278,7 @@ fn process_buffered_frames(
                 }
                 let argv = fr_command::argv_from_frame(frame)
                     .expect("command frame prevalidated for argv move");
+                plain_get_read_gate_cache = None;
                 match process_argv_frame(
                     token,
                     &argv,
@@ -8817,6 +8827,74 @@ mod tests {
                 RespFrame::BulkString(Some(b"118366".to_vec())),
             ]))
         );
+    }
+
+    #[test]
+    fn process_buffered_frames_invalidates_cached_get_gate_after_generic_state_change() {
+        use crate::ClientConnection;
+        use fr_runtime::Runtime;
+        use mio::Token;
+        use std::collections::HashSet;
+        use std::net::{TcpListener, TcpStream};
+
+        let mut runtime = Runtime::default_strict();
+        assert_eq!(
+            runtime.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"SET".to_vec())),
+                    RespFrame::BulkString(Some(b"k".to_vec())),
+                    RespFrame::BulkString(Some(b"v".to_vec())),
+                ])),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let ts = 2;
+        let session = runtime.new_session();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = TcpStream::connect(addr).unwrap();
+        let (_server_stream, _server_addr) = listener.accept().unwrap();
+        let mut conn = ClientConnection::new(mio::net::TcpStream::from_std(stream), session, ts);
+
+        let get = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"GET".to_vec())),
+            RespFrame::BulkString(Some(b"k".to_vec())),
+        ]));
+        let select_db1 = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"SELECT".to_vec())),
+            RespFrame::BulkString(Some(b"1".to_vec())),
+        ]));
+        conn.read_buf.extend_from_slice(&get.to_bytes());
+        conn.read_buf.extend_from_slice(&select_db1.to_bytes());
+        conn.read_buf.extend_from_slice(&get.to_bytes());
+
+        let mut blocked_tokens = HashSet::new();
+        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
+        let mut closing_tokens = HashSet::new();
+        let mut write_tokens = HashSet::new();
+        let mut paused_tokens = HashSet::new();
+        let prev = runtime.swap_session(std::mem::take(&mut conn.session));
+        crate::process_buffered_frames(
+            Token(1),
+            &mut conn,
+            &mut runtime,
+            &mut blocked_tokens,
+            &mut blocked_wake_index,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut paused_tokens,
+            ts,
+            ts.saturating_mul(1000),
+        );
+        conn.session = runtime.swap_session(prev);
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&RespFrame::BulkString(Some(b"v".to_vec())).to_bytes());
+        expected.extend_from_slice(&RespFrame::SimpleString("OK".to_string()).to_bytes());
+        expected.extend_from_slice(&RespFrame::BulkString(None).to_bytes());
+        assert_eq!(conn.write_buf, expected);
     }
 
     #[test]

@@ -1,0 +1,2 @@
+cdb1611ce3ce2738c8583d8afd19c0fcea4f51d2d57082a6bcc83965ea77751f  artifacts/optimization/frankenredis-ohsk5/pass129/validation/current-golden.resp
+cdb1611ce3ce2738c8583d8afd19c0fcea4f51d2d57082a6bcc83965ea77751f  artifacts/optimization/frankenredis-ohsk5/pass129/validation/candidate-golden.resp

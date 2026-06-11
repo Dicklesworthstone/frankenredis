@@ -1,0 +1,65 @@
+# command FLUSHALL
++OK
+# command SET
++OK
+# command GET
+$1
+v
+# command OBJECT
+:0
+# command SET_INT
++OK
+# command GET_INT
+$2
+42
+# command LPUSH
+:1
+# command GET_WRONGTYPE
+-WRONGTYPE Operation against a key holding the wrong kind of value
+# command EXPIRED_SET
++OK
+# command PEXPIREAT
+:1
+# command GET_EXPIRED
+$-1
+# command GET_EXPIRED_AGAIN
+$-1
+# command GET_SELECT_GET
+$1
+v
++OK
+$-1
++OK
+$1
+v
+# command HELLO3_GET_QUIT
+%7
+$6
+server
+$5
+redis
+$7
+version
+$5
+7.2.4
+$5
+proto
+:3
+$2
+id
+:28
+$4
+mode
+$10
+standalone
+$4
+role
+$6
+master
+$7
+modules
+*0
+_
++OK
+# command DEBUG_DIGEST
+-ERR DEBUG command not allowed. If the enable-debug-command option is set to "local", you can run it from a local connection, otherwise you need to set this option in the configuration file, and then restart the server.

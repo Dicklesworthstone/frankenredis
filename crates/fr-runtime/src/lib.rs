@@ -7546,7 +7546,25 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        if !self.can_execute_plain_get_borrowed(key, now_ms) {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_get_borrowed_into_with_default_read_gate(
+            key,
+            now_ms,
+            resp3,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    pub fn execute_plain_get_borrowed_into_with_default_read_gate(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: bool,
+    ) -> Option<()> {
+        if !self.can_execute_plain_get_borrowed_with_default_read_gate(key, default_read_allowed) {
             return None;
         }
 
@@ -7666,12 +7684,25 @@ impl Runtime {
     }
 
     fn can_execute_plain_get_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.can_execute_plain_get_borrowed_with_default_read_gate(key, default_read_allowed)
+    }
+
+    fn can_execute_plain_get_borrowed_with_default_read_gate(
+        &self,
+        key: &[u8],
+        default_read_allowed: bool,
+    ) -> bool {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"GET".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
+        default_read_allowed
+    }
+
+    pub fn plain_borrowed_default_key_read_gate(&mut self, now_ms: u64) -> bool {
         self.plain_borrowed_default_key_read_allows(now_ms)
     }
 
@@ -20914,6 +20945,49 @@ mod tests {
             Some(())
         );
         assert_eq!(resp3_out, b"_\r\n");
+    }
+
+    #[test]
+    fn plain_get_borrowed_into_cached_gate_matches_uncached() {
+        let mut cached = Runtime::default_strict();
+        let mut uncached = Runtime::default_strict();
+        for rt in [&mut cached, &mut uncached] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"k", b"v"]), 1),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+
+        let default_read_allowed = cached.plain_borrowed_default_key_read_gate(2);
+        assert!(default_read_allowed);
+
+        let mut cached_out = Vec::new();
+        assert_eq!(
+            cached.execute_plain_get_borrowed_into_with_default_read_gate(
+                b"k",
+                2,
+                false,
+                &mut cached_out,
+                default_read_allowed,
+            ),
+            Some(())
+        );
+
+        let mut uncached_out = Vec::new();
+        assert_eq!(
+            uncached.execute_plain_get_borrowed_into(b"k", 2, false, &mut uncached_out),
+            Some(())
+        );
+
+        assert_eq!(cached_out, uncached_out);
+        assert_eq!(
+            cached.server.store.stat_keyspace_hits,
+            uncached.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            cached.session.last_command_name,
+            uncached.session.last_command_name
+        );
     }
 
     #[test]
