@@ -1,0 +1,84 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-fbj62/pfcount_workload.py --server-bin target-fbj62-baseline/release-perf/frankenredis --port 6395 --mode single-cached --ops 20000 --json-out artifacts/optimization/frankenredis-fbj62/pass142-baseline-single-paired-last.json",
+      "mean": 1.5787823632333335,
+      "stddev": 0.062305452206024625,
+      "median": 1.5792358389,
+      "user": 0.5224709666666666,
+      "system": 1.0179994399999999,
+      "min": 1.5162514109,
+      "max": 1.6408598399000003,
+      "times": [
+        1.6408598399000003,
+        1.5162514109,
+        1.5792358389
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-fbj62/pfcount_workload.py --server-bin target-fbj62-candidate/release-perf/frankenredis --port 6396 --mode single-cached --ops 20000 --json-out artifacts/optimization/frankenredis-fbj62/pass142-candidate-single-paired-last.json",
+      "mean": 1.5721524809,
+      "stddev": 0.032282042332695486,
+      "median": 1.5832800799,
+      "user": 0.5150146333333332,
+      "system": 1.0192151066666666,
+      "min": 1.5357785749000001,
+      "max": 1.5973987879000002,
+      "times": [
+        1.5357785749000001,
+        1.5832800799,
+        1.5973987879000002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-fbj62/pfcount_workload.py --server-bin target-fbj62-baseline/release-perf/frankenredis --port 6397 --mode multi --ops 20000 --json-out artifacts/optimization/frankenredis-fbj62/pass142-baseline-multi-paired-last.json",
+      "mean": 2.2286001415666665,
+      "stddev": 0.016576173236744974,
+      "median": 2.2358411729,
+      "user": 1.1054349666666667,
+      "system": 1.0859177733333334,
+      "min": 2.2096354048999998,
+      "max": 2.2403238469,
+      "times": [
+        2.2403238469,
+        2.2096354048999998,
+        2.2358411729
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-fbj62/pfcount_workload.py --server-bin target-fbj62-candidate/release-perf/frankenredis --port 6398 --mode multi --ops 20000 --json-out artifacts/optimization/frankenredis-fbj62/pass142-candidate-multi-paired-last.json",
+      "mean": 2.2797714035666665,
+      "stddev": 0.008466750449947737,
+      "median": 2.2823530309,
+      "user": 1.1334716333333335,
+      "system": 1.10256944,
+      "min": 2.2703143628999998,
+      "max": 2.2866468169,
+      "times": [
+        2.2866468169,
+        2.2823530309,
+        2.2703143628999998
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

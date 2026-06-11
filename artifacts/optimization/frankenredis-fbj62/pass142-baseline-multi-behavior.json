@@ -1,0 +1,9 @@
+{
+  "elements_per_hll": 50000,
+  "last_reply": 98718,
+  "merged_count": 98718,
+  "mode": "multi",
+  "ops": 20000,
+  "other_count": 50144,
+  "single_count": 49966
+}
