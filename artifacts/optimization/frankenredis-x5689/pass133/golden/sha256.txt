@@ -1,0 +1,3 @@
+080ffc877764372c588cd09117c8f65cc854b32e98e9bd534b2d12fbbedb9e54  artifacts/optimization/frankenredis-x5689/pass133/golden/request.bin
+fef02389a599a6d4a395fbaa1f80b47c6cdaadced0e0d05c6d8f11dfc4cbd04f  artifacts/optimization/frankenredis-x5689/pass133/golden/current-response.bin
+fef02389a599a6d4a395fbaa1f80b47c6cdaadced0e0d05c6d8f11dfc4cbd04f  artifacts/optimization/frankenredis-x5689/pass133/golden/candidate-response.bin

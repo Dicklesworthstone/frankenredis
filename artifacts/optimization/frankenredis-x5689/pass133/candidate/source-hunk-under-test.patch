@@ -1,0 +1,275 @@
+diff --git a/crates/fr-server/src/main.rs b/crates/fr-server/src/main.rs
+index fb53095f4..26c69dc4b 100644
+--- a/crates/fr-server/src/main.rs
++++ b/crates/fr-server/src/main.rs
+@@ -2115,8 +2115,26 @@ fn process_buffered_frames(
+             let borrowed_parse_result = {
+                 let unparsed = &conn.read_buf[consumed_total..];
+                 let parser_config = runtime.parser_config();
+-                if let Some(packet) = parse_borrowed_plain_get_packet(unparsed, &parser_config) {
+-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
++                let output_hard_limit = runtime.effective_output_hard_limit(conn.session.client_id);
++                let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
++                if output_hard_limit == usize::MAX
++                    && let Some(run) = execute_borrowed_plain_get_run(
++                        unparsed,
++                        &parser_config,
++                        runtime,
++                        ts,
++                        &mut conn.write_buf,
++                        &mut plain_get_read_gate_cache,
++                        MAX_FRAMES_PER_CLIENT_TICK.saturating_sub(processed_frames),
++                    )
++                {
++                    Ok(BorrowedMultibulkAction::FastEncodedReply {
++                        consumed: run.consumed,
++                        frames: run.frames,
++                    })
++                } else if let Some(packet) =
++                    parse_borrowed_plain_get_packet(unparsed, &parser_config)
++                {
+                     let default_read_allowed = *plain_get_read_gate_cache
+                         .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
+                     if runtime
+@@ -2131,6 +2149,7 @@ fn process_buffered_frames(
+                     {
+                         Ok(BorrowedMultibulkAction::FastEncodedReply {
+                             consumed: packet.consumed,
++                            frames: 1,
+                         })
+                     } else {
+                         parse_borrowed_multibulk_action(
+@@ -2163,8 +2182,8 @@ fn process_buffered_frames(
+                 }
+             };
+             match borrowed_parse_result {
+-                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed }) => {
+-                    processed_frames = processed_frames.saturating_add(1);
++                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed, frames }) => {
++                    processed_frames = processed_frames.saturating_add(frames);
+                     drain_pending_pubsub_to_connection(runtime, conn);
+                     consumed_total += consumed;
+                     if disconnect_if_output_limit_exceeded(
+@@ -2359,6 +2378,7 @@ fn parse_borrowed_multibulk_action(
+                     {
+                         return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                             consumed: parsed.consumed,
++                            frames: 1,
+                         });
+                     }
+                     copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+@@ -2573,14 +2593,64 @@ enum BorrowedMultibulkAction {
+     },
+     FastEncodedReply {
+         consumed: usize,
++        frames: usize,
+     },
+ }
+ 
++struct BorrowedPlainGetRun {
++    consumed: usize,
++    frames: usize,
++}
++
+ struct BorrowedPlainGetPacket<'a> {
+     consumed: usize,
+     key: &'a [u8],
+ }
+ 
++fn execute_borrowed_plain_get_run(
++    input: &[u8],
++    config: &ParserConfig,
++    runtime: &mut Runtime,
++    ts: u64,
++    out: &mut Vec<u8>,
++    plain_get_read_gate_cache: &mut Option<bool>,
++    frame_budget: usize,
++) -> Option<BorrowedPlainGetRun> {
++    let mut consumed = 0usize;
++    let mut frames = 0usize;
++    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
++
++    while frames < frame_budget {
++        let Some(remaining) = input.get(consumed..) else {
++            break;
++        };
++        let Some(packet) = parse_borrowed_plain_get_packet(remaining, config) else {
++            break;
++        };
++        let default_read_allowed = *plain_get_read_gate_cache
++            .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
++        if !default_read_allowed {
++            return None;
++        }
++        if runtime
++            .execute_plain_get_borrowed_into_with_default_read_gate(
++                packet.key,
++                ts,
++                client_resp3,
++                out,
++                default_read_allowed,
++            )
++            .is_none()
++        {
++            break;
++        }
++        consumed += packet.consumed;
++        frames += 1;
++    }
++
++    (frames > 0).then_some(BorrowedPlainGetRun { consumed, frames })
++}
++
+ fn parse_borrowed_plain_get_packet<'a>(
+     input: &'a [u8],
+     config: &ParserConfig,
+@@ -8897,6 +8967,149 @@ mod tests {
+         assert_eq!(conn.write_buf, expected);
+     }
+ 
++    #[test]
++    fn process_buffered_frames_get_run_stops_before_generic_state_change() {
++        use crate::ClientConnection;
++        use fr_runtime::Runtime;
++        use mio::Token;
++        use std::collections::HashSet;
++        use std::net::{TcpListener, TcpStream};
++
++        let mut runtime = Runtime::default_strict();
++        assert_eq!(
++            runtime.execute_frame(
++                RespFrame::Array(Some(vec![
++                    RespFrame::BulkString(Some(b"SET".to_vec())),
++                    RespFrame::BulkString(Some(b"k".to_vec())),
++                    RespFrame::BulkString(Some(b"v".to_vec())),
++                ])),
++                1,
++            ),
++            RespFrame::SimpleString("OK".to_string())
++        );
++        let session = runtime.new_session();
++
++        let get_hit = RespFrame::Array(Some(vec![
++            RespFrame::BulkString(Some(b"GET".to_vec())),
++            RespFrame::BulkString(Some(b"k".to_vec())),
++        ]))
++        .to_bytes();
++        let get_miss = RespFrame::Array(Some(vec![
++            RespFrame::BulkString(Some(b"GET".to_vec())),
++            RespFrame::BulkString(Some(b"missing".to_vec())),
++        ]))
++        .to_bytes();
++        let select_db1 = RespFrame::Array(Some(vec![
++            RespFrame::BulkString(Some(b"SELECT".to_vec())),
++            RespFrame::BulkString(Some(b"1".to_vec())),
++        ]))
++        .to_bytes();
++        let mut input = Vec::new();
++        input.extend_from_slice(&get_hit);
++        input.extend_from_slice(&get_miss);
++        input.extend_from_slice(&select_db1);
++
++        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++        let addr = listener.local_addr().unwrap();
++        let stream = TcpStream::connect(addr).unwrap();
++        let (_server_stream, _server_addr) = listener.accept().unwrap();
++        let mut conn = ClientConnection::new(mio::net::TcpStream::from_std(stream), session, 2);
++        conn.read_buf.extend_from_slice(&input);
++
++        let mut blocked_tokens = HashSet::new();
++        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
++        let mut closing_tokens = HashSet::new();
++        let mut write_tokens = HashSet::new();
++        let mut paused_tokens = HashSet::new();
++        let prev = runtime.swap_session(std::mem::take(&mut conn.session));
++        crate::process_buffered_frames(
++            Token(1),
++            &mut conn,
++            &mut runtime,
++            &mut blocked_tokens,
++            &mut blocked_wake_index,
++            &mut closing_tokens,
++            &mut write_tokens,
++            &mut paused_tokens,
++            2,
++            2_000,
++        );
++        conn.session = runtime.swap_session(prev);
++
++        let mut expected = Vec::new();
++        expected.extend_from_slice(&RespFrame::BulkString(Some(b"v".to_vec())).to_bytes());
++        expected.extend_from_slice(&RespFrame::BulkString(None).to_bytes());
++        expected.extend_from_slice(&RespFrame::SimpleString("OK".to_string()).to_bytes());
++        assert_eq!(conn.write_buf, expected);
++        assert!(conn.read_buf.is_empty());
++    }
++
++    #[test]
++    fn canonical_get_run_respects_configured_output_limit_boundary() {
++        use crate::ClientConnection;
++        use fr_runtime::Runtime;
++        use mio::Token;
++        use std::collections::HashSet;
++        use std::net::{TcpListener, TcpStream};
++
++        let mut runtime = Runtime::default_strict();
++        runtime.server.client_output_buffer_limits.normal.hard = 1;
++        assert_eq!(
++            runtime.execute_frame(
++                RespFrame::Array(Some(vec![
++                    RespFrame::BulkString(Some(b"SET".to_vec())),
++                    RespFrame::BulkString(Some(b"k".to_vec())),
++                    RespFrame::BulkString(Some(b"v".to_vec())),
++                ])),
++                1,
++            ),
++            RespFrame::SimpleString("OK".to_string())
++        );
++        let session = runtime.new_session();
++
++        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++        let addr = listener.local_addr().unwrap();
++        let stream = TcpStream::connect(addr).unwrap();
++        let (_server_stream, _server_addr) = listener.accept().unwrap();
++        let mut conn = ClientConnection::new(mio::net::TcpStream::from_std(stream), session, 2);
++
++        let get = RespFrame::Array(Some(vec![
++            RespFrame::BulkString(Some(b"GET".to_vec())),
++            RespFrame::BulkString(Some(b"k".to_vec())),
++        ]))
++        .to_bytes();
++        conn.read_buf.extend_from_slice(&get);
++        conn.read_buf.extend_from_slice(&get);
++
++        let mut blocked_tokens = HashSet::new();
++        let mut blocked_wake_index = crate::BlockedWakeIndex::default();
++        let mut closing_tokens = HashSet::new();
++        let mut write_tokens = HashSet::new();
++        let mut paused_tokens = HashSet::new();
++        let prev = runtime.swap_session(std::mem::take(&mut conn.session));
++        crate::process_buffered_frames(
++            Token(1),
++            &mut conn,
++            &mut runtime,
++            &mut blocked_tokens,
++            &mut blocked_wake_index,
++            &mut closing_tokens,
++            &mut write_tokens,
++            &mut paused_tokens,
++            2,
++            2_000,
++        );
++        conn.session = runtime.swap_session(prev);
++
++        assert!(conn.closing);
++        assert!(closing_tokens.contains(&Token(1)));
++        assert_eq!(conn.read_buf, get);
++        assert_eq!(
++            conn.write_buf,
++            RespFrame::BulkString(Some(b"v".to_vec())).to_bytes()
++        );
++    }
++
+     #[test]
+     fn simple_string_quit_closes_connection() {
+         use crate::ClientConnection;
