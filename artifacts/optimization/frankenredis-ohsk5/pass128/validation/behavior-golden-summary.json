@@ -1,0 +1,174 @@
+{
+  "byte_identical": true,
+  "isomorphism_note": "GET reply writing now uses a store-owned encoded capsule only for non-LFU borrowed fast path. Transcript covers string hit, integer hit, wrong-type error, expired miss with lazy delete, RESP2 nil, RESP3 nil via HELLO 3, and DEBUG DIGEST. Ordering, tie-breaking, floating-point behavior, RNG behavior, expiry propagation ordering, keyspace hit/miss stats, LRU/LFU semantics, and response bytes are preserved; LFU path delegates to the previous get_string_bytes implementation.",
+  "results": [
+    {
+      "binary": "/tmp/rch_target_fr_ohsk5_p128_current/release-perf/frankenredis",
+      "commands": [
+        {
+          "command": "FLUSHALL",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "SET",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "GET",
+          "raw_hex_prefix": "24310d0a760d0a",
+          "sha256": "77b3b7d2d1b055e43b669939b3bc2b10ebc14672c3d0b1fffc39b1de2775228c"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "3a300d0a",
+          "sha256": "f3b4cb77478ec9e7388d907937dad039f9204482b7038f21ccabce096918ea23"
+        },
+        {
+          "command": "SET",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "GET",
+          "raw_hex_prefix": "24320d0a34320d0a",
+          "sha256": "ae08deb70caacded464f44272bc23c4e6086c574c874beb19d0e289ae89f2b82"
+        },
+        {
+          "command": "LPUSH",
+          "raw_hex_prefix": "3a310d0a",
+          "sha256": "6d7dbcb27aa6e24f40bf1f4cb2cc8a36e2f3b7f1ae87edf906578a2936b756d2"
+        },
+        {
+          "command": "GET",
+          "raw_hex_prefix": "2d57524f4e4754595045204f7065726174696f6e20616761696e73742061206b657920686f6c64696e67207468652077726f6e67206b696e64206f662076616c75650d0a",
+          "sha256": "30c7a6a3e846cda0ec6bec93bbcead474c8b735d81d6b13043e8e7bd1287465b"
+        },
+        {
+          "command": "SET",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "PEXPIREAT",
+          "raw_hex_prefix": "3a310d0a",
+          "sha256": "6d7dbcb27aa6e24f40bf1f4cb2cc8a36e2f3b7f1ae87edf906578a2936b756d2"
+        },
+        {
+          "command": "GET",
+          "raw_hex_prefix": "242d310d0a",
+          "sha256": "8b731f85850fac625747bb8f9e4d99f93a230f8ba98898830ade3698b666fc6b"
+        },
+        {
+          "command": "GET",
+          "raw_hex_prefix": "242d310d0a",
+          "sha256": "8b731f85850fac625747bb8f9e4d99f93a230f8ba98898830ade3698b666fc6b"
+        },
+        {
+          "command": "HELLO",
+          "raw_hex_prefix": "25370d0a24360d0a7365727665720d0a24350d0a72656469730d0a24370d0a76657273696f6e0d0a24350d0a372e322e340d0a24350d0a70726f746f0d0a3a330d0a24320d0a69640d0a3a320d0a24340d0a6d6f64650d0a2431300d0a737461",
+          "sha256": "e76945e39d69335704bb25122dda17d62a1c0996f585c69b1b0f82e2f7b9eb9d"
+        },
+        {
+          "command": "GET",
+          "raw_hex_prefix": "5f0d0a",
+          "sha256": "8b85c3cbc421795cd9b2c5ce3078c161bfe1a6a11e626d17f1a26e451e2d70d4"
+        },
+        {
+          "command": "DEBUG",
+          "raw_hex_prefix": "2434300d0a663066303330313931316434643437623030303431623365373936663565323237373639636233660d0a",
+          "sha256": "2e84c43fc1f1673c4287cda31cd366abeb004ccddbbef1549f62de77896228aa"
+        }
+      ],
+      "label": "current",
+      "port": 6830,
+      "transcript": "artifacts/optimization/frankenredis-ohsk5/pass128/validation/current-golden.resp",
+      "transcript_sha256": "0571c4fab0ef04fca624094ebdddbb7a1e0eff0384c1b857a01ea9fa1a6a2cff"
+    },
+    {
+      "binary": "/tmp/rch_target_fr_ohsk5_p128_candidate/release-perf/frankenredis",
+      "commands": [
+        {
+          "command": "FLUSHALL",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "SET",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "GET",
+          "raw_hex_prefix": "24310d0a760d0a",
+          "sha256": "77b3b7d2d1b055e43b669939b3bc2b10ebc14672c3d0b1fffc39b1de2775228c"
+        },
+        {
+          "command": "OBJECT",
+          "raw_hex_prefix": "3a300d0a",
+          "sha256": "f3b4cb77478ec9e7388d907937dad039f9204482b7038f21ccabce096918ea23"
+        },
+        {
+          "command": "SET",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "GET",
+          "raw_hex_prefix": "24320d0a34320d0a",
+          "sha256": "ae08deb70caacded464f44272bc23c4e6086c574c874beb19d0e289ae89f2b82"
+        },
+        {
+          "command": "LPUSH",
+          "raw_hex_prefix": "3a310d0a",
+          "sha256": "6d7dbcb27aa6e24f40bf1f4cb2cc8a36e2f3b7f1ae87edf906578a2936b756d2"
+        },
+        {
+          "command": "GET",
+          "raw_hex_prefix": "2d57524f4e4754595045204f7065726174696f6e20616761696e73742061206b657920686f6c64696e67207468652077726f6e67206b696e64206f662076616c75650d0a",
+          "sha256": "30c7a6a3e846cda0ec6bec93bbcead474c8b735d81d6b13043e8e7bd1287465b"
+        },
+        {
+          "command": "SET",
+          "raw_hex_prefix": "2b4f4b0d0a",
+          "sha256": "4fe64db76d55e725725c37bcdb91df3266f059510ec44c342a31c426fdd01c5f"
+        },
+        {
+          "command": "PEXPIREAT",
+          "raw_hex_prefix": "3a310d0a",
+          "sha256": "6d7dbcb27aa6e24f40bf1f4cb2cc8a36e2f3b7f1ae87edf906578a2936b756d2"
+        },
+        {
+          "command": "GET",
+          "raw_hex_prefix": "242d310d0a",
+          "sha256": "8b731f85850fac625747bb8f9e4d99f93a230f8ba98898830ade3698b666fc6b"
+        },
+        {
+          "command": "GET",
+          "raw_hex_prefix": "242d310d0a",
+          "sha256": "8b731f85850fac625747bb8f9e4d99f93a230f8ba98898830ade3698b666fc6b"
+        },
+        {
+          "command": "HELLO",
+          "raw_hex_prefix": "25370d0a24360d0a7365727665720d0a24350d0a72656469730d0a24370d0a76657273696f6e0d0a24350d0a372e322e340d0a24350d0a70726f746f0d0a3a330d0a24320d0a69640d0a3a320d0a24340d0a6d6f64650d0a2431300d0a737461",
+          "sha256": "e76945e39d69335704bb25122dda17d62a1c0996f585c69b1b0f82e2f7b9eb9d"
+        },
+        {
+          "command": "GET",
+          "raw_hex_prefix": "5f0d0a",
+          "sha256": "8b85c3cbc421795cd9b2c5ce3078c161bfe1a6a11e626d17f1a26e451e2d70d4"
+        },
+        {
+          "command": "DEBUG",
+          "raw_hex_prefix": "2434300d0a663066303330313931316434643437623030303431623365373936663565323237373639636233660d0a",
+          "sha256": "2e84c43fc1f1673c4287cda31cd366abeb004ccddbbef1549f62de77896228aa"
+        }
+      ],
+      "label": "candidate",
+      "port": 6831,
+      "transcript": "artifacts/optimization/frankenredis-ohsk5/pass128/validation/candidate-golden.resp",
+      "transcript_sha256": "0571c4fab0ef04fca624094ebdddbb7a1e0eff0384c1b857a01ea9fa1a6a2cff"
+    }
+  ]
+}

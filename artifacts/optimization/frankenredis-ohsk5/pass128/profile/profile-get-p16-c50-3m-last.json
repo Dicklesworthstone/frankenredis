@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781141686996,
+  "host": "127.0.0.1",
+  "port": 6731,
+  "workload": "get",
+  "clients": 50,
+  "requests": 3000000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "ohsk5:p128:prof",
+  "total_time_ms": 1708,
+  "ops_per_sec": 1756354.8304603621,
+  "bytes_sent": 140666285,
+  "bytes_received": 27000000,
+  "latency_us": {
+    "min": 41,
+    "p50": 418,
+    "p95": 641,
+    "p99": 869,
+    "p999": 1465,
+    "max": 17935,
+    "mean": 446.1116123333329,
+    "samples": 3000000
+  }
+}

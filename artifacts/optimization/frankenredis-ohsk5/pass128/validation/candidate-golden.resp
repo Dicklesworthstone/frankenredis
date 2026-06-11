@@ -1,0 +1,58 @@
+# command FLUSHALL
++OK
+# command SET
++OK
+# command GET
+$1
+v
+# command OBJECT
+:0
+# command SET
++OK
+# command GET
+$2
+42
+# command LPUSH
+:1
+# command GET
+-WRONGTYPE Operation against a key holding the wrong kind of value
+# command SET
++OK
+# command PEXPIREAT
+:1
+# command GET
+$-1
+# command GET
+$-1
+# command HELLO
+%7
+$6
+server
+$5
+redis
+$7
+version
+$5
+7.2.4
+$5
+proto
+:3
+$2
+id
+:2
+$4
+mode
+$10
+standalone
+$4
+role
+$6
+master
+$7
+modules
+*0
+# command GET
+_
+# command DEBUG
+$40
+f0f0301911d4d47b00041b3e796f5e227769cb3f

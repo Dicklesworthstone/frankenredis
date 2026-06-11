@@ -1,0 +1,11 @@
+Benchmark 1: OUT=artifacts/optimization/frankenredis-ohsk5/pass128/benchmark/reversed/candidate-run SERVER=/tmp/rch_target_fr_ohsk5_p128_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p128_candidate/release-perf/fr-bench PORT=6734 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass128/benchmark/reversed/candidate-get-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p128:reversed:candidate artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh
+  Time (mean ± σ):     635.9 ms ±  30.3 ms    [User: 1010.2 ms, System: 2194.3 ms]
+  Range (min … max):   579.9 ms … 680.2 ms    10 runs
+ 
+Benchmark 2: OUT=artifacts/optimization/frankenredis-ohsk5/pass128/benchmark/reversed/current-run SERVER=/tmp/rch_target_fr_ohsk5_p128_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p128_current/release-perf/fr-bench PORT=6735 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass128/benchmark/reversed/current-get-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p128:reversed:current artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh
+  Time (mean ± σ):     711.6 ms ±  37.9 ms    [User: 1113.3 ms, System: 2307.4 ms]
+  Range (min … max):   660.9 ms … 788.2 ms    10 runs
+ 
+Summary
+  OUT=artifacts/optimization/frankenredis-ohsk5/pass128/benchmark/reversed/candidate-run SERVER=/tmp/rch_target_fr_ohsk5_p128_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p128_candidate/release-perf/fr-bench PORT=6734 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass128/benchmark/reversed/candidate-get-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p128:reversed:candidate artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh ran
+    1.12 ± 0.08 times faster than OUT=artifacts/optimization/frankenredis-ohsk5/pass128/benchmark/reversed/current-run SERVER=/tmp/rch_target_fr_ohsk5_p128_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_ohsk5_p128_current/release-perf/fr-bench PORT=6735 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-ohsk5/pass128/benchmark/reversed/current-get-p16-c50-1m-last.json KEY_PREFIX=ohsk5:p128:reversed:current artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh

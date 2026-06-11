@@ -1,0 +1,61 @@
+[RCH] local (no admissible workers: critical_pressure=1,insufficient_slots=1)
+   Compiling zmij v1.0.21
+   Compiling serde_json v1.0.149
+   Compiling serde_core v1.0.228
+   Compiling typenum v1.20.0
+   Compiling cfg-if v1.0.4
+   Compiling memchr v2.8.0
+   Compiling fr-protocol v0.1.0 (/data/projects/frankenredis/crates/fr-protocol)
+   Compiling libc v0.2.185
+   Compiling proc-macro2 v1.0.106
+   Compiling find-msvc-tools v0.1.9
+   Compiling itoa v1.0.18
+   Compiling shlex v1.3.0
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling equivalent v1.0.2
+   Compiling hashbrown v0.17.0
+   Compiling const-oid v0.10.2
+   Compiling foldhash v0.1.5
+   Compiling autocfg v1.5.0
+   Compiling fr-expire v0.1.0 (/data/projects/frankenredis/crates/fr-expire)
+   Compiling cpufeatures v0.3.0
+   Compiling crossbeam-utils v0.8.21
+   Compiling crc32fast v1.5.0
+   Compiling simd-adler32 v0.3.9
+   Compiling adler2 v2.0.1
+   Compiling fr-eventloop v0.1.0 (/data/projects/frankenredis/crates/fr-eventloop)
+   Compiling minimal-lexical v0.2.1
+   Compiling fr-repl v0.1.0 (/data/projects/frankenredis/crates/fr-repl)
+   Compiling hex v0.4.3
+   Compiling log v0.4.29
+   Compiling serde v1.0.228
+   Compiling fr-config v0.1.0 (/data/projects/frankenredis/crates/fr-config)
+   Compiling byteorder v1.5.0
+   Compiling base64 v0.21.7
+   Compiling cc v1.2.60
+   Compiling miniz_oxide v0.8.9
+   Compiling num-traits v0.2.19
+   Compiling fr-sentinel v0.1.0 (/data/projects/frankenredis/crates/fr-sentinel)
+   Compiling fr-persist v0.1.0 (/data/projects/frankenredis/crates/fr-persist)
+   Compiling nom v7.1.3
+   Compiling flate2 v1.1.9
+   Compiling crossbeam-channel v0.5.15
+   Compiling indexmap v2.14.0
+   Compiling syn v2.0.117
+   Compiling hybrid-array v0.4.10
+   Compiling libmimalloc-sys v0.1.46
+   Compiling mio v1.2.0
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.1
+   Compiling fr-store v0.1.0 (/data/projects/frankenredis/crates/fr-store)
+   Compiling digest v0.11.2
+   Compiling hdrhistogram v7.5.4
+   Compiling sha2 v0.11.0
+   Compiling serde_derive v1.0.228
+   Compiling fr-command v0.1.0 (/data/projects/frankenredis/crates/fr-command)
+   Compiling fr-bench v0.1.0 (/data/projects/frankenredis/crates/fr-bench)
+   Compiling mimalloc v0.1.49
+   Compiling fr-runtime v0.1.0 (/data/projects/frankenredis/crates/fr-runtime)
+   Compiling fr-server v0.1.0 (/data/projects/frankenredis/crates/fr-server)
+    Finished `release-perf` profile [optimized + debuginfo] target(s) in 32.17s
