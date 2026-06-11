@@ -10443,7 +10443,9 @@ impl Store {
         let was_removed = if let Some(entry) = self.entries.get_mut(source) {
             let r = match &mut entry.value {
                 Value::Set(s) => {
-                    let r = s.shift_remove(member);
+                    // (frankenredis-sremfast) Order-agnostic O(1) remove for a
+                    // hashtable-encoded source set — was O(n) per SMOVE.
+                    let r = s.swap_remove(member);
                     if r {
                         source_empty = s.is_empty();
                     }
