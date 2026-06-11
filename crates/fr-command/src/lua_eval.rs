@@ -65,6 +65,9 @@ fn lua_test_live_tables() -> i64 {
 #[cfg(test)]
 impl Drop for LuaTableInner {
     fn drop(&mut self) {
+        if self.shared_template {
+            return;
+        }
         LUA_TEST_LIVE_TABLES.with(|c| c.set(c.get() - 1));
     }
 }
@@ -229,6 +232,10 @@ pub struct LuaTableInner {
     pub other_keys: HashSet<LuaHashKey>,
     /// Optional metatable for Lua 5.1 metamethods.
     pub metatable: Option<LuaTable>,
+    /// Shared immutable standard-library template tables are reused across
+    /// EVAL calls and must not be cleared by per-state cycle teardown.
+    /// They are script-readonly before user code can observe them.
+    pub shared_template: bool,
     /// When true, this table is protected: any script-level write (field
     /// assignment, `rawset`, `setmetatable`, `table.insert/remove/sort`) raises
     /// "Attempt to modify a readonly table". Redis applies this recursively to
@@ -383,6 +390,7 @@ impl LuaTable {
             other_hash: Vec::new(),
             other_keys: HashSet::new(),
             metatable: None,
+            shared_template: false,
             readonly: false,
         }));
         // (frankenredis-qqq17) Track for cycle-breaking at eval end.
@@ -391,6 +399,21 @@ impl LuaTable {
         LUA_TEST_LIVE_TABLES.with(|c| c.set(c.get() + 1));
         Self { inner }
     }
+
+    fn new_shared_template() -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(LuaTableInner {
+                array: Vec::new(),
+                string_hash: HashMap::new(),
+                other_hash: Vec::new(),
+                other_keys: HashSet::new(),
+                metatable: None,
+                shared_template: true,
+                readonly: false,
+            })),
+        }
+    }
+
     fn get(&self, key: &LuaValue) -> LuaValue {
         self.inner.borrow().get(key)
     }
@@ -2950,210 +2973,289 @@ impl Env {
     }
 }
 
+thread_local! {
+    static LUA_BASE_GLOBALS_TEMPLATE: RefCell<Option<HashMap<String, LuaValue>>> =
+        const { RefCell::new(None) };
+}
+
+fn lua_base_globals_template() -> HashMap<String, LuaValue> {
+    LUA_BASE_GLOBALS_TEMPLATE.with(|template| {
+        let mut template = template.borrow_mut();
+        template
+            .get_or_insert_with(build_lua_base_globals_template)
+            .clone()
+    })
+}
+
+fn build_lua_base_globals_template() -> HashMap<String, LuaValue> {
+    let mut globals = HashMap::new();
+    // Register built-in functions.
+    for name in &[
+        "tonumber",
+        "tostring",
+        "type",
+        "error",
+        "pcall",
+        "pairs",
+        "ipairs",
+        "next",
+        "unpack",
+        "select",
+        "rawget",
+        "rawset",
+        // (frankenredis-uyj7c) rawlen was added in Lua 5.2; vendored Redis
+        // ships Lua 5.1, so the global must not be exposed. The dispatch
+        // handler is kept for any internal callers but is not bound.
+        "setmetatable",
+        "getmetatable",
+        "newproxy",
+        "getfenv",
+        "setfenv",
+        "assert",
+        "xpcall",
+        // (frankenredis-cfflo) loadstring/load parse a chunk of source code
+        // and return a callable function. Redis only blocks loadfile/dofile/
+        // io/os/require/print.
+        "loadstring",
+        "load",
+    ] {
+        globals.insert(name.to_string(), LuaValue::RustFunction(name.to_string()));
+    }
+
+    let math_table = LuaTable::new_shared_template();
+    for name in &[
+        "floor",
+        "ceil",
+        "abs",
+        "max",
+        "min",
+        "sqrt",
+        "huge",
+        "random",
+        "randomseed",
+        "fmod",
+        "log",
+        "log10",
+        "exp",
+        "pow",
+        "sin",
+        "cos",
+        "tan",
+        "asin",
+        "acos",
+        "atan",
+        "atan2",
+        "modf",
+        "frexp",
+        "ldexp",
+        "deg",
+        "rad",
+        "sinh",
+        "cosh",
+        "tanh",
+    ] {
+        math_table.set(
+            LuaValue::Str(name.as_bytes().to_vec()),
+            if *name == "huge" {
+                LuaValue::Number(f64::INFINITY)
+            } else {
+                LuaValue::RustFunction(format!("math.{name}"))
+            },
+        );
+    }
+    math_table.set(
+        LuaValue::Str(b"pi".to_vec()),
+        LuaValue::Number(std::f64::consts::PI),
+    );
+    globals.insert("math".to_string(), LuaValue::Table(math_table));
+
+    let string_table = LuaTable::new_shared_template();
+    for name in &[
+        "sub", "len", "rep", "lower", "upper", "byte", "char", "reverse", "format", "find",
+        "match", "gsub", "gmatch", "dump",
+    ] {
+        string_table.set(
+            LuaValue::Str(name.as_bytes().to_vec()),
+            LuaValue::RustFunction(format!("string.{name}")),
+        );
+    }
+    globals.insert("string".to_string(), LuaValue::Table(string_table));
+
+    let table_lib = LuaTable::new_shared_template();
+    for name in &[
+        "insert", "remove", "concat", "sort", "getn", "maxn", "foreach", "foreachi",
+    ] {
+        table_lib.set(
+            LuaValue::Str(name.as_bytes().to_vec()),
+            LuaValue::RustFunction(format!("table.{name}")),
+        );
+    }
+    globals.insert("table".to_string(), LuaValue::Table(table_lib));
+
+    let cjson_table = LuaTable::new_shared_template();
+    for name in &["encode", "decode"] {
+        cjson_table.set(
+            LuaValue::Str(name.as_bytes().to_vec()),
+            LuaValue::RustFunction(format!("cjson.{name}")),
+        );
+    }
+    cjson_table.set(
+        LuaValue::Str(b"null".to_vec()),
+        LuaValue::Userdata(LuaUserdata::CjsonNull),
+    );
+    globals.insert("cjson".to_string(), LuaValue::Table(cjson_table));
+
+    let cmsgpack_table = LuaTable::new_shared_template();
+    for name in &["pack", "unpack", "unpack_one", "unpack_limit"] {
+        cmsgpack_table.set(
+            LuaValue::Str(name.as_bytes().to_vec()),
+            LuaValue::RustFunction(format!("cmsgpack.{name}")),
+        );
+    }
+    for (name, value) in &[
+        ("_NAME", "cmsgpack"),
+        ("_VERSION", "lua-cmsgpack 0.4.0"),
+        ("_COPYRIGHT", "Copyright (C) 2012, Salvatore Sanfilippo"),
+        ("_DESCRIPTION", "MessagePack C implementation for Lua"),
+    ] {
+        cmsgpack_table.set(
+            LuaValue::Str(name.as_bytes().to_vec()),
+            LuaValue::Str(value.as_bytes().to_vec()),
+        );
+    }
+    globals.insert("cmsgpack".to_string(), LuaValue::Table(cmsgpack_table));
+
+    let struct_table = LuaTable::new_shared_template();
+    for name in &["pack", "unpack", "size"] {
+        struct_table.set(
+            LuaValue::Str(name.as_bytes().to_vec()),
+            LuaValue::RustFunction(format!("struct.{name}")),
+        );
+    }
+    globals.insert("struct".to_string(), LuaValue::Table(struct_table));
+
+    globals.insert("_VERSION".to_string(), LuaValue::Str(b"Lua 5.1".to_vec()));
+    globals.insert(
+        "rawequal".to_string(),
+        LuaValue::RustFunction("rawequal".to_string()),
+    );
+    globals.insert(
+        "gcinfo".to_string(),
+        LuaValue::RustFunction("gcinfo".to_string()),
+    );
+    globals.insert(
+        "collectgarbage".to_string(),
+        LuaValue::RustFunction("collectgarbage".to_string()),
+    );
+
+    let bit_table = LuaTable::new_shared_template();
+    for name in &[
+        "band", "bor", "bxor", "bnot", "lshift", "rshift", "arshift", "rol", "ror", "bswap",
+        "tobit", "tohex",
+    ] {
+        bit_table.set(
+            LuaValue::Str(name.as_bytes().to_vec()),
+            LuaValue::RustFunction(format!("bit.{name}")),
+        );
+    }
+    globals.insert("bit".to_string(), LuaValue::Table(bit_table));
+    globals.insert(
+        "redis".to_string(),
+        LuaValue::Table(lua_redis_table_template()),
+    );
+
+    for name in [
+        "math", "string", "table", "struct", "bit", "cjson", "cmsgpack", "redis",
+    ] {
+        if let Some(LuaValue::Table(table)) = globals.get(name) {
+            table.mark_readonly_recursive();
+        }
+    }
+    globals
+}
+
+fn lua_redis_table_template() -> LuaTable {
+    let redis_table = LuaTable::new_shared_template();
+    redis_table.set(
+        LuaValue::Str(b"call".to_vec()),
+        LuaValue::RustFunction("redis.call".to_string()),
+    );
+    redis_table.set(
+        LuaValue::Str(b"pcall".to_vec()),
+        LuaValue::RustFunction("redis.pcall".to_string()),
+    );
+    redis_table.set(
+        LuaValue::Str(b"error_reply".to_vec()),
+        LuaValue::RustFunction("redis.error_reply".to_string()),
+    );
+    redis_table.set(
+        LuaValue::Str(b"status_reply".to_vec()),
+        LuaValue::RustFunction("redis.status_reply".to_string()),
+    );
+    redis_table.set(
+        LuaValue::Str(b"log".to_vec()),
+        LuaValue::RustFunction("redis.log".to_string()),
+    );
+    redis_table.set(
+        LuaValue::Str(b"sha1hex".to_vec()),
+        LuaValue::RustFunction("redis.sha1hex".to_string()),
+    );
+    redis_table.set(
+        LuaValue::Str(b"replicate_commands".to_vec()),
+        LuaValue::RustFunction("redis.replicate_commands".to_string()),
+    );
+    redis_table.set(
+        LuaValue::Str(b"set_repl".to_vec()),
+        LuaValue::RustFunction("redis.set_repl".to_string()),
+    );
+    redis_table.set(
+        LuaValue::Str(b"breakpoint".to_vec()),
+        LuaValue::RustFunction("redis.breakpoint".to_string()),
+    );
+    redis_table.set(
+        LuaValue::Str(b"debug".to_vec()),
+        LuaValue::RustFunction("redis.debug".to_string()),
+    );
+    redis_table.set(
+        LuaValue::Str(b"setresp".to_vec()),
+        LuaValue::RustFunction("redis.setresp".to_string()),
+    );
+    redis_table.set(
+        LuaValue::Str(b"acl_check_cmd".to_vec()),
+        LuaValue::RustFunction("redis.acl_check_cmd".to_string()),
+    );
+    redis_table.set(LuaValue::Str(b"LOG_DEBUG".to_vec()), LuaValue::Number(0.0));
+    redis_table.set(
+        LuaValue::Str(b"LOG_VERBOSE".to_vec()),
+        LuaValue::Number(1.0),
+    );
+    redis_table.set(LuaValue::Str(b"LOG_NOTICE".to_vec()), LuaValue::Number(2.0));
+    redis_table.set(
+        LuaValue::Str(b"LOG_WARNING".to_vec()),
+        LuaValue::Number(3.0),
+    );
+    redis_table.set(LuaValue::Str(b"REPL_NONE".to_vec()), LuaValue::Number(0.0));
+    redis_table.set(LuaValue::Str(b"REPL_AOF".to_vec()), LuaValue::Number(1.0));
+    redis_table.set(LuaValue::Str(b"REPL_SLAVE".to_vec()), LuaValue::Number(2.0));
+    redis_table.set(
+        LuaValue::Str(b"REPL_REPLICA".to_vec()),
+        LuaValue::Number(2.0),
+    );
+    redis_table.set(LuaValue::Str(b"REPL_ALL".to_vec()), LuaValue::Number(3.0));
+    redis_table.set(
+        LuaValue::Str(b"REDIS_VERSION".to_vec()),
+        LuaValue::Str(fr_store::REDIS_COMPAT_VERSION.as_bytes().to_vec()),
+    );
+    redis_table.set(
+        LuaValue::Str(b"REDIS_VERSION_NUM".to_vec()),
+        LuaValue::Number(f64::from(redis_version_num(fr_store::REDIS_COMPAT_VERSION))),
+    );
+    redis_table
+}
+
 impl<'a> LuaState<'a> {
     pub fn new(store: &'a mut Store, now_ms: u64) -> Self {
-        let mut globals = HashMap::new();
-        // Register built-in functions
-        for name in &[
-            "tonumber",
-            "tostring",
-            "type",
-            "error",
-            "pcall",
-            "pairs",
-            "ipairs",
-            "next",
-            "unpack",
-            "select",
-            "rawget",
-            "rawset",
-            // (frankenredis-uyj7c) rawlen was added in Lua 5.2; vendored Redis
-            // ships Lua 5.1, so the global must not be exposed. The dispatch
-            // handler is kept for any internal callers but is not bound.
-            "setmetatable",
-            "getmetatable",
-            "newproxy",
-            "getfenv",
-            "setfenv",
-            "assert",
-            "xpcall",
-            // (frankenredis-cfflo) loadstring/load parse a chunk of
-            // source code and return a callable function. Both are part
-            // of vendored Redis 7.2.4's Lua 5.1 sandbox surface; Redis
-            // only blocks loadfile/dofile/io/os/require/print etc.
-            "loadstring",
-            "load",
-            // (frankenredis-1khox) 'print' is *not* exposed in the
-            // Redis 7.2 Lua sandbox (script_lua.c blocks it alongside
-            // loadfile/dofile/io/os/require). The print RustFunction
-            // dispatch handler remains in case internal callers want
-            // it, but the global is not bound.
-        ] {
-            globals.insert(name.to_string(), LuaValue::RustFunction(name.to_string()));
-        }
-        // Math library
-        let math_table = LuaTable::new();
-        for name in &[
-            "floor",
-            "ceil",
-            "abs",
-            "max",
-            "min",
-            "sqrt",
-            "huge",
-            "random",
-            "randomseed",
-            "fmod",
-            "log",
-            "log10",
-            "exp",
-            "pow",
-            "sin",
-            "cos",
-            "tan",
-            "asin",
-            "acos",
-            "atan",
-            "atan2",
-            "modf",
-            "frexp",
-            "ldexp",
-            // (frankenredis-9dmqr) Trig helpers vendored Redis 7.2.4
-            // exposes through Lua 5.1's lmathlib but fr was missing.
-            "deg",
-            "rad",
-            "sinh",
-            "cosh",
-            "tanh",
-        ] {
-            math_table.set(
-                LuaValue::Str(name.as_bytes().to_vec()),
-                if *name == "huge" {
-                    LuaValue::Number(f64::INFINITY)
-                } else {
-                    LuaValue::RustFunction(format!("math.{name}"))
-                },
-            );
-        }
-        math_table.set(
-            LuaValue::Str(b"pi".to_vec()),
-            LuaValue::Number(std::f64::consts::PI),
-        );
-        globals.insert("math".to_string(), LuaValue::Table(math_table));
-
-        // String library
-        let string_table = LuaTable::new();
-        for name in &[
-            "sub", "len", "rep", "lower", "upper", "byte", "char", "reverse", "format", "find",
-            "match", "gsub", "gmatch",
-            // (frankenredis-dqbdr) Vendored Redis 7.2.4 exposes
-            // string.dump from Lua 5.1's stdlib. The function has no
-            // useful semantics in fr's tree-walking interpreter (no
-            // bytecode form to serialize) so the dispatch handler
-            // errors at call time, but `type(string.dump)` must still
-            // return 'function' for scripts that probe the surface.
-            "dump",
-        ] {
-            string_table.set(
-                LuaValue::Str(name.as_bytes().to_vec()),
-                LuaValue::RustFunction(format!("string.{name}")),
-            );
-        }
-        globals.insert("string".to_string(), LuaValue::Table(string_table));
-
-        // Table library
-        let table_lib = LuaTable::new();
-        for name in &[
-            "insert", "remove", "concat", "sort", "getn", "maxn", "foreach", "foreachi",
-        ] {
-            table_lib.set(
-                LuaValue::Str(name.as_bytes().to_vec()),
-                LuaValue::RustFunction(format!("table.{name}")),
-            );
-        }
-        globals.insert("table".to_string(), LuaValue::Table(table_lib));
-
-        // cjson library (commonly used in Redis scripts)
-        let cjson_table = LuaTable::new();
-        for name in &["encode", "decode"] {
-            cjson_table.set(
-                LuaValue::Str(name.as_bytes().to_vec()),
-                LuaValue::RustFunction(format!("cjson.{name}")),
-            );
-        }
-        cjson_table.set(
-            LuaValue::Str(b"null".to_vec()),
-            LuaValue::Userdata(LuaUserdata::CjsonNull),
-        );
-        globals.insert("cjson".to_string(), LuaValue::Table(cjson_table));
-
-        // cmsgpack library bundled with Redis' Lua sandbox.
-        let cmsgpack_table = LuaTable::new();
-        for name in &["pack", "unpack", "unpack_one", "unpack_limit"] {
-            cmsgpack_table.set(
-                LuaValue::Str(name.as_bytes().to_vec()),
-                LuaValue::RustFunction(format!("cmsgpack.{name}")),
-            );
-        }
-        for (name, value) in &[
-            ("_NAME", "cmsgpack"),
-            ("_VERSION", "lua-cmsgpack 0.4.0"),
-            ("_COPYRIGHT", "Copyright (C) 2012, Salvatore Sanfilippo"),
-            ("_DESCRIPTION", "MessagePack C implementation for Lua"),
-        ] {
-            cmsgpack_table.set(
-                LuaValue::Str(name.as_bytes().to_vec()),
-                LuaValue::Str(value.as_bytes().to_vec()),
-            );
-        }
-        globals.insert("cmsgpack".to_string(), LuaValue::Table(cmsgpack_table));
-
-        // struct library bundled with Redis' Lua sandbox.
-        let struct_table = LuaTable::new();
-        for name in &["pack", "unpack", "size"] {
-            struct_table.set(
-                LuaValue::Str(name.as_bytes().to_vec()),
-                LuaValue::RustFunction(format!("struct.{name}")),
-            );
-        }
-        globals.insert("struct".to_string(), LuaValue::Table(struct_table));
-
-        // (frankenredis-vgnsc) Standard Lua 5.1 globals also exposed in
-        // Redis 7.2.4's sandbox: _VERSION constant, rawequal /
-        // gcinfo / collectgarbage function entries. fr's tree-walking
-        // interpreter has no real Lua heap accounting so gcinfo /
-        // collectgarbage('count') return a stable placeholder value
-        // and the control variants of collectgarbage are no-ops.
-        globals.insert("_VERSION".to_string(), LuaValue::Str(b"Lua 5.1".to_vec()));
-        globals.insert(
-            "rawequal".to_string(),
-            LuaValue::RustFunction("rawequal".to_string()),
-        );
-        globals.insert(
-            "gcinfo".to_string(),
-            LuaValue::RustFunction("gcinfo".to_string()),
-        );
-        globals.insert(
-            "collectgarbage".to_string(),
-            LuaValue::RustFunction("collectgarbage".to_string()),
-        );
-
-        // (frankenredis-v95aj) Redis 7.2.4 exposes LuaJIT's bit library
-        // as a global 'bit' table. Operations are 32-bit; numbers are
-        // truncated to u32 before each op and the result is returned
-        // as a Lua number (f64-representable for the 0..=u32::MAX range).
-        let bit_table = LuaTable::new();
-        for name in &[
-            "band", "bor", "bxor", "bnot", "lshift", "rshift", "arshift", "rol", "ror", "bswap",
-            "tobit", "tohex",
-        ] {
-            bit_table.set(
-                LuaValue::Str(name.as_bytes().to_vec()),
-                LuaValue::RustFunction(format!("bit.{name}")),
-            );
-        }
-        globals.insert("bit".to_string(), LuaValue::Table(bit_table));
-
+        let globals = lua_base_globals_template();
         let rng_seed = store.rng_seed;
         // (frankenredis-lwj8o) Initialize math.random's PRNG with the
         // low 32 bits of the store's rng_seed (or 1 if zero). User
@@ -3208,99 +3310,6 @@ impl<'a> LuaState<'a> {
         self.globals
             .insert("ARGV".to_string(), LuaValue::Table(argv_table));
 
-        // Set up redis table with call/pcall
-        let redis_table = LuaTable::new();
-        redis_table.set(
-            LuaValue::Str(b"call".to_vec()),
-            LuaValue::RustFunction("redis.call".to_string()),
-        );
-        redis_table.set(
-            LuaValue::Str(b"pcall".to_vec()),
-            LuaValue::RustFunction("redis.pcall".to_string()),
-        );
-        redis_table.set(
-            LuaValue::Str(b"error_reply".to_vec()),
-            LuaValue::RustFunction("redis.error_reply".to_string()),
-        );
-        redis_table.set(
-            LuaValue::Str(b"status_reply".to_vec()),
-            LuaValue::RustFunction("redis.status_reply".to_string()),
-        );
-        redis_table.set(
-            LuaValue::Str(b"log".to_vec()),
-            LuaValue::RustFunction("redis.log".to_string()),
-        );
-        redis_table.set(
-            LuaValue::Str(b"sha1hex".to_vec()),
-            LuaValue::RustFunction("redis.sha1hex".to_string()),
-        );
-        redis_table.set(
-            LuaValue::Str(b"replicate_commands".to_vec()),
-            LuaValue::RustFunction("redis.replicate_commands".to_string()),
-        );
-        redis_table.set(
-            LuaValue::Str(b"set_repl".to_vec()),
-            LuaValue::RustFunction("redis.set_repl".to_string()),
-        );
-        redis_table.set(
-            LuaValue::Str(b"breakpoint".to_vec()),
-            LuaValue::RustFunction("redis.breakpoint".to_string()),
-        );
-        redis_table.set(
-            LuaValue::Str(b"debug".to_vec()),
-            LuaValue::RustFunction("redis.debug".to_string()),
-        );
-        // Upstream script_lua.c registers `setresp` and
-        // `acl_check_cmd` even though their effects are largely
-        // no-ops in standalone mode — clients still expect them
-        // to validate their arguments. (br-frankenredis-redislua)
-        redis_table.set(
-            LuaValue::Str(b"setresp".to_vec()),
-            LuaValue::RustFunction("redis.setresp".to_string()),
-        );
-        redis_table.set(
-            LuaValue::Str(b"acl_check_cmd".to_vec()),
-            LuaValue::RustFunction("redis.acl_check_cmd".to_string()),
-        );
-        redis_table.set(LuaValue::Str(b"LOG_DEBUG".to_vec()), LuaValue::Number(0.0));
-        redis_table.set(
-            LuaValue::Str(b"LOG_VERBOSE".to_vec()),
-            LuaValue::Number(1.0),
-        );
-        redis_table.set(LuaValue::Str(b"LOG_NOTICE".to_vec()), LuaValue::Number(2.0));
-        redis_table.set(
-            LuaValue::Str(b"LOG_WARNING".to_vec()),
-            LuaValue::Number(3.0),
-        );
-        // Replication mode constants. Upstream server.h defines
-        // PROPAGATE_AOF=1 and PROPAGATE_REPL=2; script_lua.c then
-        // exports REPL_AOF=PROPAGATE_AOF and REPL_SLAVE=REPL_REPLICA=
-        // PROPAGATE_REPL. fr previously had AOF and SLAVE/REPLICA
-        // swapped. (br-frankenredis-replconst)
-        redis_table.set(LuaValue::Str(b"REPL_NONE".to_vec()), LuaValue::Number(0.0));
-        redis_table.set(LuaValue::Str(b"REPL_AOF".to_vec()), LuaValue::Number(1.0));
-        redis_table.set(LuaValue::Str(b"REPL_SLAVE".to_vec()), LuaValue::Number(2.0));
-        redis_table.set(
-            LuaValue::Str(b"REPL_REPLICA".to_vec()),
-            LuaValue::Number(2.0),
-        );
-        redis_table.set(LuaValue::Str(b"REPL_ALL".to_vec()), LuaValue::Number(3.0));
-        // (frankenredis-luaver) Upstream script_lua.c exposes the server
-        // version to scripts: redis.REDIS_VERSION (string) and
-        // redis.REDIS_VERSION_NUM ((major<<16)|(minor<<8)|patch). For 7.2.4
-        // that is 0x070204 = 459268. Derived from REDIS_COMPAT_VERSION so the
-        // two stay in lock-step if the compat target ever moves.
-        redis_table.set(
-            LuaValue::Str(b"REDIS_VERSION".to_vec()),
-            LuaValue::Str(fr_store::REDIS_COMPAT_VERSION.as_bytes().to_vec()),
-        );
-        redis_table.set(
-            LuaValue::Str(b"REDIS_VERSION_NUM".to_vec()),
-            LuaValue::Number(f64::from(redis_version_num(fr_store::REDIS_COMPAT_VERSION))),
-        );
-        self.globals
-            .insert("redis".to_string(), LuaValue::Table(redis_table));
-
         // (frankenredis-1khox) Redis 7.2.4's Lua sandbox does NOT
         // expose the os table -- scripts that reference 'os' get the
         // standard 'Script attempted to access nonexistent global
@@ -3336,15 +3345,11 @@ impl<'a> LuaState<'a> {
         // table error and any read of an undefined global raises the
         // upstream sandbox error. Mirrors script_lua.c::
         // luaSetTableProtectionRecursively run after script env init.
-        // (frankenredis-u24vv) Snapshot the globals into a `_G` table
-        // right before locking, mirroring Lua 5.1 / vendored Redis 7.2.4
-        // where the script's environment IS exposed as `_G`. Reads come
-        // from the snapshot (since globals are readonly after locking,
-        // the snapshot stays in sync); the metatable __index handler
-        // emits the nonexistent-global error for missing keys, and the
-        // __newindex handler emits the readonly-table error for writes.
-        // `_G._G` self-references so scripts can detect the table.
-        self.install_g_table();
+        // (frankenredis-u24vv) The script's environment is exposed as `_G`.
+        // Build that snapshot lazily when script code observes `_G` or asks
+        // for the default environment; trivial scripts should not pay for a
+        // full globals table clone. The snapshot stays behavior-equivalent
+        // because globals are locked before user code executes.
         self.globals_locked = true;
         // (frankenredis-8mwy9) Protect the standard library tables the same way
         // redis's `luaSetTableProtectionRecursively` does: after env init the
@@ -3843,9 +3848,7 @@ impl<'a> LuaState<'a> {
             // (frankenredis-8mwy9) A protected library table rejects every
             // field write (new or overwriting) with redis's readonly error.
             if current.is_readonly() {
-                return Err(
-                    "user_script:1: Attempt to modify a readonly table".to_string()
-                );
+                return Err("user_script:1: Attempt to modify a readonly table".to_string());
             }
             let existing = current.inner.borrow().get(&key);
             if !matches!(existing, LuaValue::Nil) {
@@ -3955,6 +3958,8 @@ impl<'a> LuaState<'a> {
                         env,
                         varargs,
                     )
+                } else if name == "_G" {
+                    Ok(LuaValue::Table(self.ensure_g_table()))
                 } else if let Some(val) = self.globals.get(name) {
                     Ok(val.clone())
                 } else if self.globals_locked {
@@ -4799,10 +4804,13 @@ impl<'a> LuaState<'a> {
     /// Lua 5.1's string-as-metatable __index behavior: `s.foo` and
     /// `s:foo()` resolve `foo` via the string library. Unknown keys
     /// (including non-string keys) return nil. (frankenredis-tbu4k)
-    /// Build the `_G` table that mirrors the post-init globals and
-    /// install it under the "_G" key. Idempotent if called twice
-    /// (replaces any existing _G entry). (frankenredis-u24vv)
-    fn install_g_table(&mut self) {
+    /// Build the `_G` table that mirrors the post-init globals and install it
+    /// under the "_G" key. Idempotent so lazy callers can force materialization
+    /// from global lookup, getfenv, and setfenv surfaces. (frankenredis-u24vv)
+    fn ensure_g_table(&mut self) -> LuaTable {
+        if let Some(LuaValue::Table(table)) = self.globals.get("_G") {
+            return table.clone();
+        }
         let g_table = LuaTable::new();
         for (k, v) in &self.globals {
             g_table.set(LuaValue::Str(k.as_bytes().to_vec()), v.clone());
@@ -4822,21 +4830,15 @@ impl<'a> LuaState<'a> {
         );
         g_table.inner.borrow_mut().metatable = Some(mt);
         self.globals
-            .insert("_G".to_string(), LuaValue::Table(g_table));
+            .insert("_G".to_string(), LuaValue::Table(g_table.clone()));
+        g_table
     }
 
-    fn default_global_env_table(&self) -> LuaTable {
-        if let Some(LuaValue::Table(table)) = self.globals.get("_G") {
-            return table.clone();
-        }
-        let table = LuaTable::new();
-        for (k, v) in &self.globals {
-            table.set(LuaValue::Str(k.as_bytes().to_vec()), v.clone());
-        }
-        table
+    fn default_global_env_table(&mut self) -> LuaTable {
+        self.ensure_g_table()
     }
 
-    fn effective_global_env_table(&self, env: &Env) -> LuaTable {
+    fn effective_global_env_table(&mut self, env: &Env) -> LuaTable {
         env.current_global_env()
             .unwrap_or_else(|| self.default_global_env_table())
     }
@@ -11881,6 +11883,9 @@ impl Drop for LuaState<'_> {
         fn clear_table_recursive(table: &LuaTable, visited: &mut HashSet<usize>) {
             let ptr = Rc::as_ptr(&table.inner) as usize;
             if !visited.insert(ptr) {
+                return;
+            }
+            if table.inner.borrow().shared_template {
                 return;
             }
             let inner = &mut *table.inner.borrow_mut();

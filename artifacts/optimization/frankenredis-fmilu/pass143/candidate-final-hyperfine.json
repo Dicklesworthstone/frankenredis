@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-fmilu/pass143/eval_trivial_harness.py --server-bin /data/projects/.scratch/frankenredis-yurn2-codex/target-fmilu-candidate3/release-perf/frankenredis --out-dir artifacts/optimization/frankenredis-fmilu/pass143 --artifact-prefix candidate-final --port 26478 --ops 10000 --warmup-ops 200 --trials 1",
+      "mean": 0.8592647455000002,
+      "stddev": 0.04493851472212782,
+      "median": 0.8495262212000001,
+      "user": 0.34748474,
+      "system": 0.44083951999999993,
+      "min": 0.8089636132000001,
+      "max": 0.9509551322,
+      "times": [
+        0.8159682852000001,
+        0.8364397452000001,
+        0.8274926322000001,
+        0.8089636132000001,
+        0.9509551322,
+        0.9162024412,
+        0.8390818612000001,
+        0.8678405942,
+        0.8697325692000001,
+        0.8599705812000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

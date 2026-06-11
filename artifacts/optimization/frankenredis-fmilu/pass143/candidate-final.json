@@ -1,0 +1,35 @@
+{
+  "behavior": {
+    "ping": "PONG",
+    "raw_transcript_sha256": "e4d5419d2f9ea7c33e1ce857b1298a1a8a9ce1836c25273f146618e4bbc00ced"
+  },
+  "mode": "eval_return_one",
+  "ops_per_trial": 10000,
+  "script": "return 1",
+  "server_log": "artifacts/optimization/frankenredis-fmilu/pass143/candidate-final.server.log",
+  "summary": {
+    "max_per_op_us": 72.8529726038687,
+    "mean_ops_per_sec": 13726.27587123188,
+    "median_ops_per_sec": 13726.27587123188,
+    "min_per_op_us": 72.8529726038687,
+    "p50_per_op_us": 72.8529726038687,
+    "p95_per_op_us": 72.8529726038687,
+    "p99_per_op_us": 72.8529726038687
+  },
+  "trials": [
+    {
+      "elapsed_sec": 0.7285297260386869,
+      "first_values": [
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "ops_per_sec": 13726.27587123188,
+      "per_op_us": 72.8529726038687,
+      "raw_transcript_sha256": "47b06206db9f0cba69a9cd23108db88dfce38549ed98d79da135a5ce08853951"
+    }
+  ],
+  "warmup_ops": 200
+}

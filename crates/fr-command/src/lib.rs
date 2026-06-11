@@ -6580,7 +6580,10 @@ fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // command the client actually invoked, not the base GEORADIUS, matching
         // upstream where each registered fullname owns its error.
         // (frankenredis-aliasarity)
-        let name = if argv.first().is_some_and(|c| c.eq_ignore_ascii_case(b"GEORADIUS_RO")) {
+        let name = if argv
+            .first()
+            .is_some_and(|c| c.eq_ignore_ascii_case(b"GEORADIUS_RO"))
+        {
             "GEORADIUS_RO"
         } else {
             "GEORADIUS"
@@ -16958,11 +16961,16 @@ pub fn check_full_command_arity(argv: &[Vec<u8>]) -> Result<(), &'static str> {
         if command_acl_parent_has_subcommands(&parent) {
             let sub = String::from_utf8_lossy(&argv[1]).to_ascii_lowercase();
             let key = format!("{parent}|{sub}");
-            if let Some(&(cmd_name, arity, ..)) =
-                SUBCOMMAND_TABLE.iter().find(|entry| entry.0 == key.as_str())
+            if let Some(&(cmd_name, arity, ..)) = SUBCOMMAND_TABLE
+                .iter()
+                .find(|entry| entry.0 == key.as_str())
             {
                 let argc = argv.len() as i64;
-                let ok = if arity > 0 { argc == arity } else { argc >= -arity };
+                let ok = if arity > 0 {
+                    argc == arity
+                } else {
+                    argc >= -arity
+                };
                 if !ok {
                     return Err(cmd_name);
                 }
@@ -17346,8 +17354,8 @@ pub fn command_has_acl_subcommands(parent: &str) -> bool {
 /// namespaced DEBUG as `debug|sub`.
 #[must_use]
 pub fn canonical_command_fullname(argv: &[Vec<u8>]) -> String {
-    let parent =
-        String::from_utf8_lossy(argv.first().map(Vec::as_slice).unwrap_or(b"")).to_ascii_lowercase();
+    let parent = String::from_utf8_lossy(argv.first().map(Vec::as_slice).unwrap_or(b""))
+        .to_ascii_lowercase();
     if command_acl_parent_has_subcommands(&parent)
         && let Some(sub) = argv.get(1)
     {
@@ -26546,7 +26554,10 @@ fn restore_cmd(
     if argv.len() < 4 {
         // RESTORE-ASKING (cluster slot-migration alias) shares this handler;
         // report the invoked name. (frankenredis-aliasarity)
-        let name = if argv.first().is_some_and(|c| c.eq_ignore_ascii_case(b"RESTORE-ASKING")) {
+        let name = if argv
+            .first()
+            .is_some_and(|c| c.eq_ignore_ascii_case(b"RESTORE-ASKING"))
+        {
             "RESTORE-ASKING"
         } else {
             "RESTORE"
@@ -27192,12 +27203,11 @@ mod tests {
         CLIENT_TRACKING_PREFIX_REQUIRES_BCAST, CLIENT_TRACKING_REDIRECT_MISSING,
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
         SCRIPT_NOSCRIPT_ERROR, SUBCOMMAND_TABLE, StreamLagInfo, acl_command_selectors_for_argv,
-        canonical_command_fullname, check_command_arity, check_full_command_arity, classify_command,
-        client_wrong_subcommand_arity,
-        cluster_disabled_error, cluster_reset_with_keys_error, cluster_wrong_subcommand_arity,
-        command_acl_categories, command_acl_key_access, command_has_acl_subcommands,
-        command_key_indexes, command_write_keys, commands_in_acl_category, dispatch_argv,
-        drain_pubsub_messages,
+        canonical_command_fullname, check_command_arity, check_full_command_arity,
+        classify_command, client_wrong_subcommand_arity, cluster_disabled_error,
+        cluster_reset_with_keys_error, cluster_wrong_subcommand_arity, command_acl_categories,
+        command_acl_key_access, command_has_acl_subcommands, command_key_indexes,
+        command_write_keys, commands_in_acl_category, dispatch_argv, drain_pubsub_messages,
         eq_ascii_command, eval_script, execute_migrate, format_coord_human,
         format_eval_read_only_script_error, frame_to_argv, geo_coord_frame, get_command_flags,
         hello_bulk, hello_simple, is_known_acl_command_selector, is_write_command,
@@ -37348,7 +37358,13 @@ mod tests {
         // s2: a real stream with NO matching group; str1: a string (wrong type);
         // nostream: absent.
         dispatch_argv(
-            &[b"XADD".to_vec(), b"s2".to_vec(), b"1-1".to_vec(), b"f".to_vec(), b"v".to_vec()],
+            &[
+                b"XADD".to_vec(),
+                b"s2".to_vec(),
+                b"1-1".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
             &mut store,
             0,
         )
@@ -37356,7 +37372,9 @@ mod tests {
         store.set(b"str1".to_vec(), b"hello".to_vec(), None, 0);
 
         let nogroup = |key: &str| {
-            format!("NOGROUP No such key '{key}' or consumer group 'gX' in XREADGROUP with GROUP option")
+            format!(
+                "NOGROUP No such key '{key}' or consumer group 'gX' in XREADGROUP with GROUP option"
+            )
         };
         let rg = |key: &str, id: &str, store: &mut Store| {
             dispatch_argv(
@@ -46488,7 +46506,12 @@ mod tests {
             let (_, value) = entries
                 .iter()
                 .find(|(k, _)| matches!(k, RespFrame::BulkString(Some(b)) if b.as_slice() == *key))
-                .unwrap_or_else(|| panic!("RESP3 MEMORY STATS missing {:?}", String::from_utf8_lossy(key)));
+                .unwrap_or_else(|| {
+                    panic!(
+                        "RESP3 MEMORY STATS missing {:?}",
+                        String::from_utf8_lossy(key)
+                    )
+                });
             assert!(
                 matches!(value, RespFrame::Double(_)),
                 "RESP3 {} must be a Double, got {value:?}",
@@ -46507,7 +46530,12 @@ mod tests {
             let pos = items
                 .iter()
                 .position(|f| matches!(f, RespFrame::BulkString(Some(b)) if b.as_slice() == *key))
-                .unwrap_or_else(|| panic!("RESP2 MEMORY STATS missing {:?}", String::from_utf8_lossy(key)));
+                .unwrap_or_else(|| {
+                    panic!(
+                        "RESP2 MEMORY STATS missing {:?}",
+                        String::from_utf8_lossy(key)
+                    )
+                });
             assert!(
                 matches!(items[pos + 1], RespFrame::BulkString(Some(_))),
                 "RESP2 {} must be a bulk string, got {:?}",
@@ -46548,8 +46576,10 @@ mod tests {
         fn int_field(store: &mut Store, field: &[u8]) -> i64 {
             match field_at(store, field) {
                 RespFrame::Integer(n) => n,
-                other => panic!("{:?} must be an Integer, got {other:?}", // ubs:ignore — AI triage
-                    String::from_utf8_lossy(field)),
+                other => panic!(
+                    "{:?} must be an Integer, got {other:?}", // ubs:ignore — AI triage
+                    String::from_utf8_lossy(field)
+                ),
             }
         }
 
@@ -48547,8 +48577,28 @@ mod tests {
                     b"e",
                 ]
                 .as_slice(),
-                [b"ZADD".as_slice(), b"zb", b"1", b"a", b"2", b"b", b"3", b"c"].as_slice(),
-                [b"ZADD".as_slice(), b"zc", b"1", b"c", b"2", b"d", b"3", b"e"].as_slice(),
+                [
+                    b"ZADD".as_slice(),
+                    b"zb",
+                    b"1",
+                    b"a",
+                    b"2",
+                    b"b",
+                    b"3",
+                    b"c",
+                ]
+                .as_slice(),
+                [
+                    b"ZADD".as_slice(),
+                    b"zc",
+                    b"1",
+                    b"c",
+                    b"2",
+                    b"d",
+                    b"3",
+                    b"e",
+                ]
+                .as_slice(),
             ] {
                 let argv: Vec<Vec<u8>> = argv.iter().map(|arg| arg.to_vec()).collect();
                 dispatch_argv(&argv, &mut store, 0).unwrap();
@@ -48559,10 +48609,7 @@ mod tests {
         }
 
         for (argv, expected_hits) in [
-            (
-                [b"ZINTERCARD".as_slice(), b"2", b"za", b"zb"].as_slice(),
-                2,
-            ),
+            ([b"ZINTERCARD".as_slice(), b"2", b"za", b"zb"].as_slice(), 2),
             ([b"ZINTER".as_slice(), b"2", b"za", b"zb"].as_slice(), 2),
             (
                 [b"ZINTER".as_slice(), b"3", b"za", b"zb", b"zc"].as_slice(),
@@ -52213,13 +52260,20 @@ mod tests {
         store.dispatch_client_ctx.resp_protocol_version = 3;
         let proto = |store: &mut Store, t: &str| {
             dispatch_argv(
-                &[b"DEBUG".to_vec(), b"PROTOCOL".to_vec(), t.as_bytes().to_vec()],
+                &[
+                    b"DEBUG".to_vec(),
+                    b"PROTOCOL".to_vec(),
+                    t.as_bytes().to_vec(),
+                ],
                 store,
                 0,
             )
             .unwrap_or_else(|_| panic!("DEBUG PROTOCOL {t}"))
         };
-        assert_eq!(proto(&mut store, "double"), RespFrame::Double("3.141".to_string()));
+        assert_eq!(
+            proto(&mut store, "double"),
+            RespFrame::Double("3.141".to_string())
+        );
         assert_eq!(
             proto(&mut store, "bignum"),
             RespFrame::BigNumber("1234567999999999999999999999999999999".to_string())
@@ -54266,7 +54320,11 @@ mod tests {
         // Sub-node LIMIT evicts nothing (whole-node granularity).
         seed(&mut store, 250);
         assert_eq!(
-            xadd_trim(&mut store, 251, &[b"MINID", b"~", b"201-0", b"LIMIT", b"50"]),
+            xadd_trim(
+                &mut store,
+                251,
+                &[b"MINID", b"~", b"201-0", b"LIMIT", b"50"]
+            ),
             251
         );
         assert!(!store.last_xadd_trimmed, "sub-node LIMIT removes nothing");
@@ -57477,8 +57535,13 @@ mod tests {
         // Invalid type on the write op wins over the read-only rejection.
         assert!(err(&mut store, &[b"SET", b"i0", b"0", b"1"]).contains("Invalid bitfield type"));
         // Invalid type on a later op also precedes the read-only rejection.
-        assert!(err(&mut store, &[b"GET", b"u8", b"0", b"SET", b"i-1", b"0", b"2"])
-            .contains("Invalid bitfield type"));
+        assert!(
+            err(
+                &mut store,
+                &[b"GET", b"u8", b"0", b"SET", b"i-1", b"0", b"2"]
+            )
+            .contains("Invalid bitfield type")
+        );
         // Out-of-range value on the write op precedes the rejection (surfaces as a
         // CommandError mapped to "value is not an integer or out of range").
         assert!(matches!(
@@ -57497,15 +57560,29 @@ mod tests {
             Err(CommandError::InvalidInteger)
         ));
         // Bad OVERFLOW keyword precedes the rejection.
-        assert!(err(&mut store, &[b"SET", b"i8", b"0", b"1", b"OVERFLOW", b"BAD"])
-            .contains("Invalid OVERFLOW type"));
+        assert!(
+            err(
+                &mut store,
+                &[b"SET", b"i8", b"0", b"1", b"OVERFLOW", b"BAD"]
+            )
+            .contains("Invalid OVERFLOW type")
+        );
         // All args valid + a write op => the read-only rejection stands.
-        assert!(err(&mut store, &[b"SET", b"u8", b"0", b"1", b"INCRBY", b"u8", b"8", b"2"])
-            .contains("BITFIELD_RO only supports the GET subcommand"));
+        assert!(
+            err(
+                &mut store,
+                &[b"SET", b"u8", b"0", b"1", b"INCRBY", b"u8", b"8", b"2"]
+            )
+            .contains("BITFIELD_RO only supports the GET subcommand")
+        );
 
         // Read-only branch type-checks the key even with NO op (WRONGTYPE).
-        dispatch_argv(&[b"RPUSH".to_vec(), b"lk".to_vec(), b"a".to_vec()], &mut store, 0)
-            .expect("rpush");
+        dispatch_argv(
+            &[b"RPUSH".to_vec(), b"lk".to_vec(), b"a".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("rpush");
         assert!(matches!(
             dispatch_argv(&[b"BITFIELD_RO".to_vec(), b"lk".to_vec()], &mut store, 0),
             Err(CommandError::Store(fr_store::StoreError::WrongType))
@@ -62525,7 +62602,12 @@ mod tests {
     #[test]
     fn command_write_keys_excludes_read_only_source_keys() {
         let wk = |parts: &[&str]| {
-            command_write_keys(&parts.iter().map(|p| p.as_bytes().to_vec()).collect::<Vec<_>>())
+            command_write_keys(
+                &parts
+                    .iter()
+                    .map(|p| p.as_bytes().to_vec())
+                    .collect::<Vec<_>>(),
+            )
         };
         let k = |s: &str| s.as_bytes().to_vec();
         // Read-only sources excluded; only the destination is a write key.
@@ -62576,16 +62658,31 @@ mod tests {
             parts.iter().map(|p| p.as_bytes().to_vec()).collect()
         };
         // Real containers namespace as parent|sub (matches c->cmd->fullname).
-        assert_eq!(canonical_command_fullname(&argv(&["CONFIG", "GET"])), "config|get");
-        assert_eq!(canonical_command_fullname(&argv(&["CLIENT", "KILL", "x"])), "client|kill");
-        assert_eq!(canonical_command_fullname(&argv(&["OBJECT", "ENCODING", "k"])), "object|encoding");
+        assert_eq!(
+            canonical_command_fullname(&argv(&["CONFIG", "GET"])),
+            "config|get"
+        );
+        assert_eq!(
+            canonical_command_fullname(&argv(&["CLIENT", "KILL", "x"])),
+            "client|kill"
+        );
+        assert_eq!(
+            canonical_command_fullname(&argv(&["OBJECT", "ENCODING", "k"])),
+            "object|encoding"
+        );
         // Case-insensitive, bare parent when no subcommand arg.
         assert_eq!(canonical_command_fullname(&argv(&["Config"])), "config");
         // DEBUG is NOT a container: its args are not registered subcommands, so
         // upstream's fullname is the bare "debug" (drives INFO commandstats /
         // latencystats keys + the subscribe-context error).
-        assert_eq!(canonical_command_fullname(&argv(&["DEBUG", "SLEEP", "0"])), "debug");
-        assert_eq!(canonical_command_fullname(&argv(&["DEBUG", "JMAP"])), "debug");
+        assert_eq!(
+            canonical_command_fullname(&argv(&["DEBUG", "SLEEP", "0"])),
+            "debug"
+        );
+        assert_eq!(
+            canonical_command_fullname(&argv(&["DEBUG", "JMAP"])),
+            "debug"
+        );
         // Plain commands are unchanged.
         assert_eq!(canonical_command_fullname(&argv(&["GET", "k"])), "get");
         assert_eq!(canonical_command_fullname(&argv(&[])), "");
