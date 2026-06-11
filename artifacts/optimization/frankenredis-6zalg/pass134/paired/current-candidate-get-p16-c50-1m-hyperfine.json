@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-6zalg/pass134/paired/current SERVER=/tmp/rch_target_fr_6zalg_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_6zalg_current/release-perf/fr-bench PORT=26845 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-6zalg/pass134/paired/current-get-p16-c50-1m-last.json KEY_PREFIX=fr6zalg_pair_cur_ artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 0.7505745226599999,
+      "stddev": 0.06393318242317977,
+      "median": 0.7431673884600001,
+      "user": 1.20335944,
+      "system": 2.4498027599999994,
+      "min": 0.65678118046,
+      "max": 0.86571995346,
+      "times": [
+        0.83490770346,
+        0.86571995346,
+        0.77220965346,
+        0.73890807146,
+        0.76730562846,
+        0.71955278946,
+        0.72314401046,
+        0.67978953046,
+        0.74742670546,
+        0.65678118046
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "OUT=artifacts/optimization/frankenredis-6zalg/pass134/paired/candidate SERVER=/tmp/rch_target_fr_6zalg_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_6zalg_candidate/release-perf/fr-bench PORT=26846 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-6zalg/pass134/paired/candidate-get-p16-c50-1m-last.json KEY_PREFIX=fr6zalg_pair_cand_ artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh",
+      "mean": 0.76103341746,
+      "stddev": 0.03969671951659287,
+      "median": 0.75951724696,
+      "user": 1.21993284,
+      "system": 2.4230230599999993,
+      "min": 0.6981115544600001,
+      "max": 0.81133317246,
+      "times": [
+        0.74870487846,
+        0.71905772646,
+        0.81105306946,
+        0.79294288546,
+        0.73427865146,
+        0.73529970646,
+        0.81133317246,
+        0.6981115544600001,
+        0.77032961546,
+        0.78922291446
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

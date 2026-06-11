@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781152487082,
+  "host": "127.0.0.1",
+  "port": 26847,
+  "workload": "get",
+  "clients": 50,
+  "requests": 1000000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "fr6zalg_rev_cand_",
+  "total_time_ms": 689,
+  "ops_per_sec": 1451036.6832187243,
+  "bytes_sent": 48888700,
+  "bytes_received": 9000000,
+  "latency_us": {
+    "min": 45,
+    "p50": 519,
+    "p95": 760,
+    "p99": 995,
+    "p999": 1812,
+    "max": 2351,
+    "mean": 536.9530049999987,
+    "samples": 1000000
+  }
+}

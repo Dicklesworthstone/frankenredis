@@ -1,0 +1,56 @@
+diff --git a/crates/fr-protocol/src/lib.rs b/crates/fr-protocol/src/lib.rs
+index f74ae70d1..570ea1b50 100644
+--- a/crates/fr-protocol/src/lib.rs
++++ b/crates/fr-protocol/src/lib.rs
+@@ -129,9 +129,19 @@ fn push_usize(out: &mut Vec<u8>, n: usize) {
+ pub fn encode_bulk_string_slice(value: Option<&[u8]>, resp3: bool, out: &mut Vec<u8>) {
+     match value {
+         Some(bytes) => {
+-            out.reserve(1 + decimal_usize_len(bytes.len()) + 2 + bytes.len() + 2);
++            let len = bytes.len();
++            if len < 10 {
++                out.reserve(len + 6);
++                out.push(b'$');
++                out.push(b'0' + len as u8);
++                out.extend_from_slice(b"\r\n");
++                out.extend_from_slice(bytes);
++                out.extend_from_slice(b"\r\n");
++                return;
++            }
++            out.reserve(1 + decimal_usize_len(len) + 2 + len + 2);
+             out.extend_from_slice(b"$");
+-            push_usize(out, bytes.len());
++            push_usize(out, len);
+             out.extend_from_slice(b"\r\n");
+             out.extend_from_slice(bytes);
+             out.extend_from_slice(b"\r\n");
+@@ -1708,7 +1718,10 @@ mod tests {
+         // Measured ~1.58x real-world (format-into-Vec; the common extend cost
+         // caps the kernel speedup per Amdahl). This is a regression floor, not a
+         // 2.0 extreme-opt claim — guards that the two-digit LUT stays a net win.
+-        assert!(score >= 1.25, "two-digit LUT itoa regressed below floor; got {score:.2}x");
++        assert!(
++            score >= 1.25,
++            "two-digit LUT itoa regressed below floor; got {score:.2}x"
++        );
+     }
+ 
+     #[test]
+@@ -3364,6 +3377,17 @@ mod tests {
+         fn borrowed_bulk_slice_encoder_matches_frame_encoder() {
+             let payload = b"hello\r\nbinary\0";
+ 
++            for len in 0..=12 {
++                let payload: Vec<u8> = (0..len).map(|n| n as u8).collect();
++                let mut borrowed = Vec::new();
++                crate::encode_bulk_string_slice(Some(&payload), false, &mut borrowed);
++                assert_eq!(
++                    borrowed,
++                    RespFrame::BulkString(Some(payload)).to_bytes(),
++                    "borrowed bulk encoder mismatch for length {len}"
++                );
++            }
++
+             let mut borrowed_resp2 = Vec::new();
+             crate::encode_bulk_string_slice(Some(payload), false, &mut borrowed_resp2);
+             assert_eq!(
