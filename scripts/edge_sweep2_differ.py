@@ -163,6 +163,27 @@ def normalize_hello(reply):
     return reply
 
 
+# Time-relative reads drift by the µs–ms gap between the two servers running the
+# same command, so a fresh `SET k v PX 100000; PTTL k` legitimately reports e.g.
+# 100000 on one and 99999 on the other. Treat both-positive integers within a
+# small tolerance as equal (the same "sub-10ms TTL race" filter the other gates
+# already carry); ms units get 50, second units get 2.
+_TTL_TOL = {"PTTL": 50, "PEXPIRETIME": 50, "TTL": 2, "EXPIRETIME": 2}
+
+
+def time_jitter_ok(step, a, b):
+    tol = _TTL_TOL.get(step[0].upper()) if step else None
+    if tol is None:
+        return False
+    if not (isinstance(a, str) and isinstance(b, str) and a[:1] == ":" and b[:1] == ":"):
+        return False
+    try:
+        ia, ib = int(a[1:]), int(b[1:])
+    except ValueError:
+        return False
+    return ia > 0 and ib > 0 and abs(ia - ib) <= tol
+
+
 # Pin both servers to a known encoding-threshold baseline before the exact
 # boundary scenarios (128/129, 512/513, 64/65-byte). The shared oracle's CONFIG
 # drifts (other probes leave small thresholds; config-less redis = 512/-2 vs fr's
@@ -202,7 +223,7 @@ def main():
             continue  # HELLO maps carry version/id; skip value compare
         if ro != rf:
             for i, (a, b) in enumerate(zip(ro, rf)):
-                if a != b:
+                if a != b and not time_jitter_ok(steps[i], a, b):
                     diffs += 1
                     print(f"DIFF {steps}")
                     print(f"   step {i} {steps[i]}")

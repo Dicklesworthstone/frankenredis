@@ -60,8 +60,92 @@ sys.exit(0)
 PY
 }
 
+# Per-gate state reset. A differ that leaves a non-default encoding threshold
+# (e.g. encoding_config_boundary_differ sets list-max-listpack-size=4, the
+# encoding gates set the *-max-listpack-* family small) silently contaminates
+# every LATER gate that assumes compiled defaults — geo_differ / hash_differ /
+# fuzz_untrodden then report phantom OBJECT ENCODING / reply divergences that are
+# config artifacts, not fr bugs (this masked nothing real but burned agent time
+# chasing 3 such phantoms). We snapshot the as-started baseline of the commonly
+# mutated configs from BOTH servers ONCE (the documented invocation runs this
+# right after a fresh start, so these are the compiled defaults the pair shares)
+# and restore them + FLUSHALL before every gate, so each gate sees a clean slate.
+BASELINE_FILE="$(mktemp)"
+trap 'rm -f "$BASELINE_FILE"' EXIT
+
+cfg_state() {
+    # cfg_state capture  -> snapshot baseline of both servers into BASELINE_FILE
+    # cfg_state restore  -> reapply that baseline to both servers, then FLUSHALL
+    python3 - "$1" "$OP" "$FP" "$BASELINE_FILE" <<'PY' 2>/dev/null
+import socket, sys
+mode, op, fp, path = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+PARAMS = ["list-max-listpack-size", "hash-max-listpack-entries", "hash-max-listpack-value",
+          "set-max-listpack-entries", "set-max-listpack-value", "set-max-intset-entries",
+          "zset-max-listpack-entries", "zset-max-listpack-value", "notify-keyspace-events",
+          "maxmemory", "maxmemory-policy"]
+def conn(p):
+    s = socket.create_connection(("127.0.0.1", p), timeout=3); s.settimeout(3)
+    buf = bytearray()
+    def line():
+        while b"\r\n" not in buf:
+            buf.extend(s.recv(4096))
+        i = buf.index(b"\r\n"); out = bytes(buf[:i]); del buf[:i + 2]; return out
+    def reply():
+        h = line(); t = h[:1]
+        if t in (b"+", b"-", b":"):
+            return h
+        if t == b"$":
+            n = int(h[1:])
+            if n < 0:
+                return None
+            while len(buf) < n + 2:
+                buf.extend(s.recv(4096))
+            d = bytes(buf[:n]); del buf[:n + 2]; return d
+        if t == b"*":
+            n = int(h[1:])
+            return [reply() for _ in range(n)] if n >= 0 else None
+        return h
+    def cmd(*a):
+        m = b"*%d\r\n" % len(a)
+        for x in a:
+            x = x if isinstance(x, bytes) else str(x).encode()
+            m += b"$%d\r\n%s\r\n" % (len(x), x)
+        s.sendall(m); return reply()
+    return cmd
+if mode == "capture":
+    rows = []
+    for port in (op, fp):
+        c = conn(port)
+        for name in PARAMS:
+            r = c("CONFIG", "GET", name)
+            if isinstance(r, list) and len(r) == 2 and r[1] is not None:
+                rows.append("%d\t%s\t%s" % (port, name, r[1].decode("latin1")))
+    with open(path, "w") as fh:
+        fh.write("\n".join(rows) + "\n")
+else:  # restore
+    byport = {op: conn(op), fp: conn(fp)}
+    try:
+        for ln in open(path):
+            ln = ln.rstrip("\n")
+            if not ln:
+                continue
+            port, name, val = ln.split("\t", 2)
+            byport[int(port)]("CONFIG", "SET", name, val)
+    except FileNotFoundError:
+        pass
+    for c in byport.values():
+        c("FLUSHALL")
+PY
+}
+
+cfg_state capture
+
 for script in "$DIR"/*.py; do
     name="$(basename "$script")"
+    # Restore the as-started config + clear data so a prior config-mutating gate
+    # cannot contaminate this one (self-launching gates use their own servers, so
+    # this is a harmless no-op for them).
+    cfg_state restore
     if grep -qE -- "--redis-bin|add_argument\\(.--bin.\\)" "$script"; then
         # Self-launching gate: drive it with the binary paths. Fall back to
         # --bin-only for gates that don't take --redis-bin (e.g. fr<->fr ones).
