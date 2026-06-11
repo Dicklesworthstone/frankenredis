@@ -1,0 +1,9 @@
+mode=Golden
+n=100000
+start=90000
+stop=90000
+first=member-00000000,member-00000001,member-00000002
+deep=member-00090000
+rev=member-00099999,member-00099998,member-00099997
+scored=member-00090000:90000
+rank=Some(90000)

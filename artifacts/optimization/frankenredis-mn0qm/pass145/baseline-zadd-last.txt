@@ -1,0 +1,5 @@
+mode=Zadd
+n=100000
+elapsed_ns=51918679
+first=member-00000000,member-00000001,member-00000002
+last=member-00099999,member-00099998,member-00099997

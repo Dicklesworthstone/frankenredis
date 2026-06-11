@@ -521,6 +521,9 @@ pub enum StoreError {
 
 const SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES: usize = 128;
 const SORTED_SET_PACKED_DEFAULT_MAX_VALUE: usize = 64;
+const ZSET_INDEX_TREE_WARM_MIN_LEN: usize = 4096;
+const ZSET_INDEX_TREE_WARM_MIN_SKIP: usize = 1024;
+const ZSET_INDEX_TREE_WARM_HITS: u8 = 2;
 
 #[derive(Debug, Clone)]
 pub struct SortedSet {
@@ -549,6 +552,7 @@ struct FullSortedSet {
     /// mutation choke point; `None` means "not yet needed" so rank-free zsets
     /// pay nothing. (frankenredis-oyhl7)
     rank_tree: Option<ZRankTreap>,
+    deep_index_reads: u8,
 }
 
 impl PartialEq for SortedSet {
@@ -634,6 +638,7 @@ impl FullSortedSet {
             dict: HashMap::with_capacity_and_hasher(cap, foldhash::quality::RandomState::default()),
             ordered: BTreeMap::new(),
             rank_tree: None,
+            deep_index_reads: 0,
         }
     }
 
@@ -774,17 +779,43 @@ impl FullSortedSet {
     }
 
     /// Ensure the order-statistic index exists, building it from `ordered`
-    /// (the source of truth) on first use. O(n log n) one-time; thereafter it
+    /// (the source of truth) on first use. O(n) one-time; thereafter it
     /// is maintained incrementally at the mutation choke points.
     fn ensure_rank_tree(&mut self) -> &ZRankTreap {
         if self.rank_tree.is_none() {
-            let mut tree = ZRankTreap::with_capacity(self.ordered.len());
-            for sm in self.ordered.keys() {
-                tree.insert(sm.clone());
-            }
-            self.rank_tree = Some(tree);
+            self.rank_tree = Some(ZRankTreap::from_sorted_keys(
+                self.ordered.keys().cloned(),
+                self.ordered.len(),
+            ));
+            self.deep_index_reads = ZSET_INDEX_TREE_WARM_HITS;
         }
         self.rank_tree.as_ref().expect("rank tree just built")
+    }
+
+    fn maybe_warm_rank_tree_for_index(&mut self, start_idx: usize, count: usize) {
+        let len = self.dict.len();
+        if self.rank_tree.is_some()
+            || len < ZSET_INDEX_TREE_WARM_MIN_LEN
+            || start_idx < ZSET_INDEX_TREE_WARM_MIN_SKIP
+            || start_idx.saturating_mul(8) < len
+            || count.saturating_mul(8) > len
+        {
+            return;
+        }
+        self.deep_index_reads = self.deep_index_reads.saturating_add(1);
+        if self.deep_index_reads >= ZSET_INDEX_TREE_WARM_HITS {
+            let _ = self.ensure_rank_tree();
+        }
+    }
+
+    fn index_slice_asc_adaptive(&mut self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
+        self.maybe_warm_rank_tree_for_index(start_idx, count);
+        self.index_slice_asc(start_idx, count)
+    }
+
+    fn index_slice_desc_adaptive(&mut self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
+        self.maybe_warm_rank_tree_for_index(start_idx, count);
+        self.index_slice_desc(start_idx, count)
     }
 
     fn rank(&mut self, member: &[u8]) -> Option<usize> {
@@ -1190,12 +1221,17 @@ impl SortedSet {
         }
     }
 
-    /// `count` (member, score) pairs starting at descending index `start_idx`
-    /// (0 = highest score), in descending order.
-    fn index_slice_desc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
-        match &self.inner {
+    fn index_slice_asc_adaptive(&mut self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
+        match &mut self.inner {
+            SortedSetInner::Packed(p) => p.index_slice_asc(start_idx, count),
+            SortedSetInner::Full(f) => f.index_slice_asc_adaptive(start_idx, count),
+        }
+    }
+
+    fn index_slice_desc_adaptive(&mut self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
+        match &mut self.inner {
             SortedSetInner::Packed(p) => p.index_slice_desc(start_idx, count),
-            SortedSetInner::Full(f) => f.index_slice_desc(start_idx, count),
+            SortedSetInner::Full(f) => f.index_slice_desc_adaptive(start_idx, count),
         }
     }
 
@@ -1483,6 +1519,30 @@ impl ZRankTreap {
         }
     }
 
+    fn from_sorted_keys(keys: impl IntoIterator<Item = ScoreMember>, cap: usize) -> Self {
+        let mut tree = Self::with_capacity(cap);
+        let mut stack: Vec<usize> = Vec::new();
+        for key in keys {
+            let idx = tree.alloc(key);
+            let mut left = ZRANK_TREAP_NIL;
+            while stack
+                .last()
+                .is_some_and(|&top| tree.nodes[top].prio < tree.nodes[idx].prio)
+            {
+                left = stack.pop().expect("stack last existed");
+            }
+            tree.nodes[idx].left = left;
+            if let Some(&parent) = stack.last() {
+                tree.nodes[parent].right = idx;
+            } else {
+                tree.root = idx;
+            }
+            stack.push(idx);
+        }
+        tree.recompute_sizes();
+        tree
+    }
+
     /// Deterministic "random" priority: FNV-1a over the canonicalized score
     /// bits and member bytes. Well-distributed enough for treap balance; ties
     /// (collisions) only mildly unbalance and never affect rank correctness.
@@ -1526,6 +1586,25 @@ impl ZRankTreap {
     fn update_size(&mut self, n: usize) {
         let (l, r) = (self.nodes[n].left, self.nodes[n].right);
         self.nodes[n].size = 1 + self.size(l) + self.size(r);
+    }
+
+    fn recompute_sizes(&mut self) {
+        if self.root == ZRANK_TREAP_NIL {
+            return;
+        }
+        let mut stack = vec![(self.root, false)];
+        while let Some((idx, visited)) = stack.pop() {
+            if idx == ZRANK_TREAP_NIL {
+                continue;
+            }
+            if visited {
+                self.update_size(idx);
+            } else {
+                stack.push((idx, true));
+                stack.push((self.nodes[idx].right, false));
+                stack.push((self.nodes[idx].left, false));
+            }
+        }
     }
 
     fn alloc(&mut self, key: ScoreMember) -> usize {
@@ -11230,7 +11309,7 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
                         let len = zs.len() as i64;
                         let s = normalize_index(start, len);
@@ -11242,7 +11321,7 @@ impl Store {
                         let e_idx = e.min(len - 1) as usize;
                         let count = e_idx - s_idx + 1;
                         let result: Vec<Vec<u8>> = zs
-                            .index_slice_asc(s_idx, count)
+                            .index_slice_asc_adaptive(s_idx, count)
                             .into_iter()
                             .map(|(m, _)| m)
                             .collect();
@@ -11280,7 +11359,7 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
                         let len = zs.len() as i64;
                         let s = normalize_index(start, len);
@@ -11292,7 +11371,7 @@ impl Store {
                         let e_idx = e.min(len - 1) as usize;
                         let count = e_idx - s_idx + 1;
                         let result: Vec<Vec<u8>> = zs
-                            .index_slice_desc(s_idx, count)
+                            .index_slice_desc_adaptive(s_idx, count)
                             .into_iter()
                             .map(|(m, _)| m)
                             .collect();
@@ -11837,7 +11916,7 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
                         let len = zs.len() as i64;
                         let s = normalize_index(start, len);
@@ -11848,7 +11927,7 @@ impl Store {
                         let s_idx = s.max(0) as usize;
                         let e_idx = e.min(len - 1) as usize;
                         let count = e_idx - s_idx + 1;
-                        let result: Vec<(Vec<u8>, f64)> = zs.index_slice_asc(s_idx, count);
+                        let result: Vec<(Vec<u8>, f64)> = zs.index_slice_asc_adaptive(s_idx, count);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -11967,7 +12046,7 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
                         let len = zs.len() as i64;
                         let s = normalize_index(start, len);
@@ -11978,7 +12057,8 @@ impl Store {
                         let s_idx = s.max(0) as usize;
                         let e_idx = e.min(len - 1) as usize;
                         let count = e_idx - s_idx + 1;
-                        let result: Vec<(Vec<u8>, f64)> = zs.index_slice_desc(s_idx, count);
+                        let result: Vec<(Vec<u8>, f64)> =
+                            zs.index_slice_desc_adaptive(s_idx, count);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -28024,8 +28104,10 @@ mod tests {
             (50_000, 49_000), // empty (start > stop)
         ];
 
-        // Cold path (order-statistic tree NOT yet built — zrange/zrevrange never
-        // build it): capture results for every range + variant.
+        // Cold path: capture results for every range + variant before any rank
+        // query. Deep by-index reads may adaptively materialize the tree after
+        // repeated hits, but the tree is behavior-invisible and must produce
+        // byte-identical output to the original linear scan.
         let cold_asc: Vec<_> = ranges
             .iter()
             .map(|&(s, e)| store.zrange(key, s, e, 0).unwrap())
@@ -28100,6 +28182,27 @@ mod tests {
             ratio > 2.0 || cfg!(debug_assertions),
             "expected >2x, got {ratio:.2}x"
         );
+    }
+
+    #[test]
+    fn repeated_deep_zrange_adaptively_warms_rank_tree_mn0qm() {
+        let key = b"z";
+        let n = 10_000usize;
+        let mut store = Store::new();
+        let adds: Vec<(f64, Vec<u8>)> = (0..n)
+            .map(|i| (i as f64, format!("m{i:06}").into_bytes()))
+            .collect();
+        store.zadd(key, &adds, 0).unwrap();
+
+        let first = store.zrange(key, 9_000, 9_000, 0).unwrap();
+        assert_eq!(first, vec![b"m009000".to_vec()]);
+        let second = store.zrange(key, 9_000, 9_000, 0).unwrap();
+        assert_eq!(second, first);
+
+        let rank = store.zrank(key, b"m009000", 0).unwrap();
+        assert_eq!(rank, Some(9_000));
+        let withscores = store.zrange_withscores(key, 9_000, 9_000, 0).unwrap();
+        assert_eq!(withscores, vec![(b"m009000".to_vec(), 9000.0)]);
     }
 
     #[test]
