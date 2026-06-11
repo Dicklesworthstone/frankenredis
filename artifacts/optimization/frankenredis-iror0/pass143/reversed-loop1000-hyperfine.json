@@ -1,0 +1,64 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-iror0/pass143/lua_eval_bench.py --server-bin /data/projects/.scratch/frankenredis-iror0-pass143-candidate-target/release-perf/frankenredis --port 21435 --mode loop1000 --iterations 2500 --json-out artifacts/optimization/frankenredis-iror0/pass143/reversed-candidate-loop1000-last.json --golden-out artifacts/optimization/frankenredis-iror0/pass143/reversed-candidate-golden.json",
+      "mean": 1.085259134985,
+      "stddev": 0.033877856831783786,
+      "median": 1.08393314686,
+      "user": 0.88299363,
+      "system": 0.17816627999999998,
+      "min": 1.04311032286,
+      "max": 1.1470023518599999,
+      "times": [
+        1.07690992886,
+        1.07580619386,
+        1.04453160686,
+        1.09726425786,
+        1.10649205286,
+        1.1470023518599999,
+        1.09095636486,
+        1.04311032286
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-iror0/pass143/lua_eval_bench.py --server-bin /data/projects/.scratch/frankenredis-iror0-pass143-baseline-target/release-perf/frankenredis --port 21436 --mode loop1000 --iterations 2500 --json-out artifacts/optimization/frankenredis-iror0/pass143/reversed-baseline-loop1000-last.json --golden-out artifacts/optimization/frankenredis-iror0/pass143/reversed-baseline-golden.json",
+      "mean": 1.48528109586,
+      "stddev": 0.07387477592124285,
+      "median": 1.49097387286,
+      "user": 1.2825117549999998,
+      "system": 0.182837405,
+      "min": 1.38535230986,
+      "max": 1.57783535586,
+      "times": [
+        1.46435416386,
+        1.51759358186,
+        1.38900188686,
+        1.52826578186,
+        1.56394362786,
+        1.45590205886,
+        1.57783535586,
+        1.38535230986
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

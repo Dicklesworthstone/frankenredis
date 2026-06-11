@@ -1,0 +1,30 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-iror0/pass143/lua_eval_bench.py --server-bin /tmp/rch_fr_iror0_pass143_baseline/release-perf/frankenredis --port 21432 --mode table200 --iterations 2500 --json-out artifacts/optimization/frankenredis-iror0/pass143/baseline-table200-last.json",
+      "mean": 0.9847192842600001,
+      "stddev": 0.028250316916530512,
+      "median": 0.98555707826,
+      "user": 0.7561803666666665,
+      "system": 0.17557478666666668,
+      "min": 0.95207313126,
+      "max": 1.01303065826,
+      "times": [
+        0.9666383832600001,
+        1.01252833726,
+        1.00447577326,
+        1.01303065826,
+        0.95207313126,
+        0.9595694222600001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

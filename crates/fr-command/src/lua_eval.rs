@@ -302,13 +302,17 @@ fn stamp_user_script_line(msg: String, line: u32) -> String {
     }
 }
 
+type LuaCell = Rc<RefCell<LuaValue>>;
+type LuaCapturedScope = Vec<(String, LuaCell)>;
+type LuaCapturedEnv = Vec<LuaCapturedScope>;
+
 #[derive(Clone, Debug)]
 pub struct LuaFunc {
     pub params: Vec<String>,
     pub body: Block,
     pub is_variadic: bool,
     /// Captured lexical environment (upvalues) from function definition site.
-    pub captured_env: Option<Vec<HashMap<String, Rc<RefCell<LuaValue>>>>>,
+    pub captured_env: Option<LuaCapturedEnv>,
     /// Lua 5.1 function environment used for unresolved global reads and
     /// writes. `None` means the interpreter's default protected globals.
     pub env_table: Rc<RefCell<Option<LuaTable>>>,
@@ -2850,15 +2854,54 @@ impl RedisLrand48 {
 }
 
 #[derive(Clone, Debug)]
+struct LocalBinding {
+    name: String,
+    cell: LuaCell,
+}
+
+#[derive(Clone, Debug)]
 struct Scope {
-    locals: HashMap<String, Rc<RefCell<LuaValue>>>,
+    locals: Vec<LocalBinding>,
 }
 
 impl Scope {
     fn new() -> Self {
-        Self {
-            locals: HashMap::new(),
+        Self { locals: Vec::new() }
+    }
+
+    fn set_local_cell(&mut self, name: &str, cell: LuaCell) {
+        if let Some(existing) = self
+            .locals
+            .iter_mut()
+            .rev()
+            .find(|local| local.name == name)
+        {
+            existing.cell = cell;
+        } else {
+            self.locals.push(LocalBinding {
+                name: name.to_string(),
+                cell,
+            });
         }
+    }
+
+    fn get_local_cell(&self, name: &str) -> Option<&LuaCell> {
+        self.locals
+            .iter()
+            .rev()
+            .find(|local| local.name == name)
+            .map(|local| &local.cell)
+    }
+
+    fn contains_local(&self, name: &str) -> bool {
+        self.locals.iter().rev().any(|local| local.name == name)
+    }
+
+    fn captured_locals(&self) -> Vec<(String, LuaCell)> {
+        self.locals
+            .iter()
+            .map(|local| (local.name.clone(), local.cell.clone()))
+            .collect()
     }
 }
 
@@ -2913,13 +2956,13 @@ impl Env {
             // (frankenredis-qqq17) Track upvalue cells: a recursive closure's
             // captured_env can hold an Rc back to this cell, forming a leak.
             lua_gc_register_cell(&cell);
-            scope.locals.insert(name.to_string(), cell);
+            scope.set_local_cell(name, cell);
         }
     }
 
     fn get_local(&self, name: &str) -> Option<LuaValue> {
         for scope in self.scopes.iter().rev() {
-            if let Some(value) = scope.locals.get(name) {
+            if let Some(value) = scope.get_local_cell(name) {
                 return Some(value.borrow().clone());
             }
         }
@@ -2927,8 +2970,8 @@ impl Env {
     }
 
     fn set_existing_local(&mut self, name: &str, value: LuaValue) -> bool {
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(existing) = scope.locals.get(name) {
+        for scope in self.scopes.iter().rev() {
+            if let Some(existing) = scope.get_local_cell(name) {
                 *existing.borrow_mut() = value;
                 return true;
             }
@@ -2937,12 +2980,12 @@ impl Env {
     }
 
     /// Snapshot all current scope locals for upvalue capture.
-    fn snapshot(&self) -> Vec<HashMap<String, Rc<RefCell<LuaValue>>>> {
-        self.scopes.iter().map(|s| s.locals.clone()).collect()
+    fn snapshot(&self) -> LuaCapturedEnv {
+        self.scopes.iter().map(Scope::captured_locals).collect()
     }
 
     /// Create an Env pre-loaded with captured upvalue scopes.
-    fn from_captured(captured: &[HashMap<String, Rc<RefCell<LuaValue>>>]) -> Self {
+    fn from_captured(captured: &[LuaCapturedScope]) -> Self {
         // (frankenredis-md71j) The captured scopes are upvalues from the
         // outer function; any scopes pushed AFTER this point belong to the
         // freshly-entered function body and are reported as "local".
@@ -2951,7 +2994,13 @@ impl Env {
             scopes: captured
                 .iter()
                 .map(|locals| Scope {
-                    locals: locals.clone(),
+                    locals: locals
+                        .iter()
+                        .map(|(name, cell)| LocalBinding {
+                            name: name.clone(),
+                            cell: cell.clone(),
+                        })
+                        .collect(),
                 })
                 .collect(),
             global_env: None,
@@ -2965,7 +3014,7 @@ impl Env {
     /// (frankenredis-md71j)
     fn classify_name(&self, name: &str) -> Option<bool> {
         for (idx, scope) in self.scopes.iter().enumerate().rev() {
-            if scope.locals.contains_key(name) {
+            if scope.contains_local(name) {
                 return Some(idx >= self.local_floor);
             }
         }
