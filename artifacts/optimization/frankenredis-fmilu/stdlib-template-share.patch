@@ -1,0 +1,345 @@
+diff --git a/crates/fr-command/src/lua_eval.rs b/crates/fr-command/src/lua_eval.rs
+index ef6a60997..0c621a176 100644
+--- a/crates/fr-command/src/lua_eval.rs
++++ b/crates/fr-command/src/lua_eval.rs
+@@ -139,6 +139,132 @@ impl Drop for LuaGcScope {
+     }
+ }
+ 
++// ── Shared stdlib-table template (frankenredis-fmilu) ─────────────────────
++//
++// The pure standard-library tables (math/string/table/cjson/cmsgpack/struct/
++// bit) are byte-for-byte identical on every EVAL and are read-only while a
++// script runs (frankenredis-8mwy9). Redis keeps a persistent lua_State and so
++// builds them once; fr previously rebuilt all ~150 entries (a `Vec` key plus a
++// `RustFunction` name `String` each) on EVERY `LuaState::new`. We instead build
++// them ONCE per thread and Rc-clone them into each script's globals, which also
++// makes the per-call `_G` snapshot copy them by refcount bump rather than deep
++// rebuild. The templates are `new_unregistered` (invisible to the eval-end GC
++// sweep) and pre-marked read-only so they can never be mutated through the
++// shared `Rc`.
++thread_local! {
++    static LUA_STDLIB_TEMPLATE: Vec<(&'static str, LuaTable)> = build_stdlib_template();
++}
++
++fn build_stdlib_template() -> Vec<(&'static str, LuaTable)> {
++    let math_table = LuaTable::new_unregistered();
++    for name in &[
++        "floor", "ceil", "abs", "max", "min", "sqrt", "huge", "random", "randomseed", "fmod",
++        "log", "log10", "exp", "pow", "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
++        "modf", "frexp", "ldexp", "deg", "rad", "sinh", "cosh", "tanh",
++    ] {
++        math_table.set(
++            LuaValue::Str(name.as_bytes().to_vec()),
++            if *name == "huge" {
++                LuaValue::Number(f64::INFINITY)
++            } else {
++                LuaValue::RustFunction(format!("math.{name}"))
++            },
++        );
++    }
++    math_table.set(
++        LuaValue::Str(b"pi".to_vec()),
++        LuaValue::Number(std::f64::consts::PI),
++    );
++
++    let string_table = LuaTable::new_unregistered();
++    for name in &[
++        "sub", "len", "rep", "lower", "upper", "byte", "char", "reverse", "format", "find",
++        "match", "gsub", "gmatch", "dump",
++    ] {
++        string_table.set(
++            LuaValue::Str(name.as_bytes().to_vec()),
++            LuaValue::RustFunction(format!("string.{name}")),
++        );
++    }
++
++    let table_lib = LuaTable::new_unregistered();
++    for name in &[
++        "insert", "remove", "concat", "sort", "getn", "maxn", "foreach", "foreachi",
++    ] {
++        table_lib.set(
++            LuaValue::Str(name.as_bytes().to_vec()),
++            LuaValue::RustFunction(format!("table.{name}")),
++        );
++    }
++
++    let cjson_table = LuaTable::new_unregistered();
++    for name in &["encode", "decode"] {
++        cjson_table.set(
++            LuaValue::Str(name.as_bytes().to_vec()),
++            LuaValue::RustFunction(format!("cjson.{name}")),
++        );
++    }
++    cjson_table.set(
++        LuaValue::Str(b"null".to_vec()),
++        LuaValue::Userdata(LuaUserdata::CjsonNull),
++    );
++
++    let cmsgpack_table = LuaTable::new_unregistered();
++    for name in &["pack", "unpack", "unpack_one", "unpack_limit"] {
++        cmsgpack_table.set(
++            LuaValue::Str(name.as_bytes().to_vec()),
++            LuaValue::RustFunction(format!("cmsgpack.{name}")),
++        );
++    }
++    for (name, value) in &[
++        ("_NAME", "cmsgpack"),
++        ("_VERSION", "lua-cmsgpack 0.4.0"),
++        ("_COPYRIGHT", "Copyright (C) 2012, Salvatore Sanfilippo"),
++        ("_DESCRIPTION", "MessagePack C implementation for Lua"),
++    ] {
++        cmsgpack_table.set(
++            LuaValue::Str(name.as_bytes().to_vec()),
++            LuaValue::Str(value.as_bytes().to_vec()),
++        );
++    }
++
++    let struct_table = LuaTable::new_unregistered();
++    for name in &["pack", "unpack", "size"] {
++        struct_table.set(
++            LuaValue::Str(name.as_bytes().to_vec()),
++            LuaValue::RustFunction(format!("struct.{name}")),
++        );
++    }
++
++    let bit_table = LuaTable::new_unregistered();
++    for name in &[
++        "band", "bor", "bxor", "bnot", "lshift", "rshift", "arshift", "rol", "ror", "bswap",
++        "tobit", "tohex",
++    ] {
++        bit_table.set(
++            LuaValue::Str(name.as_bytes().to_vec()),
++            LuaValue::RustFunction(format!("bit.{name}")),
++        );
++    }
++
++    let tables = vec![
++        ("math", math_table),
++        ("string", string_table),
++        ("table", table_lib),
++        ("cjson", cjson_table),
++        ("cmsgpack", cmsgpack_table),
++        ("struct", struct_table),
++        ("bit", bit_table),
++    ];
++    // Born read-only: redis protects these during execution (frankenredis-8mwy9)
++    // and, since the Rc is shared across every script, immutability is what makes
++    // the sharing sound.
++    for (_, t) in &tables {
++        t.mark_readonly_recursive();
++    }
++    tables
++}
++
+ // ── Value type ──────────────────────────────────────────────────────────
+ 
+ #[derive(Clone, Debug)]
+@@ -391,6 +517,24 @@ impl LuaTable {
+         LUA_TEST_LIVE_TABLES.with(|c| c.set(c.get() + 1));
+         Self { inner }
+     }
++    /// A table that is NOT registered with the per-eval GC sweep and NOT counted
++    /// by the test-only live-table counter. Used ONLY for the thread-local
++    /// stdlib template (frankenredis-fmilu): those tables live for the whole
++    /// thread, are read-only, contain no cycles, and are shared (Rc-cloned) into
++    /// every script's globals — so they must survive the eval-end sweep that
++    /// would otherwise clear a registered table, and must stay invisible to the
++    /// qqq17 leak assertion.
++    fn new_unregistered() -> Self {
++        let inner = Rc::new(RefCell::new(LuaTableInner {
++            array: Vec::new(),
++            string_hash: HashMap::new(),
++            other_hash: Vec::new(),
++            other_keys: HashSet::new(),
++            metatable: None,
++            readonly: false,
++        }));
++        Self { inner }
++    }
+     fn get(&self, key: &LuaValue) -> LuaValue {
+         self.inner.borrow().get(key)
+     }
+@@ -2991,132 +3135,15 @@ impl<'a> LuaState<'a> {
+         ] {
+             globals.insert(name.to_string(), LuaValue::RustFunction(name.to_string()));
+         }
+-        // Math library
+-        let math_table = LuaTable::new();
+-        for name in &[
+-            "floor",
+-            "ceil",
+-            "abs",
+-            "max",
+-            "min",
+-            "sqrt",
+-            "huge",
+-            "random",
+-            "randomseed",
+-            "fmod",
+-            "log",
+-            "log10",
+-            "exp",
+-            "pow",
+-            "sin",
+-            "cos",
+-            "tan",
+-            "asin",
+-            "acos",
+-            "atan",
+-            "atan2",
+-            "modf",
+-            "frexp",
+-            "ldexp",
+-            // (frankenredis-9dmqr) Trig helpers vendored Redis 7.2.4
+-            // exposes through Lua 5.1's lmathlib but fr was missing.
+-            "deg",
+-            "rad",
+-            "sinh",
+-            "cosh",
+-            "tanh",
+-        ] {
+-            math_table.set(
+-                LuaValue::Str(name.as_bytes().to_vec()),
+-                if *name == "huge" {
+-                    LuaValue::Number(f64::INFINITY)
+-                } else {
+-                    LuaValue::RustFunction(format!("math.{name}"))
+-                },
+-            );
+-        }
+-        math_table.set(
+-            LuaValue::Str(b"pi".to_vec()),
+-            LuaValue::Number(std::f64::consts::PI),
+-        );
+-        globals.insert("math".to_string(), LuaValue::Table(math_table));
+-
+-        // String library
+-        let string_table = LuaTable::new();
+-        for name in &[
+-            "sub", "len", "rep", "lower", "upper", "byte", "char", "reverse", "format", "find",
+-            "match", "gsub", "gmatch",
+-            // (frankenredis-dqbdr) Vendored Redis 7.2.4 exposes
+-            // string.dump from Lua 5.1's stdlib. The function has no
+-            // useful semantics in fr's tree-walking interpreter (no
+-            // bytecode form to serialize) so the dispatch handler
+-            // errors at call time, but `type(string.dump)` must still
+-            // return 'function' for scripts that probe the surface.
+-            "dump",
+-        ] {
+-            string_table.set(
+-                LuaValue::Str(name.as_bytes().to_vec()),
+-                LuaValue::RustFunction(format!("string.{name}")),
+-            );
+-        }
+-        globals.insert("string".to_string(), LuaValue::Table(string_table));
+-
+-        // Table library
+-        let table_lib = LuaTable::new();
+-        for name in &[
+-            "insert", "remove", "concat", "sort", "getn", "maxn", "foreach", "foreachi",
+-        ] {
+-            table_lib.set(
+-                LuaValue::Str(name.as_bytes().to_vec()),
+-                LuaValue::RustFunction(format!("table.{name}")),
+-            );
+-        }
+-        globals.insert("table".to_string(), LuaValue::Table(table_lib));
+-
+-        // cjson library (commonly used in Redis scripts)
+-        let cjson_table = LuaTable::new();
+-        for name in &["encode", "decode"] {
+-            cjson_table.set(
+-                LuaValue::Str(name.as_bytes().to_vec()),
+-                LuaValue::RustFunction(format!("cjson.{name}")),
+-            );
+-        }
+-        cjson_table.set(
+-            LuaValue::Str(b"null".to_vec()),
+-            LuaValue::Userdata(LuaUserdata::CjsonNull),
+-        );
+-        globals.insert("cjson".to_string(), LuaValue::Table(cjson_table));
+-
+-        // cmsgpack library bundled with Redis' Lua sandbox.
+-        let cmsgpack_table = LuaTable::new();
+-        for name in &["pack", "unpack", "unpack_one", "unpack_limit"] {
+-            cmsgpack_table.set(
+-                LuaValue::Str(name.as_bytes().to_vec()),
+-                LuaValue::RustFunction(format!("cmsgpack.{name}")),
+-            );
+-        }
+-        for (name, value) in &[
+-            ("_NAME", "cmsgpack"),
+-            ("_VERSION", "lua-cmsgpack 0.4.0"),
+-            ("_COPYRIGHT", "Copyright (C) 2012, Salvatore Sanfilippo"),
+-            ("_DESCRIPTION", "MessagePack C implementation for Lua"),
+-        ] {
+-            cmsgpack_table.set(
+-                LuaValue::Str(name.as_bytes().to_vec()),
+-                LuaValue::Str(value.as_bytes().to_vec()),
+-            );
+-        }
+-        globals.insert("cmsgpack".to_string(), LuaValue::Table(cmsgpack_table));
+-
+-        // struct library bundled with Redis' Lua sandbox.
+-        let struct_table = LuaTable::new();
+-        for name in &["pack", "unpack", "size"] {
+-            struct_table.set(
+-                LuaValue::Str(name.as_bytes().to_vec()),
+-                LuaValue::RustFunction(format!("struct.{name}")),
+-            );
+-        }
+-        globals.insert("struct".to_string(), LuaValue::Table(struct_table));
++        // (frankenredis-fmilu) Pull the seven pure stdlib tables
++        // (math/string/table/cjson/cmsgpack/struct/bit) from the shared
++        // thread-local template (built once) by Rc-clone, instead of
++        // reallocating ~150 entries here on every EVAL.
++        LUA_STDLIB_TEMPLATE.with(|tmpl| {
++            for (name, table) in tmpl {
++                globals.insert((*name).to_string(), LuaValue::Table(table.clone()));
++            }
++        });
+ 
+         // (frankenredis-vgnsc) Standard Lua 5.1 globals also exposed in
+         // Redis 7.2.4's sandbox: _VERSION constant, rawequal /
+@@ -3138,21 +3165,9 @@ impl<'a> LuaState<'a> {
+             LuaValue::RustFunction("collectgarbage".to_string()),
+         );
+ 
+-        // (frankenredis-v95aj) Redis 7.2.4 exposes LuaJIT's bit library
+-        // as a global 'bit' table. Operations are 32-bit; numbers are
+-        // truncated to u32 before each op and the result is returned
+-        // as a Lua number (f64-representable for the 0..=u32::MAX range).
+-        let bit_table = LuaTable::new();
+-        for name in &[
+-            "band", "bor", "bxor", "bnot", "lshift", "rshift", "arshift", "rol", "ror", "bswap",
+-            "tobit", "tohex",
+-        ] {
+-            bit_table.set(
+-                LuaValue::Str(name.as_bytes().to_vec()),
+-                LuaValue::RustFunction(format!("bit.{name}")),
+-            );
+-        }
+-        globals.insert("bit".to_string(), LuaValue::Table(bit_table));
++        // (frankenredis-v95aj) The 'bit' table (LuaJIT 32-bit ops) is part of
++        // the shared stdlib template above; its operation handlers live in the
++        // RustFunction dispatch.
+ 
+         let rng_seed = store.rng_seed;
+         // (frankenredis-lwj8o) Initialize math.random's PRNG with the
+@@ -11883,6 +11898,15 @@ impl Drop for LuaState<'_> {
+             if !visited.insert(ptr) {
+                 return;
+             }
++            // (frankenredis-fmilu) Never drain the shared read-only stdlib
++            // templates: they live in a thread-local and are Rc-shared into
++            // EVERY script's globals, so draining one here empties it for all
++            // later EVALs on this thread. They are immutable and cycle-free, so
++            // there is nothing to break. (The per-call `redis` table is also
++            // read-only but is registered with the GC sweep, which reclaims it.)
++            if table.inner.borrow().readonly {
++                return;
++            }
+             let inner = &mut *table.inner.borrow_mut();
+             for value in inner.array.drain(..) {
+                 if let LuaValue::Table(t) = value {
