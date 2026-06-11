@@ -229,6 +229,16 @@ pub struct LuaTableInner {
     pub other_keys: HashSet<LuaHashKey>,
     /// Optional metatable for Lua 5.1 metamethods.
     pub metatable: Option<LuaTable>,
+    /// When true, this table is protected: any script-level write (field
+    /// assignment, `rawset`, `setmetatable`, `table.insert/remove/sort`) raises
+    /// "Attempt to modify a readonly table". Redis applies this recursively to
+    /// the whole script global env (math/string/table/struct/bit/cjson/cmsgpack/
+    /// redis) via `luaSetTableProtectionRecursively`; fr previously left these
+    /// library tables mutable. Internal `set()` during env construction is NOT
+    /// gated (the flag is only consulted at the script-facing write sites), so
+    /// the interpreter can still build the tables before locking them.
+    /// (frankenredis-8mwy9)
+    pub readonly: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -373,6 +383,7 @@ impl LuaTable {
             other_hash: Vec::new(),
             other_keys: HashSet::new(),
             metatable: None,
+            readonly: false,
         }));
         // (frankenredis-qqq17) Track for cycle-breaking at eval end.
         lua_gc_register_table(&inner);
@@ -410,6 +421,38 @@ impl LuaTable {
     }
     fn set(&self, key: LuaValue, value: LuaValue) {
         self.inner.borrow_mut().set(key, value)
+    }
+    /// Whether this table is protected against script-level writes. (8mwy9)
+    fn is_readonly(&self) -> bool {
+        self.inner.borrow().readonly
+    }
+    /// Mark this table (and any nested table values, guarding against cycles)
+    /// read-only, mirroring redis's `luaSetTableProtectionRecursively`. Called
+    /// once on the library tables after env construction, before user code runs.
+    /// (frankenredis-8mwy9)
+    fn mark_readonly_recursive(&self) {
+        // Already protected (or being protected up the stack) → stop; this also
+        // breaks self-referential cycles like `_G._G`.
+        if self.inner.borrow().readonly {
+            return;
+        }
+        let nested: Vec<LuaTable> = {
+            let mut inner = self.inner.borrow_mut();
+            inner.readonly = true;
+            inner
+                .array
+                .iter()
+                .chain(inner.string_hash.values())
+                .chain(inner.other_hash.iter().map(|(_, v)| v))
+                .filter_map(|v| match v {
+                    LuaValue::Table(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        for t in nested {
+            t.mark_readonly_recursive();
+        }
     }
     fn len(&self) -> usize {
         self.inner.borrow().len()
@@ -3303,6 +3346,18 @@ impl<'a> LuaState<'a> {
         // `_G._G` self-references so scripts can detect the table.
         self.install_g_table();
         self.globals_locked = true;
+        // (frankenredis-8mwy9) Protect the standard library tables the same way
+        // redis's `luaSetTableProtectionRecursively` does: after env init the
+        // math/string/table/struct/bit/cjson/cmsgpack/redis tables are read-only
+        // for the duration of the script. KEYS/ARGV stay mutable (redis leaves
+        // them writable), so they are deliberately excluded.
+        for name in [
+            "math", "string", "table", "struct", "bit", "cjson", "cmsgpack", "redis",
+        ] {
+            if let Some(LuaValue::Table(t)) = self.globals.get(name) {
+                t.mark_readonly_recursive();
+            }
+        }
         // (frankenredis-vr8rg) Every script starts in RESP2 for redis.call,
         // independent of the client's HELLO version.
         self.resp_version = 2;
@@ -3785,6 +3840,13 @@ impl<'a> LuaState<'a> {
     ) -> Result<(), String> {
         let mut current = table;
         for _ in 0..16 {
+            // (frankenredis-8mwy9) A protected library table rejects every
+            // field write (new or overwriting) with redis's readonly error.
+            if current.is_readonly() {
+                return Err(
+                    "user_script:1: Attempt to modify a readonly table".to_string()
+                );
+            }
             let existing = current.inner.borrow().get(&key);
             if !matches!(existing, LuaValue::Nil) {
                 current.set(key, value);
@@ -6324,6 +6386,12 @@ impl<'a> LuaState<'a> {
                 if args.get(2).is_none() {
                     return Err(self.format_builtin_argerror("rawset", 3, "value expected"));
                 }
+                // (frankenredis-8mwy9) rawset bypasses __newindex but NOT the
+                // table protection — redis raises the readonly error (no
+                // user_script prefix) before the nil/NaN key checks below.
+                if matches!(&args[0], LuaValue::Table(t) if t.is_readonly()) {
+                    return Err("Attempt to modify a readonly table".to_string());
+                }
                 // (frankenredis-uyj7c) Upstream lua_rawset routes a nil key
                 // through luaH_set which raises 'table index is nil' (no
                 // user_script:1 prefix — this comes from the VM core rather
@@ -6376,6 +6444,12 @@ impl<'a> LuaState<'a> {
                         2,
                         "nil or table expected",
                     ));
+                }
+                // (frankenredis-8mwy9) A protected library table rejects
+                // setmetatable with the bare readonly error (no source prefix),
+                // matching redis.
+                if t.is_readonly() {
+                    return Err("Attempt to modify a readonly table".to_string());
                 }
                 // (frankenredis-fnh42) Upstream luaL_getmetafield checks
                 // the existing metatable for __metatable; if present,
@@ -7494,6 +7568,12 @@ impl<'a> LuaState<'a> {
                     } else {
                         body.to_string()
                     });
+                }
+                // (frankenredis-8mwy9) Writing into a protected library table
+                // raises the readonly error (after the arity check, before any
+                // element move), matching redis.
+                if matches!(&args[0], LuaValue::Table(t) if t.is_readonly()) {
+                    return Err("Attempt to modify a readonly table".to_string());
                 }
                 if args.len() == 2 {
                     let val = args[1].clone();
