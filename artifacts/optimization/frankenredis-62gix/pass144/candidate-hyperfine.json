@@ -1,0 +1,64 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/frankenredis-fbj62/pfcount_workload.py --server-bin target-62gix-candidate/release-perf/frankenredis --port 7394 --mode single-cached --elements 50000 --ops 20000 --warmup-ops 100 --json-out artifacts/optimization/frankenredis-62gix/pass144/candidate-single-last.json",
+      "mean": 1.57615471816,
+      "stddev": 0.026832415797252592,
+      "median": 1.57877596416,
+      "user": 0.52037806,
+      "system": 1.02393498,
+      "min": 1.52100789066,
+      "max": 1.60674912066,
+      "times": [
+        1.59192287766,
+        1.56669028366,
+        1.5652080186600001,
+        1.6001076256600002,
+        1.57584889466,
+        1.5817030336600002,
+        1.60674912066,
+        1.52100789066
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/frankenredis-fbj62/pfcount_workload.py --server-bin target-62gix-candidate/release-perf/frankenredis --port 7395 --mode multi --elements 50000 --ops 20000 --warmup-ops 100 --json-out artifacts/optimization/frankenredis-62gix/pass144/candidate-multi-last.json",
+      "mean": 1.8719171847850002,
+      "stddev": 0.019068014053971283,
+      "median": 1.8663809331600003,
+      "user": 0.78082731,
+      "system": 1.05081398,
+      "min": 1.8548182036600003,
+      "max": 1.9056021946600001,
+      "times": [
+        1.8548182036600003,
+        1.9056021946600001,
+        1.87469452266,
+        1.8952993986600002,
+        1.8669712616600003,
+        1.8559419166600002,
+        1.8562193756600003,
+        1.8657906046600001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

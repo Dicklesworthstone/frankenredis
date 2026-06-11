@@ -3373,6 +3373,12 @@ struct ScanResume {
     generation: u64,
 }
 
+#[derive(Debug, Clone)]
+struct HllRegisterCache {
+    modification_count: u64,
+    registers: Box<[u8; HLL_REGISTERS]>,
+}
+
 #[derive(Debug)]
 pub struct Store {
     /// The keyspace dict. Uses `foldhash` (a fast, HashDoS-resistant, pure-
@@ -3437,6 +3443,7 @@ pub struct Store {
     digest_mutations: u64,
     digest_stale: bool,
     zintercard_cache: Option<ZIntercardCache>,
+    hll_register_cache: HashMap<Vec<u8>, HllRegisterCache, foldhash::quality::RandomState>,
     db_key_counts: Vec<usize>,
     db_expires_counts: Vec<usize>,
     /// Number of databases (configurable at startup, default 16).
@@ -3888,6 +3895,7 @@ impl Default for Store {
             digest_mutations: 0,
             digest_stale: false,
             zintercard_cache: None,
+            hll_register_cache: HashMap::default(),
             db_key_counts: vec![0; DEFAULT_NUM_DATABASES],
             db_expires_counts: vec![0; DEFAULT_NUM_DATABASES],
             database_count: DEFAULT_NUM_DATABASES,
@@ -7005,6 +7013,7 @@ impl Store {
         } else {
             self.forget_volatile_key(&key);
         }
+        self.hll_register_cache.remove(&key);
         let old_entry = self.entries.insert(key.clone(), entry);
         self.update_expiry_deadline(old_expiry, new_expiry);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
@@ -7032,6 +7041,7 @@ impl Store {
 
     fn internal_entries_remove(&mut self, key: &[u8]) -> Option<Entry> {
         if let Some(entry) = self.entries.remove(key) {
+            self.hll_register_cache.remove(key);
             self.ordered_keys.remove(key);
             self.random_key_index_remove(key);
             self.forget_volatile_key(key);
@@ -7453,6 +7463,7 @@ impl Store {
         self.volatile_keys.clear();
         self.volatile_keys_dirty = false;
         self.expiry_deadline_counts.clear();
+        self.hll_register_cache.clear();
         self.hash_field_expires.clear();
         self.running_digest = 0;
         self.digest_stale = false;
@@ -14275,6 +14286,15 @@ impl Store {
 
     // ── HyperLogLog commands ───────────────────────────────────────────
 
+    fn hll_register_cache_store(&mut self, key: &[u8], registers: Vec<u8>) {
+        if let Some(entry) = self.entries.get(key) {
+            self.hll_register_cache.insert(
+                key.to_vec(),
+                hll_register_cache(registers, entry.modification_count),
+            );
+        }
+    }
+
     /// PFADD: add elements to a HyperLogLog. Returns `true` if any internal
     /// register was altered or the key was newly created.
     pub fn pfadd(
@@ -14339,8 +14359,11 @@ impl Store {
             entry.force_raw_encoding = true;
             entry.touch_write(now_ms);
             self.internal_entries_insert(key.to_vec(), entry);
+            self.hll_register_cache_store(key, registers);
             let updated = u64::from(created).saturating_add(register_updates);
             self.dirty = self.dirty.saturating_add(updated);
+        } else if existed {
+            self.hll_register_cache_store(key, registers);
         }
         Ok(created || modified)
     }
@@ -14430,6 +14453,7 @@ impl Store {
             } else {
                 0
             };
+            let mut cache_insert = None;
             if let Some(entry) = self.entries.get_mut(key) {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -14437,14 +14461,28 @@ impl Store {
                 let Some(data) = entry.value.string_bytes() else {
                     return Err(StoreError::WrongType);
                 };
+                let modification_count = entry.modification_count;
                 // Multi-key PFCOUNT merges via hllMerge, which tolerates a
                 // trailing VAL overflow (breaks the walk) the same way PFMERGE
                 // does — unlike single-key PFCOUNT's strict histogram. (frankenredis-yiu5p)
-                let registers = hll_parse_registers(data.as_ref(), HllDecode::Tolerant)?;
-                for i in 0..HLL_REGISTERS {
-                    merged[i] = merged[i].max(registers[i]);
+                if let Some(cache) = self
+                    .hll_register_cache
+                    .get(key)
+                    .filter(|cache| cache.modification_count == modification_count)
+                {
+                    hll_merge_registers(&mut merged, cache.registers.as_slice());
+                } else {
+                    let registers = hll_parse_registers(data.as_ref(), HllDecode::Tolerant)?;
+                    hll_merge_registers(&mut merged, &registers);
+                    cache_insert = Some((
+                        key.to_vec(),
+                        hll_register_cache(registers, modification_count),
+                    ));
                 }
                 entry.touch(now_ms);
+            }
+            if let Some((key, cache)) = cache_insert {
+                self.hll_register_cache.insert(key, cache);
             }
         }
         Ok(hll_estimate(&merged))
@@ -14472,9 +14510,7 @@ impl Store {
             // overflow the register set (trailing VAL garbage tolerated). (frankenredis-yiu5p)
             let (encoding, registers) = hll_parse(data.as_ref(), HllDecode::Tolerant)?;
             saw_dense_input |= encoding == HllEncoding::Dense;
-            for i in 0..HLL_REGISTERS {
-                merged[i] = merged[i].max(registers[i]);
-            }
+            hll_merge_registers(&mut merged, &registers);
         }
 
         // Merge all sources
@@ -14486,9 +14522,7 @@ impl Store {
                 };
                 let (encoding, registers) = hll_parse(data.as_ref(), HllDecode::Tolerant)?;
                 saw_dense_input |= encoding == HllEncoding::Dense;
-                for i in 0..HLL_REGISTERS {
-                    merged[i] = merged[i].max(registers[i]);
-                }
+                hll_merge_registers(&mut merged, &registers);
             }
         }
 
@@ -14504,6 +14538,7 @@ impl Store {
         entry.force_raw_encoding = true;
         entry.touch_write(now_ms);
         self.internal_entries_insert(dest.to_vec(), entry);
+        self.hll_register_cache_store(dest, merged);
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
     }
@@ -21086,6 +21121,25 @@ const HLL_SPARSE_VAL_MAX_LEN: usize = 4;
 const HLL_SPARSE_ZERO_MAX_LEN: usize = 64;
 const HLL_SPARSE_XZERO_MAX_LEN: usize = 16_384;
 const HLL_REDIS_SPARSE_MAX_BYTES: usize = 3_000;
+
+fn hll_register_cache(registers: Vec<u8>, modification_count: u64) -> HllRegisterCache {
+    let registers = registers
+        .into_boxed_slice()
+        .try_into()
+        .expect("HLL decode always returns exactly HLL_REGISTERS registers");
+    HllRegisterCache {
+        modification_count,
+        registers,
+    }
+}
+
+fn hll_merge_registers(merged: &mut [u8], registers: &[u8]) {
+    for (dst, &src) in merged.iter_mut().zip(registers) {
+        if src > *dst {
+            *dst = src;
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HllEncoding {
@@ -28297,7 +28351,7 @@ mod tests {
     // similar-size case it targets, plus a skewed case to prove no regression.
     #[test]
     fn intersect_sorted_i64_galloping_isomorphic_and_faster_galp1() {
-        use super::{SetValue, intersect_sorted_i64};
+        use super::intersect_sorted_i64;
 
         // Trivially-correct reference: keep ascending-unique `a` members present
         // in `b` via per-element binary search (the algorithm being replaced).
@@ -28324,7 +28378,7 @@ mod tests {
 
         // Self-contained FNV-1a fingerprint over every intersection output.
         let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut fnv = |g: &mut u64, x: i64| {
+        let fnv = |g: &mut u64, x: i64| {
             for byte in x.to_le_bytes() {
                 *g ^= u64::from(byte);
                 *g = g.wrapping_mul(0x0000_0100_0000_01b3);
@@ -28489,7 +28543,7 @@ mod tests {
 
         // Self-contained FNV-1a fingerprint over every difference output.
         let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut fnv = |g: &mut u64, x: i64| {
+        let fnv = |g: &mut u64, x: i64| {
             for byte in x.to_le_bytes() {
                 *g ^= u64::from(byte);
                 *g = g.wrapping_mul(0x0000_0100_0000_01b3);
@@ -28653,7 +28707,7 @@ mod tests {
             st
         };
         let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut fnv = |g: &mut u64, b: &[u8]| {
+        let fnv = |g: &mut u64, b: &[u8]| {
             for &byte in b {
                 *g ^= u64::from(byte);
                 *g = g.wrapping_mul(0x0000_0100_0000_01b3);
@@ -28801,7 +28855,7 @@ mod tests {
             st
         };
         let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut fnv = |g: &mut u64, b: &[u8]| {
+        let fnv = |g: &mut u64, b: &[u8]| {
             for &byte in b {
                 *g ^= u64::from(byte);
                 *g = g.wrapping_mul(0x0000_0100_0000_01b3);
@@ -29207,7 +29261,7 @@ mod tests {
             st
         };
         let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut fnv = |g: &mut u64, b: &[u8]| {
+        let fnv = |g: &mut u64, b: &[u8]| {
             for &byte in b {
                 *g ^= u64::from(byte);
                 *g = g.wrapping_mul(0x0000_0100_0000_01b3);
@@ -29350,7 +29404,7 @@ mod tests {
             s
         };
         let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut fnv = |g: &mut u64, n: u64| {
+        let fnv = |g: &mut u64, n: u64| {
             for byte in n.to_le_bytes() {
                 *g ^= u64::from(byte);
                 *g = g.wrapping_mul(0x0000_0100_0000_01b3);
@@ -29494,8 +29548,7 @@ mod tests {
             let mut cold = SortedSet::new();
             for _ in 0..n {
                 let klen = 1 + (next() % 4) as usize;
-                let member: Vec<u8> =
-                    (0..klen).map(|_| b"abcde"[(next() % 5) as usize]).collect();
+                let member: Vec<u8> = (0..klen).map(|_| b"abcde"[(next() % 5) as usize]).collect();
                 warm.insert(member.clone(), score);
                 cold.insert(member, score);
             }
@@ -29547,7 +29600,7 @@ mod tests {
             s
         };
         let bnd = |meta: u64, v: f64| -> ScoreBound {
-            if meta % 2 == 0 {
+            if meta.is_multiple_of(2) {
                 ScoreBound::Inclusive(v)
             } else {
                 ScoreBound::Exclusive(v)
@@ -29559,8 +29612,7 @@ mod tests {
             let mut cold = SortedSet::new();
             for _ in 0..n {
                 let klen = 1 + (next() % 4) as usize;
-                let member: Vec<u8> =
-                    (0..klen).map(|_| b"abcde"[(next() % 5) as usize]).collect();
+                let member: Vec<u8> = (0..klen).map(|_| b"abcde"[(next() % 5) as usize]).collect();
                 // small integer scores so many members share scores (ties)
                 let score = (next() % 7) as f64;
                 warm.insert(member.clone(), score);
@@ -29656,7 +29708,7 @@ mod tests {
             s
         };
         let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut fnv = |g: &mut u64, b: &[u8]| {
+        let fnv = |g: &mut u64, b: &[u8]| {
             for &byte in b {
                 *g ^= u64::from(byte);
                 *g = g.wrapping_mul(0x0000_0100_0000_01b3);
@@ -29784,7 +29836,7 @@ mod tests {
             s
         };
         let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut fnv = |g: &mut u64, b: &[u8]| {
+        let fnv = |g: &mut u64, b: &[u8]| {
             for &byte in b {
                 *g ^= u64::from(byte);
                 *g = g.wrapping_mul(0x0000_0100_0000_01b3);
@@ -29952,7 +30004,7 @@ mod tests {
             s
         };
         let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut fnv = |g: &mut u64, b: &[u8]| {
+        let fnv = |g: &mut u64, b: &[u8]| {
             for &byte in b {
                 *g ^= u64::from(byte);
                 *g = g.wrapping_mul(0x0000_0100_0000_01b3);
@@ -30100,7 +30152,7 @@ mod tests {
             state
         };
         let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut fnv = |g: &mut u64, b: &[u8]| {
+        let fnv = |g: &mut u64, b: &[u8]| {
             for &byte in b {
                 *g ^= u64::from(byte);
                 *g = g.wrapping_mul(0x0000_0100_0000_01b3);
@@ -35183,6 +35235,61 @@ mod tests {
         let before = store.dirty;
         assert_eq!(store.pfcount(&[b"missing"], 0).unwrap(), 0);
         assert_eq!(store.dirty, before);
+    }
+
+    #[test]
+    fn pfcount_multi_key_register_cache_tracks_hll_writes_and_overwrites() {
+        let mut store = Store::new();
+        store
+            .pfadd(b"a", &[b"x".to_vec(), b"y".to_vec()], 0)
+            .unwrap();
+        store.pfadd(b"b", &[b"z".to_vec()], 0).unwrap();
+
+        let first = store.pfcount(&[b"a", b"b"], 0).unwrap();
+        assert!(store.hll_register_cache.contains_key(b"a".as_slice()));
+        assert!(store.hll_register_cache.contains_key(b"b".as_slice()));
+        assert_eq!(store.pfcount(&[b"a", b"b"], 1).unwrap(), first);
+
+        store.set(b"a".to_vec(), b"not-a-hll".to_vec(), None, 2);
+        assert!(!store.hll_register_cache.contains_key(b"a".as_slice()));
+        assert_eq!(
+            store.pfcount(&[b"a", b"b"], 3),
+            Err(StoreError::InvalidHllValue)
+        );
+    }
+
+    #[test]
+    fn pfcount_multi_key_register_cache_rejects_stale_in_place_string_mutation() {
+        let mut store = Store::new();
+        store
+            .pfadd(b"a", &[b"x".to_vec(), b"y".to_vec()], 0)
+            .unwrap();
+        store.pfadd(b"b", &[b"z".to_vec()], 0).unwrap();
+        store.pfcount(&[b"a", b"b"], 0).unwrap();
+        let cached_modification_count = store
+            .hll_register_cache
+            .get(b"a".as_slice())
+            .expect("PFCOUNT should cache decoded registers")
+            .modification_count;
+        let hll_len = store
+            .entries
+            .get(b"a".as_slice())
+            .and_then(|entry| entry.value.string_bytes().map(|data| data.len()))
+            .expect("HLL key is stored as string bytes");
+
+        assert_eq!(store.setrange(b"a", 0, b"Z", 1).unwrap(), hll_len);
+        assert_ne!(
+            store
+                .entries
+                .get(b"a".as_slice())
+                .expect("mutated key remains present")
+                .modification_count,
+            cached_modification_count
+        );
+        assert_eq!(
+            store.pfcount(&[b"a", b"b"], 2),
+            Err(StoreError::InvalidHllValue)
+        );
     }
 
     #[test]

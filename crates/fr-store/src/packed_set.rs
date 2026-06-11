@@ -2049,8 +2049,7 @@ mod tests {
                 (source_deque, copy_deque)
             }
             _ => {
-                assert!(false, "large list must promote to deque storage");
-                return;
+                unreachable!("large list must promote to deque storage");
             }
         };
         assert!(std::sync::Arc::ptr_eq(source_deque, copy_deque));
@@ -2065,8 +2064,7 @@ mod tests {
                 (source_deque, copy_deque)
             }
             _ => {
-                assert!(false, "large list must stay in deque storage");
-                return;
+                unreachable!("large list must stay in deque storage");
             }
         };
         assert!(!std::sync::Arc::ptr_eq(source_deque, copy_deque));
@@ -2084,7 +2082,7 @@ mod tests {
                 assert!(std::sync::Arc::ptr_eq(&source_tail.elems, &copy_tail.elems));
             }
             _ => {
-                assert!(false, "129-element deque must split into two chunks");
+                unreachable!("129-element deque must split into two chunks");
             }
         }
     }

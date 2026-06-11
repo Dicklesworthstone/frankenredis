@@ -1,0 +1,12 @@
+{
+  "elapsed_sec": 2.054722559056245,
+  "elements_per_hll": 50000,
+  "last_reply": 98718,
+  "merged_count": 98718,
+  "mode": "multi",
+  "ops": 20000,
+  "ops_per_sec": 9733.674218862037,
+  "other_count": 50144,
+  "server_pid": 1953407,
+  "single_count": 49966
+}
