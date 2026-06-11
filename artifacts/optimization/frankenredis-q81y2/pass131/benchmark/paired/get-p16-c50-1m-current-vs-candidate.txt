@@ -1,0 +1,11 @@
+Benchmark 1: OUT=artifacts/optimization/frankenredis-q81y2/pass131/benchmark/paired/current-run SERVER=/tmp/rch_target_fr_3cc4w_p130_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_3cc4w_p130_current/release-perf/fr-bench PORT=6762 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-q81y2/pass131/benchmark/paired/current-get-p16-c50-1m-last.json KEY_PREFIX=q81y2:p131:paired:current artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh
+  Time (mean ± σ):      2.056 s ±  0.236 s    [User: 1.777 s, System: 2.609 s]
+  Range (min … max):    1.628 s …  2.444 s    10 runs
+ 
+Benchmark 2: OUT=artifacts/optimization/frankenredis-q81y2/pass131/benchmark/paired/candidate-run SERVER=/tmp/rch_target_fr_q81y2_p131_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_q81y2_p131_candidate/release-perf/fr-bench PORT=6763 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-q81y2/pass131/benchmark/paired/candidate-get-p16-c50-1m-last.json KEY_PREFIX=q81y2:p131:paired:candidate artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh
+  Time (mean ± σ):      2.079 s ±  0.199 s    [User: 1.792 s, System: 2.661 s]
+  Range (min … max):    1.733 s …  2.468 s    10 runs
+ 
+Summary
+  OUT=artifacts/optimization/frankenredis-q81y2/pass131/benchmark/paired/current-run SERVER=/tmp/rch_target_fr_3cc4w_p130_current/release-perf/frankenredis BENCH=/tmp/rch_target_fr_3cc4w_p130_current/release-perf/fr-bench PORT=6762 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-q81y2/pass131/benchmark/paired/current-get-p16-c50-1m-last.json KEY_PREFIX=q81y2:p131:paired:current artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh ran
+    1.01 ± 0.15 times faster than OUT=artifacts/optimization/frankenredis-q81y2/pass131/benchmark/paired/candidate-run SERVER=/tmp/rch_target_fr_q81y2_p131_candidate/release-perf/frankenredis BENCH=/tmp/rch_target_fr_q81y2_p131_candidate/release-perf/fr-bench PORT=6763 WORKLOAD=get REQUESTS=1000000 JSON_OUT=artifacts/optimization/frankenredis-q81y2/pass131/benchmark/paired/candidate-get-p16-c50-1m-last.json KEY_PREFIX=q81y2:p131:paired:candidate artifacts/optimization/frankenredis-zhphm/pass1/run_fr_bench_once.sh
