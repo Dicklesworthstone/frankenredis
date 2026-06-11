@@ -1,0 +1,85 @@
+diff --git a/crates/fr-server/src/main.rs b/crates/fr-server/src/main.rs
+index fb53095f4..9d36ab335 100644
+--- a/crates/fr-server/src/main.rs
++++ b/crates/fr-server/src/main.rs
+@@ -53,6 +53,7 @@ const MAX_LISTENERS: usize = 16;
+ const WRITER_WAKE_TOKEN: Token = Token(usize::MAX);
+ const WRITER_POOL_WORKERS: usize = 2;
+ const WRITER_QUEUE_BOUND: usize = 1024;
++const WRITER_HANDOFF_SPARE_CAP_BYTES: usize = 64 * 1024;
+ 
+ const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
+ const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
+@@ -5245,6 +5246,10 @@ fn drive_client_output(
+         let byte_len = bytes.len();
+         match pool.try_enqueue(token, writer_stream, bytes) {
+             Ok(()) => {
++                let spare_capacity = byte_len.min(WRITER_HANDOFF_SPARE_CAP_BYTES);
++                if spare_capacity > 0 {
++                    conn.write_buf = Vec::with_capacity(spare_capacity);
++                }
+                 conn.writer_in_flight_bytes = byte_len;
+                 conn.session.output_buffer_bytes = conn.pending_output_bytes();
+                 ctx.write_tokens.insert(token);
+@@ -8986,6 +8991,61 @@ mod tests {
+         assert!(closing_tokens.contains(&Token(1)));
+     }
+ 
++    #[test]
++    fn writer_handoff_leaves_bounded_spare_write_buffer() {
++        use crate::{
++            ClientConnection, OutputDriveContext, WRITER_HANDOFF_SPARE_CAP_BYTES, WriterPool,
++            clone_writer_stream, drive_client_output,
++        };
++        use fr_runtime::Runtime;
++        use mio::{Poll, Token};
++        use std::collections::HashSet;
++
++        let mut runtime = Runtime::default_strict();
++        let session = runtime.new_session();
++        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
++        let addr = listener.local_addr().unwrap();
++        let stream = StdTcpStream::connect(addr).unwrap();
++        let (_peer, _peer_addr) = listener.accept().unwrap();
++        let mio_stream = mio::net::TcpStream::from_std(stream);
++        let writer_stream = clone_writer_stream(&mio_stream).unwrap();
++        let mut conn =
++            ClientConnection::new_with_writer(mio_stream, Some(writer_stream), session, 0);
++        let payload_len = WRITER_HANDOFF_SPARE_CAP_BYTES + 4096;
++        conn.write_buf.resize(payload_len, b'x');
++
++        let mut poll = Poll::new().unwrap();
++        let pool = WriterPool::new(&poll).unwrap();
++        let mut write_tokens = HashSet::new();
++        let mut closing_tokens = HashSet::new();
++
++        drive_client_output(
++            Token(99),
++            &mut conn,
++            OutputDriveContext {
++                runtime: &mut runtime,
++                poll: &mut poll,
++                write_tokens: &mut write_tokens,
++                closing_tokens: &mut closing_tokens,
++                writer_pool: Some(&pool),
++            },
++            true,
++        );
++
++        assert_eq!(conn.writer_in_flight_bytes, payload_len);
++        assert!(conn.write_buf.is_empty());
++        assert!(
++            conn.write_buf.capacity() >= WRITER_HANDOFF_SPARE_CAP_BYTES,
++            "handoff should keep a spare output slab"
++        );
++        assert!(
++            conn.write_buf.capacity() <= payload_len,
++            "spare output slab should not exceed the handed-off batch"
++        );
++        assert!(write_tokens.contains(&Token(99)));
++        assert!(closing_tokens.is_empty());
++    }
++
+     #[test]
+     fn client_unblock_error_mode_unblocks_blocked_connection() {
+         use crate::{BlockedState, BlockingOp, ClientConnection};

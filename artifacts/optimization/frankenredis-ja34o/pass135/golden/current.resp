@@ -1,0 +1,25 @@
++OK
+$3
+abc
+$-1
++OK
+$0
+
++OK
+$10
+abcdefghij
+:1
+-WRONGTYPE Operation against a key holding the wrong kind of value
++OK
+$-1
++OK
++OK
+$3
+abc
++OK
+$3
+abc
++OK
+$3
+abc
++OK
