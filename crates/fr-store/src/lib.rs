@@ -1998,6 +1998,37 @@ impl SetValue {
         }
     }
 
+    /// (frankenredis-saddfast) Borrowed-member variant of [`Self::insert`].
+    /// Result and final state are byte-identical to `insert(member.to_vec(), ..)`
+    /// for every input, but no owned member is allocated on the hot path: the
+    /// intset branch never materializes the bytes, and the generic branch defers
+    /// to [`GenericSet::insert_borrowed`], which allocates only on a true
+    /// hashtable miss. This is the asymmetry that made `SADD` pay a `Vec<u8>`
+    /// allocation on every (mostly duplicate) member while redis allocates none.
+    pub(crate) fn insert_borrowed(&mut self, member: &[u8], max_intset_entries: usize) -> bool {
+        match self {
+            SetValue::Int(v) => match Self::canonical_int(member) {
+                Some(n) => match v.binary_search(&n) {
+                    Ok(_) => false,
+                    Err(pos) => {
+                        if v.len() >= max_intset_entries {
+                            self.promote_to_generic();
+                            self.insert_borrowed(member, max_intset_entries)
+                        } else {
+                            v.insert(pos, n);
+                            true
+                        }
+                    }
+                },
+                None => {
+                    self.promote_to_generic();
+                    self.insert_borrowed(member, max_intset_entries)
+                }
+            },
+            SetValue::Generic(s) => s.insert_borrowed(member),
+        }
+    }
+
     /// Remove `member`, returning true if it was present. (Generic removal keeps
     /// insertion order, matching `IndexSet::shift_remove`.)
     pub(crate) fn shift_remove(&mut self, member: &[u8]) -> bool {
@@ -9941,7 +9972,7 @@ impl Store {
                             && Self::set_fits_intset(s, max_intset_entries);
                         let mut added = 0_u64;
                         for m in members {
-                            if s.insert(m.as_ref().to_vec(), max_intset_entries) {
+                            if s.insert_borrowed(m.as_ref(), max_intset_entries) {
                                 added += 1;
                             }
                         }
@@ -9979,7 +10010,7 @@ impl Store {
                 let mut s = GenericSet::default();
                 let mut added = 0_u64;
                 for m in members {
-                    if s.insert(m.as_ref().to_vec()) {
+                    if s.insert_borrowed(m.as_ref()) {
                         added += 1;
                     }
                 }

@@ -271,6 +271,33 @@ impl GenericSet {
         }
     }
 
+    /// (frankenredis-saddfast) Borrowed-member insert: byte-identical in result
+    /// and final state to [`Self::insert`] with `member.to_vec()`, but allocates
+    /// an owned member only on a genuine `Hash`-encoding miss. The `Packed`
+    /// listpack already copies the bytes into its backing buffer, and a `Hash`
+    /// duplicate add (the overwhelmingly common case in `SADD myset element`
+    /// once the keyspace saturates) needs no allocation at all — matching redis's
+    /// `dict`, which never allocates an sds on a duplicate `setTypeAdd`. The
+    /// promotion check fires under the identical condition as `insert`, so the
+    /// observable encoding transition is unchanged.
+    pub fn insert_borrowed(&mut self, member: &[u8]) -> bool {
+        if let GenericSet::Packed(p) = self
+            && (p.len() >= PACKED_MAX_ENTRIES || member.len() > PACKED_MAX_VALUE)
+        {
+            self.promote();
+        }
+        match self {
+            GenericSet::Packed(p) => p.insert(member),
+            GenericSet::Hash(h) => {
+                if h.contains(member) {
+                    false
+                } else {
+                    h.insert(member.to_vec())
+                }
+            }
+        }
+    }
+
     pub fn shift_remove(&mut self, member: &[u8]) -> bool {
         match self {
             GenericSet::Packed(p) => p.remove(member),
