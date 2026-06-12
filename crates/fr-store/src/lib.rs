@@ -10,6 +10,8 @@ use fr_expire::evaluate_expiry;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+
+use indexmap::IndexMap;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Deref, DerefMut};
 
@@ -589,10 +591,15 @@ enum SortedSetInner {
 #[derive(Debug, Clone)]
 struct FullSortedSet {
     /// member -> score. foldhash (not SipHash) for fast ZSCORE/ZADD/ZINCRBY
-    /// member lookups; this map's iteration order is never observed (all zset
-    /// output is produced from `ordered`), so the hasher is invisible.
-    /// (frankenredis-rqdxh, extends 8kuy1)
-    dict: HashMap<Vec<u8>, f64, foldhash::quality::RandomState>,
+    /// member lookups. An `IndexMap` (not plain `HashMap`) so ZRANDMEMBER can
+    /// pick a uniformly-random member in O(1) via `get_index`, matching redis's
+    /// O(1) dict-random instead of an O(log n) order-statistic `select` per
+    /// pick. All ORDERED zset output is still produced from `ordered`, so this
+    /// map's positional/iteration order remains unobserved by every command
+    /// except ZRANDMEMBER (whose output is an unordered random sample anyway);
+    /// `swap_remove` keeps removals O(1) at the cost of reordering, which is
+    /// invisible. (frankenredis-rqdxh, extends 8kuy1; zrandmember O(1) pick)
+    dict: IndexMap<Vec<u8>, f64, foldhash::quality::RandomState>,
     /// (score, member) -> ()
     /// We use ScoreMember wrapper to handle f64 comparison and lexicographical member tie-breaking.
     ordered: BTreeMap<ScoreMember, ()>,
@@ -685,7 +692,7 @@ impl ScoreMember {
 impl FullSortedSet {
     fn with_capacity(cap: usize) -> Self {
         Self {
-            dict: HashMap::with_capacity_and_hasher(cap, foldhash::quality::RandomState::default()),
+            dict: IndexMap::with_capacity_and_hasher(cap, foldhash::quality::RandomState::default()),
             ordered: BTreeMap::new(),
             rank_tree: None,
             deep_index_reads: 0,
@@ -721,7 +728,7 @@ impl FullSortedSet {
     }
 
     fn remove(&mut self, member: &[u8]) -> bool {
-        if let Some(score) = self.dict.remove(member) {
+        if let Some(score) = self.dict.swap_remove(member) {
             let sm = ScoreMember::actual(score, member.to_vec());
             self.ordered.remove(&sm);
             if let Some(tree) = &mut self.rank_tree {
@@ -806,7 +813,7 @@ impl FullSortedSet {
             }
             if let Some(member) = sm.member.into_actual() {
                 let score = sm.score;
-                self.dict.remove(&member);
+                self.dict.swap_remove(&member);
                 return Some((member, score));
             }
         }
@@ -821,7 +828,7 @@ impl FullSortedSet {
             }
             if let Some(member) = sm.member.into_actual() {
                 let score = sm.score;
-                self.dict.remove(&member);
+                self.dict.swap_remove(&member);
                 return Some((member, score));
             }
         }
@@ -1043,6 +1050,30 @@ impl SortedSet {
             .iter()
             .filter_map(|idx| by_idx.get(idx).cloned())
             .collect()
+    }
+
+    /// (frankenredis-zrandmember) Resolve random pick indices to (member, score)
+    /// for ZRANDMEMBER. For the `Full` encoding this uses the dict's O(1)
+    /// positional access (`get_index`) — matching redis's O(1) dict-random —
+    /// instead of `members_at_indices`' O(log n) order-statistic `select` per
+    /// pick. ZRANDMEMBER's reply is an UNORDERED random sample, so resolving an
+    /// index against the dict's order rather than the score order is
+    /// contract-equivalent (same uniform distribution over the same member set,
+    /// same count, same distinctness) while dropping the per-pick log n. The
+    /// `Packed` (small-listpack) encoding has no dict, so it keeps the ordered
+    /// iter path — trivial at <=128 members. Out-of-range indices are skipped,
+    /// matching `members_at_indices`.
+    pub(crate) fn random_members_at_indices(&self, indices: &[usize]) -> Vec<(Vec<u8>, f64)> {
+        if indices.is_empty() {
+            return Vec::new();
+        }
+        if let SortedSetInner::Full(full) = &self.inner {
+            return indices
+                .iter()
+                .filter_map(|&idx| full.dict.get_index(idx).map(|(m, &s)| (m.clone(), s)))
+                .collect();
+        }
+        self.members_at_indices(indices)
     }
 
     fn iter_desc(&self) -> SortedSetIterDesc<'_> {
@@ -12827,11 +12858,11 @@ impl Store {
             idxs
         };
 
-        // Clone only the picked members in a single ordered pass (see
-        // SortedSet::members_at_indices). Output preserves pick order + dups.
+        // Clone only the picked members (Full: O(1) dict positional access;
+        // Packed: small ordered pass). Output preserves pick order + dups.
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => Ok(zs.members_at_indices(&indices)),
+                Value::SortedSet(zs) => Ok(zs.random_members_at_indices(&indices)),
                 _ => Ok(Vec::new()),
             },
             None => Ok(Vec::new()),
