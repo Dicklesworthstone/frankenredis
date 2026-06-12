@@ -11816,7 +11816,16 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<(Vec<u8>, f64)>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (frankenredis-byq16) Skip the redundant second keyspace lookup on the
+        // missing/expired-key path. `drop_if_expired` already probed `entries`
+        // and reports presence; when the key is absent the `entries.get_mut`
+        // below can only return None, so early-returning here is byte-identical
+        // to the get_mut-else-None arm. Mirrors `Store::spop`'s
+        // `if !self.drop_if_expired { return Ok(None); }` guard. RNG state is
+        // unchanged: `next_rand()` is only reached when the key exists.
+        if !self.drop_if_expired(key, now_ms) {
+            return Ok(None);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -11856,7 +11865,12 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<(Vec<u8>, f64)>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (frankenredis-byq16) See `zpopmin`: skip the redundant second keyspace
+        // lookup on the missing/expired-key path (byte-identical to the
+        // get_mut-else-None arm; RNG untouched since the key is absent).
+        if !self.drop_if_expired(key, now_ms) {
+            return Ok(None);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
