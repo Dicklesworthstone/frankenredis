@@ -5525,12 +5525,19 @@ impl Store {
         results
     }
 
-    pub fn setnx(&mut self, key: Vec<u8>, value: Vec<u8>, now_ms: u64) -> bool {
-        self.drop_if_expired(&key, now_ms);
-        if self.entries.contains_key(&key) {
+    pub fn setnx(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
+        self.drop_if_expired(key, now_ms);
+        if self.entries.contains_key(key) {
             return false;
         }
-        self.internal_entries_insert(key, Entry::new(canonical_string_value(value), None, now_ms));
+        // Borrow key+value: the owned copy is built only on the actual insert
+        // (existing-key SETNX allocates nothing), and the value is materialised
+        // straight into the canonical Value (inline for small strings) instead of
+        // via a throwaway clone. Byte-identical to the prior owned path.
+        self.internal_entries_insert(
+            key.to_vec(),
+            Entry::new(canonical_string_value_from_slice(value), None, now_ms),
+        );
         self.dirty = self.dirty.saturating_add(1);
         true
     }
@@ -5538,7 +5545,7 @@ impl Store {
     pub fn getset(
         &mut self,
         key: Vec<u8>,
-        value: Vec<u8>,
+        value: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
         // GETSET reads the old value (upstream getsetCommand → getGenericCommand →
@@ -5566,7 +5573,7 @@ impl Store {
             }
             None => (None, None),
         };
-        let mut new_entry = Entry::new(canonical_string_value(value), None, now_ms);
+        let mut new_entry = Entry::new(canonical_string_value_from_slice(value), None, now_ms);
         if let Some((freq, last_touch)) = lfu_state {
             new_entry.lfu_freq = freq;
             new_entry.lfu_last_touch_min = last_touch;
@@ -24943,8 +24950,8 @@ mod tests {
     #[test]
     fn setnx_only_sets_if_absent() {
         let mut store = Store::new();
-        assert!(store.setnx(b"k".to_vec(), b"v1".to_vec(), 0));
-        assert!(!store.setnx(b"k".to_vec(), b"v2".to_vec(), 0));
+        assert!(store.setnx(b"k", b"v1", 0));
+        assert!(!store.setnx(b"k", b"v2", 0));
         assert_eq!(store.get(b"k", 0).unwrap(), Some(b"v1".to_vec()));
     }
 
@@ -24952,11 +24959,11 @@ mod tests {
     fn getset_returns_old_and_sets_new() {
         let mut store = Store::new();
         assert_eq!(
-            store.getset(b"k".to_vec(), b"v1".to_vec(), 0).unwrap(),
+            store.getset(b"k".to_vec(), b"v1", 0).unwrap(),
             None
         );
         assert_eq!(
-            store.getset(b"k".to_vec(), b"v2".to_vec(), 0).unwrap(),
+            store.getset(b"k".to_vec(), b"v2", 0).unwrap(),
             Some(b"v1".to_vec())
         );
         assert_eq!(store.get(b"k", 0).unwrap(), Some(b"v2".to_vec()));
@@ -24969,7 +24976,7 @@ mod tests {
         assert_eq!(store.pttl(b"k", 1_000), PttlValue::Remaining(5_000));
 
         assert_eq!(
-            store.getset(b"k".to_vec(), b"v2".to_vec(), 2_000).unwrap(),
+            store.getset(b"k".to_vec(), b"v2", 2_000).unwrap(),
             Some(b"v1".to_vec())
         );
         assert_eq!(store.get(b"k", 2_000).unwrap(), Some(b"v2".to_vec()));
@@ -27653,7 +27660,7 @@ mod tests {
             Some(LFU_INIT_VAL) => {}
             other => return Err(format!("new string LFU frequency mismatch: {other:?}")),
         }
-        let _old = store.getset(b"s".to_vec(), b"new".to_vec(), 1).unwrap();
+        let _old = store.getset(b"s".to_vec(), b"new", 1).unwrap();
         match store.object_freq(b"s", 1) {
             Some(6) => {}
             other => return Err(format!("GETSET LFU mismatch: {other:?}")),
