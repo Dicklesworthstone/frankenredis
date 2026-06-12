@@ -6087,15 +6087,42 @@ impl Runtime {
         self.apply_requirepass_update(requirepass, false);
     }
 
+    /// Per-command refresh of the O(1) runtime→store scalar mirrors that INFO
+    /// (and a couple of tests) expect to be live immediately after the mutating
+    /// command (e.g. `maxmemory_bytes_live` right after CONFIG SET maxmemory).
+    /// The EXPENSIVE O(n) INFO aggregates moved to `refresh_store_info_aggregates`
+    /// (lazy, INFO-only) — see (frankenredis-infolazy).
     fn refresh_store_runtime_info_context(&mut self) {
-        // (frankenredis-trackingtotal) Compute client tracking stats for INFO stats section.
-        // stat_tracking_clients: count of clients with tracking enabled
-        // stat_tracking_total_keys: number of distinct keys being tracked
-        // stat_tracking_total_items: sum of all key-to-client subscriptions
-        // stat_tracking_total_prefixes: sum of all BCAST prefixes across clients
+        self.server.store.maxmemory_bytes_live = self.server.maxmemory_bytes;
+        self.server.store.rdb_bgsave_in_progress = self.server.rdb_bgsave_pid.is_some();
+        self.server.store.rdb_bgsave_start_time_sec = self.server.rdb_bgsave_start_time_sec;
+        self.server.store.aof_rewrite_in_progress = self.server.aof_rewrite_pid.is_some();
+        self.server.store.aof_rewrite_start_time_sec = self.server.aof_rewrite_start_time_sec;
+        self.server.store.aof_rewrite_scheduled = self.server.aof_rewrite_scheduled;
+    }
+
+    /// (frankenredis-infolazy) The O(n) INFO-only store aggregates: client-
+    /// tracking stats (a scan over EVERY client session + the observed-key map)
+    /// and the replication-backlog memory estimate (a scan over EVERY buffered
+    /// AOF record, summing argv byte lengths). These fields are consumed ONLY by
+    /// the INFO `stats` / `memory` section builders, so computing them on every
+    /// command — O(clients + tracked_keys + backlog_bytes) per command — was pure
+    /// per-command waste (the borrowed fast paths already skip it). Refresh them
+    /// lazily, only when INFO actually needs the relevant section. Mirrors the
+    /// `refresh_client_memory_aggregates` laziness shipped in zfu61.
+    fn refresh_store_info_aggregates(&mut self) {
+        // Count every OTHER client from the registry, then the current session
+        // authoritatively. At this lazy (INFO-time) call the active session has
+        // already been synced into `client_sessions`, so it must be excluded from
+        // the registry scan to avoid double-counting (the previous per-command
+        // call ran before that sync). (frankenredis-infolazy)
+        let current_id = self.session.client_id;
         let mut tracking_clients: u64 = 0;
         let mut total_prefixes: usize = 0;
-        for session in self.server.client_sessions.values() {
+        for (id, session) in &self.server.client_sessions {
+            if *id == current_id {
+                continue;
+            }
             if session.client_tracking.enabled {
                 tracking_clients += 1;
                 total_prefixes += session.client_tracking.prefixes.len();
@@ -6115,20 +6142,13 @@ impl Runtime {
             .map(|observers| observers.len())
             .sum();
         self.server.store.stat_tracking_total_prefixes = total_prefixes;
-        self.server.store.maxmemory_bytes_live = self.server.maxmemory_bytes;
-        self.server.store.rdb_bgsave_in_progress = self.server.rdb_bgsave_pid.is_some();
-        self.server.store.rdb_bgsave_start_time_sec = self.server.rdb_bgsave_start_time_sec;
-        self.server.store.aof_rewrite_in_progress = self.server.aof_rewrite_pid.is_some();
-        self.server.store.aof_rewrite_start_time_sec = self.server.aof_rewrite_start_time_sec;
-        self.server.store.aof_rewrite_scheduled = self.server.aof_rewrite_scheduled;
-        // Compute replication backlog memory usage from aof_records buffer.
-        // Each AofRecord contains a Vec<Vec<u8>> for the command argv.
+        // Replication backlog memory usage from the aof_records buffer. Each
+        // AofRecord holds a Vec<Vec<u8>> for the command argv.
         self.server.store.mem_replication_backlog = self
             .server
             .aof_records
             .iter()
             .map(|record| {
-                // Size estimate: Vec overhead + sum of argv element lengths + Vec overhead per element
                 std::mem::size_of::<fr_persist::AofRecord>()
                     + record
                         .argv
@@ -18890,6 +18910,18 @@ impl Runtime {
         // memory section is actually requested) instead of on every command.
         if section_requested("memory") {
             self.refresh_client_memory_aggregates();
+        }
+        // (frankenredis-infolazy) The O(n) INFO-only store aggregates are read by
+        // three sections: tracking_clients (Clients), mem_replication_backlog
+        // (Memory) and stat_tracking_total_* (Stats). Refresh them lazily here
+        // when any of those sections is requested, instead of on every command.
+        // Other commands leave these store fields untouched, exactly as the
+        // borrowed fast paths already do.
+        if section_requested("clients")
+            || section_requested("memory")
+            || section_requested("stats")
+        {
+            self.refresh_store_info_aggregates();
         }
         // Upstream INFO emits Latencystats only when explicitly
         // requested or as part of `all`/`everything`. The bare
