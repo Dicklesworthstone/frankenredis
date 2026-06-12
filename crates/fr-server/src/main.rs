@@ -36,7 +36,8 @@ use fr_eventloop::{
 use fr_protocol::{BorrowedCommandArgsKind, ParserConfig, RespFrame, RespParseError};
 use fr_repl::ReplOffset;
 use fr_runtime::{
-    ClientSession, ClientUnblockMode, PlainKeyedPopCmd, PlainKeyedValuesCmd, Runtime,
+    ClientSession, ClientUnblockMode, PlainCardinalityCmd, PlainKeyedPopCmd, PlainKeyedValuesCmd,
+    Runtime,
 };
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token, Waker};
@@ -2497,6 +2498,14 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_cardinality_borrowed(cmd, key, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some((key, index)) = borrowed_plain_lindex_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_lindex_borrowed(key, index, ts)
                 {
@@ -2882,6 +2891,22 @@ fn borrowed_plain_scard_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u
         [command, key] if command.eq_ignore_ascii_case(b"SCARD") => Some(*key),
         _ => None,
     }
+}
+
+fn borrowed_plain_cardinality_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(PlainCardinalityCmd, &'a [u8])> {
+    let [command, key] = borrowed_args else {
+        return None;
+    };
+    let cmd = if command.eq_ignore_ascii_case(b"ZCARD") {
+        PlainCardinalityCmd::Zcard
+    } else if command.eq_ignore_ascii_case(b"HLEN") {
+        PlainCardinalityCmd::Hlen
+    } else {
+        return None;
+    };
+    Some((cmd, *key))
 }
 
 fn borrowed_plain_lindex_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {

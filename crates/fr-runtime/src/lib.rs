@@ -371,6 +371,36 @@ fn plain_keyed_pop_owned_argv(cmd: PlainKeyedPopCmd, key: &[u8]) -> Vec<Vec<u8>>
     vec![cmd.name_upper().as_bytes().to_vec(), key.to_vec()]
 }
 
+/// Single-key cardinality reads that return an Integer length and share one
+/// borrowed fast path (mirrors LLEN/SCARD). ZCARD/HLEN lacked a fast path and
+/// fell to the generic owned-argv dispatch — measured 1.30x/1.34x FR-SLOWER vs
+/// redis while LLEN/SCARD (fast-pathed) were fr-faster. (frankenredis-cardfast)
+#[derive(Clone, Copy)]
+pub enum PlainCardinalityCmd {
+    Zcard,
+    Hlen,
+}
+
+impl PlainCardinalityCmd {
+    fn name_upper(self) -> &'static str {
+        match self {
+            PlainCardinalityCmd::Zcard => "ZCARD",
+            PlainCardinalityCmd::Hlen => "HLEN",
+        }
+    }
+
+    fn name_lower(self) -> &'static str {
+        match self {
+            PlainCardinalityCmd::Zcard => "zcard",
+            PlainCardinalityCmd::Hlen => "hlen",
+        }
+    }
+}
+
+fn plain_cardinality_owned_argv(cmd: PlainCardinalityCmd, key: &[u8]) -> Vec<Vec<u8>> {
+    vec![cmd.name_upper().as_bytes().to_vec(), key.to_vec()]
+}
+
 /// Build the RESP reply for a no-count ZPOPMIN/ZPOPMAX from the store result,
 /// byte-identical to the generic `zpopmin`/`zpopmax` command handlers: a flat
 /// `[member, score]` array on a hit, an empty array on a miss, the WRONGTYPE
@@ -9039,6 +9069,150 @@ impl Runtime {
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
                 output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    fn can_execute_plain_cardinality_borrowed(
+        &mut self,
+        cmd: PlainCardinalityCmd,
+        key: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < cmd.name_upper().len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Conservative borrowed runtime fast path for `ZCARD key` / `HLEN key`:
+    /// mirrors `execute_plain_scard_borrowed` (key borrowed, generic argv
+    /// materialization and dispatch skipped). Returns the collection cardinality
+    /// as an Integer, or a WRONGTYPE error reply for a mismatched key, exactly
+    /// like the generic handler — the same `store.zcard`/`store.hlen` are called,
+    /// so LFU/LRU touch and keyspace hit/miss accounting are identical. Returns
+    /// None (fall back) on any disabling state. (frankenredis-cardfast)
+    pub fn execute_plain_cardinality_borrowed(
+        &mut self,
+        cmd: PlainCardinalityCmd,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_cardinality_borrowed(cmd, key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_argv_len_sum = cmd.name_upper().len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let result = match cmd {
+            PlainCardinalityCmd::Zcard => self.server.store.zcard(key, now_ms),
+            PlainCardinalityCmd::Hlen => self.server.store.hlen(key, now_ms),
+        };
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match result {
+            Ok(len) => RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_cardinality_borrowed_metrics(
+            cmd, key, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_cardinality_borrowed_metrics(
+        &mut self,
+        cmd: PlainCardinalityCmd,
+        key: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_cardinality_owned_argv(cmd, key));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_cardinality_owned_argv(cmd, key));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server.store.record_command_histogram_with_kind(
+                cmd.name_lower(),
+                elapsed_us,
+                kind,
+            );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_cardinality_owned_argv(cmd, key));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command '{}' took {}us, exceeding budget {}ms",
+                    cmd.name_upper(),
+                    elapsed_us,
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
             });
         }
     }
