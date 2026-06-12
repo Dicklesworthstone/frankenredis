@@ -197,6 +197,20 @@ def run(oport, fport, seed, iters):
                 if not (co and cf and co == cf):
                     divs.append((i, cmd, ro, rf))
             continue
+        # EXPIRE-family with GT/LT compares the NEW expiry against the key's
+        # CURRENT expiry, each side using its own live clock. When the two are
+        # within the inter-process execution gap (a few ms) — e.g. re-applying a
+        # TTL a key already holds — the boolean set/not-set result (1 vs 0) flips
+        # purely on which process's `now` is microseconds ahead. That is a timing
+        # race, not a logic divergence: fr's conditional-EXPIRE (NX/XX/GT/LT)
+        # semantics are pinned byte-exact by the deterministic
+        # core_command_edges fixtures. NX/XX test the mere presence of any TTL
+        # (state-based, not clock-relative), so they are NOT skipped here — only
+        # the GT/LT relative comparison races.
+        if (cmd[0] in ("EXPIRE", "PEXPIRE", "EXPIREAT", "PEXPIREAT")
+                and any(str(a).upper() in ("GT", "LT") for a in cmd[1:])
+                and ro[0] == 'int' and rf[0] == 'int'):
+            continue
         # compare: exact, but allow error-message wording to differ if both errors share code
         if ro != rf:
             co, cf = err_code(ro), err_code(rf)
