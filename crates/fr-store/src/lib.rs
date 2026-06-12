@@ -705,10 +705,26 @@ impl FullSortedSet {
 
     fn insert(&mut self, member: Vec<u8>, score: f64) -> bool {
         let score = canonicalize_zero_score(score);
-        if let Some(old_score) = self.dict.insert(member.clone(), score) {
-            if old_score.total_cmp(&score).is_eq() {
-                return false;
+        // (frankenredis-ug50u) Existing-member score update: bump the score in the
+        // dict IN PLACE via `get_mut` rather than `dict.insert(member.clone())`,
+        // which cloned a fresh member-Vec for the key on EVERY update only to have
+        // `IndexMap` keep the original key and drop the clone. ZADD on a saturated
+        // zset (redis-benchmark `-r`, ~75% duplicate members) hit this wasted
+        // alloc+free per command. The dict probe is unchanged (one `get_mut` vs the
+        // old one `insert`); behaviour is byte-identical — the slot only changes
+        // when the score differs, exactly as the old equal-score early return.
+        let existing = match self.dict.get_mut(&member) {
+            Some(slot) => {
+                let old_score = *slot;
+                if old_score.total_cmp(&score).is_eq() {
+                    return false;
+                }
+                *slot = score;
+                Some(old_score)
             }
+            None => None,
+        };
+        if let Some(old_score) = existing {
             let old_sm = ScoreMember::actual(old_score, member.clone());
             let new_sm = ScoreMember::actual(score, member);
             self.ordered.remove(&old_sm);
@@ -727,6 +743,7 @@ impl FullSortedSet {
             }
             return false;
         }
+        self.dict.insert(member.clone(), score);
         let new_sm = ScoreMember::actual(score, member);
         if let Some(tree) = &mut self.rank_tree {
             self.ordered.insert(new_sm.clone(), ());
@@ -11089,7 +11106,7 @@ impl Store {
             return Ok(added);
         }
 
-        self.zadd_with_options(key, members, ZaddOptions::default(), now_ms)
+        self.zadd_with_options(key, members.to_vec(), ZaddOptions::default(), now_ms)
             .map(|(added, _changed)| added)
     }
 
@@ -11101,7 +11118,7 @@ impl Store {
     pub fn zadd_with_options(
         &mut self,
         key: &[u8],
-        members: &[(f64, Vec<u8>)],
+        members: Vec<(f64, Vec<u8>)>,
         opts: ZaddOptions,
         now_ms: u64,
     ) -> Result<(usize, usize), StoreError> {
@@ -11134,27 +11151,34 @@ impl Store {
             // `ZADD k GT 20 a 10 a` must end at 20, not 10; `ZADD k NX 1 a 2 a`
             // must keep 1, not 2) and the CH/added counts (each successive
             // change counts). Iterate the pairs verbatim.
+            // (frankenredis-ug50u) `members` is owned, so each member-Vec is MOVED
+            // into the store instead of `member.clone()`-d. The runtime ZADD fast
+            // path and both fr-command callers already build a throwaway
+            // `Vec<(f64, Vec<u8>)>`, so the prior borrowed signature forced a second
+            // full member allocation per pair purely to hand an owned Vec to
+            // `insert_with_limits`. Moving eliminates that clone; behaviour is
+            // unchanged (a skipped NX/XX/GT/LT pair simply drops its owned member).
             for (score, member) in members {
-                match zs.get_score(member) {
+                match zs.get_score(&member) {
                     Some(old_score) => {
                         // Existing member
                         if opts.nx {
                             continue; // NX: don't update existing
                         }
                         let should_update = if opts.gt {
-                            *score > old_score
+                            score > old_score
                         } else if opts.lt {
-                            *score < old_score
+                            score < old_score
                         } else {
                             true
                         };
                         if should_update {
                             let old_canonical = canonicalize_zero_score(old_score);
-                            let new_canonical = canonicalize_zero_score(*score);
+                            let new_canonical = canonicalize_zero_score(score);
                             let score_changed = !old_canonical.total_cmp(&new_canonical).is_eq();
                             zs.insert_with_limits(
-                                member.clone(),
-                                *score,
+                                member,
+                                score,
                                 zset_max_entries,
                                 zset_max_value,
                             );
@@ -11169,8 +11193,8 @@ impl Store {
                             continue; // XX: don't add new
                         }
                         zs.insert_with_limits(
-                            member.clone(),
-                            *score,
+                            member,
+                            score,
                             zset_max_entries,
                             zset_max_value,
                         );
@@ -28300,7 +28324,7 @@ mod tests {
         let (n, _) = store
             .zadd_with_options(
                 b"z",
-                &[
+                vec![
                     (10.0, b"a".to_vec()),
                     (1.0, b"b".to_vec()),
                     (20.0, b"a".to_vec()),
@@ -28321,7 +28345,7 @@ mod tests {
         store
             .zadd_with_options(
                 b"z2",
-                &[(20.0, b"a".to_vec()), (10.0, b"a".to_vec())],
+                vec![(20.0, b"a".to_vec()), (10.0, b"a".to_vec())],
                 gt2,
                 0,
             )
@@ -28334,7 +28358,7 @@ mod tests {
             ..ZaddOptions::default()
         };
         store
-            .zadd_with_options(b"z3", &[(1.0, b"a".to_vec()), (2.0, b"a".to_vec())], nx, 0)
+            .zadd_with_options(b"z3", vec![(1.0, b"a".to_vec()), (2.0, b"a".to_vec())], nx, 0)
             .unwrap();
         assert_eq!(store.zscore(b"z3", b"a", 0).unwrap(), Some(1.0));
 
@@ -28346,7 +28370,7 @@ mod tests {
         let (n, _) = store
             .zadd_with_options(
                 b"z4",
-                &[
+                vec![
                     (1.0, b"a".to_vec()),
                     (2.0, b"a".to_vec()),
                     (3.0, b"a".to_vec()),

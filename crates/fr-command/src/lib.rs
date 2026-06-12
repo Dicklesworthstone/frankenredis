@@ -5443,7 +5443,7 @@ fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             i += 2;
         }
 
-        let (count, _changed) = store.zadd_with_options(&argv[1], &pairs, opts, now_ms)?;
+        let (count, _changed) = store.zadd_with_options(&argv[1], pairs, opts, now_ms)?;
         Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
     }
 }
@@ -6099,7 +6099,7 @@ fn geoadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
 
     let (total_changed, _only_updated) = store.zadd_with_options(
         &argv[1],
-        &pairs,
+        pairs,
         fr_store::ZaddOptions {
             xx,
             nx,

@@ -7505,7 +7505,7 @@ impl Runtime {
         let start = Instant::now();
         let reply = match self.server.store.zadd_with_options(
             key,
-            &members,
+            members,
             fr_store::ZaddOptions {
                 nx: false,
                 xx: false,

@@ -12,7 +12,7 @@ fn zadd_xx_missing_key_creates_empty_set() {
     };
 
     let _ = store
-        .zadd_with_options(b"myzset", &members, opts, 0)
+        .zadd_with_options(b"myzset", members, opts, 0)
         .unwrap();
 
     // Redis should NOT have created the key
