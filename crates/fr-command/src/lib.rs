@@ -3997,7 +3997,12 @@ fn mset(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     }
     let mut i = 1;
     while i < argv.len() {
-        store.set(argv[i].clone(), argv[i + 1].clone(), None, now_ms);
+        // Use the borrowed plain-SET fast path (no per-pair key/value clones,
+        // same full overwrite cleanup as single SET) instead of the owned
+        // Store::set. MSET is exactly N independent plain SETs with no TTL, so
+        // this is byte-identical while avoiding 2 heap allocations per pair —
+        // MSET was ~1.7x slower than redis 7.2.4 purely from that clone churn.
+        store.set_plain_borrowed(&argv[i], &argv[i + 1], now_ms);
         i += 2;
     }
     Ok(RespFrame::SimpleString("OK".to_string()))
@@ -23180,9 +23185,10 @@ fn msetnx(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             return Ok(RespFrame::Integer(0));
         }
     }
-    // All keys are new — set them all
+    // All keys are new — set them all via the borrowed plain-SET fast path
+    // (no per-pair clones; byte-identical to N single SETs).
     for i in (1..argv.len()).step_by(2) {
-        store.set(argv[i].clone(), argv[i + 1].clone(), None, now_ms);
+        store.set_plain_borrowed(&argv[i], &argv[i + 1], now_ms);
     }
     Ok(RespFrame::Integer(1))
 }
