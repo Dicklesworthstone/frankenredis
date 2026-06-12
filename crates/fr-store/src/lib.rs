@@ -692,7 +692,10 @@ impl ScoreMember {
 impl FullSortedSet {
     fn with_capacity(cap: usize) -> Self {
         Self {
-            dict: IndexMap::with_capacity_and_hasher(cap, foldhash::quality::RandomState::default()),
+            dict: IndexMap::with_capacity_and_hasher(
+                cap,
+                foldhash::quality::RandomState::default(),
+            ),
             ordered: BTreeMap::new(),
             rank_tree: None,
             deep_index_reads: 0,
@@ -2804,6 +2807,19 @@ impl Entry {
         self.last_access_ms = now_ms;
         self.lfu_freq = LFU_INIT_VAL;
         self.lfu_last_touch_min = now_ms / 60_000;
+    }
+
+    fn replace_with_integer_write(&mut self, value: i64, now_ms: u64) {
+        self.value = Value::Integer(value);
+        self.refresh_db_add_metadata(now_ms);
+        self.bump_mod_count();
+        self.force_raw_encoding = false;
+        self.force_string_encoding = false;
+        self.force_set_listpack_encoding = false;
+        self.force_set_hashtable_encoding = false;
+        self.force_hash_hashtable_encoding = false;
+        self.force_zset_skiplist_encoding = false;
+        self.int_copy_not_shared = false;
     }
 
     fn duplicate_for_copy(&self, now_ms: u64) -> Self {
@@ -5365,20 +5381,55 @@ impl Store {
     }
 
     pub fn incr(&mut self, key: &[u8], now_ms: u64) -> Result<i64, StoreError> {
+        self.incrby_existing_or_insert(key, 1, now_ms)
+    }
+
+    fn incrby_existing_or_insert(
+        &mut self,
+        key: &[u8],
+        delta: i64,
+        now_ms: u64,
+    ) -> Result<i64, StoreError> {
         self.drop_if_expired(key, now_ms);
-        let (current, expires_at_ms) = match self.entries.get(key) {
+
+        let (next, has_expiry) = match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
-                Value::String(v) => (parse_i64(v)?, entry.expiry_ms()),
-                Value::Integer(value) => (*value, entry.expiry_ms()),
+                Value::String(v) => {
+                    let next = parse_i64(v)?
+                        .checked_add(delta)
+                        .ok_or(StoreError::IntegerOverflow)?;
+                    entry.replace_with_integer_write(next, now_ms);
+                    (next, entry.expiry_ms().is_some())
+                }
+                Value::Integer(value) => {
+                    let next = value
+                        .checked_add(delta)
+                        .ok_or(StoreError::IntegerOverflow)?;
+                    entry.replace_with_integer_write(next, now_ms);
+                    (next, entry.expiry_ms().is_some())
+                }
                 _ => return Err(StoreError::WrongType),
             },
-            None => (0_i64, None),
+            None => {
+                let next = 0_i64
+                    .checked_add(delta)
+                    .ok_or(StoreError::IntegerOverflow)?;
+                self.internal_entries_insert(
+                    key.to_vec(),
+                    Entry::new(Value::Integer(next), None, now_ms),
+                );
+                self.dirty = self.dirty.saturating_add(1);
+                return Ok(next);
+            }
         };
-        let next = current.checked_add(1).ok_or(StoreError::IntegerOverflow)?;
-        self.internal_entries_insert(
-            key.to_vec(),
-            Entry::new(Value::Integer(next), expires_at_ms, now_ms),
-        );
+
+        if has_expiry {
+            self.mark_volatile_keys_dirty();
+        } else {
+            self.forget_volatile_key(key);
+        }
+        self.hll_register_cache.remove(key);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
         Ok(next)
     }
@@ -5673,24 +5724,7 @@ impl Store {
     }
 
     pub fn incrby(&mut self, key: &[u8], delta: i64, now_ms: u64) -> Result<i64, StoreError> {
-        self.drop_if_expired(key, now_ms);
-        let (current, expires_at_ms) = match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::String(v) => (parse_i64(v)?, entry.expiry_ms()),
-                Value::Integer(value) => (*value, entry.expiry_ms()),
-                _ => return Err(StoreError::WrongType),
-            },
-            None => (0_i64, None),
-        };
-        let next = current
-            .checked_add(delta)
-            .ok_or(StoreError::IntegerOverflow)?;
-        self.internal_entries_insert(
-            key.to_vec(),
-            Entry::new(Value::Integer(next), expires_at_ms, now_ms),
-        );
-        self.dirty = self.dirty.saturating_add(1);
-        Ok(next)
+        self.incrby_existing_or_insert(key, delta, now_ms)
     }
 
     pub fn incrbyfloat(&mut self, key: &[u8], delta: f64, now_ms: u64) -> Result<f64, StoreError> {
@@ -11132,11 +11166,8 @@ impl Store {
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
         let (added, changed, is_empty, touched) = {
-            let entry = self.internal_entry(
-                key,
-                || Value::SortedSet(Box::new(SortedSet::new())),
-                now_ms,
-            );
+            let entry =
+                self.internal_entry(key, || Value::SortedSet(Box::new(SortedSet::new())), now_ms);
             let Value::SortedSet(zs) = &mut entry.value else {
                 return Err(StoreError::WrongType);
             };
@@ -11176,12 +11207,7 @@ impl Store {
                             let old_canonical = canonicalize_zero_score(old_score);
                             let new_canonical = canonicalize_zero_score(score);
                             let score_changed = !old_canonical.total_cmp(&new_canonical).is_eq();
-                            zs.insert_with_limits(
-                                member,
-                                score,
-                                zset_max_entries,
-                                zset_max_value,
-                            );
+                            zs.insert_with_limits(member, score, zset_max_entries, zset_max_value);
                             if score_changed {
                                 changed += 1;
                             }
@@ -11192,12 +11218,7 @@ impl Store {
                         if opts.xx {
                             continue; // XX: don't add new
                         }
-                        zs.insert_with_limits(
-                            member,
-                            score,
-                            zset_max_entries,
-                            zset_max_value,
-                        );
+                        zs.insert_with_limits(member, score, zset_max_entries, zset_max_value);
                         added += 1;
                     }
                 }
@@ -11937,11 +11958,8 @@ impl Store {
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
         let (res, is_empty, touched) = {
-            let entry = self.internal_entry(
-                key,
-                || Value::SortedSet(Box::new(SortedSet::new())),
-                now_ms,
-            );
+            let entry =
+                self.internal_entry(key, || Value::SortedSet(Box::new(SortedSet::new())), now_ms);
             if lfu_tracking_enabled && key_existed {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
@@ -22783,21 +22801,22 @@ fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usi
 #[cfg(test)]
 mod tests {
     use super::{
-        BitRangeUnit, DUMP_CRC64_LEN, DUMP_TRAILER_LEN, DUMP_VERSION_LEN, EvictionLoopFailure,
-        EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue, HLL_REDIS_DENSE_ENCODING,
-        HLL_REDIS_DENSE_SIZE, HLL_REDIS_HEADER_SIZE, HLL_REDIS_MAGIC, HLL_REDIS_SPARSE_ENCODING,
-        HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, LFU_INIT_VAL, LatencySample, MaxmemoryPolicy,
-        MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT,
-        PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK,
-        RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST,
-        RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET,
-        RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET,
-        RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, ScoreBound, Store,
-        StoreError, StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions,
-        StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value,
-        REDIS_OBJECT_OVERHEAD_BYTES, REDIS_SCORE_BYTES, SetValue, ValueType, decode_length,
-        decode_listpack_strings, decode_rdb_string, encode_db_key, encode_intset, encode_length,
-        encode_listpack_strings, estimate_listpack_entry_bytes, estimate_listpack_score_bytes,
+        BitRangeUnit, DUMP_CRC64_LEN, DUMP_TRAILER_LEN, DUMP_VERSION_LEN, Entry,
+        EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue,
+        HLL_REDIS_DENSE_ENCODING, HLL_REDIS_DENSE_SIZE, HLL_REDIS_HEADER_SIZE, HLL_REDIS_MAGIC,
+        HLL_REDIS_SPARSE_ENCODING, HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, LFU_INIT_VAL,
+        LatencySample, MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED,
+        NOTIFY_GENERIC, NOTIFY_KEYEVENT, PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2,
+        RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP,
+        RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST,
+        RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3,
+        RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK,
+        RDB_TYPE_ZSET_ZIPLIST, REDIS_OBJECT_OVERHEAD_BYTES, REDIS_SCORE_BYTES, ScoreBound,
+        SetValue, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
+        StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
+        StreamPendingEntry, Value, ValueType, decode_length, decode_listpack_strings,
+        decode_rdb_string, encode_db_key, encode_intset, encode_length, encode_listpack_strings,
+        estimate_listpack_entry_bytes, estimate_listpack_score_bytes,
         estimate_set_memory_usage_bytes, hll_sparse_decode, redis_allocation_size,
         redis_score_to_string,
     };
@@ -23370,6 +23389,122 @@ mod tests {
         let mut store = Store::new();
         store.set(b"n".to_vec(), b"-0".to_vec(), None, 0);
         assert_eq!(store.incr(b"n", 0), Err(StoreError::ValueNotInteger));
+    }
+
+    #[test]
+    fn incrby_existing_key_matches_whole_entry_replacement_side_effects() {
+        fn seed(store: &mut Store) {
+            store.set(b"n".to_vec(), b"41".to_vec(), Some(5_000), 1_000);
+            store.rebuild_volatile_keys_if_dirty();
+            let _ = store.state_digest();
+            let modification_count = {
+                let entry = store.entries.get_mut(b"n".as_slice()).expect("seeded key");
+                entry.last_access_ms = 1_234;
+                entry.lfu_freq = 200;
+                entry.lfu_last_touch_min = 55;
+                entry.modification_count = 41;
+                entry.force_raw_encoding = true;
+                entry.force_string_encoding = true;
+                entry.force_set_listpack_encoding = true;
+                entry.force_set_hashtable_encoding = true;
+                entry.force_hash_hashtable_encoding = true;
+                entry.force_zset_skiplist_encoding = true;
+                entry.int_copy_not_shared = true;
+                entry.modification_count
+            };
+            store.hll_register_cache.insert(
+                b"n".to_vec(),
+                super::hll_register_cache(vec![0; HLL_REGISTERS], modification_count),
+            );
+            store.dirty = 17;
+            store.digest_stale = false;
+            store.digest_mutations = 23;
+        }
+
+        let mut expected = Store::new();
+        let mut actual = Store::new();
+        seed(&mut expected);
+        seed(&mut actual);
+
+        let expires_at_ms = expected
+            .entries
+            .get(b"n".as_slice())
+            .and_then(Entry::expiry_ms);
+        expected.internal_entries_insert(
+            b"n".to_vec(),
+            Entry::new(Value::Integer(42), expires_at_ms, 2_000),
+        );
+        expected.dirty = expected.dirty.saturating_add(1);
+
+        assert_eq!(actual.incrby(b"n", 1, 2_000), Ok(42));
+        assert_eq!(
+            actual.entries.get(b"n".as_slice()),
+            expected.entries.get(b"n".as_slice())
+        );
+        assert_eq!(
+            actual.pttl_no_stats(b"n", 2_000),
+            expected.pttl_no_stats(b"n", 2_000)
+        );
+        assert_eq!(actual.expires_count, expected.expires_count);
+        assert_eq!(actual.db_expires_counts, expected.db_expires_counts);
+        assert_eq!(actual.volatile_keys_dirty, expected.volatile_keys_dirty);
+        assert_eq!(
+            actual.hll_register_cache.len(),
+            expected.hll_register_cache.len()
+        );
+        assert_eq!(actual.dirty, expected.dirty);
+        assert_eq!(actual.digest_stale, expected.digest_stale);
+        assert_eq!(actual.digest_mutations, expected.digest_mutations);
+        assert_eq!(actual.state_digest(), expected.state_digest());
+    }
+
+    #[test]
+    fn incr_invalid_integer_leaves_entry_and_side_effects_unchanged() {
+        let mut store = Store::new();
+        store.set(b"n".to_vec(), b"-0".to_vec(), Some(5_000), 1_000);
+        store.rebuild_volatile_keys_if_dirty();
+        let _ = store.state_digest();
+        let modification_count = {
+            let entry = store.entries.get_mut(b"n".as_slice()).expect("seeded key");
+            entry.last_access_ms = 1_234;
+            entry.lfu_freq = 200;
+            entry.lfu_last_touch_min = 55;
+            entry.modification_count = 41;
+            entry.force_raw_encoding = true;
+            entry.force_string_encoding = true;
+            entry.force_set_listpack_encoding = true;
+            entry.force_set_hashtable_encoding = true;
+            entry.force_hash_hashtable_encoding = true;
+            entry.force_zset_skiplist_encoding = true;
+            entry.int_copy_not_shared = true;
+            entry.modification_count
+        };
+        store.hll_register_cache.insert(
+            b"n".to_vec(),
+            super::hll_register_cache(vec![0; HLL_REGISTERS], modification_count),
+        );
+        store.dirty = 17;
+        store.digest_stale = false;
+        store.digest_mutations = 23;
+
+        let before_entry = store.entries.get(b"n".as_slice()).cloned();
+        let before_expires_count = store.expires_count;
+        let before_db_expires_counts = store.db_expires_counts.clone();
+        let before_volatile_keys_dirty = store.volatile_keys_dirty;
+        let before_hll_cache_len = store.hll_register_cache.len();
+        let before_dirty = store.dirty;
+        let before_digest_stale = store.digest_stale;
+        let before_digest_mutations = store.digest_mutations;
+
+        assert_eq!(store.incr(b"n", 2_000), Err(StoreError::ValueNotInteger));
+        assert_eq!(store.entries.get(b"n".as_slice()).cloned(), before_entry);
+        assert_eq!(store.expires_count, before_expires_count);
+        assert_eq!(store.db_expires_counts, before_db_expires_counts);
+        assert_eq!(store.volatile_keys_dirty, before_volatile_keys_dirty);
+        assert_eq!(store.hll_register_cache.len(), before_hll_cache_len);
+        assert_eq!(store.dirty, before_dirty);
+        assert_eq!(store.digest_stale, before_digest_stale);
+        assert_eq!(store.digest_mutations, before_digest_mutations);
     }
 
     #[test]
@@ -23997,9 +24132,9 @@ mod tests {
         // 64-bit: 9 + 1 = 10
         assert_eq!(estimate_listpack_score_bytes(5_000_000_000.0), 10);
         // non-integer score -> string entry (d2string bytes + 2)
-        let frac = redis_score_to_string(3.14159);
+        let frac = redis_score_to_string(1.2345);
         assert_eq!(
-            estimate_listpack_score_bytes(3.14159),
+            estimate_listpack_score_bytes(1.2345),
             estimate_listpack_entry_bytes(frac.as_bytes())
         );
         // 1e20 renders as "1e+20" (d2string), a 5-byte string entry -> 5 + 2
@@ -25165,10 +25300,7 @@ mod tests {
     #[test]
     fn getset_returns_old_and_sets_new() {
         let mut store = Store::new();
-        assert_eq!(
-            store.getset(b"k".to_vec(), b"v1", 0).unwrap(),
-            None
-        );
+        assert_eq!(store.getset(b"k".to_vec(), b"v1", 0).unwrap(), None);
         assert_eq!(
             store.getset(b"k".to_vec(), b"v2", 0).unwrap(),
             Some(b"v1".to_vec())
@@ -28358,7 +28490,12 @@ mod tests {
             ..ZaddOptions::default()
         };
         store
-            .zadd_with_options(b"z3", vec![(1.0, b"a".to_vec()), (2.0, b"a".to_vec())], nx, 0)
+            .zadd_with_options(
+                b"z3",
+                vec![(1.0, b"a".to_vec()), (2.0, b"a".to_vec())],
+                nx,
+                0,
+            )
             .unwrap();
         assert_eq!(store.zscore(b"z3", b"a", 0).unwrap(), Some(1.0));
 

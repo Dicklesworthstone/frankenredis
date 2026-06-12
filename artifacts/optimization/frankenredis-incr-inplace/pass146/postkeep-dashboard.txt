@@ -1,0 +1,11 @@
+== post-keep vs-redis pipelined throughput (P16, -c50, -n200000, best-of-2) ==
+cmd          redis         fr   redis/fr
+set         740740     722021      1.03x  FR-SLOWER
+get         790513     925925      0.85x  fr-faster
+incr        806451     716845      1.13x  FR-SLOWER
+lpush       961538     888888      1.08x  FR-SLOWER
+rpush       896860     947867      0.95x  fr-faster
+sadd        840336     813008      1.03x  FR-SLOWER
+hset        724637     716845      1.01x  FR-SLOWER
+zadd        409836     426439      0.96x  fr-faster
+spop       1052631     913242      1.15x  FR-SLOWER
