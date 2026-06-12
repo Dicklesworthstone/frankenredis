@@ -702,6 +702,38 @@ impl FullSortedSet {
         }
     }
 
+    /// (frankenredis-zsetbulk) Build a `FullSortedSet` from already-unique
+    /// (member, score) pairs in ONE bulk pass instead of N incremental
+    /// `insert`s. The `ordered` `BTreeMap` is produced via `collect()`, which
+    /// sorts once and bottom-up bulk-builds the tree in O(n) — versus N
+    /// root-to-leaf inserts with node splits scattered across the tree. The
+    /// result is byte-identical to inserting the same pairs one at a time: the
+    /// `dict` keeps the pairs' iteration order (only ever observed by the random
+    /// `ZRANDMEMBER` index pick, so order is unobservable), the `BTreeMap` is
+    /// order-defined by `ScoreMember`, and the rank treap stays lazily `None`.
+    /// Callers must guarantee member uniqueness (e.g. pairs drained from a
+    /// `HashMap`), exactly as `from_unique_pairs_with_limits` already requires.
+    fn from_unique_pairs(pairs: Vec<(Vec<u8>, f64)>) -> Self {
+        let mut dict = IndexMap::with_capacity_and_hasher(
+            pairs.len(),
+            foldhash::quality::RandomState::default(),
+        );
+        let mut score_members: Vec<ScoreMember> = Vec::with_capacity(pairs.len());
+        for (member, score) in pairs {
+            let score = canonicalize_zero_score(score);
+            score_members.push(ScoreMember::actual(score, member.clone()));
+            dict.insert(member, score);
+        }
+        let ordered: BTreeMap<ScoreMember, ()> =
+            score_members.into_iter().map(|sm| (sm, ())).collect();
+        Self {
+            dict,
+            ordered,
+            rank_tree: None,
+            deep_index_reads: 0,
+        }
+    }
+
     fn len(&self) -> usize {
         self.dict.len()
     }
@@ -1011,12 +1043,8 @@ impl SortedSet {
                 inner: SortedSetInner::Packed(PackedZSet::from_unique_pairs(pairs)),
             }
         } else {
-            let mut full = FullSortedSet::with_capacity(pairs.len());
-            for (member, score) in pairs {
-                full.insert(member, score);
-            }
             Self {
-                inner: SortedSetInner::Full(full),
+                inner: SortedSetInner::Full(FullSortedSet::from_unique_pairs(pairs)),
             }
         }
     }
@@ -15766,10 +15794,12 @@ impl Store {
         self.stream_last_ids.remove(dest);
 
         if count > 0 {
-            let mut zs = SortedSet::new();
-            for (m, s) in combined {
-                zs.insert_with_limits(m, s, zset_max_entries, zset_max_value);
-            }
+            // (frankenredis-zsetbulk) `combined` has unique members, so build the
+            // dest zset in one bulk pass (O(n) BTreeMap build) instead of N
+            // incremental treap/BTreeMap inserts.
+            let pairs: Vec<(Vec<u8>, f64)> = combined.into_iter().collect();
+            let zs =
+                SortedSet::from_unique_pairs_with_limits(pairs, zset_max_entries, zset_max_value);
             self.internal_entries_insert(
                 dest.to_vec(),
                 Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
