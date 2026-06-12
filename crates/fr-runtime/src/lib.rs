@@ -17348,14 +17348,31 @@ impl Runtime {
         }
 
         if let Some(path) = self.server.rdb_path.clone() {
-            let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
             let fn_codes = self.rdb_function_codes();
             let fn_refs: Vec<&[u8]> = fn_codes.iter().map(Vec::as_slice).collect();
             let aux = [
                 ("redis-ver", fr_store::REDIS_COMPAT_VERSION),
                 ("frankenredis", "true"),
             ];
-            if fr_persist::write_rdb_file_with_functions(&path, &entries, &aux, &fn_refs).is_err() {
+            // (frankenredis-rdbsave) Prefer the borrowed string-only fast path —
+            // it references each key/value straight out of the store instead of
+            // cloning the whole keyspace into an owned RdbEntry list, which the
+            // profiler showed dominated SAVE at scale. Byte-identical to the
+            // owned encoder for an all-string keyspace; any non-string value
+            // falls back to the full encoder. Mirrors the AOF-base + in-memory
+            // snapshot sites that already use this path.
+            let encoded = if let Some(bytes) = try_encode_string_only_rdb_snapshot(
+                &mut self.server.store,
+                now_ms,
+                &aux,
+                &fn_refs,
+            ) {
+                bytes
+            } else {
+                let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
+                fr_persist::encode_rdb_with_functions(&entries, &aux, &fn_refs)
+            };
+            if fr_persist::write_rdb_bytes(&path, &encoded).is_err() {
                 return Err(RespFrame::Error(
                     "ERR error saving RDB snapshot to disk".to_string(),
                 ));

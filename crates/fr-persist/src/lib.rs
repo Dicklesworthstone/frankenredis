@@ -3370,6 +3370,14 @@ pub fn write_rdb_file_with_functions(
     write_rdb_bytes_atomically(path, &encode_rdb_with_functions(entries, aux, functions))
 }
 
+/// Durably write already-encoded RDB `bytes` to `path` (temp file + rename +
+/// parent fsync). Lets callers that pre-encode the snapshot — e.g. via the
+/// borrowed string-only fast path — reuse the atomic-write machinery without
+/// going back through an owned `RdbEntry` list.
+pub fn write_rdb_bytes(path: &Path, bytes: &[u8]) -> Result<(), PersistError> {
+    write_rdb_bytes_atomically(path, bytes)
+}
+
 /// Durably write RDB bytes to `path` via a temp file + rename + parent fsync.
 fn write_rdb_bytes_atomically(path: &Path, encoded: &[u8]) -> Result<(), PersistError> {
     let tmp_path = path.with_extension("rdb.tmp");
