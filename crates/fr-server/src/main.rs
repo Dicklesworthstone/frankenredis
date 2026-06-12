@@ -2442,6 +2442,15 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some((key, delta, member)) = borrowed_plain_zincrby_args(&borrowed_args)
+                    && let Some(response) =
+                        runtime.execute_plain_zincrby_borrowed(key, delta, member, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_keyed_pop_borrowed(cmd, key, ts)
                 {
@@ -2796,6 +2805,17 @@ fn borrowed_plain_zadd_args<'a>(
         return None;
     }
     Some((*key, pairs))
+}
+
+fn borrowed_plain_zincrby_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(&'a [u8], &'a [u8], &'a [u8])> {
+    match borrowed_args {
+        [command, key, delta, member] if command.eq_ignore_ascii_case(b"ZINCRBY") => {
+            Some((*key, *delta, *member))
+        }
+        _ => None,
+    }
 }
 
 /// `LPOP | RPOP | SPOP key` borrowed-arg matcher for the no-count pop fast path.
