@@ -1,0 +1,5 @@
+baseline_sha256=ebdd2e13dee8907214ea0fa16db4757cafe3fdebc6ef25ea31cd31f1a64db9d1
+candidate_sha256=ebdd2e13dee8907214ea0fa16db4757cafe3fdebc6ef25ea31cd31f1a64db9d1
+bytes_equal=True
+output_len=269
+commands=PING,HSET,HSET,HSET,HGETALL,HGET,HLEN,HDEL,HSET,HGETALL,QUIT

@@ -1,0 +1,11 @@
+Benchmark 1: ART=/data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline BENCH=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark BIN=/data/projects/frankenredis/target-coralox-pass148-candidate-debug/release/frankenredis PORT=24036 NAME=candidate_r1_rev N=3000000 CLIENTS=50 PIPE=16 KEYSPACE=1 bash /data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline/run_hset_once.sh
+  Time (mean ± σ):      3.273 s ±  0.074 s    [User: 1.926 s, System: 4.276 s]
+  Range (min … max):    3.170 s …  3.420 s    8 runs
+ 
+Benchmark 2: ART=/data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline BENCH=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark BIN=/data/projects/frankenredis/target-coralox-pass148-baseline/release/frankenredis PORT=24037 NAME=baseline_r1_rev N=3000000 CLIENTS=50 PIPE=16 KEYSPACE=1 bash /data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline/run_hset_once.sh
+  Time (mean ± σ):      3.649 s ±  0.559 s    [User: 2.313 s, System: 4.513 s]
+  Range (min … max):    3.295 s …  4.708 s    8 runs
+ 
+Summary
+  ART=/data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline BENCH=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark BIN=/data/projects/frankenredis/target-coralox-pass148-candidate-debug/release/frankenredis PORT=24036 NAME=candidate_r1_rev N=3000000 CLIENTS=50 PIPE=16 KEYSPACE=1 bash /data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline/run_hset_once.sh ran
+    1.11 ± 0.17 times faster than ART=/data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline BENCH=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark BIN=/data/projects/frankenredis/target-coralox-pass148-baseline/release/frankenredis PORT=24037 NAME=baseline_r1_rev N=3000000 CLIENTS=50 PIPE=16 KEYSPACE=1 bash /data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline/run_hset_once.sh

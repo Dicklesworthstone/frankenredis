@@ -1,0 +1,12 @@
+>> building standard --release frankenredis via rch ...
+== vs-redis pipelined throughput (P16, -c50, -n200000, best-of-2) ==
+cmd          redis         fr   redis/fr
+set         738007     687285      1.07x  FR-SLOWER
+get         829875     896860      0.93x  fr-faster
+incr        829875     668896      1.24x  FR-SLOWER
+lpush       966183     719424      1.34x  FR-SLOWER
+rpush       952381     772200      1.23x  FR-SLOWER
+sadd        796812     657894      1.21x  FR-SLOWER
+hset        738007     526315      1.40x  FR-SLOWER
+zadd        371747     314465      1.18x  FR-SLOWER
+spop       1020408     934579      1.09x  FR-SLOWER

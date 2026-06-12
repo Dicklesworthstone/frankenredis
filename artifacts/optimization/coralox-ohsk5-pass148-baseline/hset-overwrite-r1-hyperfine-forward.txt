@@ -1,0 +1,11 @@
+Benchmark 1: ART=/data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline BENCH=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark BIN=/data/projects/frankenredis/target-coralox-pass148-baseline/release/frankenredis PORT=24034 NAME=baseline_r1 N=3000000 CLIENTS=50 PIPE=16 KEYSPACE=1 bash /data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline/run_hset_once.sh
+  Time (mean ± σ):      3.287 s ±  0.046 s    [User: 2.002 s, System: 4.255 s]
+  Range (min … max):    3.226 s …  3.351 s    8 runs
+ 
+Benchmark 2: ART=/data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline BENCH=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark BIN=/data/projects/frankenredis/target-coralox-pass148-candidate-debug/release/frankenredis PORT=24035 NAME=candidate_r1 N=3000000 CLIENTS=50 PIPE=16 KEYSPACE=1 bash /data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline/run_hset_once.sh
+  Time (mean ± σ):      3.273 s ±  0.072 s    [User: 1.964 s, System: 4.250 s]
+  Range (min … max):    3.206 s …  3.406 s    8 runs
+ 
+Summary
+  ART=/data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline BENCH=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark BIN=/data/projects/frankenredis/target-coralox-pass148-candidate-debug/release/frankenredis PORT=24035 NAME=candidate_r1 N=3000000 CLIENTS=50 PIPE=16 KEYSPACE=1 bash /data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline/run_hset_once.sh ran
+    1.00 ± 0.03 times faster than ART=/data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline BENCH=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark BIN=/data/projects/frankenredis/target-coralox-pass148-baseline/release/frankenredis PORT=24034 NAME=baseline_r1 N=3000000 CLIENTS=50 PIPE=16 KEYSPACE=1 bash /data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline/run_hset_once.sh

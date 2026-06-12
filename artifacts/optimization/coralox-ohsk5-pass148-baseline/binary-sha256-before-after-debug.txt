@@ -1,0 +1,2 @@
+5c01df095f3d6bc75ebf89ea65eadfdf41c8a1cee3598a495e611085c54b2bc2  target-coralox-pass148-baseline/release/frankenredis
+b4fbb5e685c77e429d6361734a32d751250fb7332702653b2ee8c51ba17bba70  target-coralox-pass148-candidate-debug/release/frankenredis
