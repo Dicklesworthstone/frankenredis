@@ -15708,7 +15708,13 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
-        let mut combined: HashMap<Vec<u8>, f64> = HashMap::new();
+        // (frankenredis-zunionfold) Accumulate the union members in a foldhash
+        // map, not the default-SipHash `HashMap::new()`. The output is rebuilt
+        // into an ordered `SortedSet` below, so the hasher never affects the
+        // result — but ZUNIONSTORE over large zsets hashes every member of every
+        // source set here, and foldhash is ~3-5x faster per hash than SipHash.
+        let mut combined: HashMap<Vec<u8>, f64, foldhash::quality::RandomState> =
+            HashMap::default();
 
         for (i, &key) in keys.iter().enumerate() {
             self.drop_if_expired(key, now_ms);

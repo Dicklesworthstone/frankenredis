@@ -23435,7 +23435,12 @@ fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     }
     let (weights, aggregate, withscores) =
         parse_zset_algebra_options(argv, 2 + numkeys, numkeys, true)?;
-    let mut combined: std::collections::HashMap<Vec<u8>, f64> = std::collections::HashMap::new();
+    // (frankenredis-zunionfold) foldhash accumulator, not default-SipHash
+    // `HashMap::new()`: `entries` is sorted by (score, member) below, so the
+    // hasher never affects output, but ZUNION hashes every member of every
+    // source set here and foldhash is ~3-5x faster per hash.
+    let mut combined: std::collections::HashMap<Vec<u8>, f64, foldhash::quality::RandomState> =
+        std::collections::HashMap::default();
     for (i, &key) in keys.iter().enumerate() {
         let w = weights.get(i).copied().unwrap_or(1.0);
         let members = store.zget_members_with_scores(key, now_ms)?;
