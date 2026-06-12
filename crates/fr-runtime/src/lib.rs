@@ -1142,6 +1142,23 @@ impl AclUser {
 
     /// Check if a command invocation is allowed for this user.
     fn is_command_allowed_for_argv(&self, argv: &[Vec<u8>]) -> bool {
+        // Hot-path fast exit: a user with NO per-command and NO category rules
+        // (e.g. the default `+@all` user, which is what the unauthenticated
+        // benchmark/common path uses) decides purely on `all_commands`. The
+        // existing short-circuit below already skipped the category scan for
+        // such users, but only AFTER building the per-command selector list
+        // (`acl_command_selectors_for_argv` allocates a `Vec<String>` plus a
+        // lowercased command `String` on every command). Lifting the check above
+        // that computation skips both allocations. Byte-identical: the fall-
+        // through path returns `false` for an empty argv (no selectors) and
+        // `all_commands` otherwise, exactly as reproduced here.
+        if self.denied_commands.is_empty()
+            && self.allowed_commands.is_empty()
+            && self.denied_categories.is_empty()
+            && self.allowed_categories.is_empty()
+        {
+            return !argv.is_empty() && self.all_commands;
+        }
         let selectors = fr_command::acl_command_selectors_for_argv(argv);
         if selectors.is_empty() {
             return false;
