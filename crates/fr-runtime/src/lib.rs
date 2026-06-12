@@ -3608,14 +3608,26 @@ impl ServerState {
         // `cmdstat_memory`. (frankenredis-8who6) Reuse the shared
         // canonical_command_fullname helper that already drives the
         // subscribe-context error wording.
-        let key = canonical_command_fullname(argv);
         let kind = if failed {
             CommandRecordKind::Failed
         } else {
             CommandRecordKind::Success
         };
-        self.store
-            .record_command_histogram_with_kind(&key, duration_us, kind);
+        // Avoid the per-command canonical-fullname String allocation: only
+        // container commands (acl|whoami, …) need namespacing; for everything
+        // else the histogram tracker lowercases the name itself, so a borrowed
+        // Cow over the raw command bytes is enough.
+        // (frankenredis-light-cmd-dispatch-overhead-byq16)
+        let parent = argv.first().map(Vec::as_slice).unwrap_or(b"");
+        if argv.len() > 1 && fr_command::command_has_subcommands_bytes(parent) {
+            let key = canonical_command_fullname(argv);
+            self.store
+                .record_command_histogram_with_kind(&key, duration_us, kind);
+        } else {
+            let name = String::from_utf8_lossy(parent);
+            self.store
+                .record_command_histogram_with_kind(&name, duration_us, kind);
+        }
     }
 
     /// Record a pre-handler rejection (wrong arity surfaced by the
@@ -3632,9 +3644,18 @@ impl ServerState {
         }
         // (frankenredis-6n2qm, frankenredis-8who6) — see
         // record_command_histogram_outcome.
-        let key = canonical_command_fullname(argv);
-        self.store
-            .record_command_histogram_with_kind(&key, 0, CommandRecordKind::Rejected);
+        // See record_command_histogram_outcome: skip the canonical-fullname
+        // String alloc for non-container commands. (frankenredis-byq16)
+        let parent = argv.first().map(Vec::as_slice).unwrap_or(b"");
+        if argv.len() > 1 && fr_command::command_has_subcommands_bytes(parent) {
+            let key = canonical_command_fullname(argv);
+            self.store
+                .record_command_histogram_with_kind(&key, 0, CommandRecordKind::Rejected);
+        } else {
+            let name = String::from_utf8_lossy(parent);
+            self.store
+                .record_command_histogram_with_kind(&name, 0, CommandRecordKind::Rejected);
+        }
     }
 
     fn capture_aof_record(&mut self, argv: &[Vec<u8>]) {

@@ -17376,21 +17376,31 @@ pub fn canonical_command_fullname(argv: &[Vec<u8>]) -> String {
 }
 
 fn command_acl_parent_has_subcommands(parent: &str) -> bool {
-    parent.eq_ignore_ascii_case("acl")
-        || parent.eq_ignore_ascii_case("client")
-        || parent.eq_ignore_ascii_case("cluster")
-        || parent.eq_ignore_ascii_case("command")
-        || parent.eq_ignore_ascii_case("config")
-        || parent.eq_ignore_ascii_case("function")
-        || parent.eq_ignore_ascii_case("latency")
-        || parent.eq_ignore_ascii_case("memory")
-        || parent.eq_ignore_ascii_case("module")
-        || parent.eq_ignore_ascii_case("object")
-        || parent.eq_ignore_ascii_case("pubsub")
-        || parent.eq_ignore_ascii_case("script")
-        || parent.eq_ignore_ascii_case("slowlog")
-        || parent.eq_ignore_ascii_case("xgroup")
-        || parent.eq_ignore_ascii_case("xinfo")
+    command_has_subcommands_bytes(parent.as_bytes())
+}
+
+/// Whether a raw command name is a container command whose per-command
+/// histogram/ACL key is namespaced as `parent|subcommand`. Byte version of the
+/// `canonical_command_fullname` container check, so hot-path callers can decide
+/// without lowercasing the name into an owned `String` first.
+/// (frankenredis-light-cmd-dispatch-overhead-byq16)
+#[must_use]
+pub fn command_has_subcommands_bytes(parent: &[u8]) -> bool {
+    parent.eq_ignore_ascii_case(b"acl")
+        || parent.eq_ignore_ascii_case(b"client")
+        || parent.eq_ignore_ascii_case(b"cluster")
+        || parent.eq_ignore_ascii_case(b"command")
+        || parent.eq_ignore_ascii_case(b"config")
+        || parent.eq_ignore_ascii_case(b"function")
+        || parent.eq_ignore_ascii_case(b"latency")
+        || parent.eq_ignore_ascii_case(b"memory")
+        || parent.eq_ignore_ascii_case(b"module")
+        || parent.eq_ignore_ascii_case(b"object")
+        || parent.eq_ignore_ascii_case(b"pubsub")
+        || parent.eq_ignore_ascii_case(b"script")
+        || parent.eq_ignore_ascii_case(b"slowlog")
+        || parent.eq_ignore_ascii_case(b"xgroup")
+        || parent.eq_ignore_ascii_case(b"xinfo")
 }
 
 /// Return ACL selectors for a command invocation, most-specific first.
