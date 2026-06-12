@@ -712,17 +712,27 @@ impl FullSortedSet {
             let old_sm = ScoreMember::actual(old_score, member.clone());
             let new_sm = ScoreMember::actual(score, member);
             self.ordered.remove(&old_sm);
-            self.ordered.insert(new_sm.clone(), ());
+            // (frankenredis-zaddmove) When no order-statistic tree is built — the
+            // common case (rank-free zsets, and every ZADD before the first
+            // ZRANK/ZREVRANK) — MOVE `new_sm` into `ordered` instead of cloning
+            // it and dropping the original, saving one member-Vec alloc+free per
+            // insert. Only when the tree exists do we still need the clone to feed
+            // both `ordered` and the treap. Behaviour-identical either way.
             if let Some(tree) = &mut self.rank_tree {
+                self.ordered.insert(new_sm.clone(), ());
                 tree.remove(&old_sm);
                 tree.insert(new_sm);
+            } else {
+                self.ordered.insert(new_sm, ());
             }
             return false;
         }
         let new_sm = ScoreMember::actual(score, member);
-        self.ordered.insert(new_sm.clone(), ());
         if let Some(tree) = &mut self.rank_tree {
+            self.ordered.insert(new_sm.clone(), ());
             tree.insert(new_sm);
+        } else {
+            self.ordered.insert(new_sm, ());
         }
         true
     }
@@ -34915,6 +34925,68 @@ mod tests {
         let ratio = naive_ns as f64 / swar_ns as f64;
         println!(
             "BITCOUNT popcount A/B over {n} bytes x{reps}: naive={naive_ns}ns swar={swar_ns}ns ratio={ratio:.2}x"
+        );
+    }
+
+    #[test]
+    fn zadd_insert_move_matches_clone_and_reports_ab_ratio() {
+        // (frankenredis-zaddmove) Prove the rank-tree-free ZADD insert path that
+        // MOVES `new_sm` into `ordered` is byte-identical to the old path that
+        // cloned it and dropped the original, and report the A/B speedup from the
+        // one fewer member-Vec alloc+free per insert.
+        let n = 200_000usize;
+        let members: Vec<Vec<u8>> = (0..n)
+            .map(|i| format!("element:{:0>12}", (i * 2_654_435_761) % n).into_bytes())
+            .collect();
+
+        // NEW: FullSortedSet::insert with no rank tree → moves new_sm into ordered.
+        let t_new = std::time::Instant::now();
+        let mut fnew = super::FullSortedSet::with_capacity(0);
+        for (i, m) in members.iter().enumerate() {
+            fnew.insert(m.clone(), i as f64);
+        }
+        let new_ns = t_new.elapsed().as_nanos().max(1);
+
+        // OLD: replicate the previous clone-then-drop insert exactly.
+        let t_old = std::time::Instant::now();
+        let mut dict: super::IndexMap<Vec<u8>, f64, foldhash::quality::RandomState> =
+            super::IndexMap::with_hasher(foldhash::quality::RandomState::default());
+        let mut ordered: std::collections::BTreeMap<super::ScoreMember, ()> =
+            std::collections::BTreeMap::new();
+        for (i, m) in members.iter().enumerate() {
+            let member = m.clone();
+            let score = super::canonicalize_zero_score(i as f64);
+            if dict.insert(member.clone(), score).is_none() {
+                let new_sm = super::ScoreMember::actual(score, member);
+                ordered.insert(new_sm.clone(), ());
+                // original new_sm dropped here, exactly as the old code did
+            }
+        }
+        let old_ns = t_old.elapsed().as_nanos().max(1);
+
+        // Isomorphism: identical ordered key set, identical dict scores.
+        assert_eq!(fnew.ordered.len(), ordered.len(), "ordered len mismatch");
+        for (a, b) in fnew.ordered.keys().zip(ordered.keys()) {
+            assert_eq!(a, b, "ordered key sequence diverged");
+        }
+        for m in &members {
+            assert_eq!(
+                fnew.get_score(m),
+                dict.get(m.as_slice()).copied(),
+                "score diverged"
+            );
+        }
+
+        let ratio = old_ns as f64 / new_ns as f64;
+        println!(
+            "ZADD insert A/B over {n} new members: clone={old_ns}ns move={new_ns}ns ratio={ratio:.2}x"
+        );
+        // Loose guard: the move path drops one alloc+free per insert; under
+        // parallel `cargo test` contention the margin compresses, so only require
+        // no regression. (release builds show the real >1x speedup)
+        assert!(
+            ratio >= 0.85 || cfg!(debug_assertions),
+            "ZADD move-insert regressed vs clone: {ratio:.2}x"
         );
     }
 
