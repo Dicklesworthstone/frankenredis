@@ -37,7 +37,7 @@ use fr_protocol::{BorrowedCommandArgsKind, ParserConfig, RespFrame, RespParseErr
 use fr_repl::ReplOffset;
 use fr_runtime::{
     ClientSession, ClientUnblockMode, PlainCardinalityCmd, PlainKeyedPopCmd, PlainKeyedValuesCmd,
-    Runtime,
+    PlainRankCmd, Runtime,
 };
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token, Waker};
@@ -2515,6 +2515,15 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some((cmd, key, member)) = borrowed_plain_rank_args(&borrowed_args)
+                    && let Some(response) =
+                        runtime.execute_plain_rank_borrowed(cmd, key, member, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some((key, index)) = borrowed_plain_lindex_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_lindex_borrowed(key, index, ts)
                 {
@@ -2927,6 +2936,22 @@ fn borrowed_plain_cardinality_args<'a>(
         return None;
     };
     Some((cmd, *key))
+}
+
+fn borrowed_plain_rank_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(PlainRankCmd, &'a [u8], &'a [u8])> {
+    let [command, key, member] = borrowed_args else {
+        return None;
+    };
+    let cmd = if command.eq_ignore_ascii_case(b"ZRANK") {
+        PlainRankCmd::Zrank
+    } else if command.eq_ignore_ascii_case(b"ZREVRANK") {
+        PlainRankCmd::Zrevrank
+    } else {
+        return None;
+    };
+    Some((cmd, *key, *member))
 }
 
 fn borrowed_plain_lindex_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
