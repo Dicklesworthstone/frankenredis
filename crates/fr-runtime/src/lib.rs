@@ -528,6 +528,21 @@ fn wrong_arity_error(command: &'static str) -> RespFrame {
 /// `to_ascii_lowercase` equals byte-wise for ASCII; multi-byte chars unchanged).
 /// (frankenredis-hackk)
 fn push_ascii_lowercase_lossy(out: &mut String, bytes: &[u8]) {
+    // (frankenredis-loweasc) Command names are ASCII in the overwhelming common
+    // case, and this runs on EVERY command (write_client_info_command_name sets
+    // last_command_name for CLIENT INFO/LIST). For all-ASCII input, lowercase
+    // with a direct byte loop — skipping the UTF-8 validation + char-iteration
+    // (from_utf8 + Utf8Chunks) the general path pays. Byte-identical: every byte
+    // is <= 0x7F so ascii-lowercasing keeps it valid 1-byte UTF-8, exactly what
+    // `ch.to_ascii_lowercase()` produces for ASCII chars. Non-ASCII input (only a
+    // malformed command name) keeps the char-correct slow path below.
+    if bytes.is_ascii() {
+        out.reserve(bytes.len());
+        for &b in bytes {
+            out.push(b.to_ascii_lowercase() as char);
+        }
+        return;
+    }
     match std::str::from_utf8(bytes) {
         Ok(s) => {
             for ch in s.chars() {
