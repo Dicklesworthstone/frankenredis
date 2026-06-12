@@ -6917,12 +6917,24 @@ impl Store {
         self.expires_count
     }
 
-    fn internal_entry(&mut self, key: Vec<u8>, default_value: Value, now_ms: u64) -> &mut Entry {
-        if !self.entries.contains_key(&key) {
-            self.internal_entries_insert(key.clone(), Entry::new(default_value, None, now_ms));
+    /// Get-or-insert the entry for `key`. The key and the default value are only
+    /// allocated when an insertion actually happens: `key` is borrowed (cloned
+    /// into the map only on insert), and `default_value` is a closure invoked
+    /// only on the insert path. On the common existing-key path (e.g. repeated
+    /// HSET/SADD/ZADD into the same key) this allocates NOTHING — previously
+    /// every caller eagerly built `key.to_vec()` + a boxed empty collection that
+    /// were thrown away when the key already existed. Byte-identical behaviour.
+    fn internal_entry(
+        &mut self,
+        key: &[u8],
+        default_value: impl FnOnce() -> Value,
+        now_ms: u64,
+    ) -> &mut Entry {
+        if !self.entries.contains_key(key) {
+            self.internal_entries_insert(key.to_vec(), Entry::new(default_value(), None, now_ms));
         }
         self.entries
-            .get_mut(&key)
+            .get_mut(key)
             .expect("entry must exist after internal insertion")
     }
 
@@ -7947,7 +7959,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(Box::default()), now_ms);
+        self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let result = {
@@ -8259,7 +8271,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(Box::default()), now_ms);
+        self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self
@@ -8318,7 +8330,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(Box::default()), now_ms);
+        self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let result = self
@@ -8401,7 +8413,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
-        self.internal_entry(key.to_vec(), Value::Hash(Box::default()), now_ms);
+        self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self
@@ -10927,8 +10939,8 @@ impl Store {
         let zset_max_value = self.zset_max_listpack_value;
         let (added, changed, is_empty, touched) = {
             let entry = self.internal_entry(
-                key.to_vec(),
-                Value::SortedSet(Box::new(SortedSet::new())),
+                key,
+                || Value::SortedSet(Box::new(SortedSet::new())),
                 now_ms,
             );
             let Value::SortedSet(zs) = &mut entry.value else {
@@ -11725,8 +11737,8 @@ impl Store {
         let zset_max_value = self.zset_max_listpack_value;
         let (res, is_empty, touched) = {
             let entry = self.internal_entry(
-                key.to_vec(),
-                Value::SortedSet(Box::new(SortedSet::new())),
+                key,
+                || Value::SortedSet(Box::new(SortedSet::new())),
                 now_ms,
             );
             if lfu_tracking_enabled && key_existed {
