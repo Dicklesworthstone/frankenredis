@@ -2804,6 +2804,13 @@ fn borrowed_plain_keyed_pop_args<'a>(
         PlainKeyedPopCmd::Rpop
     } else if command.eq_ignore_ascii_case(b"SPOP") {
         PlainKeyedPopCmd::Spop
+    } else if command.eq_ignore_ascii_case(b"ZPOPMIN") {
+        // (frankenredis-zpopfast) 2-arg (no-count) ZPOPMIN/ZPOPMAX share the
+        // borrowed pop fast path; the count form (3 args) won't match this
+        // [command, key] shape and falls through to the generic handler.
+        PlainKeyedPopCmd::Zpopmin
+    } else if command.eq_ignore_ascii_case(b"ZPOPMAX") {
+        PlainKeyedPopCmd::Zpopmax
     } else {
         return None;
     };

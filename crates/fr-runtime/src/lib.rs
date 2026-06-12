@@ -334,6 +334,8 @@ pub enum PlainKeyedPopCmd {
     Lpop,
     Rpop,
     Spop,
+    Zpopmin,
+    Zpopmax,
 }
 
 impl PlainKeyedPopCmd {
@@ -342,6 +344,8 @@ impl PlainKeyedPopCmd {
             PlainKeyedPopCmd::Lpop => "LPOP",
             PlainKeyedPopCmd::Rpop => "RPOP",
             PlainKeyedPopCmd::Spop => "SPOP",
+            PlainKeyedPopCmd::Zpopmin => "ZPOPMIN",
+            PlainKeyedPopCmd::Zpopmax => "ZPOPMAX",
         }
     }
 
@@ -350,12 +354,44 @@ impl PlainKeyedPopCmd {
             PlainKeyedPopCmd::Lpop => "lpop",
             PlainKeyedPopCmd::Rpop => "rpop",
             PlainKeyedPopCmd::Spop => "spop",
+            PlainKeyedPopCmd::Zpopmin => "zpopmin",
+            PlainKeyedPopCmd::Zpopmax => "zpopmax",
         }
+    }
+
+    /// LPOP/RPOP/SPOP reply with a single bulk string (the popped element);
+    /// ZPOPMIN/ZPOPMAX reply with a `[member, score]` flat array. The borrowed
+    /// fast path uses this to pick the reply shape. (frankenredis-zpopfast)
+    fn is_zpop(self) -> bool {
+        matches!(self, PlainKeyedPopCmd::Zpopmin | PlainKeyedPopCmd::Zpopmax)
     }
 }
 
 fn plain_keyed_pop_owned_argv(cmd: PlainKeyedPopCmd, key: &[u8]) -> Vec<Vec<u8>> {
     vec![cmd.name_upper().as_bytes().to_vec(), key.to_vec()]
+}
+
+/// Build the RESP reply for a no-count ZPOPMIN/ZPOPMAX from the store result,
+/// byte-identical to the generic `zpopmin`/`zpopmax` command handlers: a flat
+/// `[member, score]` array on a hit, an empty array on a miss, the WRONGTYPE
+/// (etc.) error otherwise. `resp3` selects the Double / bulk-string score frame.
+/// (frankenredis-zpopfast)
+fn plain_zpop_reply(
+    result: Result<Option<(Vec<u8>, f64)>, fr_store::StoreError>,
+    resp3: bool,
+) -> RespFrame {
+    match result {
+        Ok(Some((member, score))) => {
+            let score_frame = if resp3 {
+                RespFrame::double_from_f64(score)
+            } else {
+                RespFrame::BulkString(Some(fr_store::redis_score_to_string(score).into_bytes()))
+            };
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(member)), score_frame]))
+        }
+        Ok(None) => RespFrame::Array(Some(vec![])),
+        Err(err) => CommandError::Store(err).to_resp(),
+    }
 }
 
 fn plain_mget_owned_argv(keys: &[&[u8]]) -> Vec<Vec<u8>> {
@@ -7515,17 +7551,34 @@ impl Runtime {
         self.server.last_eviction_loop = None;
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
+        let resp3 = self.session.resp_protocol_version == 3;
         let start = Instant::now();
-        let store_result = match cmd {
-            PlainKeyedPopCmd::Lpop => self.server.store.lpop(key, now_ms),
-            PlainKeyedPopCmd::Rpop => self.server.store.rpop(key, now_ms),
-            PlainKeyedPopCmd::Spop => self.server.store.spop(key, now_ms),
+        let reply = match cmd {
+            PlainKeyedPopCmd::Lpop => match self.server.store.lpop(key, now_ms) {
+                Ok(value) => RespFrame::BulkString(value),
+                Err(err) => CommandError::Store(err).to_resp(),
+            },
+            PlainKeyedPopCmd::Rpop => match self.server.store.rpop(key, now_ms) {
+                Ok(value) => RespFrame::BulkString(value),
+                Err(err) => CommandError::Store(err).to_resp(),
+            },
+            PlainKeyedPopCmd::Spop => match self.server.store.spop(key, now_ms) {
+                Ok(value) => RespFrame::BulkString(value),
+                Err(err) => CommandError::Store(err).to_resp(),
+            },
+            // (frankenredis-zpopfast) ZPOPMIN/ZPOPMAX (no count) reply with a
+            // flat `[member, score]` array, or an empty array on a miss — exactly
+            // what the generic `zpopmin`/`zpopmax` command handlers produce. The
+            // score frame is RESP3 Double / RESP2 bulk-string, matching
+            // `zpop_score_frame`.
+            PlainKeyedPopCmd::Zpopmin => {
+                plain_zpop_reply(self.server.store.zpopmin(key, now_ms), resp3)
+            }
+            PlainKeyedPopCmd::Zpopmax => {
+                plain_zpop_reply(self.server.store.zpopmax(key, now_ms), resp3)
+            }
         };
         let elapsed_us = start.elapsed().as_micros() as u64;
-        let reply = match store_result {
-            Ok(value) => RespFrame::BulkString(value),
-            Err(err) => CommandError::Store(err).to_resp(),
-        };
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_keyed_pop_borrowed_metrics(
