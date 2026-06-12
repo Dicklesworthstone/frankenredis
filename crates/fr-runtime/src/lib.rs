@@ -11692,6 +11692,23 @@ impl Runtime {
     }
 
     fn strip_db_prefixes_from_frame(&self, frame: &mut RespFrame) {
+        // (frankenredis-stripdb0) DB 0 stores keys WITHOUT the namespace prefix —
+        // `encode_db_key(0, k)` is the identity — so no reply derived from a DB-0
+        // key or value can carry a `\0frdb\0` prefix that fr added. Skip the whole
+        // recursive reply-frame walk for the overwhelmingly common selected_db==0
+        // case (it was ~4.6% of LRANGE self-time, paid by EVERY generic-path
+        // command with a non-trivial reply). This also AVOIDS corrupting a genuine
+        // DB-0 user value that happens to begin with the `\0frdb\0`+8-byte prefix
+        // pattern, which the unconditional strip would wrongly shorten — redis
+        // returns such bytes verbatim. Mirrors the input-side guard in
+        // `namespace_argv_for_selected_db`.
+        if self.session.selected_db == 0 {
+            return;
+        }
+        self.strip_db_prefixes_from_frame_inner(frame);
+    }
+
+    fn strip_db_prefixes_from_frame_inner(&self, frame: &mut RespFrame) {
         match frame {
             RespFrame::BulkString(Some(bytes)) => {
                 if let Some((_, logical)) = decode_db_key(bytes) {
@@ -11705,7 +11722,7 @@ impl Runtime {
             }
             RespFrame::Array(Some(frames)) => {
                 for f in frames {
-                    self.strip_db_prefixes_from_frame(f);
+                    self.strip_db_prefixes_from_frame_inner(f);
                 }
             }
             _ => {}
