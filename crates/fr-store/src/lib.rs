@@ -8122,6 +8122,49 @@ impl Store {
         result
     }
 
+    /// (frankenredis-hsetfast) Borrowed-field variant of [`Self::hset`]. Result
+    /// and final state are byte-identical to `hset(key, field.to_vec(), value, ..)`
+    /// for every input, but no owned field key is allocated when the field already
+    /// exists — the value slot is overwritten in place. This is the asymmetry that
+    /// made `HSET myhash f v` pay a field `Vec<u8>` allocation on every (mostly
+    /// duplicate) write while redis allocates none for the field.
+    pub fn hset_borrowed(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        value: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let should_bump_lfu = lfu_tracking_enabled && self.entries.contains_key(key);
+        let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
+        let max_entries = self.hash_max_listpack_entries;
+        let max_value = self.hash_max_listpack_value;
+        let entry = self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
+        if should_bump_lfu {
+            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+        }
+        let result = match &mut entry.value {
+            Value::Hash(m) => {
+                let is_new = m.insert_borrowed(field, value);
+                entry.touch_write(now_ms);
+                // (frankenredis-yp503) Lock the encoding into hashtable
+                // once the hash crosses either listpack threshold.
+                Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+                Ok(is_new)
+            }
+            _ => Err(StoreError::WrongType),
+        };
+        if result.is_ok() {
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        }
+        self.dirty = self.dirty.saturating_add(1);
+        result
+    }
+
     pub fn hget(
         &mut self,
         key: &[u8],

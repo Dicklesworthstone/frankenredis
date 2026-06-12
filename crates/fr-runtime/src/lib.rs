@@ -7348,7 +7348,7 @@ impl Runtime {
             match self
                 .server
                 .store
-                .hset(key, pair[0].to_vec(), pair[1].to_vec(), now_ms)
+                .hset_borrowed(key, pair[0], pair[1].to_vec(), now_ms)
             {
                 Ok(true) => added += 1,
                 Ok(false) => {}

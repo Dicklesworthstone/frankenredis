@@ -493,6 +493,40 @@ impl HashFieldMap {
         }
     }
 
+    /// (frankenredis-hsetfast) Borrowed-field upsert: returns `true` iff the
+    /// field was newly added. Byte-identical in result and final state to
+    /// `insert(field.to_vec(), value).is_none()`, but does NOT allocate an owned
+    /// field key when the field already exists — it overwrites the value slot in
+    /// place. Redis's `hashTypeSet` on an existing field likewise keeps the field
+    /// sds and frees/replaces only the value sds, so a `HSET myhash f v` against a
+    /// saturated keyspace (the duplicate-field steady state) allocates a field
+    /// key in fr exactly where redis allocates none. The `Hash` (hashtable)
+    /// overwrite also collapses the old contains_key-then-insert double probe into
+    /// a single `get_mut`. The promotion check fires under the identical condition
+    /// as `insert` (new field only), so the encoding transition is unchanged.
+    pub fn insert_borrowed(&mut self, field: &[u8], value: Vec<u8>) -> bool {
+        if let HashFieldMap::Packed(p) = self
+            && !p.contains_key(field)
+            && (p.len() >= PACKED_MAX_ENTRIES
+                || field.len() > PACKED_MAX_VALUE
+                || value.len() > PACKED_MAX_VALUE)
+        {
+            self.promote();
+        }
+        match self {
+            HashFieldMap::Packed(p) => p.insert(field.to_vec(), value).is_none(),
+            HashFieldMap::Hash(h) => {
+                if let Some(slot) = h.get_mut(field) {
+                    *slot = value;
+                    false
+                } else {
+                    h.insert(field.to_vec(), value);
+                    true
+                }
+            }
+        }
+    }
+
     pub fn shift_remove(&mut self, field: &[u8]) -> Option<Vec<u8>> {
         match self {
             HashFieldMap::Packed(p) => p.shift_remove(field),
