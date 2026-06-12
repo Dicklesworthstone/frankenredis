@@ -6835,6 +6835,24 @@ impl Store {
         result
     }
 
+    /// (frankenredis-keysfast) Push the LOGICAL key into `result` when it
+    /// matches `pattern`. `is_star` (pattern == `*`) takes the redis allkeys
+    /// fast path and skips `glob_match` entirely. Used by the full-DB-scan arm
+    /// of `keys_matching_in_db`.
+    fn push_logical_key_if_match(
+        result: &mut Vec<Vec<u8>>,
+        physical_key: &[u8],
+        pattern: &[u8],
+        is_star: bool,
+    ) {
+        let logical = decode_db_key(physical_key)
+            .map(|(_, logical)| logical)
+            .unwrap_or(physical_key);
+        if is_star || glob_match(pattern, logical) {
+            result.push(logical.to_vec());
+        }
+    }
+
     #[must_use]
     pub fn keys_matching_in_db(&mut self, db: usize, pattern: &[u8], now_ms: u64) -> Vec<Vec<u8>> {
         // (frankenredis-2wgom) Range-prune by the pattern's literal prefix. The
@@ -6844,9 +6862,45 @@ impl Store {
         // when the byte range bleeds past the db, and `glob_match` still filters
         // every candidate. O(log n + matches) vs the old O(n) all-key glob.
         let lit = glob_literal_prefix(pattern);
-        let candidates: Vec<Vec<u8>> = if lit.is_empty() {
-            self.ordered_physical_keys_in_db(db)
-        } else {
+        if lit.is_empty() {
+            // (frankenredis-keysfast) Full-DB scan hot path (KEYS *, KEYS *abc,
+            // etc.). The old path cloned EVERY physical key into a candidate
+            // buffer, called drop_if_expired on each (one hashmap probe), then
+            // re-probed `entries.contains_key` (a second probe), ran glob_match
+            // on every key even for the `*` all-keys case, cloned matches a
+            // second time, and finally re-sorted — all O(n) waste on top of the
+            // unavoidable per-match copy. Instead reap ONLY the due volatile keys
+            // (O(due), gated O(1) by has_expiry_due): this is the IDENTICAL
+            // eviction set/order to the old sweep, because drop_if_expired is a
+            // no-op on non-volatile and not-due keys and the old candidate set
+            // was exactly this db's keys. Then walk the already-sorted
+            // `ordered_keys` index immutably, skipping glob for `*`, emitting one
+            // owned copy per match (as redis does). Output order is unchanged
+            // (ordered_keys is physical/logical sorted), so the final sort is
+            // dropped. Byte-identical replies + identical eviction side effects.
+            self.expire_volatile_keys_in_db(db, now_ms);
+            let is_star = pattern == b"*";
+            let mut result: Vec<Vec<u8>> = Vec::new();
+            if db == 0 {
+                for key in self.ordered_keys.iter() {
+                    if decode_db_key(key).is_some() {
+                        continue;
+                    }
+                    Self::push_logical_key_if_match(&mut result, key, pattern, is_star);
+                }
+            } else {
+                let prefix = encode_db_key(db, b"");
+                for key in self
+                    .ordered_keys
+                    .range(prefix.clone()..)
+                    .take_while(|key| key.starts_with(&prefix))
+                {
+                    Self::push_logical_key_if_match(&mut result, key, pattern, is_star);
+                }
+            }
+            return result;
+        }
+        let candidates: Vec<Vec<u8>> = {
             let lower = encode_db_key(db, lit);
             let db_prefix = encode_db_key(db, b"");
             let in_db = |key: &[u8]| -> bool {
