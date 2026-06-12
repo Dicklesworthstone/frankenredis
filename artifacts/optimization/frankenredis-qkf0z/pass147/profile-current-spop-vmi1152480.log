@@ -1,0 +1,94 @@
+== metadata ==
+worker=vmi1152480
+port=29887
+bin=./.rch-target-vmi1152480-job-29884606035525977-1781304514946242203-0/release-perf/frankenredis
+42b9eb477d56da2f766f5aaade501e937989aa34ad80d5eec51678812410b7a0  ./.rch-target-vmi1152480-job-29884606035525977-1781304514946242203-0/release-perf/frankenredis
+8931ebb4de7ea5ae700bf4cf866ad246535743496318ad4e19b46af1c58d7a0b  ./legacy_redis_code/redis/src/redis-benchmark
+== prefill throughput ==
+ SADD: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           SADD: rps=1111680.0 (overall: 1107251.0) avg_msec=0.712 (overall: 0.712)                                                                         SADD: rps=830528.0 (overall: 969165.7) avg_msec=0.957 (overall: 0.816)                                                                       SADD: rps=996717.2 (overall: 978361.8) avg_msec=0.781 (overall: 0.804)                                                                       SADD: rps=741099.6 (overall: 918987.0) avg_msec=0.966 (overall: 0.837)                                                                       SADD: rps=705984.0 (overall: 876488.4) avg_msec=1.217 (overall: 0.898)                                                                       SADD: rps=869760.0 (overall: 875369.2) avg_msec=0.902 (overall: 0.899)                                                                       SADD: rps=791360.0 (overall: 863388.4) avg_msec=0.989 (overall: 0.910)                                                                       SADD: rps=736382.5 (overall: 847481.1) avg_msec=1.052 (overall: 0.926)                                                                       SADD: rps=614336.0 (overall: 821622.0) avg_msec=0.915 (overall: 0.925)                                                                       SADD: rps=652416.0 (overall: 804728.4) avg_msec=1.554 (overall: 0.976)                                                                       SADD: rps=763410.4 (overall: 800964.1) avg_msec=1.004 (overall: 0.978)                                                                       SADD: rps=884864.0 (overall: 807944.1) avg_msec=0.878 (overall: 0.969)                                                                       SADD: rps=762112.0 (overall: 804423.9) avg_msec=1.042 (overall: 0.974)                                                                       SADD: rps=913216.0 (overall: 812183.7) avg_msec=0.872 (overall: 0.966)                                                                       SADD: rps=764239.1 (overall: 808979.8) avg_msec=1.036 (overall: 0.971)                                                                       SADD: rps=785216.0 (overall: 807496.8) avg_msec=1.010 (overall: 0.973)                                                                       SADD: rps=679552.0 (overall: 799981.2) avg_msec=1.159 (overall: 0.982)                                                                       SADD: rps=732864.0 (overall: 796257.4) avg_msec=1.075 (overall: 0.987)                                                                       SADD: rps=600924.3 (overall: 785950.8) avg_msec=1.216 (overall: 0.996)                                                                       SADD: rps=0.0 (overall: 746559.1) avg_msec=-nan (overall: 0.996)                                                                 SADD: rps=464576.0 (overall: 733151.8) avg_msec=3.566 (overall: 1.074)                                                                       SADD: rps=686528.0 (overall: 731035.6) avg_msec=1.151 (overall: 1.077)                                                                       SADD: rps=761115.6 (overall: 732346.6) avg_msec=1.028 (overall: 1.075)                                                                       SADD: rps=683328.0 (overall: 730307.2) avg_msec=1.153 (overall: 1.078)                                                                       SADD: rps=816320.0 (overall: 733742.8) avg_msec=0.965 (overall: 1.073)                                                                       SADD: rps=630438.2 (overall: 729759.8) avg_msec=1.144 (overall: 1.075)                                                                       SADD: rps=742080.0 (overall: 730215.4) avg_msec=1.145 (overall: 1.078)                                                                       SADD: rps=593784.9 (overall: 725331.1) avg_msec=1.326 (overall: 1.085)                                                                       SADD: rps=521984.0 (overall: 718329.7) avg_msec=1.507 (overall: 1.096)                                                                       SADD: rps=551808.0 (overall: 712787.1) avg_msec=1.439 (overall: 1.104)                                                                       SADD: rps=702208.0 (overall: 712446.3) avg_msec=1.126 (overall: 1.105)                                                                       SADD: rps=648669.4 (overall: 710448.3) avg_msec=1.209 (overall: 1.108)                                                                       SADD: rps=678208.0 (overall: 709472.8) avg_msec=1.162 (overall: 1.110)                                                                       SADD: rps=541568.0 (overall: 704541.4) avg_msec=1.456 (overall: 1.117)                                                                       SADD: 704556.12 requests per second, p50=0.839 msec
+
+== spop throughput ==
+ SPOP: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                            SPOP: rps=381312.0 (overall: 381312.0) avg_msec=2.052 (overall: 2.052)                                                                       SPOP: rps=386103.6 (overall: 383712.6) avg_msec=2.044 (overall: 2.048)                                                                       SPOP: rps=270144.0 (overall: 345906.8) avg_msec=2.854 (overall: 2.257)                                                                       SPOP: rps=378603.2 (overall: 354121.6) avg_msec=2.115 (overall: 2.219)                                                                       SPOP: rps=338582.7 (overall: 350981.7) avg_msec=2.306 (overall: 2.236)                                                                       SPOP: rps=375232.0 (overall: 355004.7) avg_msec=2.114 (overall: 2.215)                                                                       SPOP: rps=434560.0 (overall: 366324.4) avg_msec=1.808 (overall: 2.146)                                                                       SPOP: rps=332239.1 (overall: 362063.8) avg_msec=2.351 (overall: 2.169)                                                                       SPOP: rps=364736.0 (overall: 362359.6) avg_msec=2.165 (overall: 2.169)                                                                       SPOP: rps=315520.0 (overall: 357690.6) avg_msec=2.493 (overall: 2.197)                                                                       SPOP: rps=390438.3 (overall: 360669.8) avg_msec=1.992 (overall: 2.177)                                                                       SPOP: rps=331776.0 (overall: 358269.2) avg_msec=2.392 (overall: 2.194)                                                                       SPOP: rps=394112.0 (overall: 361018.7) avg_msec=2.004 (overall: 2.178)                                                                       SPOP: rps=404079.7 (overall: 364098.0) avg_msec=1.945 (overall: 2.159)                                                                       SPOP: rps=417216.0 (overall: 367629.8) avg_msec=1.888 (overall: 2.139)                                                                       SPOP: rps=403840.0 (overall: 369887.2) avg_msec=1.959 (overall: 2.127)                                                                       SPOP: rps=447168.0 (overall: 374422.5) avg_msec=1.758 (overall: 2.101)                                                                       SPOP: rps=413004.0 (overall: 376569.2) avg_msec=1.907 (overall: 2.089)                                                                       SPOP: rps=333514.0 (overall: 374299.9) avg_msec=2.347 (overall: 2.101)                                                                       SPOP: rps=409856.0 (overall: 376073.4) avg_msec=1.928 (overall: 2.092)                                                                       SPOP: rps=448256.0 (overall: 379502.8) avg_msec=1.769 (overall: 2.074)                                                                       SPOP: rps=424286.9 (overall: 381541.8) avg_msec=1.839 (overall: 2.062)                                                                       SPOP: rps=379904.0 (overall: 381470.8) avg_msec=2.050 (overall: 2.061)                                                                       SPOP: rps=394048.0 (overall: 381993.7) avg_msec=2.012 (overall: 2.059)                                                                       SPOP: rps=380749.0 (overall: 381943.8) avg_msec=2.046 (overall: 2.059)                                                                       SPOP: rps=404672.0 (overall: 382816.1) avg_msec=1.964 (overall: 2.055)                                                                       SPOP: rps=443712.0 (overall: 385066.8) avg_msec=1.770 (overall: 2.043)                                                                       SPOP: rps=411601.6 (overall: 386016.2) avg_msec=1.884 (overall: 2.037)                                                                       SPOP: rps=452416.0 (overall: 388301.2) avg_msec=1.735 (overall: 2.025)                                                                       SPOP: rps=444928.0 (overall: 390185.0) avg_msec=1.769 (overall: 2.015)                                                                       SPOP: rps=495360.0 (overall: 393571.2) avg_msec=1.594 (overall: 1.998)                                                                       SPOP: rps=450422.3 (overall: 395351.3) avg_msec=1.748 (overall: 1.989)                                                                       SPOP: rps=494400.0 (overall: 398347.0) avg_msec=1.604 (overall: 1.974)                                                                       SPOP: rps=462528.0 (overall: 400231.1) avg_msec=1.719 (overall: 1.966)                                                                       SPOP: rps=531824.8 (overall: 403998.6) avg_msec=1.488 (overall: 1.948)                                                                       SPOP: rps=536064.0 (overall: 407660.2) avg_msec=1.488 (overall: 1.931)                                                                       SPOP: rps=520192.0 (overall: 410696.0) avg_msec=1.519 (overall: 1.917)                                                                       SPOP: rps=410900.4 (overall: 410701.4) avg_msec=1.901 (overall: 1.916)                                                                       SPOP: rps=391872.0 (overall: 410219.5) avg_msec=1.924 (overall: 1.917)                                                                       SPOP: rps=508800.0 (overall: 412679.6) avg_msec=1.560 (overall: 1.906)                                                                       SPOP: rps=550310.8 (overall: 416043.6) avg_msec=1.429 (overall: 1.890)                                                                       SPOP: rps=567744.0 (overall: 419649.0) avg_msec=1.402 (overall: 1.875)                                                                       SPOP: rps=459520.0 (overall: 420574.6) avg_msec=1.694 (overall: 1.870)                                                                       SPOP: rps=465147.4 (overall: 421589.8) avg_msec=1.676 (overall: 1.865)                                                                       SPOP: rps=429041.5 (overall: 421764.8) avg_msec=1.734 (overall: 1.862)                                                                       SPOP: rps=451011.8 (overall: 422411.1) avg_msec=1.819 (overall: 1.861)                                                                       SPOP: rps=371569.8 (overall: 421328.8) avg_msec=2.042 (overall: 1.864)                                                                       SPOP: 420875.41 requests per second, p50=1.423 msec
+
+== perf record log ==
+[ perf record: Woken up 3 times to write data ]
+[ perf record: Captured and wrote 0.891 MB /tmp/coralox-pass147-spop-29887.perf.data (7870 samples) ]
+== frankenredis self hotspots ==
+    21.04%    21.04%  frankenredis  [.] <fr_store::packed_set::GenericSet>::pop_index
+    16.64%     0.00%  frankenredis  [.] 0x487e74c9854d084e
+    10.89%    10.89%  frankenredis  [.] mi_free
+     8.56%     8.56%  frankenredis  [.] fr_store::estimate_entry_memory_usage_bytes
+     6.45%     6.45%  frankenredis  [.] <fr_store::SetValueIter as core::iter::traits::iterator::Iterator>::next
+     5.75%     5.69%  frankenredis  [.] <fr_runtime::Runtime>::execute_plain_keyed_pop_borrowed
+     2.59%     0.00%  frankenredis  [.] 0x35240a0d504f5053
+     2.14%     2.14%  frankenredis  [.] <indexmap::inner::Core<alloc::vec::Vec<u8>, ()>>::swap_remove_finish
+     2.13%     2.13%  frankenredis  [.] fr_protocol::parse_command_args_borrowed_into
+     1.63%     1.63%  frankenredis  [.] fr_store::estimate_sds_allocation_bytes
+     1.40%     1.40%  frankenredis  [.] frankenredis::parse_borrowed_multibulk_action
+     1.32%     1.32%  frankenredis  [.] <fr_store::Store>::spop
+     1.22%     1.22%  frankenredis  [.] _mi_page_malloc_zero
+     1.18%     0.00%  frankenredis  [.] 0000000000000000
+     0.80%     0.80%  frankenredis  [.] frankenredis::borrowed_plain_keyed_pop_args
+     0.76%     0.76%  frankenredis  [.] <hashbrown::map::HashMap<alloc::string::String, fr_store::CommandHistogram, foldhash::quality::RandomState>>::get_mut::<str>
+     0.68%     0.68%  frankenredis  [.] <fr_runtime::ServerState>::run_active_expire_cycle
+     0.62%     0.62%  frankenredis  [.] mi_theap_malloc_aligned
+     0.50%     0.50%  frankenredis  [.] core::ptr::drop_glue::<fr_protocol::RespFrame>
+     0.45%     0.45%  frankenredis  [.] frankenredis::process_buffered_frames
+     0.44%     0.44%  frankenredis  [.] <fr_store::Store>::drop_if_expired
+     0.42%     0.00%  frankenredis  [.] 0x0000000000000040
+     0.41%     0.41%  frankenredis  [.] <fr_runtime::Runtime>::plain_borrowed_default_key_write_allows
+     0.40%     0.37%  frankenredis  [.] <alloc::raw_vec::RawVecInner>::finish_grow
+     0.36%     0.36%  frankenredis  [.] core::str::converts::from_utf8
+== all DSO hotspots ==
+    22.00%     0.00%  frankenredis  [unknown]          [.] 0000000000000000
+    21.16%    21.04%  frankenredis  frankenredis       [.] <fr_store::packed_set::GenericSet>::pop_index
+    20.82%     0.09%  frankenredis  [kernel.kallsyms]  [k] entry_SYSCALL_64_after_hwframe
+    20.68%     0.12%  frankenredis  [kernel.kallsyms]  [k] do_syscall_64
+    20.57%     0.00%  frankenredis  libc.so.6          [.] 0x000072e7e38ac772
+    20.36%     0.06%  frankenredis  [kernel.kallsyms]  [k] x64_sys_call
+    17.14%     0.04%  frankenredis  libc.so.6          [.] __send
+    17.09%     0.05%  frankenredis  frankenredis       [.] <frankenredis::ClientConnection>::try_flush
+    16.89%     0.00%  frankenredis  [unknown]          [.] 0x487e74c9854d084e
+    16.42%     0.03%  frankenredis  [kernel.kallsyms]  [k] __x64_sys_sendto
+    16.36%     0.06%  frankenredis  [kernel.kallsyms]  [k] __sys_sendto
+    16.15%     0.03%  frankenredis  [kernel.kallsyms]  [k] inet_sendmsg
+    16.10%     0.09%  frankenredis  [kernel.kallsyms]  [k] tcp_sendmsg
+    15.79%     0.22%  frankenredis  [kernel.kallsyms]  [k] tcp_sendmsg_locked
+    14.29%     0.03%  frankenredis  [kernel.kallsyms]  [k] tcp_push
+    14.28%     0.03%  frankenredis  [kernel.kallsyms]  [k] __tcp_push_pending_frames
+    14.16%     0.07%  frankenredis  [kernel.kallsyms]  [k] tcp_write_xmit
+    13.13%     0.19%  frankenredis  [kernel.kallsyms]  [k] __tcp_transmit_skb
+    12.83%     0.01%  frankenredis  [kernel.kallsyms]  [k] ip_queue_xmit
+    12.70%     0.14%  frankenredis  [kernel.kallsyms]  [k] __ip_queue_xmit
+    11.03%     0.09%  frankenredis  [kernel.kallsyms]  [k] ip_output
+    10.96%    10.89%  frankenredis  frankenredis       [.] mi_free
+    10.69%     0.04%  frankenredis  [kernel.kallsyms]  [k] ip_finish_output
+    10.63%     0.01%  frankenredis  [kernel.kallsyms]  [k] __ip_finish_output
+    10.49%     0.24%  frankenredis  [kernel.kallsyms]  [k] ip_finish_output2
+    10.28%     0.03%  frankenredis  [kernel.kallsyms]  [k] neigh_hh_output
+    10.22%     0.09%  frankenredis  [kernel.kallsyms]  [k] __dev_queue_xmit
+     9.67%     0.03%  frankenredis  [kernel.kallsyms]  [k] __local_bh_enable_ip
+     9.64%     0.08%  frankenredis  [kernel.kallsyms]  [k] do_softirq.part.0
+     9.59%     0.03%  frankenredis  [kernel.kallsyms]  [k] __do_softirq
+     9.56%     0.08%  frankenredis  [kernel.kallsyms]  [k] handle_softirqs
+     9.46%     0.28%  frankenredis  [kernel.kallsyms]  [k] net_rx_action
+     8.72%     8.56%  frankenredis  frankenredis       [.] fr_store::estimate_entry_memory_usage_bytes
+     8.66%     0.01%  frankenredis  [kernel.kallsyms]  [k] __napi_poll
+     8.65%     0.08%  frankenredis  [kernel.kallsyms]  [k] process_backlog
+     8.52%     5.69%  frankenredis  frankenredis       [.] <fr_runtime::Runtime>::execute_plain_keyed_pop_borrowed
+     8.46%     0.04%  frankenredis  [kernel.kallsyms]  [k] __netif_receive_skb
+     8.42%     0.04%  frankenredis  [kernel.kallsyms]  [k] __netif_receive_skb_one_core
+     8.26%     0.04%  frankenredis  [kernel.kallsyms]  [k] ip_rcv
+     7.97%     0.08%  frankenredis  [kernel.kallsyms]  [k] ip_local_deliver
+     7.78%     0.02%  frankenredis  [kernel.kallsyms]  [k] ip_local_deliver_finish
+     7.62%     0.06%  frankenredis  [kernel.kallsyms]  [k] ip_protocol_deliver_rcu
+     7.45%     0.17%  frankenredis  [kernel.kallsyms]  [k] tcp_v4_rcv
+     6.75%     0.04%  frankenredis  [kernel.kallsyms]  [k] tcp_v4_do_rcv
+     6.56%     0.25%  frankenredis  [kernel.kallsyms]  [k] tcp_rcv_established
+     6.49%     6.45%  frankenredis  frankenredis       [.] <fr_store::SetValueIter as core::iter::traits::iterator::Iterator>::next
+     3.99%     0.05%  frankenredis  [kernel.kallsyms]  [k] tcp_data_ready
+     3.98%     0.09%  frankenredis  [kernel.kallsyms]  [k] sock_def_readable
+     3.87%     0.04%  frankenredis  [kernel.kallsyms]  [k] __wake_up_sync_key
+     3.68%     0.32%  frankenredis  [kernel.kallsyms]  [k] ep_poll_callback
+== perf-data ==
+/tmp/coralox-pass147-spop-29887.perf.data
