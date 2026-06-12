@@ -1,0 +1,64 @@
+{
+  "results": [
+    {
+      "command": "ART=/data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass149-baseline BENCH=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark BIN=/data/projects/frankenredis/target-coralox-pass149-candidate/release/frankenredis PORT=24048 NAME=candidate_r1_rev N=3000000 CLIENTS=50 PIPE=16 KEYSPACE=1 bash /data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline/run_hset_once.sh",
+      "mean": 3.3262252736649995,
+      "stddev": 0.09906848840414038,
+      "median": 3.3167283620399997,
+      "user": 2.0044776099999995,
+      "system": 4.270181795,
+      "min": 3.2002524115399997,
+      "max": 3.45445132954,
+      "times": [
+        3.2119329785399997,
+        3.45445132954,
+        3.2942868475399996,
+        3.3391698765399997,
+        3.2002524115399997,
+        3.27056812754,
+        3.44799750254,
+        3.39114311554
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "ART=/data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass149-baseline BENCH=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark BIN=/data/projects/frankenredis/target-coralox-pass149-baseline/release/frankenredis PORT=24049 NAME=baseline_r1_rev N=3000000 CLIENTS=50 PIPE=16 KEYSPACE=1 bash /data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline/run_hset_once.sh",
+      "mean": 3.372751802165,
+      "stddev": 0.11621602447473126,
+      "median": 3.34344088104,
+      "user": 2.0781133599999997,
+      "system": 4.328318545,
+      "min": 3.22942204154,
+      "max": 3.5395917725399997,
+      "times": [
+        3.5395917725399997,
+        3.44643317654,
+        3.5161597265399998,
+        3.2509967605399996,
+        3.34361672454,
+        3.3125291775399996,
+        3.22942204154,
+        3.3432650375399997
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

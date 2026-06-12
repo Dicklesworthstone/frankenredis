@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "ART=/data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass149-baseline BENCH=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark BIN=/data/projects/frankenredis/target-coralox-pass149-candidate/release/frankenredis PORT=24044 NAME=candidate_rev N=800000 CLIENTS=50 PIPE=16 KEYSPACE=100000 bash /data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline/run_hset_once.sh",
+      "mean": 1.1982894891800002,
+      "stddev": 0.06095382609968153,
+      "median": 1.1926179996800002,
+      "user": 0.82312054,
+      "system": 1.25560426,
+      "min": 1.1379697721800002,
+      "max": 1.35492473018,
+      "times": [
+        1.21144201818,
+        1.1379697721800002,
+        1.1460139601800001,
+        1.15226473118,
+        1.35492473018,
+        1.1998076291800002,
+        1.1904630981800002,
+        1.1885507851800001,
+        1.20668526618,
+        1.1947729011800001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "ART=/data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass149-baseline BENCH=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark BIN=/data/projects/frankenredis/target-coralox-pass149-baseline/release/frankenredis PORT=24045 NAME=baseline_rev N=800000 CLIENTS=50 PIPE=16 KEYSPACE=100000 bash /data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline/run_hset_once.sh",
+      "mean": 1.21168182968,
+      "stddev": 0.041787842044605,
+      "median": 1.20316089468,
+      "user": 0.8328527399999999,
+      "system": 1.2744450599999997,
+      "min": 1.16675473718,
+      "max": 1.3149055921800001,
+      "times": [
+        1.2280980671800001,
+        1.23000533018,
+        1.1801448221800002,
+        1.2020986071800002,
+        1.21291663018,
+        1.17766181818,
+        1.2000095101800001,
+        1.16675473718,
+        1.20422318218,
+        1.3149055921800001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

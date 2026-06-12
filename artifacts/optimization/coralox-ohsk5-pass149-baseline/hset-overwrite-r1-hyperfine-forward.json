@@ -1,0 +1,64 @@
+{
+  "results": [
+    {
+      "command": "ART=/data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass149-baseline BENCH=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark BIN=/data/projects/frankenredis/target-coralox-pass149-baseline/release/frankenredis PORT=24046 NAME=baseline_r1 N=3000000 CLIENTS=50 PIPE=16 KEYSPACE=1 bash /data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline/run_hset_once.sh",
+      "mean": 3.27678185571,
+      "stddev": 0.06554779144645537,
+      "median": 3.2793255974599997,
+      "user": 2.038388125,
+      "system": 4.19649464,
+      "min": 3.18245815846,
+      "max": 3.3644913924599997,
+      "times": [
+        3.18245815846,
+        3.19166037846,
+        3.26988841246,
+        3.32644247946,
+        3.25720513546,
+        3.33334610646,
+        3.3644913924599997,
+        3.2887627824599996
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "ART=/data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass149-baseline BENCH=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark BIN=/data/projects/frankenredis/target-coralox-pass149-candidate/release/frankenredis PORT=24047 NAME=candidate_r1 N=3000000 CLIENTS=50 PIPE=16 KEYSPACE=1 bash /data/projects/frankenredis/artifacts/optimization/coralox-ohsk5-pass148-baseline/run_hset_once.sh",
+      "mean": 3.2017780738349995,
+      "stddev": 0.06696559569362559,
+      "median": 3.1997065299600003,
+      "user": 1.9484667500000001,
+      "system": 4.132617890000001,
+      "min": 3.08927614146,
+      "max": 3.32337349046,
+      "times": [
+        3.2084932404599997,
+        3.19751689846,
+        3.24777232446,
+        3.08927614146,
+        3.16561523646,
+        3.18028109746,
+        3.20189616146,
+        3.32337349046
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
