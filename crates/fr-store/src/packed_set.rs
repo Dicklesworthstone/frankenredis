@@ -2728,7 +2728,7 @@ mod tests {
         let new_ns = t1.elapsed().as_nanos().max(1);
         std::hint::black_box(acc2);
 
-        let chunks = (n + LIST_CHUNK_TARGET - 1) / LIST_CHUNK_TARGET;
+        let chunks = n.div_ceil(LIST_CHUNK_TARGET);
         println!(
             "ChunkedList tail-locate A/B (n={n}, {chunks} chunks, x{reps}): front-walk={old_ns}ns nearer-end={new_ns}ns ratio={:.1}x",
             old_ns as f64 / new_ns as f64

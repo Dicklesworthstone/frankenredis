@@ -1165,9 +1165,7 @@ impl SortedSet {
                 .dict
                 .get_index(idx)
                 .map(|(m, _)| Cow::Borrowed(m.as_slice())),
-            SortedSetInner::Packed(_) => {
-                self.iter().nth(idx).map(|(m, _)| Cow::Owned(m.to_vec()))
-            }
+            SortedSetInner::Packed(_) => self.iter().nth(idx).map(|(m, _)| Cow::Owned(m.to_vec())),
         }
     }
 
@@ -8303,8 +8301,12 @@ impl Store {
                     // Wrap around without sampling any volatile key twice.
                     let remaining_unique_keys = volatile_key_count.saturating_sub(collected.len());
                     let remaining = (sample_limit - collected.len()).min(remaining_unique_keys);
-                    collected
-                        .extend(self.volatile_keys.iter().take(remaining).map(|k| k.to_vec()));
+                    collected.extend(
+                        self.volatile_keys
+                            .iter()
+                            .take(remaining)
+                            .map(|k| k.to_vec()),
+                    );
                 }
                 collected
             }
@@ -8321,7 +8323,9 @@ impl Store {
         for key in &keys_to_check {
             let should_evict = evaluate_expiry(
                 now_ms,
-                self.entries.get(key.as_slice()).and_then(|entry| entry.expiry_ms()),
+                self.entries
+                    .get(key.as_slice())
+                    .and_then(|entry| entry.expiry_ms()),
             )
             .should_evict;
             if should_evict {
@@ -9923,11 +9927,8 @@ impl Store {
                         let e = e as usize;
                         // (frankenredis-3r9lz) Seek to `s` at the chunk level
                         // (O(s/chunk)) instead of an O(s) element-by-element skip.
-                        let result: Vec<Vec<u8>> = l
-                            .iter_from(s)
-                            .take(e - s + 1)
-                            .map(<[u8]>::to_vec)
-                            .collect();
+                        let result: Vec<Vec<u8>> =
+                            l.iter_from(s).take(e - s + 1).map(<[u8]>::to_vec).collect();
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -17396,7 +17397,10 @@ impl Store {
             self.db_scan_cache
                 .iter()
                 .position(|c| {
-                    c.next_cursor == cursor && c.db == db && c.sig == sig && c.generation == keyspace_gen
+                    c.next_cursor == cursor
+                        && c.db == db
+                        && c.sig == sig
+                        && c.generation == keyspace_gen
                 })
                 .map(|i| self.db_scan_cache.remove(i).last_key)
         } else {
@@ -17416,10 +17420,7 @@ impl Store {
         let mut result: Vec<Vec<u8>> = Vec::new();
         let mut last_key: Option<Vec<u8>> = None;
         let mut has_more = false;
-        for physical in self
-            .ordered_keys
-            .range::<[u8], _>((lo_bound, hi_bound))
-        {
+        for physical in self.ordered_keys.range::<[u8], _>((lo_bound, hi_bound)) {
             let physical: &[u8] = physical.as_ref();
             // DB membership.
             if db == 0 {
@@ -17433,9 +17434,7 @@ impl Store {
             if !self.entries.contains_key(physical) {
                 continue;
             }
-            let logical = decode_db_key(physical)
-                .map(|(_, l)| l)
-                .unwrap_or(physical);
+            let logical = decode_db_key(physical).map(|(_, l)| l).unwrap_or(physical);
             // Glob (skipped for the `*` / no-pattern all-keys fast path).
             if !is_star
                 && let Some(pat) = pattern
@@ -25064,7 +25063,9 @@ mod tests {
         // TWICE (to_vec + clone into two Vec-keyed structures); NEW allocates once
         // behind an Arc and refcount-clones. Same external behavior, half the
         // per-key heap allocations.
-        let keys: Vec<Vec<u8>> = (0..200_000).map(|i| format!("key{i:08}").into_bytes()).collect();
+        let keys: Vec<Vec<u8>> = (0..200_000)
+            .map(|i| format!("key{i:08}").into_bytes())
+            .collect();
         let t0 = std::time::Instant::now();
         let mut old_slots: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
         let mut old_pos: std::collections::HashMap<Vec<u8>, usize> =
@@ -27580,7 +27581,12 @@ mod tests {
         let mut store = Store::new();
         for i in 0..600u32 {
             let db = (i % 4) as usize;
-            store.set(encode_db_key(db, format!("k{i:04}").as_bytes()), b"v".to_vec(), None, 0);
+            store.set(
+                encode_db_key(db, format!("k{i:04}").as_bytes()),
+                b"v".to_vec(),
+                None,
+                0,
+            );
         }
         for db in 0..4usize {
             let mut got = store.ordered_physical_keys_in_db(db);
@@ -27595,7 +27601,12 @@ mod tests {
             store.set(format!("k{i:08}").into_bytes(), b"v".to_vec(), None, 0);
         }
         for i in 0..50u32 {
-            store.set(encode_db_key(3, format!("d{i:04}").as_bytes()), b"v".to_vec(), None, 0);
+            store.set(
+                encode_db_key(3, format!("d{i:04}").as_bytes()),
+                b"v".to_vec(),
+                None,
+                0,
+            );
         }
         let reps = 2000;
         let t0 = std::time::Instant::now();
@@ -27745,7 +27756,11 @@ mod tests {
         let mut t2 = CommandHistogramTracker::default();
         let s0 = std::time::Instant::now();
         for _ in 0..reps {
-            t2.record_canonical_with_kind(std::hint::black_box("lpush"), 1, CommandRecordKind::Success);
+            t2.record_canonical_with_kind(
+                std::hint::black_box("lpush"),
+                1,
+                CommandRecordKind::Success,
+            );
         }
         let new_ns = s0.elapsed().as_nanos().max(1);
         std::hint::black_box(&t2);
@@ -31156,7 +31171,13 @@ mod tests {
         let cold_ns = (cold_ns / reps as u128).max(1);
         let mut s_warm = build();
         s_warm.zrank(b"z", b"m000000", 0).unwrap(); // build the order-statistic treap
-        std::hint::black_box(s_warm.zscan(b"z", deep_cursor, None, 10, 0).unwrap().1.len());
+        std::hint::black_box(
+            s_warm
+                .zscan(b"z", deep_cursor, None, 10, 0)
+                .unwrap()
+                .1
+                .len(),
+        );
         let mut warm_ns = 0u128;
         for _ in 0..reps {
             let t = std::time::Instant::now();
@@ -31429,8 +31450,9 @@ mod tests {
             for _ in 0..n {
                 let db = (rng() % 3) as usize; // dbs 0,1,2
                 let klen = 1 + (rng() % 7) as usize;
-                let key: Vec<u8> =
-                    (0..klen).map(|_| b"ab:_019xyz"[(rng() % 10) as usize]).collect();
+                let key: Vec<u8> = (0..klen)
+                    .map(|_| b"ab:_019xyz"[(rng() % 10) as usize])
+                    .collect();
                 let phys = encode_db_key(db, &key);
                 match rng() % 3 {
                     0 => store.set(phys, b"v".to_vec(), None, 0),
@@ -31443,7 +31465,12 @@ mod tests {
                 }
             }
             for db in 0..3usize {
-                for pat in [None, Some(&b"a*"[..]), Some(&b"*1*"[..]), Some(&b"ab:*"[..])] {
+                for pat in [
+                    None,
+                    Some(&b"a*"[..]),
+                    Some(&b"*1*"[..]),
+                    Some(&b"ab:*"[..]),
+                ] {
                     for tf in [None, Some(&b"string"[..]), Some(&b"list"[..])] {
                         let count = 1 + (rng() % 11) as usize;
                         let mut got = drive(&mut store, db, pat, tf, count);
@@ -31537,8 +31564,9 @@ mod tests {
             let n = (rng() % 500) as usize;
             for _ in 0..n {
                 let klen = 1 + (rng() % 8) as usize;
-                let key: Vec<u8> =
-                    (0..klen).map(|_| b"ab:_0129xyz"[(rng() % 11) as usize]).collect();
+                let key: Vec<u8> = (0..klen)
+                    .map(|_| b"ab:_0129xyz"[(rng() % 11) as usize])
+                    .collect();
                 store.set(key, b"v".to_vec(), None, 0);
             }
             for pat in [&b"a*"[..], b"ab:*", b"*9", b"a?:*", b"z*"] {
@@ -31552,7 +31580,10 @@ mod tests {
                     .map(|k| k.to_vec())
                     .collect();
                 want.sort();
-                assert_eq!(got, want, "SCAN MATCH {pat:?} prune diverged from glob ground truth");
+                assert_eq!(
+                    got, want,
+                    "SCAN MATCH {pat:?} prune diverged from glob ground truth"
+                );
             }
         }
 
@@ -37625,7 +37656,9 @@ mod tests {
         // Deterministic LCG so the proof is reproducible (no Date/rand needed).
         let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut next = || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 33) as u32
         };
         // Cover both list reprs by exercising small (listpack) and large (deque)
@@ -37669,7 +37702,13 @@ mod tests {
         // Every-other element matches "X" (the bead's workload).
         let build = || -> Vec<Vec<u8>> {
             (0..N)
-                .map(|i| if i % 2 == 0 { b"X".to_vec() } else { b"y".to_vec() })
+                .map(|i| {
+                    if i % 2 == 0 {
+                        b"X".to_vec()
+                    } else {
+                        b"y".to_vec()
+                    }
+                })
                 .collect()
         };
 
@@ -37686,18 +37725,18 @@ mod tests {
         store2.rpush(b"l", &build(), 0).unwrap();
         let mut removed_old = 0u64;
         let t = Instant::now();
-        if let Some(entry) = store2.entries.get_mut(b"l".as_slice()) {
-            if let Value::List(l) = &mut entry.value {
-                let limit = 5u64;
-                l.retain(|v| {
-                    if removed_old < limit && v == b"X" {
-                        removed_old += 1;
-                        false
-                    } else {
-                        true
-                    }
-                });
-            }
+        if let Some(entry) = store2.entries.get_mut(b"l".as_slice())
+            && let Value::List(l) = &mut entry.value
+        {
+            let limit = 5u64;
+            l.retain(|v| {
+                if removed_old < limit && v == b"X" {
+                    removed_old += 1;
+                    false
+                } else {
+                    true
+                }
+            });
         }
         let old_us = t.elapsed().as_secs_f64() * 1e6;
 
@@ -37707,10 +37746,13 @@ mod tests {
             "LREM 5 X over {N}-elem list: OLD(retain+bulk-rescan)={old_us:.0}us  NEW(early-stop+index)={new_us:.0}us  speedup={:.1}x",
             old_us / new_us
         );
-        assert!(new_us * 5.0 < old_us, "expected >=5x speedup, got {:.1}x", old_us / new_us);
+        assert!(
+            new_us * 5.0 < old_us,
+            "expected >=5x speedup, got {:.1}x",
+            old_us / new_us
+        );
     }
 
-    #[test]
     // (frankenredis-k681u) Single ZRANDMEMBER must return the SAME member as the
     // old `iter_asc().nth(idx)` linear skip for every index — the treap-select
     // jump only changes the access path, not which element is chosen. Verify
@@ -37725,7 +37767,14 @@ mod tests {
                 // bytes deliberately NOT in score order so sorted-position differs
                 // from insertion/hash position.
                 store
-                    .zadd(b"z", &[(i as f64, format!("m{:08x}", (i * 2654435761) % n).into_bytes())], 0)
+                    .zadd(
+                        b"z",
+                        &[(
+                            i as f64,
+                            format!("m{:08x}", (i * 2654435761) % n).into_bytes(),
+                        )],
+                        0,
+                    )
                     .unwrap();
             }
             // Reference: idx-th member in ascending (score, member) order.
@@ -37739,7 +37788,7 @@ mod tests {
             let len = reference.len();
             // Exercise both a cold path (low idx) and warmed path (repeated deep
             // draws warm the treap), every index covered.
-            for idx in 0..len {
+            for (idx, ref_member) in reference.iter().enumerate().take(len) {
                 let entry = store.entries.get_mut(b"z".as_slice()).unwrap();
                 let got = match &mut entry.value {
                     Value::SortedSet(zs) => zs
@@ -37751,7 +37800,7 @@ mod tests {
                 };
                 assert_eq!(
                     got.as_ref(),
-                    Some(&reference[idx]),
+                    Some(ref_member),
                     "n={n} idx={idx}: select jump diverged from linear nth"
                 );
             }
@@ -37808,7 +37857,11 @@ mod tests {
             "ZRANDMEMBER single idx={idx} over {N}-elem zset: OLD(iter.nth)={old_us:.1}us  NEW(treap select)={new_us:.3}us  speedup={:.0}x",
             old_us / new_us
         );
-        assert!(new_us * 5.0 < old_us, "expected >=5x, got {:.0}x", old_us / new_us);
+        assert!(
+            new_us * 5.0 < old_us,
+            "expected >=5x, got {:.0}x",
+            old_us / new_us
+        );
     }
 
     #[test]
