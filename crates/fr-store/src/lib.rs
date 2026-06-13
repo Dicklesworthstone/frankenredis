@@ -1248,6 +1248,70 @@ impl SortedSet {
             && first.score == last.score
         {
             let s = first.score;
+            // (frankenredis-q7al0) Deep LIMIT offset: jump to the start rank via
+            // the order-statistic treap (same lex rank logic as lex_count's 7uonw
+            // path — single-score => treap rank == member lex rank) + select,
+            // O(take*log n), instead of an O(offset) BTreeMap walk. Gated to deep
+            // offsets where the skip dominates, with a warm consistent treap;
+            // else falls through to the scan. Byte-identical.
+            if take != usize::MAX
+                && let Some(tree) = &full.rank_tree
+                && tree.len() == full.dict.len()
+            {
+                let total = tree.len();
+                if min == b"+" || max == b"-" {
+                    return Vec::new();
+                }
+                let below = if min == b"-" {
+                    0
+                } else {
+                    let x = &min[1..];
+                    let r = tree.rank_of(&ScoreMember::actual(s, x.to_vec()));
+                    if min[0] == b'(' {
+                        r + usize::from(full.get_score(x).is_some())
+                    } else {
+                        r
+                    }
+                };
+                let atorbelow = if max == b"+" {
+                    total
+                } else {
+                    let x = &max[1..];
+                    let r = tree.rank_of(&ScoreMember::actual(s, x.to_vec()));
+                    if max[0] == b'[' {
+                        r + usize::from(full.get_score(x).is_some())
+                    } else {
+                        r
+                    }
+                };
+                if atorbelow <= below || offset >= atorbelow - below {
+                    return Vec::new();
+                }
+                let n_emit = (atorbelow - below - offset).min(take);
+                if offset > n_emit.saturating_mul(24) {
+                    let mut out = Vec::with_capacity(n_emit.min(4096));
+                    if rev {
+                        let top = atorbelow - 1 - offset;
+                        for k in 0..n_emit {
+                            if let Some(sm) = tree.select(top - k)
+                                && let Some(m) = sm.member.as_actual()
+                            {
+                                out.push((m.clone(), s));
+                            }
+                        }
+                    } else {
+                        let start = below + offset;
+                        for r in start..start + n_emit {
+                            if let Some(sm) = tree.select(r)
+                                && let Some(m) = sm.member.as_actual()
+                            {
+                                out.push((m.clone(), s));
+                            }
+                        }
+                    }
+                    return out;
+                }
+            }
             // `+` as a min / `-` as a max select nothing.
             let lower = if min == b"-" {
                 ScoreMember::min_for_score(s)
@@ -1302,6 +1366,25 @@ impl SortedSet {
                 .map(|(m, score)| (m.to_vec(), score))
                 .collect()
         }
+    }
+
+    /// `lex_range_window` with adaptive treap warming: a large single-score zset
+    /// hit by a deep-offset BYLEX LIMIT query builds the order-statistic treap so
+    /// the rank-jump path can fire. Byte-identical result. (frankenredis-q7al0)
+    fn lex_range_window_adaptive(
+        &mut self,
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        offset: usize,
+        take: usize,
+    ) -> Vec<(Vec<u8>, f64)> {
+        if take != usize::MAX && offset > 0 {
+            if let SortedSetInner::Full(full) = &mut self.inner {
+                full.maybe_warm_rank_tree_for_index(offset, take);
+            }
+        }
+        self.lex_range_window(min, max, rev, offset, take)
     }
 
     /// (frankenredis-7st86) Count members whose bytes lie in the lex range
@@ -13046,12 +13129,12 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
                         // (frankenredis-sp1qh) Range-prune the single-score band;
                         // the skip/take window is applied before cloning.
                         let result: Vec<Vec<u8>> = zs
-                            .lex_range_window(min, max, rev, offset, take)
+                            .lex_range_window_adaptive(min, max, rev, offset, take)
                             .into_iter()
                             .map(|(m, _)| m)
                             .collect();
@@ -13096,11 +13179,11 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
                         // (frankenredis-sp1qh) Range-prune the single-score band.
                         let result: Vec<(Vec<u8>, f64)> =
-                            zs.lex_range_window(min, max, rev, offset, take);
+                            zs.lex_range_window_adaptive(min, max, rev, offset, take);
                         entry.touch(now_ms);
                         Ok(result)
                     }
