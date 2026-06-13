@@ -1,2 +1,0 @@
-4acdf6b733ca8d92c32b75ce310bfe2386ac9d1c0609d7162da4ffd3d1fd69fc  artifacts/optimization/frankenredis-incr-inplace/pass146/golden-baseline.out
-4acdf6b733ca8d92c32b75ce310bfe2386ac9d1c0609d7162da4ffd3d1fd69fc  artifacts/optimization/frankenredis-incr-inplace/pass146/golden-candidate.out

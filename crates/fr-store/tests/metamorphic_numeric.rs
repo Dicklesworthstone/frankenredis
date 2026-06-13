@@ -18,7 +18,7 @@ proptest! {
         let mut store = fresh_store();
         store.set(key.clone(), old_val.clone(), None, 0);
 
-        let retrieved_old = store.getset(key.clone(), &new_val, 0).unwrap();
+        let retrieved_old = store.getset(key.clone(), new_val.clone(), 0).unwrap();
         prop_assert_eq!(retrieved_old, Some(old_val));
 
         let retrieved_new = store.get(&key, 0).unwrap();

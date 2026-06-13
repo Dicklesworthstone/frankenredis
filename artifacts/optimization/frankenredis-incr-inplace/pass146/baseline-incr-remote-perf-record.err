@@ -1,2 +1,0 @@
-[ perf record: Woken up 1 times to write data ]
-[ perf record: Captured and wrote 0.720 MB artifacts/optimization/frankenredis-coralox-pass146-profile/incr-ssh.perf.data (5354 samples) ]
