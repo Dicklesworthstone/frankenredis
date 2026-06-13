@@ -1167,6 +1167,15 @@ impl ChunkedList {
         }
     }
 
+    /// Back-to-front iterator. O(n) total (vs O(n*chunks) for repeated `get(i)`
+    /// in a reverse scan). (frankenredis-gjyzr)
+    fn iter_rev(&self) -> ChunkedListRevIter<'_> {
+        ChunkedListRevIter {
+            chunks: self.chunks.iter().rev(),
+            current: None,
+        }
+    }
+
     /// Forward iterator starting at element index `start`, seeking at the CHUNK
     /// level from whichever end is closer — O(min(start, len-start)/chunk + chunk)
     /// instead of the O(start) element-by-element `iter().skip(start)`. Mirrors
@@ -1253,6 +1262,29 @@ impl<'a> Iterator for ChunkedListIter<'a> {
             }
             let chunk = self.chunks.next()?;
             self.current = Some(chunk.elems.iter());
+        }
+    }
+}
+
+/// Back-to-front borrowing iterator over a `ChunkedList` — chunks in reverse,
+/// elements within each chunk in reverse. (frankenredis-gjyzr)
+pub struct ChunkedListRevIter<'a> {
+    chunks: std::iter::Rev<std::collections::vec_deque::Iter<'a, ListChunk>>,
+    current: Option<std::iter::Rev<std::slice::Iter<'a, Vec<u8>>>>,
+}
+
+impl<'a> Iterator for ChunkedListRevIter<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(current) = &mut self.current
+                && let Some(elem) = current.next()
+            {
+                return Some(elem.as_slice());
+            }
+            let chunk = self.chunks.next()?;
+            self.current = Some(chunk.elems.iter().rev());
         }
     }
 }
@@ -1681,6 +1713,35 @@ impl ListValue {
         match &self.repr {
             ListRepr::Packed(p) => ListValueIter::Packed(p.iter_from(start)),
             ListRepr::Deque(d) => ListValueIter::Deque(d.iter_from(start)),
+        }
+    }
+
+    /// Back-to-front iterator. For the large (quicklist) encoding this is O(n)
+    /// via the chunk reverse-iterator; a reverse scan with repeated `get(i)`
+    /// would be O(n*chunks). The packed encoding is bounded small, so collecting
+    /// its borrowed refs to reverse them is trivial. (frankenredis-gjyzr)
+    pub fn iter_rev(&self) -> ListValueRevIter<'_> {
+        match &self.repr {
+            ListRepr::Packed(p) => {
+                ListValueRevIter::Packed(p.iter().collect::<Vec<&[u8]>>().into_iter().rev())
+            }
+            ListRepr::Deque(d) => ListValueRevIter::Deque(d.iter_rev()),
+        }
+    }
+}
+
+/// Borrowing reverse iterator over list elements, back to front.
+pub enum ListValueRevIter<'a> {
+    Packed(std::iter::Rev<std::vec::IntoIter<&'a [u8]>>),
+    Deque(ChunkedListRevIter<'a>),
+}
+
+impl<'a> Iterator for ListValueRevIter<'a> {
+    type Item = &'a [u8];
+    fn next(&mut self) -> Option<&'a [u8]> {
+        match self {
+            ListValueRevIter::Packed(it) => it.next(),
+            ListValueRevIter::Deque(it) => it.next(),
         }
     }
 }

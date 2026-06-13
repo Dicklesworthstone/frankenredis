@@ -9592,11 +9592,13 @@ impl Store {
                                 }
                             }
                         } else {
-                            // Reverse scan over indices [len-limit, len) descending.
-                            // (Indexed rather than iter().rev() — the packed list
-                            // iterator is forward-only.)
-                            for i in (len.saturating_sub(limit)..len).rev() {
-                                let item = l.get(i).expect("index in range");
+                            // (frankenredis-gjyzr) Reverse scan the last `limit`
+                            // elements via the chunk-level reverse iterator —
+                            // O(limit) instead of an O(limit*chunks) get(i)-per-
+                            // index walk on a quicklist. `i` descends from len-1.
+                            let mut i = len;
+                            for item in l.iter_rev().take(limit) {
+                                i -= 1;
                                 if item == element {
                                     matched += 1;
                                     if matched > skip {
