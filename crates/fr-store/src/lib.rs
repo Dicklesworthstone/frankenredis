@@ -4069,7 +4069,10 @@ pub struct Store {
     /// consumer observes that the earliest deadline is due. Long-TTL write-heavy
     /// workloads therefore avoid a global `BTreeSet<Vec<u8>>` insertion on
     /// every SETEX/PSETEX, but due-key sampling still uses the same sorted order.
-    volatile_keys: BTreeSet<Vec<u8>>,
+    // (frankenredis-x4tgs) Rebuilt lazily from `entries` by cloning the shared
+    // per-key Arc (refcount bump, no byte copy), so the volatile sampling index
+    // adds zero duplicate key storage. Orders via <[u8]>, identical to Vec<u8>.
+    volatile_keys: BTreeSet<std::sync::Arc<[u8]>>,
     volatile_keys_dirty: bool,
     /// Counts of absolute key-expiry deadlines, keyed by deadline ms.
     ///
@@ -7741,7 +7744,7 @@ impl Store {
             self.entries
                 .iter()
                 .filter(|(_, entry)| entry.expiry_ms().is_some())
-                .map(|(key, _)| key.to_vec()),
+                .map(|(key, _)| std::sync::Arc::clone(key)),
         );
         self.volatile_keys_dirty = false;
     }
@@ -7757,15 +7760,18 @@ impl Store {
                 .volatile_keys
                 .iter()
                 .filter(|key| decode_db_key(key).is_none())
-                .cloned()
+                .map(|k| k.to_vec())
                 .collect();
         }
 
         let prefix = encode_db_key(db, b"");
         self.volatile_keys
-            .range(prefix.clone()..)
+            .range::<[u8], _>((
+                std::ops::Bound::Included(prefix.as_slice()),
+                std::ops::Bound::Unbounded,
+            ))
             .take_while(|key| key.starts_with(&prefix))
-            .cloned()
+            .map(|k| k.to_vec())
             .collect()
     }
 
@@ -8234,13 +8240,20 @@ impl Store {
         let volatile_key_count = self.volatile_keys.len();
         let keys_to_check: Vec<Vec<u8>> = match start_cursor {
             Some(ref k) => {
-                let mut it = self.volatile_keys.range(k.clone()..).cloned();
+                let mut it = self
+                    .volatile_keys
+                    .range::<[u8], _>((
+                        std::ops::Bound::Included(k.as_slice()),
+                        std::ops::Bound::Unbounded,
+                    ))
+                    .map(|key| key.to_vec());
                 let mut collected: Vec<Vec<u8>> = it.by_ref().take(sample_limit).collect();
                 if collected.len() < sample_limit {
                     // Wrap around without sampling any volatile key twice.
                     let remaining_unique_keys = volatile_key_count.saturating_sub(collected.len());
                     let remaining = (sample_limit - collected.len()).min(remaining_unique_keys);
-                    collected.extend(self.volatile_keys.iter().take(remaining).cloned());
+                    collected
+                        .extend(self.volatile_keys.iter().take(remaining).map(|k| k.to_vec()));
                 }
                 collected
             }
@@ -8248,7 +8261,7 @@ impl Store {
                 .volatile_keys
                 .iter()
                 .take(sample_limit)
-                .cloned()
+                .map(|k| k.to_vec())
                 .collect(),
         };
 
@@ -8283,9 +8296,9 @@ impl Store {
         } else {
             keys_to_check.last().and_then(|last| {
                 self.volatile_keys
-                    .range((Excluded(last.clone()), Unbounded))
+                    .range::<[u8], _>((Excluded(last.as_slice()), Unbounded))
                     .next()
-                    .cloned()
+                    .map(|k| k.to_vec())
             })
         };
 
@@ -16829,7 +16842,7 @@ impl Store {
         // on every RANDOMKEY). (clone-storm elimination)
         if self.has_expiry_due(now_ms) {
             self.rebuild_volatile_keys_if_dirty();
-            let volatile: Vec<Vec<u8>> = self.volatile_keys.iter().cloned().collect();
+            let volatile: Vec<Vec<u8>> = self.volatile_keys.iter().map(|k| k.to_vec()).collect();
             for key in &volatile {
                 self.drop_if_expired(key, now_ms);
             }
@@ -19310,7 +19323,7 @@ impl Store {
             return;
         }
         self.rebuild_volatile_keys_if_dirty();
-        let volatile_keys: Vec<Vec<u8>> = self.volatile_keys.iter().cloned().collect();
+        let volatile_keys: Vec<Vec<u8>> = self.volatile_keys.iter().map(|k| k.to_vec()).collect();
         for key in &volatile_keys {
             self.drop_if_expired(key, now_ms);
         }
