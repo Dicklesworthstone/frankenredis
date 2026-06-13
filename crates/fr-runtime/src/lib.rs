@@ -4360,6 +4360,29 @@ fn copy_encoding_thresholds(replacement: &mut Store, original: &Store) {
     replacement.hll_sparse_max_bytes = original.hll_sparse_max_bytes;
 }
 
+/// (frankenredis-2j9wz) Snapshot the store's LIVE encoding thresholds so the RDB
+/// encoder emits each collection's compact type tag against the same limits that
+/// produced its in-memory encoding. Without this the encoder uses compiled
+/// defaults (e.g. set-max-listpack-entries=128), so a 200-member listpack set
+/// under a raised live limit of 512 would be saved as the plain RDB_TYPE_SET and
+/// reload as `hashtable`, diverging from redis and breaking DUMP byte-stability
+/// across DEBUG RELOAD.
+fn live_compact_thresholds(store: &Store) -> fr_persist::CompactRdbThresholds {
+    fr_persist::CompactRdbThresholds {
+        hash_max_listpack_entries: store.hash_max_listpack_entries,
+        hash_max_listpack_value: store.hash_max_listpack_value,
+        set_max_intset_entries: store.set_max_intset_entries,
+        set_max_listpack_entries: store.set_max_listpack_entries,
+        set_max_listpack_value: store.set_max_listpack_value,
+        zset_max_listpack_entries: store.zset_max_listpack_entries,
+        zset_max_listpack_value: store.zset_max_listpack_value,
+        // Lists are not part of the 2j9wz divergence; keep the encoder's default
+        // byte-cap (8 KiB) rather than reinterpreting the store's signed
+        // list-max-listpack-size config, so quicklist save behavior is unchanged.
+        list_max_listpack_size: fr_persist::CompactRdbThresholds::default().list_max_listpack_size,
+    }
+}
+
 const MAX_COMMAND_ARITY: usize = 1024 * 1024;
 
 impl Runtime {
@@ -4707,7 +4730,12 @@ impl Runtime {
             bytes
         } else {
             let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
-            fr_persist::encode_rdb_with_functions(&entries, &[], &fn_refs)
+            fr_persist::encode_rdb_with_functions_and_thresholds(
+                &entries,
+                &[],
+                &fn_refs,
+                live_compact_thresholds(&self.server.store),
+            )
         };
         let decoded = match fr_persist::decode_rdb_prefix(&bytes) {
             Ok(out) if out.consumed == bytes.len() => out,
@@ -4943,7 +4971,12 @@ impl Runtime {
             bytes
         } else {
             let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
-            fr_persist::encode_rdb_with_functions(&entries, &aux, &fn_refs)
+            fr_persist::encode_rdb_with_functions_and_thresholds(
+                &entries,
+                &aux,
+                &fn_refs,
+                live_compact_thresholds(&self.server.store),
+            )
         }
     }
 
@@ -18571,7 +18604,12 @@ impl Runtime {
             bytes
         } else {
             let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
-            fr_persist::encode_rdb_with_functions(&entries, &aux, &fn_refs)
+            fr_persist::encode_rdb_with_functions_and_thresholds(
+                &entries,
+                &aux,
+                &fn_refs,
+                live_compact_thresholds(&self.server.store),
+            )
         };
         fr_persist::write_aof_manifest_dir(&dir, &basename, seq, &base_rdb, &[])?;
         self.server.aof_current_seq = seq;
@@ -18644,7 +18682,12 @@ impl Runtime {
                 bytes
             } else {
                 let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
-                fr_persist::encode_rdb_with_functions(&entries, &aux, &fn_refs)
+                fr_persist::encode_rdb_with_functions_and_thresholds(
+                    &entries,
+                    &aux,
+                    &fn_refs,
+                    live_compact_thresholds(&self.server.store),
+                )
             };
             if fr_persist::write_rdb_bytes(&path, &encoded).is_err() {
                 return Err(RespFrame::Error(
@@ -21587,12 +21630,17 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
             Value::List(l) => RdbValue::List(l.iter().map(<[u8]>::to_vec).collect()),
             Value::Set(s) => {
                 let mut members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
-                members.sort();
                 // (frankenredis-39is8) Save by ACTUAL encoding: a hashtable set
                 // emits the plain RDB_TYPE_SET so the encoding survives a
                 // save/load even when its content would otherwise re-derive to a
                 // smaller encoding. intset/listpack sets keep `Set` (re-derived).
                 if store.set_is_hashtable_encoded(&key) {
+                    // (frankenredis-2j9wz) Only a hashtable set needs an imposed
+                    // order — its iteration is non-deterministic. intset/listpack
+                    // sets are saved in native iteration order (ascending for
+                    // intset, insertion for listpack), matching redis, so the
+                    // DUMP stays byte-stable across DEBUG RELOAD.
+                    members.sort();
                     RdbValue::SetHashtable(members)
                 } else {
                     RdbValue::Set(members)
@@ -21628,7 +21676,15 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
                         .iter()
                         .map(|(k_, v_)| (k_.to_vec(), v_.to_vec()))
                         .collect();
-                    fields.sort_by(|a, b| a.0.cmp(&b.0));
+                    // (frankenredis-2j9wz) Only a hashtable hash needs an imposed
+                    // field order — its iteration is non-deterministic. A listpack
+                    // hash is saved in native insertion order, matching redis, so
+                    // its DUMP stays byte-stable across DEBUG RELOAD (fields sorted
+                    // here would reload into sorted order and diverge, e.g. f0,f1,
+                    // f10,f2,.. instead of f0,f1,..,f9,f10).
+                    if store.hash_is_hashtable_encoded(&key) {
+                        fields.sort_by(|a, b| a.0.cmp(&b.0));
+                    }
                     RdbValue::Hash(fields)
                 }
             }

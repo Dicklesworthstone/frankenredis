@@ -51,10 +51,12 @@ def stable(r,kind,n):
     build(r,kind,n); d1=r.cmd("dump","k"); r.cmd("debug","reload"); d2=r.cmd("dump","k")
     return d1==d2
 CASES=[(k,n) for k in ("hash","list","zset","set-lp","set-int") for n in (5,50,200)]
-# Known-failing under the OPEN bug frankenredis-2j9wz (listpack hash/set re-serialize
-# to a different layout after reload). Listed so the suite stays green and this gate
-# hard-FAILs only on a NEW regression — and flags when 2j9wz is fixed (drop them then).
-KNOWN_2J9WZ={("hash",50),("hash",200),("set-lp",50),("set-lp",200)}
+# frankenredis-2j9wz is FIXED (commit thread on the bead): the SAVE path no longer
+# sorts listpack hash/set fields (it preserves native insertion order, matching
+# redis) and now encodes against LIVE thresholds (a listpack set above the default
+# limit saves as SET_LISTPACK, not the hashtable-pinned plain SET). This set is now
+# empty so ANY reload-DUMP instability vs redis is a hard FAIL/regression.
+KNOWN_2J9WZ=set()
 def main():
     od=R(int(sys.argv[1])); fr=R(int(sys.argv[2])); bad=0; known=0; fixed=[]
     for kind,n in CASES:

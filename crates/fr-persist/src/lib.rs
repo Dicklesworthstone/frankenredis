@@ -1314,6 +1314,32 @@ pub fn encode_rdb_with_functions(
     )
 }
 
+/// Encode a complete RDB file including FUNCTION libraries, choosing compact
+/// type tags against the supplied (live) thresholds rather than the compiled
+/// defaults. (frankenredis-2j9wz) The snapshot path must save each collection by
+/// its ACTUAL in-memory encoding: a listpack set/hash that fits only because the
+/// runtime raised `*-max-listpack-entries` above the default would otherwise be
+/// emitted as the plain `RDB_TYPE_SET`/`RDB_TYPE_HASH` and reload with a
+/// different (hashtable) encoding, breaking DUMP byte-stability across DEBUG
+/// RELOAD. Passing the live thresholds keeps the saved tag in lock-step with the
+/// in-memory encoding the thresholds produced.
+#[must_use]
+pub fn encode_rdb_with_functions_and_thresholds(
+    entries: &[RdbEntry],
+    aux: &[(&str, &str)],
+    functions: &[&[u8]],
+    thresholds: CompactRdbThresholds,
+) -> Vec<u8> {
+    encode_rdb_internal(
+        entries,
+        aux,
+        functions,
+        RdbEncodeOptions {
+            compact: Some(thresholds),
+        },
+    )
+}
+
 /// Encode a complete RDB file for an already-sorted, string-only keyspace.
 ///
 /// This mirrors `encode_rdb_with_functions` for `RdbValue::String` entries but

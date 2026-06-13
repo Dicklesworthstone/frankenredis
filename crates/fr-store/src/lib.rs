@@ -10859,6 +10859,20 @@ impl Store {
         })
     }
 
+    /// (frankenredis-2j9wz) True when the hash at `key` is hashtable-encoded.
+    /// The RDB SAVE path uses this to decide whether hash fields need an imposed
+    /// order: a hashtable hash iterates non-deterministically (and never matches
+    /// redis's dict order anyway), so it is sorted for stable output, while a
+    /// listpack hash is saved in native insertion order — exactly what redis
+    /// emits — so its DUMP stays byte-stable across a save/load (DEBUG RELOAD).
+    /// `force_hash_hashtable_encoding` is the canonical encoding indicator (the
+    /// same flag `object_encoding` reads after the a0p5p forward-only fix).
+    pub fn hash_is_hashtable_encoded(&self, key: &[u8]) -> bool {
+        self.entries.get(key).is_some_and(|entry| {
+            matches!(entry.value, Value::Hash(_)) && entry.force_hash_hashtable_encoding
+        })
+    }
+
     /// Force the set at `key` to report `hashtable` encoding (sticky). Used by the
     /// RDB load path to restore a set decoded from `RDB_TYPE_SET` (the plain,
     /// hashtable-encoded type) after its members are replayed via `sadd`, so the
