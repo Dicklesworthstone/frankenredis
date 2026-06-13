@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "artifacts/optimization/frankenredis-coralox-pass181/run_owned_lpush_bench.sh fr 25281 1000000 123 artifacts/optimization/frankenredis-coralox-pass181/baseline/fr-baseline-server.log >/dev/null",
+      "mean": 1.0148984190285713,
+      "stddev": 0.029887288379964544,
+      "median": 1.0050560646000002,
+      "user": 0.56993086,
+      "system": 1.4004105657142858,
+      "min": 0.9880486266,
+      "max": 1.0632218846000001,
+      "times": [
+        0.9880486266,
+        0.9913241856,
+        1.0050560646000002,
+        0.9989543006,
+        1.0063947006,
+        1.0632218846000001,
+        1.0512891706
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "artifacts/optimization/frankenredis-coralox-pass181/run_owned_lpush_bench.sh redis 25280 1000000 123 artifacts/optimization/frankenredis-coralox-pass181/baseline/redis-baseline-server.log >/dev/null",
+      "mean": 1.2397021693428572,
+      "stddev": 0.13898757496086586,
+      "median": 1.2256600302,
+      "user": 0.7395010371428569,
+      "system": 1.4609979485714284,
+      "min": 1.0212795322000001,
+      "max": 1.4213325592000001,
+      "times": [
+        1.2256600302,
+        1.3503813412,
+        1.3210487162,
+        1.4213325592000001,
+        1.2246736312,
+        1.1135393752,
+        1.0212795322000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
