@@ -16943,27 +16943,81 @@ impl Store {
             None
         };
 
-        let (pos, result, last_examined) = match &resume_key {
-            Some(k) => self.scan_walk(
-                self.ordered_keys.range::<[u8], _>((
-                    std::ops::Bound::Excluded(k.as_slice()),
-                    std::ops::Bound::Unbounded,
-                )),
-                start,
-                batch_size,
-                pattern,
-                now_ms,
-            ),
-            None => self.scan_walk(
-                self.ordered_keys.iter().skip(start),
-                start,
-                batch_size,
-                pattern,
-                now_ms,
-            ),
+        // (frankenredis-9cg1c) When MATCH carries a literal prefix, restrict the
+        // walk to that prefix's key range. fr's keyspace is an ORDERED BTreeSet,
+        // so `SCAN ... MATCH user:* ...` examines only O(log n + matches) keys in
+        // total instead of every key — the same asymmetry KEYS exploits (2wgom),
+        // which redis's unordered dict cannot. glob_match still filters every
+        // candidate within the range, so the matched set and order are
+        // byte-identical to the full-keyspace walk.
+        let lit = pattern.map(glob_literal_prefix).filter(|l| !l.is_empty());
+        let prefix_end: Option<Vec<u8>> = lit.and_then(prefix_range_end);
+        let (pos, result, last_examined) = if let Some(lit) = lit {
+            let end_bound = match &prefix_end {
+                Some(e) => std::ops::Bound::Excluded(e.as_slice()),
+                None => std::ops::Bound::Unbounded,
+            };
+            // The pruned cursor counts keys examined WITHIN the prefix range, so a
+            // cache hit jumps past `last_key` (O(log n)) while a cache miss /
+            // cleared cache falls back to skip(start) over the SAME prefix range —
+            // both land on the next unexamined key, identical to the full-walk
+            // skip fallback's robustness guarantee.
+            match &resume_key {
+                Some(k) => self.scan_walk(
+                    self.ordered_keys
+                        .range::<[u8], _>((std::ops::Bound::Excluded(k.as_slice()), end_bound)),
+                    start,
+                    batch_size,
+                    pattern,
+                    now_ms,
+                ),
+                None => self.scan_walk(
+                    self.ordered_keys
+                        .range::<[u8], _>((std::ops::Bound::Included(lit), end_bound))
+                        .skip(start),
+                    start,
+                    batch_size,
+                    pattern,
+                    now_ms,
+                ),
+            }
+        } else {
+            match &resume_key {
+                Some(k) => self.scan_walk(
+                    self.ordered_keys.range::<[u8], _>((
+                        std::ops::Bound::Excluded(k.as_slice()),
+                        std::ops::Bound::Unbounded,
+                    )),
+                    start,
+                    batch_size,
+                    pattern,
+                    now_ms,
+                ),
+                None => self.scan_walk(
+                    self.ordered_keys.iter().skip(start),
+                    start,
+                    batch_size,
+                    pattern,
+                    now_ms,
+                ),
+            }
         };
 
-        let next_cursor = if pos >= total_keys { 0 } else { pos as u64 };
+        // Prefix-pruned walk completes (cursor 0) when its bounded range is
+        // exhausted — i.e. it examined fewer than a full batch this call. The
+        // full-keyspace walk keeps its original global-position completion, so
+        // that path's cursor sequence is byte-for-byte unchanged.
+        let next_cursor = if lit.is_some() {
+            if pos.saturating_sub(start) < batch_size {
+                0
+            } else {
+                pos as u64
+            }
+        } else if pos >= total_keys {
+            0
+        } else {
+            pos as u64
+        };
         // Re-insert this scan's advanced resume point for its next in-order call.
         // (When the scan completes, next_cursor == 0 and the consumed entry was
         // already removed above, so nothing is re-added.)
@@ -30751,6 +30805,101 @@ mod tests {
         assert!(
             score >= 2.0,
             "resume-cache SCAN must be >=2.0x; got {score:.2}x"
+        );
+    }
+
+    // (frankenredis-9cg1c) SCAN MATCH <literal-prefix>* prunes the walk to the
+    // prefix's key range. The full-iteration result must equal a ground-truth
+    // glob filter over the whole sorted keyspace (byte-identical SET + order),
+    // and driving it to completion must examine only O(matches) keys even when
+    // the matching prefix sits at the END of a large keyspace — A/B vs the
+    // number of keys a full (unpruned) walk would examine.
+    #[test]
+    fn scan_match_prefix_prune_isomorphic_and_faster_scanpfx() {
+        use super::Store;
+
+        fn drive(store: &mut Store, pattern: &[u8], count: usize) -> (Vec<Vec<u8>>, usize) {
+            let mut all = Vec::new();
+            let mut cursor = 0u64;
+            let mut calls = 0usize;
+            loop {
+                let (next, batch) = store.scan(cursor, Some(pattern), count, 0);
+                calls += 1;
+                all.extend(batch);
+                if next == 0 || calls > 10_000_000 {
+                    break;
+                }
+                cursor = next;
+            }
+            all.sort();
+            (all, calls)
+        }
+
+        // Correctness across prefix shapes + a non-prefix control, random keyspaces.
+        let mut st: u64 = 0xfeed_face_dead_beef;
+        let mut rng = || {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            st
+        };
+        for _ in 0..60 {
+            let mut store = Store::new();
+            let n = (rng() % 500) as usize;
+            for _ in 0..n {
+                let klen = 1 + (rng() % 8) as usize;
+                let key: Vec<u8> =
+                    (0..klen).map(|_| b"ab:_0129xyz"[(rng() % 11) as usize]).collect();
+                store.set(key, b"v".to_vec(), None, 0);
+            }
+            for pat in [&b"a*"[..], b"ab:*", b"*9", b"a?:*", b"z*"] {
+                let count = 1 + (rng() % 16) as usize;
+                let (got, _) = drive(&mut store, pat, count);
+                // Ground truth: every live key matching the glob, sorted.
+                let mut want: Vec<Vec<u8>> = store
+                    .ordered_keys
+                    .iter()
+                    .filter(|k| super::glob_match(pat, k))
+                    .map(|k| k.to_vec())
+                    .collect();
+                want.sort();
+                assert_eq!(got, want, "SCAN MATCH {pat:?} prune diverged from glob ground truth");
+            }
+        }
+
+        // A/B: 200k keys under prefix "k", only ~50 under the LATE prefix "zz:".
+        // A pruned full-SCAN examines only the ~50-key range; an unpruned walk
+        // would examine all 200k. Compare wall time of driving each to completion.
+        let mut store = Store::new();
+        for i in 0..200_000u32 {
+            store.set(format!("k{i:08}").into_bytes(), b"v".to_vec(), None, 0);
+        }
+        for i in 0..50u32 {
+            store.set(format!("zz:{i:04}").into_bytes(), b"v".to_vec(), None, 0);
+        }
+        let t0 = std::time::Instant::now();
+        let (pruned, pruned_calls) = drive(&mut store, b"zz:*", 100);
+        let pruned_ns = t0.elapsed().as_nanos().max(1);
+        assert_eq!(pruned.len(), 50, "must find all 50 zz: keys");
+
+        // Reference: an unpruned full walk glob-filtering every key (what SCAN did
+        // before this lever — examine all 200_050 keys).
+        let t1 = std::time::Instant::now();
+        let mut ref_matches = 0usize;
+        for k in store.ordered_keys.iter() {
+            if super::glob_match(b"zz:*", k) {
+                ref_matches += 1;
+            }
+        }
+        let ref_ns = t1.elapsed().as_nanos().max(1);
+        assert_eq!(ref_matches, 50);
+        println!(
+            "SCAN MATCH prefix-prune A/B (200050 keys, 50 match late prefix): pruned full-scan {pruned_calls} calls {pruned_ns}ns vs unpruned full walk {ref_ns}ns ratio={:.1}x",
+            ref_ns as f64 / pruned_ns as f64
+        );
+        assert!(
+            ref_ns as f64 / pruned_ns as f64 > 2.0 || cfg!(debug_assertions),
+            "expected >2x"
         );
     }
 

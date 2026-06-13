@@ -18739,17 +18739,26 @@ impl Runtime {
             }
         }
 
-        let logical_keys = self
-            .server
-            .store
-            .keys_in_db(self.session.selected_db, now_ms);
+        // (frankenredis-9cg1c) When MATCH carries a literal prefix, pull only
+        // the matching keys via keys_matching_in_db, which range-prunes fr's
+        // ORDERED keyspace to the prefix (O(log n + matches)) instead of
+        // materializing + glob-filtering every key in the DB on every SCAN call —
+        // the same asymmetry KEYS exploits (2wgom). Byte-identical: it applies the
+        // SAME glob_match and reaps the SAME due-volatile set, so the matched
+        // logical-key set (and the cursor-indexed page) is unchanged.
+        let logical_keys = match pattern {
+            Some(pat) => self
+                .server
+                .store
+                .keys_matching_in_db(self.session.selected_db, pat, now_ms),
+            None => self
+                .server
+                .store
+                .keys_in_db(self.session.selected_db, now_ms),
+        };
         let mut filtered = Vec::new();
         for logical_key in logical_keys {
-            if let Some(expected_pattern) = pattern
-                && !glob_match(expected_pattern, &logical_key)
-            {
-                continue;
-            }
+            // `pattern` was already applied by keys_matching_in_db above.
             if let Some(expected_type) = type_filter {
                 let physical = encode_db_key(self.session.selected_db, &logical_key);
                 let expected = std::str::from_utf8(expected_type).unwrap_or("");
