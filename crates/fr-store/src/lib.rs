@@ -11869,12 +11869,13 @@ impl Store {
         force_skiplist: bool,
         now_ms: u64,
     ) {
-        let mut zs = SortedSet::new();
+        // (frankenredis-zsetbulk) ZRANGESTORE source is a zset range, so `pairs`
+        // has unique members — bulk-build the dest in one O(n) BTreeMap pass
+        // instead of N incremental inserts. The force_skiplist flag below sets
+        // the Entry encoding flag and is independent of the SortedSet storage.
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
-        for (member, score) in pairs {
-            zs.insert_with_limits(member, score, zset_max_entries, zset_max_value);
-        }
+        let zs = SortedSet::from_unique_pairs_with_limits(pairs, zset_max_entries, zset_max_value);
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
         let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms);
@@ -16786,12 +16787,11 @@ impl Store {
             return;
         }
 
-        let mut zs = SortedSet::new();
+        // (frankenredis-zsetbulk) HashMap members are unique — bulk-build the dest.
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
-        for (m, s) in members {
-            zs.insert_with_limits(m, s, zset_max_entries, zset_max_value);
-        }
+        let pairs: Vec<(Vec<u8>, f64)> = members.into_iter().collect();
+        let zs = SortedSet::from_unique_pairs_with_limits(pairs, zset_max_entries, zset_max_value);
         self.internal_entries_insert(
             dest.to_vec(),
             Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
@@ -16814,12 +16814,11 @@ impl Store {
             return;
         }
 
-        let mut zs = SortedSet::new();
+        // (frankenredis-zsetbulk) GEOSEARCHSTORE / ZRANGESTORE-by-rank results
+        // have unique members — bulk-build the dest in one O(n) BTreeMap pass.
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
-        for (m, s) in members {
-            zs.insert_with_limits(m, s, zset_max_entries, zset_max_value);
-        }
+        let zs = SortedSet::from_unique_pairs_with_limits(members, zset_max_entries, zset_max_value);
         self.internal_entries_insert(
             dest.to_vec(),
             Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
