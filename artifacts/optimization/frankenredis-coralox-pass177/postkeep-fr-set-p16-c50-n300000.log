@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:6490
+workload: set
+clients: 50  requests: 300000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 318 ms  throughput: 942070.71 ops/sec
+latency(us): min=103 p50=706 p95=1174 p99=1807 p999=17711 max=17823 mean=827.96
+bytes: sent=16716789 received=1500000 key_prefix=pass177-fr-set

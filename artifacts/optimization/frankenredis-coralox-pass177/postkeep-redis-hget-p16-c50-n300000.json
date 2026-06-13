@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781373841473,
+  "host": "127.0.0.1",
+  "port": 6491,
+  "workload": "hget",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "pass177-redis-hget",
+  "total_time_ms": 415,
+  "ops_per_sec": 722797.2577688827,
+  "bytes_sent": 17966728,
+  "bytes_received": 2700000,
+  "latency_us": {
+    "min": 39,
+    "p50": 908,
+    "p95": 1733,
+    "p99": 2361,
+    "p999": 3397,
+    "max": 5155,
+    "mean": 1082.6608699999995,
+    "samples": 300000
+  }
+}

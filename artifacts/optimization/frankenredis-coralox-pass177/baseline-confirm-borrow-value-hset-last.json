@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781374888801,
+  "host": "127.0.0.1",
+  "port": 6503,
+  "workload": "hset",
+  "clients": 50,
+  "requests": 10000000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "pass177-confirm-baseline",
+  "total_time_ms": 8691,
+  "ops_per_sec": 1150483.8523094547,
+  "bytes_sent": 773340651,
+  "bytes_received": 40000000,
+  "latency_us": {
+    "min": 33,
+    "p50": 671,
+    "p95": 782,
+    "p99": 1067,
+    "p999": 1523,
+    "max": 25919,
+    "mean": 687.3958119999987,
+    "samples": 10000000
+  }
+}

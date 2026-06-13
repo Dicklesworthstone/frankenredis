@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:6491
+workload: get
+clients: 50  requests: 300000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 314 ms  throughput: 953172.52 ops/sec
+latency(us): min=55 p50=744 p95=1211 p99=1566 p999=2517 max=3227 mean=815.08
+bytes: sent=14666709 received=2700000 key_prefix=pass177-redis-get

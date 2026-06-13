@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "bash -lc 'set -euo pipefail\n  \"/data/tmp/frankenredis-pass177-current-target/release-perf/frankenredis\" --bind 127.0.0.1 --port 6492 >\"artifacts/optimization/frankenredis-coralox-pass177/baseline-borrow-value-hset-server.log\" 2>&1 &\n  pid=$!\n  trap '\\''kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true'\\'' EXIT\n  for _ in {1..100}; do\n    if nc -z 127.0.0.1 6492 >/dev/null 2>&1; then break; fi\n    sleep 0.02\n  done\n  \"/data/tmp/frankenredis-pass177-current-target/release-perf/fr-bench\" --host 127.0.0.1 --port 6492 --workload hset --pipeline 16 --clients 50 --requests 3000000 --json-out \"artifacts/optimization/frankenredis-coralox-pass177/baseline-borrow-value-hset-last.json\" --key-prefix pass177-baseline\n'",
+      "mean": 3.160104468731429,
+      "stddev": 0.16225153198197392,
+      "median": 3.19795222616,
+      "user": 3.659575231428571,
+      "system": 5.177533471428572,
+      "min": 2.89944106116,
+      "max": 3.3579353701600003,
+      "times": [
+        3.07963840316,
+        2.89944106116,
+        3.0425532361600003,
+        3.31786773916,
+        3.22534324516,
+        3.3579353701600003,
+        3.19795222616
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

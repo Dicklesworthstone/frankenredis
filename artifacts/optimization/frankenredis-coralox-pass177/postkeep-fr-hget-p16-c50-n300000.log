@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:6490
+workload: hget
+clients: 50  requests: 300000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 387 ms  throughput: 774540.71 ops/sec
+latency(us): min=75 p50=960 p95=1300 p99=1462 p999=6291 max=6307 mean=1009.14
+bytes: sent=17066889 received=2700000 key_prefix=pass177-fr-hget
