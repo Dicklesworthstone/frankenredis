@@ -156,6 +156,24 @@ fn write_varint(buf: &mut Vec<u8>, mut n: usize) {
     }
 }
 
+fn encode_varint_array(mut n: usize) -> ([u8; 10], usize) {
+    let mut buf = [0u8; 10];
+    let mut len = 0usize;
+    loop {
+        let mut byte = (n & 0x7f) as u8;
+        n >>= 7;
+        if n != 0 {
+            byte |= 0x80;
+        }
+        buf[len] = byte;
+        len += 1;
+        if n == 0 {
+            break;
+        }
+    }
+    (buf, len)
+}
+
 /// Read a LEB128 varint starting at `pos`; returns `(value, index_after_varint)`.
 fn read_varint(buf: &[u8], mut pos: usize) -> (usize, usize) {
     let mut result = 0usize;
@@ -514,7 +532,7 @@ impl HashFieldMap {
             self.promote();
         }
         match self {
-            HashFieldMap::Packed(p) => p.insert(field.to_vec(), value).is_none(),
+            HashFieldMap::Packed(p) => p.insert_borrowed(field, value),
             HashFieldMap::Hash(h) => {
                 if let Some(slot) = h.get_mut(field) {
                     *slot = value;
@@ -707,6 +725,36 @@ impl PackedStrMap {
             self.buf.extend_from_slice(&value);
             self.len += 1;
             None
+        }
+    }
+
+    /// Borrowed-field upsert for callers that only need "was this field new?"
+    /// instead of the previous value. Existing-field updates preserve the record
+    /// position exactly like `IndexMap::insert`, but avoid materializing the
+    /// field key and old value.
+    pub fn insert_borrowed(&mut self, field: &[u8], value: Vec<u8>) -> bool {
+        if let Some(l) = self.locate(field) {
+            let (value_len_prefix, value_len_prefix_len) = encode_varint_array(value.len());
+            let new_encoded_len = value_len_prefix_len + value.len();
+            if new_encoded_len == l.value_end - l.value_enc_start {
+                let value_start = l.value_enc_start + value_len_prefix_len;
+                self.buf[l.value_enc_start..value_start]
+                    .copy_from_slice(&value_len_prefix[..value_len_prefix_len]);
+                self.buf[value_start..l.value_end].copy_from_slice(&value);
+            } else {
+                let mut encoded = Vec::with_capacity(new_encoded_len);
+                encoded.extend_from_slice(&value_len_prefix[..value_len_prefix_len]);
+                encoded.extend_from_slice(&value);
+                self.buf.splice(l.value_enc_start..l.value_end, encoded);
+            }
+            false
+        } else {
+            write_varint(&mut self.buf, field.len());
+            self.buf.extend_from_slice(field);
+            write_varint(&mut self.buf, value.len());
+            self.buf.extend_from_slice(&value);
+            self.len += 1;
+            true
         }
     }
 
@@ -2223,7 +2271,7 @@ mod tests {
         /// identical. The isomorphism the HashFieldMap wiring relies on.
         #[test]
         fn map_equivalent_to_indexmap(ops in proptest::collection::vec(
-            (0u8..3, proptest::collection::vec(0u8..3, 0..4), proptest::collection::vec(0u8..9, 0..4)),
+            (0u8..4, proptest::collection::vec(0u8..3, 0..4), proptest::collection::vec(0u8..9, 0..4)),
             0..300)) {
             let mut packed = PackedStrMap::new();
             let mut oracle: IndexMap<Vec<u8>, Vec<u8>> = IndexMap::new();
@@ -2239,11 +2287,19 @@ mod tests {
                         let b = oracle.shift_remove(&field);
                         prop_assert_eq!(a, b);
                     }
-                    _ => {
+                    2 => {
                         prop_assert_eq!(packed.get(&field), oracle.get(&field[..]).map(|v| v.as_slice()));
                         prop_assert_eq!(packed.contains_key(&field), oracle.contains_key(&field[..]));
                     }
+                    _ => {
+                        let a = packed.insert_borrowed(&field, value.clone());
+                        let b = !oracle.contains_key(&field[..]);
+                        oracle.insert(field.clone(), value.clone());
+                        prop_assert_eq!(a, b);
+                    }
                 }
+                prop_assert_eq!(packed.get(&field), oracle.get(&field[..]).map(|v| v.as_slice()));
+                prop_assert_eq!(packed.contains_key(&field), oracle.contains_key(&field[..]));
                 prop_assert_eq!(packed.len(), oracle.len());
                 let p: Vec<(&[u8], &[u8])> = packed.iter().collect();
                 let o: Vec<(&[u8], &[u8])> =
@@ -2667,9 +2723,7 @@ mod tests {
         let mut acc2 = 0usize;
         let t1 = std::time::Instant::now();
         for _ in 0..reps {
-            acc2 += cl
-                .locate(std::hint::black_box(tail))
-                .map_or(0, |(c, _)| c);
+            acc2 += cl.locate(std::hint::black_box(tail)).map_or(0, |(c, _)| c);
         }
         let new_ns = t1.elapsed().as_nanos().max(1);
         std::hint::black_box(acc2);
