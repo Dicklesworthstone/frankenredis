@@ -1371,14 +1371,11 @@ impl SortedSet {
             .count()
     }
 
-    /// `count` (member, score) pairs starting at ascending index `start_idx`.
-    fn index_slice_asc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
-        match &self.inner {
-            SortedSetInner::Packed(p) => p.index_slice_asc(start_idx, count),
-            SortedSetInner::Full(f) => f.index_slice_asc(start_idx, count),
-        }
-    }
-
+    /// `count` (member, score) pairs starting at ascending index `start_idx`,
+    /// adaptively warming the rank treap on repeated deep access. The only
+    /// SortedSet-level slice path (ZRANGE-by-index, ZREMRANGEBYRANK, ZSCAN all
+    /// route through here); the non-adaptive form was retired once every caller
+    /// wanted the warm. (frankenredis-5l66d)
     fn index_slice_asc_adaptive(&mut self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
         match &mut self.inner {
             SortedSetInner::Packed(p) => p.index_slice_asc(start_idx, count),
@@ -16617,7 +16614,9 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
+                // `&mut` so the skiplist path can adaptively warm the rank
+                // treap; the listpack branch only reads. (frankenredis-5l66d)
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
                         // (frankenredis-yvxq6) Upstream
                         // t_zset.c::zscanCommand short-circuits on the
@@ -16648,12 +16647,14 @@ impl Store {
                         // order-statistic treap in O(log N + batch) when the tree
                         // is built (the common case for ranked zsets) — versus
                         // iter_asc().skip(start) = O(start), which makes a full
-                        // ZSCAN O(N²/batch). Cold zsets fall back to the same skip,
-                        // so behavior and the position cursor are unchanged. The
+                        // ZSCAN O(N²/batch). The ADAPTIVE slice warms the treap
+                        // once a deep enough cursor is reached on a large zset, so
+                        // a full ZSCAN of a cold zset stops being quadratic. Cursor
+                        // and result order are unchanged (treap select == skip). The
                         // examined window (== examined count) drives `pos` exactly
                         // as the old per-member loop did; only matching members are
-                        // returned.
-                        let window = zs.index_slice_asc(start, batch_size);
+                        // returned. (frankenredis-5l66d)
+                        let window = zs.index_slice_asc_adaptive(start, batch_size);
                         let examined = window.len();
                         let result: Vec<(Vec<u8>, f64)> = match pattern {
                             Some(pat) => window
@@ -29753,8 +29754,14 @@ mod tests {
         if cfg!(debug_assertions) {
             return;
         }
-        // Score: full ZSCAN of a 20k-member zset at COUNT 10 — treap not built
-        // (skip fallback = old O(N²/batch)) vs treap built (O(N)).
+        // Score: ONE deep-cursor ZSCAN batch. (frankenredis-5l66d) index_slice_asc
+        // is now adaptive, so a *full* cold ZSCAN self-warms partway through and no
+        // longer has a slow baseline to compare against. A *single* deep-cursor
+        // batch is exactly one warm-hit — below the 2-hit warm threshold — so the
+        // cold store still takes the O(start) skip (old behavior), while a store
+        // whose treap is already built resumes in O(log N + batch). This isolates
+        // the per-call treap-resume win the adaptive path delivers once warm. Only
+        // the zscan call is timed; the cold rebuild is excluded.
         let build = || {
             let mut s = Store::new();
             for i in 0..20_000u32 {
@@ -29763,32 +29770,35 @@ mod tests {
             }
             s
         };
-        let mut s_old = build();
-        let mut s_new = build();
-        s_new.zrank(b"z", b"m000000", 0).unwrap(); // build the order-statistic treap
-        let reps = 4;
-        let t0 = std::time::Instant::now();
-        let mut acc = 0usize;
+        let deep_cursor = 19_500u64;
+        let reps = 20;
+        let mut cold_ns = 0u128;
         for _ in 0..reps {
-            acc = acc.wrapping_add(full_zscan(&mut s_old, b"z", None, 10).len());
+            let mut s = build(); // fresh -> cold (1 hit < 2-hit warm threshold)
+            let t = std::time::Instant::now();
+            let (_c, batch) = s.zscan(b"z", deep_cursor, None, 10, 0).unwrap();
+            cold_ns += t.elapsed().as_nanos();
+            std::hint::black_box(batch.len());
         }
-        let old_ns = t0.elapsed().as_nanos().max(1);
-        std::hint::black_box(acc);
-        let t1 = std::time::Instant::now();
-        let mut acc2 = 0usize;
+        let cold_ns = (cold_ns / reps as u128).max(1);
+        let mut s_warm = build();
+        s_warm.zrank(b"z", b"m000000", 0).unwrap(); // build the order-statistic treap
+        std::hint::black_box(s_warm.zscan(b"z", deep_cursor, None, 10, 0).unwrap().1.len());
+        let mut warm_ns = 0u128;
         for _ in 0..reps {
-            acc2 = acc2.wrapping_add(full_zscan(&mut s_new, b"z", None, 10).len());
+            let t = std::time::Instant::now();
+            let (_c, batch) = s_warm.zscan(b"z", deep_cursor, None, 10, 0).unwrap();
+            warm_ns += t.elapsed().as_nanos();
+            std::hint::black_box(batch.len());
         }
-        let new_ns = t1.elapsed().as_nanos().max(1);
-        std::hint::black_box(acc2);
-        assert_eq!(acc, acc2, "old/new returned different totals");
-        let score = old_ns as f64 / new_ns as f64;
+        let warm_ns = (warm_ns / reps as u128).max(1);
+        let score = cold_ns as f64 / warm_ns as f64;
         eprintln!(
-            "ZSCANRT full ZSCAN 20k @ COUNT 10: cold(skip)={old_ns}ns hot(treap)={new_ns}ns score={score:.2}x"
+            "ZSCANRT deep ZSCAN @{deep_cursor}: cold(skip)={cold_ns}ns warm(treap)={warm_ns}ns score={score:.2}x"
         );
         assert!(
             score >= 2.0,
-            "treap-resume ZSCAN must be >=2.0x; got {score:.2}x"
+            "treap-resume deep ZSCAN must be >=2.0x; got {score:.2}x"
         );
     }
 
