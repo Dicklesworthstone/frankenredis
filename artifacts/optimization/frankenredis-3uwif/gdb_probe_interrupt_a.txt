@@ -1,0 +1,9 @@
+Reading symbols from /data/tmp/frankenredis-152va-pass168-perf-target/release-perf/frankenredis...
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/frankenredis-152va-pass168-perf-target/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+Starting program: /data/tmp/frankenredis-152va-pass168-perf-target/release-perf/frankenredis --port 24194
+
+Thread 1 (process 256702 "frankenredis"):
+Selected thread is running.
+[Inferior 1 (process 256702) killed]
