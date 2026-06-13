@@ -1,0 +1,3 @@
+feb22bd30fe7bd48d50ac54544cf3557cb64bacbd44bb7c7be86703d62dd0a97  artifacts/optimization/frankenredis-coralox-pass171/hset-golden-input.raw
+1ee447fae351f3e7224f7ab64368d3bdb7d3f7e15455ec3df5100a256fd3a7ac  artifacts/optimization/frankenredis-coralox-pass171/hset-golden-baseline.resp
+1ee447fae351f3e7224f7ab64368d3bdb7d3f7e15455ec3df5100a256fd3a7ac  artifacts/optimization/frankenredis-coralox-pass171/hset-golden-candidate.resp

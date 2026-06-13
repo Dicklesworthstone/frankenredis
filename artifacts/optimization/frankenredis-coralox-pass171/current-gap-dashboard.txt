@@ -1,0 +1,14 @@
+head=4423bde88c366c3b180e55e258393ab9952ed506
+fr_binary=/data/tmp/frankenredis-coralox-pass171-target/release/frankenredis
+redis_binary=legacy_redis_code/redis/src/redis-server
+P16 C50 N200000 keyspace100000 best-of-3
+cmd            redis           fr redis_over_fr
+$cmd            819672       925925       0.885x
+$cmd            896860      1030927       0.870x
+$cmd            934579       865800       1.079x
+$cmd            990099      1075268       0.921x
+$cmd           1075268      1041666       1.032x
+$cmd            909090       888888       1.023x
+$cmd            816326       732600       1.114x
+$cmd            399201       518134       0.770x
+$cmd           1010101      1030927       0.980x

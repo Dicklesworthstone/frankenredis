@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "bash -lc 'set -euo pipefail\nFR=/data/tmp/frankenredis-coralox-pass171-target/release/frankenredis\nBENCH=/data/tmp/frankenredis-coralox-pass171-target/release/fr-bench\nART=artifacts/optimization/frankenredis-coralox-pass171\nPORT=24521\n\"$FR\" --port \"$PORT\" >\"$ART/hset-baseline-server-last.log\" 2>&1 & pid=$!\ntrap \"kill $pid 2>/dev/null || true\" EXIT\nsleep 0.25\n\"$BENCH\" --port \"$PORT\" --workload hset --requests 500000 --clients 50 --pipeline 16 --keyspace 100000 --json-out \"$ART/hset-baseline-last.json\" >/dev/null\nkill \"$pid\" 2>/dev/null || true\nwait \"$pid\" 2>/dev/null || true\n'",
+      "mean": 1.3508402325542856,
+      "stddev": 0.11925228256449505,
+      "median": 1.32336926384,
+      "user": 1.15925144,
+      "system": 0.9618441285714285,
+      "min": 1.22504477884,
+      "max": 1.58307724584,
+      "times": [
+        1.29797747084,
+        1.3267840528400001,
+        1.32336926384,
+        1.42543908884,
+        1.22504477884,
+        1.27418972684,
+        1.58307724584
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
