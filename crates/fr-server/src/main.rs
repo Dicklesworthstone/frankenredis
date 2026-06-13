@@ -319,6 +319,7 @@ struct ClientConnection {
     session: ClientSession,
     read_buf: Vec<u8>,
     write_buf: Vec<u8>,
+    main_writable_armed: bool,
     /// True if the client sent QUIT or must be disconnected.
     closing: bool,
     /// If set, the client is blocked waiting for data.
@@ -387,6 +388,7 @@ impl ClientConnection {
             session,
             read_buf: Vec::with_capacity(4096),
             write_buf: Vec::new(),
+            main_writable_armed: false,
             closing: false,
             blocked: None,
             replication_sent_offset: None,
@@ -1714,11 +1716,10 @@ fn accept_connections(
                     None
                 };
 
-                if let Err(e) = poll.registry().register(
-                    &mut stream,
-                    conn_handle,
-                    Interest::READABLE | Interest::WRITABLE,
-                ) {
+                if let Err(e) =
+                    poll.registry()
+                        .register(&mut stream, conn_handle, Interest::READABLE)
+                {
                     eprintln!("warn: failed to register client: {e}");
                     let _ = stream.shutdown(std::net::Shutdown::Both);
                     continue;
@@ -5298,20 +5299,14 @@ fn drive_client_output(
     if conn.writer_in_flight() {
         ctx.write_tokens.insert(token);
         conn.session.output_buffer_bytes = conn.pending_output_bytes();
-        let _ = ctx
-            .poll
-            .registry()
-            .reregister(&mut conn.stream, token, Interest::READABLE);
+        ensure_main_writable_disarmed(token, conn, ctx.poll);
         return;
     }
 
     if conn.write_buf.is_empty() {
         ctx.write_tokens.remove(&token);
         conn.session.output_buffer_bytes = 0;
-        let _ = ctx
-            .poll
-            .registry()
-            .reregister(&mut conn.stream, token, Interest::READABLE);
+        ensure_main_writable_disarmed(token, conn, ctx.poll);
         return;
     }
 
@@ -5331,11 +5326,7 @@ fn drive_client_output(
                 ctx.runtime.note_write_event();
                 ctx.write_tokens.remove(&token);
                 conn.session.output_buffer_bytes = 0;
-                let _ = ctx.poll.registry().reregister(
-                    &mut conn.stream,
-                    token,
-                    Interest::READABLE,
-                );
+                ensure_main_writable_disarmed(token, conn, ctx.poll);
                 return;
             }
             Ok(false) => {
@@ -5361,10 +5352,7 @@ fn drive_client_output(
                 conn.writer_in_flight_bytes = byte_len;
                 conn.session.output_buffer_bytes = conn.pending_output_bytes();
                 ctx.write_tokens.insert(token);
-                let _ = ctx
-                    .poll
-                    .registry()
-                    .reregister(&mut conn.stream, token, Interest::READABLE);
+                ensure_main_writable_disarmed(token, conn, ctx.poll);
                 return;
             }
             Err(mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job)) => {
@@ -5384,10 +5372,7 @@ fn drive_client_output(
         Ok(true) => {
             ctx.runtime.note_write_event();
             ctx.write_tokens.remove(&token);
-            let _ = ctx
-                .poll
-                .registry()
-                .reregister(&mut conn.stream, token, Interest::READABLE);
+            ensure_main_writable_disarmed(token, conn, ctx.poll);
         }
         Ok(false) => {
             arm_main_writable(token, conn, ctx.poll, ctx.write_tokens);
@@ -5401,6 +5386,15 @@ fn drive_client_output(
     conn.session.output_buffer_bytes = conn.pending_output_bytes();
 }
 
+fn ensure_main_writable_disarmed(token: Token, conn: &mut ClientConnection, poll: &mut Poll) {
+    if conn.main_writable_armed {
+        let _ = poll
+            .registry()
+            .reregister(&mut conn.stream, token, Interest::READABLE);
+        conn.main_writable_armed = false;
+    }
+}
+
 fn arm_main_writable(
     token: Token,
     conn: &mut ClientConnection,
@@ -5409,16 +5403,17 @@ fn arm_main_writable(
 ) {
     if conn.has_pending_output() {
         write_tokens.insert(token);
-        let _ = poll.registry().reregister(
-            &mut conn.stream,
-            token,
-            Interest::READABLE | Interest::WRITABLE,
-        );
+        if !conn.main_writable_armed {
+            let _ = poll.registry().reregister(
+                &mut conn.stream,
+                token,
+                Interest::READABLE | Interest::WRITABLE,
+            );
+            conn.main_writable_armed = true;
+        }
     } else {
         write_tokens.remove(&token);
-        let _ = poll
-            .registry()
-            .reregister(&mut conn.stream, token, Interest::READABLE);
+        ensure_main_writable_disarmed(token, conn, poll);
     }
 }
 
@@ -5452,11 +5447,7 @@ fn drain_writer_completions(
                 runtime.note_write_event();
                 if conn.write_buf.is_empty() {
                     write_tokens.remove(&completion.token);
-                    let _ = poll.registry().reregister(
-                        &mut conn.stream,
-                        completion.token,
-                        Interest::READABLE,
-                    );
+                    ensure_main_writable_disarmed(completion.token, conn, poll);
                     conn.session.output_buffer_bytes = 0;
                 } else {
                     drive_client_output(
@@ -7397,6 +7388,42 @@ mod tests {
         assert!(!connection.write_buf.is_empty());
 
         server.join().expect("primary thread");
+    }
+
+    #[test]
+    fn main_writable_interest_tracks_only_real_writable_arm() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = StdTcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let mut stream = mio::net::TcpStream::from_std(server);
+        let mut poll = mio::Poll::new().unwrap();
+        let token = Token(crate::MAX_LISTENERS + 71);
+        poll.registry()
+            .register(&mut stream, token, mio::Interest::READABLE)
+            .unwrap();
+
+        let runtime = Runtime::default_strict();
+        let session = runtime.new_session();
+        let mut conn = crate::ClientConnection::new(stream, session, 1_000);
+        let mut write_tokens = std::collections::HashSet::new();
+
+        crate::ensure_main_writable_disarmed(token, &mut conn, &mut poll);
+        assert!(!conn.main_writable_armed);
+
+        conn.write_buf.extend_from_slice(b"+OK\r\n");
+        crate::arm_main_writable(token, &mut conn, &mut poll, &mut write_tokens);
+        assert!(conn.main_writable_armed);
+        assert!(write_tokens.contains(&token));
+
+        crate::arm_main_writable(token, &mut conn, &mut poll, &mut write_tokens);
+        assert!(conn.main_writable_armed);
+        assert!(write_tokens.contains(&token));
+
+        conn.write_buf.clear();
+        crate::arm_main_writable(token, &mut conn, &mut poll, &mut write_tokens);
+        assert!(!conn.main_writable_armed);
+        assert!(!write_tokens.contains(&token));
     }
 
     #[test]
