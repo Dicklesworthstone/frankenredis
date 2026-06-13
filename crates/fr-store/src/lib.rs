@@ -1379,10 +1379,11 @@ impl SortedSet {
         offset: usize,
         take: usize,
     ) -> Vec<(Vec<u8>, f64)> {
-        if take != usize::MAX && offset > 0 {
-            if let SortedSetInner::Full(full) = &mut self.inner {
-                full.maybe_warm_rank_tree_for_index(offset, take);
-            }
+        if take != usize::MAX
+            && offset > 0
+            && let SortedSetInner::Full(full) = &mut self.inner
+        {
+            full.maybe_warm_rank_tree_for_index(offset, take);
         }
         self.lex_range_window(min, max, rev, offset, take)
     }
@@ -1650,10 +1651,11 @@ impl SortedSet {
         offset: usize,
         take: usize,
     ) -> Vec<(Vec<u8>, f64)> {
-        if take != usize::MAX && offset > 0 {
-            if let SortedSetInner::Full(full) = &mut self.inner {
-                full.maybe_warm_rank_tree_for_index(offset, take);
-            }
+        if take != usize::MAX
+            && offset > 0
+            && let SortedSetInner::Full(full) = &mut self.inner
+        {
+            full.maybe_warm_rank_tree_for_index(offset, take);
         }
         self.score_bound_range_limited(min, max, rev, offset, take)
     }
