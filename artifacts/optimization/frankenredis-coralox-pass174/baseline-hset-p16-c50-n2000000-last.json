@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781370670659,
+  "host": "127.0.0.1",
+  "port": 6515,
+  "workload": "hset",
+  "clients": 50,
+  "requests": 2000000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "pass174-paired-n2m-baseline-hset",
+  "total_time_ms": 2579,
+  "ops_per_sec": 775240.8264211249,
+  "bytes_sent": 169228720,
+  "bytes_received": 8000000,
+  "latency_us": {
+    "min": 261,
+    "p50": 990,
+    "p95": 1222,
+    "p99": 1767,
+    "p999": 2325,
+    "max": 3173,
+    "mean": 1021.2818160000003,
+    "samples": 2000000
+  }
+}
