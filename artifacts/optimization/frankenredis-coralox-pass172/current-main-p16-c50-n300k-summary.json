@@ -1,0 +1,66 @@
+[
+  {
+    "fr_ops": 920131.1246967927,
+    "fr_p99_us": 1301,
+    "redis_ops": 824176.3857025924,
+    "redis_over_fr": 0.8957162338945769,
+    "redis_p99_us": 1796,
+    "workload": "get"
+  },
+  {
+    "fr_ops": 745106.2520397749,
+    "fr_p99_us": 1749,
+    "redis_ops": 824035.2265610418,
+    "redis_over_fr": 1.1059298245118652,
+    "redis_p99_us": 1917,
+    "workload": "hget"
+  },
+  {
+    "fr_ops": 599439.474936897,
+    "fr_p99_us": 5291,
+    "redis_ops": 885435.7262855609,
+    "redis_over_fr": 1.477106135492279,
+    "redis_p99_us": 1645,
+    "workload": "hset"
+  },
+  {
+    "fr_ops": 827080.2892987902,
+    "fr_p99_us": 1571,
+    "redis_ops": 960122.1736263497,
+    "redis_over_fr": 1.1608572783669577,
+    "redis_p99_us": 1526,
+    "workload": "incr"
+  },
+  {
+    "fr_ops": 692825.9597009604,
+    "fr_p99_us": 3217,
+    "redis_ops": 697119.9715307357,
+    "redis_over_fr": 1.0061978217900909,
+    "redis_p99_us": 2227,
+    "workload": "lpop"
+  },
+  {
+    "fr_ops": 775926.9872982511,
+    "fr_p99_us": 2004,
+    "redis_ops": 774827.2430973623,
+    "redis_over_fr": 0.9985826705103813,
+    "redis_p99_us": 2004,
+    "workload": "lpush"
+  },
+  {
+    "fr_ops": 903574.6134568041,
+    "fr_p99_us": 1422,
+    "redis_ops": 949269.5962168493,
+    "redis_over_fr": 1.0505713441696087,
+    "redis_p99_us": 1552,
+    "workload": "mixed"
+  },
+  {
+    "fr_ops": 809721.711036659,
+    "fr_p99_us": 1527,
+    "redis_ops": 849577.3417858878,
+    "redis_over_fr": 1.04922139323423,
+    "redis_p99_us": 1729,
+    "workload": "set"
+  }
+]

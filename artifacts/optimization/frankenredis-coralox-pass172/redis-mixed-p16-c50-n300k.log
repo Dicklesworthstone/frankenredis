@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:6480
+workload: mixed
+clients: 50  requests: 300000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 316 ms  throughput: 949269.60 ops/sec
+latency(us): min=44 p50=786 p95=1186 p99=1552 p999=1667 max=2341 mean=819.42
+bytes: sent=16746040 received=2217884 key_prefix=pass172-redis-mixed

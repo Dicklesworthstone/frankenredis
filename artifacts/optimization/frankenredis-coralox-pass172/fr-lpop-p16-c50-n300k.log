@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:6479
+workload: lpop
+clients: 50  requests: 300000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 433 ms  throughput: 692825.96 ops/sec
+latency(us): min=82 p50=1060 p95=1484 p99=3217 p999=4019 max=4083 mean=1132.85
+bytes: sent=13766743 received=2699772 key_prefix=pass172-fr-lpop

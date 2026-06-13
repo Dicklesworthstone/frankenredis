@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781367895149,
+  "host": "127.0.0.1",
+  "port": 6479,
+  "workload": "lpop",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "pass172-fr-lpop",
+  "total_time_ms": 433,
+  "ops_per_sec": 692825.9597009604,
+  "bytes_sent": 13766743,
+  "bytes_received": 2699772,
+  "latency_us": {
+    "min": 82,
+    "p50": 1060,
+    "p95": 1484,
+    "p99": 3217,
+    "p999": 4019,
+    "max": 4083,
+    "mean": 1132.8547300000025,
+    "samples": 300000
+  }
+}
