@@ -1,0 +1,4 @@
+Benchmark 1: /data/tmp/frankenredis-yjedr-candidate-target/release/fr-bench --port 25254 --workload lpush --clients 50 --pipeline 16 --requests 1000000 --keyspace 100000 --key-prefix yjedr:cand --json-out artifacts/optimization/frankenredis-yjedr/candidate-run1/lpush-p16-c50-n1m-last.json
+  Time (mean ± σ):      1.413 s ±  0.091 s    [User: 0.738 s, System: 1.068 s]
+  Range (min … max):    1.291 s …  1.539 s    7 runs
+ 

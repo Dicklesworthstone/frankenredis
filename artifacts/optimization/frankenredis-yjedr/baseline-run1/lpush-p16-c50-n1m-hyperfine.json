@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/frankenredis-yjedr-baseline-target/release/fr-bench --port 25251 --workload lpush --clients 50 --pipeline 16 --requests 1000000 --keyspace 100000 --key-prefix yjedr:base --json-out artifacts/optimization/frankenredis-yjedr/baseline-run1/lpush-p16-c50-n1m-last.json",
+      "mean": 1.44232610942,
+      "stddev": 0.1325624099678026,
+      "median": 1.42521285842,
+      "user": 0.7469048571428571,
+      "system": 1.1019757514285713,
+      "min": 1.2839089104199999,
+      "max": 1.6705160054200001,
+      "times": [
+        1.3470612954199999,
+        1.37912402742,
+        1.5634565084199998,
+        1.6705160054200001,
+        1.42521285842,
+        1.2839089104199999,
+        1.42700316042
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

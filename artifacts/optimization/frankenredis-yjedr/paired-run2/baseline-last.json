@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781356204283,
+  "host": "127.0.0.1",
+  "port": 25257,
+  "workload": "lpush",
+  "clients": 50,
+  "requests": 1000000,
+  "pipeline": 16,
+  "keyspace": 100000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "yjedr:pair2base",
+  "total_time_ms": 1576,
+  "ops_per_sec": 634201.0474601487,
+  "bytes_sent": 58338572,
+  "bytes_received": 5006447,
+  "latency_us": {
+    "min": 65,
+    "p50": 1109,
+    "p95": 1513,
+    "p99": 7487,
+    "p999": 10287,
+    "max": 10799,
+    "mean": 1249.365624999999,
+    "samples": 1000000
+  }
+}

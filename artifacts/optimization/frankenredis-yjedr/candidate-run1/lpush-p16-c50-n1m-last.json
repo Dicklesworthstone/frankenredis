@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781356104903,
+  "host": "127.0.0.1",
+  "port": 25254,
+  "workload": "lpush",
+  "clients": 50,
+  "requests": 1000000,
+  "pipeline": 16,
+  "keyspace": 100000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "yjedr:cand",
+  "total_time_ms": 1303,
+  "ops_per_sec": 767268.0862522178,
+  "bytes_sent": 53339194,
+  "bytes_received": 5006760,
+  "latency_us": {
+    "min": 106,
+    "p50": 956,
+    "p95": 1010,
+    "p99": 6419,
+    "p999": 8215,
+    "max": 8327,
+    "mean": 1031.437356,
+    "samples": 1000000
+  }
+}
