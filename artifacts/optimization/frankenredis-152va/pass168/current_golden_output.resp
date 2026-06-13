@@ -1,0 +1,14 @@
++OK
+:1
+:4
+*4
+$1
+d
+$1
+c
+$1
+b
+$1
+a
+:5
+-ERR Protocol error: expected '$', got '*'

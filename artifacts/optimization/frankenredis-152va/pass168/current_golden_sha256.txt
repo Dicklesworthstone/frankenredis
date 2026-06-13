@@ -1,0 +1,2 @@
+9c7598c7e7fa7a0f50ee535b2e3716967504e9bb61f545c192490e503762d15b  artifacts/optimization/frankenredis-152va/pass168/current_golden_input.resp
+d79bfd8ca34229a740bd36ff60e16d412c03f5dde51ed571c6f63fd5879ef74d  artifacts/optimization/frankenredis-152va/pass168/current_golden_output.resp

@@ -1,0 +1,3 @@
+Benchmark 1: /data/tmp/frankenredis-152va-pass168-baseline-target/release/fr-bench --port 25269 --workload lpush --clients 50 --pipeline 16 --requests 1000000 --keyspace 100000
+  Time (mean ± σ):      2.916 s ±  0.762 s    [User: 0.787 s, System: 1.264 s]
+  Range (min … max):    2.012 s …  3.933 s    7 runs
