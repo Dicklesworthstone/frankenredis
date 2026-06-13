@@ -2522,6 +2522,14 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some(pairs) = borrowed_plain_mset_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_mset_borrowed(&pairs, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some((key, pairs)) = borrowed_plain_zadd_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_zadd_borrowed(key, pairs, ts)
                 {
@@ -2906,6 +2914,22 @@ fn borrowed_plain_append_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a 
 /// `SADD | LPUSH | RPUSH key value [value ...]` borrowed-arg matcher for the
 /// shared keyed-values write fast path. (frankenredis-ev067)
 type BorrowedKeyedValuesArgs<'a> = (PlainKeyedValuesCmd, &'a [u8], &'a [&'a [u8]]);
+
+/// (frankenredis-5gisf) `MSET k v [k v ...]` borrowed-arg matcher: a non-empty
+/// even-length key/value tail. Returns borrowed `(key, value)` pairs so the MSET
+/// fast path avoids the general parse path's 2N per-arg `.to_vec()` allocations.
+/// Odd/empty falls back to the generic WrongArity path.
+fn borrowed_plain_mset_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<Vec<(&'a [u8], &'a [u8])>> {
+    let [command, rest @ ..] = borrowed_args else {
+        return None;
+    };
+    if !command.eq_ignore_ascii_case(b"MSET") || rest.is_empty() || rest.len() % 2 != 0 {
+        return None;
+    }
+    Some(rest.chunks_exact(2).map(|c| (c[0], c[1])).collect())
+}
 
 fn borrowed_plain_keyed_values_args<'a>(
     borrowed_args: &'a [&'a [u8]],

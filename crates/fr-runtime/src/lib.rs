@@ -254,6 +254,18 @@ fn plain_set_owned_argv(key: &[u8], value: &[u8]) -> Vec<Vec<u8>> {
     vec![b"SET".to_vec(), key.to_vec(), value.to_vec()]
 }
 
+/// (frankenredis-5gisf) Reconstruct the owned `MSET k v [k v ...]` argv for the
+/// rare slowlog/latency/threat paths of the borrowed MSET fast path.
+fn plain_mset_owned_argv(pairs: &[(&[u8], &[u8])]) -> Vec<Vec<u8>> {
+    let mut argv = Vec::with_capacity(1 + pairs.len() * 2);
+    argv.push(b"MSET".to_vec());
+    for (k, v) in pairs {
+        argv.push(k.to_vec());
+        argv.push(v.to_vec());
+    }
+    argv
+}
+
 fn plain_incr_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"INCR".to_vec(), key.to_vec()]
 }
@@ -6595,6 +6607,115 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
 
         Some(RespFrame::SimpleString("OK".to_string()))
+    }
+
+    /// (frankenredis-5gisf) Borrowed MSET fast path: N independent plain SETs
+    /// from borrowed read-buffer slices, avoiding the general parse path's 2N
+    /// per-arg `.to_vec()` allocations (MSET was ~0.89x vs redis purely from that
+    /// churn). Byte-identical to the owned MSET — each pair goes through the same
+    /// `set_plain_borrowed`, and the write-allow gate guarantees no tracking /
+    /// keyspace-notification / replica / AOF bookkeeping is owed, so looping the
+    /// store write is sufficient. Records ONE `mset` command in
+    /// stats/commandstats/histogram (not N `set`s). Returns None to fall back to
+    /// the owned path when the gate or argv-shape check fails.
+    pub fn execute_plain_mset_borrowed(
+        &mut self,
+        pairs: &[(&[u8], &[u8])],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_mset_borrowed(pairs, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("mset");
+        self.session.last_argv_len_sum =
+            b"MSET".len() + pairs.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        for (key, value) in pairs {
+            self.server.store.set_plain_borrowed(key, value, now_ms);
+        }
+        let elapsed_us = start.elapsed().as_micros() as u64;
+
+        self.record_plain_mset_borrowed_metrics(pairs, elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(RespFrame::SimpleString("OK".to_string()))
+    }
+
+    fn can_execute_plain_mset_borrowed(&mut self, pairs: &[(&[u8], &[u8])], now_ms: u64) -> bool {
+        if pairs.is_empty()
+            || self.policy.gate.max_array_len < 1 + pairs.len() * 2
+            || self.policy.gate.max_bulk_len < b"MSET".len()
+        {
+            return false;
+        }
+        for (k, v) in pairs {
+            if k.len() > self.policy.gate.max_bulk_len || v.len() > self.policy.gate.max_bulk_len {
+                return false;
+            }
+        }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    fn record_plain_mset_borrowed_metrics(
+        &mut self,
+        pairs: &[(&[u8], &[u8])],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_mset_owned_argv(pairs));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_mset_owned_argv(pairs));
+            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+        if self.server.latency_tracking {
+            self.server.store.record_command_histogram_canonical_with_kind(
+                "mset",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
+        }
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_mset_owned_argv(pairs));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'MSET' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
     }
 
     fn can_execute_plain_set_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
