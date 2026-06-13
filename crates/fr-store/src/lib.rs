@@ -13525,13 +13525,25 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
                 }
-                match &entry.value {
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
                         if zs.is_empty() {
                             return Ok(None);
                         }
                         let idx = (rand_val as usize) % zs.len();
-                        let member = zs.iter_asc().nth(idx).map(|(m, _)| m.to_vec());
+                        // (frankenredis-k681u) The picked member is the idx-th in
+                        // ascending (score, member) order. `iter_asc().nth(idx)`
+                        // is an O(idx) linear skip over the BTreeMap; route through
+                        // index_slice_asc_adaptive(idx, 1), which uses the
+                        // order-statistic treap's select() for an O(log n) jump
+                        // (and adaptively warms it on repeated deep draws, exactly
+                        // like ZRANGE-by-index m4uxp). Byte-identical: same idx-th
+                        // sorted member, same Packed fallback.
+                        let member = zs
+                            .index_slice_asc_adaptive(idx, 1)
+                            .into_iter()
+                            .next()
+                            .map(|(m, _)| m);
                         entry.touch(now_ms);
                         Ok(member)
                     }
@@ -36562,6 +36574,107 @@ mod tests {
             old_us / new_us
         );
         assert!(new_us * 5.0 < old_us, "expected >=5x speedup, got {:.1}x", old_us / new_us);
+    }
+
+    #[test]
+    // (frankenredis-k681u) Single ZRANDMEMBER must return the SAME member as the
+    // old `iter_asc().nth(idx)` linear skip for every index — the treap-select
+    // jump only changes the access path, not which element is chosen. Verify
+    // across both encodings (small Packed + large promoted Full), warm and cold
+    // treap, for every index in the set.
+    #[test]
+    fn zrandmember_single_index_select_matches_linear_nth() {
+        for n in [8usize, 200, 5000] {
+            let mut store = Store::new();
+            for i in 0..n {
+                // Distinct scores so the ascending order is unambiguous; member
+                // bytes deliberately NOT in score order so sorted-position differs
+                // from insertion/hash position.
+                store
+                    .zadd(b"z", &[(i as f64, format!("m{:08x}", (i * 2654435761) % n).into_bytes())], 0)
+                    .unwrap();
+            }
+            // Reference: idx-th member in ascending (score, member) order.
+            let reference: Vec<Vec<u8>> = {
+                let entry = store.entries.get(b"z".as_slice()).unwrap();
+                match &entry.value {
+                    Value::SortedSet(zs) => zs.iter_asc().map(|(m, _)| m.to_vec()).collect(),
+                    _ => unreachable!(),
+                }
+            };
+            let len = reference.len();
+            // Exercise both a cold path (low idx) and warmed path (repeated deep
+            // draws warm the treap), every index covered.
+            for idx in 0..len {
+                let entry = store.entries.get_mut(b"z".as_slice()).unwrap();
+                let got = match &mut entry.value {
+                    Value::SortedSet(zs) => zs
+                        .index_slice_asc_adaptive(idx, 1)
+                        .into_iter()
+                        .next()
+                        .map(|(m, _)| m),
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    got.as_ref(),
+                    Some(&reference[idx]),
+                    "n={n} idx={idx}: select jump diverged from linear nth"
+                );
+            }
+        }
+    }
+
+    // (frankenredis-k681u) Concrete before/after timing.
+    // `cargo test -- --ignored --nocapture zrandmember_bench`.
+    #[test]
+    #[ignore]
+    fn zrandmember_bench_select_vs_nth() {
+        use std::time::Instant;
+        const N: usize = 200_000;
+        let mut store = Store::new();
+        let items: Vec<(f64, Vec<u8>)> = (0..N)
+            .map(|i| (i as f64, format!("m{i:08}").into_bytes()))
+            .collect();
+        store.zadd(b"z", &items, 0).unwrap();
+
+        // Deep index near the end so the O(idx) skip is maximally expensive.
+        let idx = N - 3;
+
+        // OLD: linear iter_asc().nth(idx).
+        let entry = store.entries.get(b"z".as_slice()).unwrap();
+        let (old_us, old_m) = match &entry.value {
+            Value::SortedSet(zs) => {
+                let t = Instant::now();
+                let m = zs.iter_asc().nth(idx).map(|(m, _)| m.to_vec());
+                (t.elapsed().as_secs_f64() * 1e6, m)
+            }
+            _ => unreachable!(),
+        };
+
+        // NEW: warm treap then select jump.
+        let entry = store.entries.get_mut(b"z".as_slice()).unwrap();
+        let (new_us, new_m) = match &mut entry.value {
+            Value::SortedSet(zs) => {
+                // Warm the treap (one-time O(n), amortized over many draws).
+                let _ = zs.index_slice_asc_adaptive(idx, 1);
+                let _ = zs.index_slice_asc_adaptive(idx, 1);
+                let _ = zs.index_slice_asc_adaptive(idx, 1);
+                let t = Instant::now();
+                let m = zs
+                    .index_slice_asc_adaptive(idx, 1)
+                    .into_iter()
+                    .next()
+                    .map(|(m, _)| m);
+                (t.elapsed().as_secs_f64() * 1e6, m)
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(old_m, new_m, "bench picked different member");
+        eprintln!(
+            "ZRANDMEMBER single idx={idx} over {N}-elem zset: OLD(iter.nth)={old_us:.1}us  NEW(treap select)={new_us:.3}us  speedup={:.0}x",
+            old_us / new_us
+        );
+        assert!(new_us * 5.0 < old_us, "expected >=5x, got {:.0}x", old_us / new_us);
     }
 
     #[test]
