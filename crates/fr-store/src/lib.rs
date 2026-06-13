@@ -3080,6 +3080,17 @@ pub enum ValueType {
     Stream,
 }
 
+/// (frankenredis-dryll) Result of a SORT numeric weight lookup, avoiding the
+/// int->string->f64 round-trip. `Missing` (key absent / wrong type) sorts as 0;
+/// `NotNumber` (a present non-numeric string) makes SORT raise the upstream
+/// "can't be converted into double" error.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SortWeight {
+    Number(f64),
+    Missing,
+    NotNumber,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveExpireCycleResult {
     pub sampled_keys: usize,
@@ -5278,6 +5289,52 @@ impl Store {
     pub fn get(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
         self.get_string_bytes(key, now_ms)
             .map(|value| value.map(std::borrow::Cow::into_owned))
+    }
+
+    /// (frankenredis-dryll) The value of `key` as a SORT numeric weight, WITHOUT
+    /// the int->string->f64 round-trip `get` forces. An Integer-encoded value is
+    /// read directly as `n as f64` (exactly what redis's getDoubleFromObject does
+    /// for OBJ_ENCODING_INT, and identical to formatting then parsing); a string
+    /// value is parsed like the sort's own `from_utf8().trim().parse::<f64>()`.
+    /// Side-effects (keyspace hit/miss, LFU, touch, wrongtype->Missing) mirror
+    /// `get`/`sort_resolve_key_or_hash` so it is byte-exact, only faster.
+    pub fn get_sort_weight(&mut self, key: &[u8], now_ms: u64) -> SortWeight {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return SortWeight::Missing;
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if !entry.value.is_string_like() {
+                    // store.get would return WrongType; sort_resolve_key_or_hash
+                    // maps that to None == a missing weight (0).
+                    return SortWeight::Missing;
+                }
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                entry.touch(now_ms);
+                match &entry.value {
+                    Value::Integer(n) => SortWeight::Number(*n as f64),
+                    Value::String(b) => match std::str::from_utf8(b) {
+                        Ok(text) => match text.trim().parse::<f64>() {
+                            Ok(f) => SortWeight::Number(f),
+                            Err(_) => SortWeight::NotNumber,
+                        },
+                        Err(_) => SortWeight::NotNumber,
+                    },
+                    _ => SortWeight::Missing,
+                }
+            }
+            None => SortWeight::Missing,
+        }
     }
 
     /// Get a string-like value while borrowing ordinary string payloads.

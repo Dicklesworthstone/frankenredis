@@ -26878,11 +26878,26 @@ fn sort_generic(
             elements.reverse();
         }
     } else {
-        // Build sort keys for each element
-        let sort_keys: Vec<Option<Vec<u8>>> = elements
-            .iter()
-            .map(|el| sort_lookup_by_pattern(store, &by_pattern, el, now_ms))
-            .collect();
+        // (frankenredis-dryll) Numeric sort by a plain-keyed BY pattern (has '*',
+        // no '->' hash deref): read each weight as f64 directly via
+        // store.get_sort_weight, which skips the int->string->f64 round-trip that
+        // dominated the profile (~50% in i64::to_string). The string-keyed-byte
+        // path (`sort_keys`) is only built for ALPHA, the no-BY case, and
+        // hash-field BY — none of which benefit from the int fast path.
+        let numeric_fast = !alpha
+            && by_pattern
+                .as_ref()
+                .is_some_and(|p| p.contains(&b'*') && !p.windows(2).any(|w| w == b"->"));
+
+        // Build sort keys for each element (skipped for the numeric fast path).
+        let sort_keys: Vec<Option<Vec<u8>>> = if numeric_fast {
+            Vec::new()
+        } else {
+            elements
+                .iter()
+                .map(|el| sort_lookup_by_pattern(store, &by_pattern, el, now_ms))
+                .collect()
+        };
 
         // Compute the LIMIT window [start, end) up front so we can sort ONLY the
         // requested slice (redis pqsort, sort.c:513) instead of the whole vector
@@ -26902,7 +26917,53 @@ fn sort_generic(
         let end = start + count;
         let full = start == 0 && end == total;
 
-        if !alpha {
+        if !alpha && numeric_fast {
+            // Numeric sort, plain-keyed BY: weights read directly as f64.
+            let pat = by_pattern.as_ref().expect("numeric_fast => BY present");
+            let star = pat
+                .iter()
+                .position(|&b| b == b'*')
+                .expect("numeric_fast => '*' present");
+            let mut scored: Vec<(f64, usize)> = Vec::with_capacity(elements.len());
+            // Reuse one key buffer across elements — the substituted lookup key
+            // is rebuilt in place rather than allocating a fresh Vec per element.
+            let mut k: Vec<u8> = Vec::with_capacity(pat.len() + 16);
+            for (idx, el) in elements.iter().enumerate() {
+                k.clear();
+                k.extend_from_slice(&pat[..star]);
+                k.extend_from_slice(el);
+                k.extend_from_slice(&pat[star + 1..]);
+                match store.get_sort_weight(&k, now_ms) {
+                    fr_store::SortWeight::Number(f) => scored.push((f, idx)),
+                    fr_store::SortWeight::Missing => scored.push((0.0, idx)),
+                    fr_store::SortWeight::NotNumber => {
+                        return Ok(RespFrame::Error(
+                            "ERR One or more scores can't be converted into double".to_string(),
+                        ));
+                    }
+                }
+            }
+            let mut cmp = |a: &(f64, usize), b: &(f64, usize)| {
+                let base =
+                    a.0.partial_cmp(&b.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| elements[a.1].cmp(&elements[b.1]));
+                let base = if desc { base.reverse() } else { base };
+                base.then_with(|| a.1.cmp(&b.1))
+            };
+            if full {
+                scored.sort_unstable_by(&mut cmp);
+            } else {
+                partial_sort_window(&mut scored, start, end, &mut cmp);
+            }
+            let reordered: Vec<Vec<u8>> = scored[start..end]
+                .iter()
+                .map(|(_, idx)| elements[*idx].clone())
+                .collect();
+            elements = reordered;
+            limit_offset = 0;
+            limit_count = -1;
+        } else if !alpha {
             // Numeric sort: parse sort keys as f64
             let mut scored: Vec<(f64, usize)> = Vec::with_capacity(elements.len());
             for (idx, sk) in sort_keys.iter().enumerate() {
