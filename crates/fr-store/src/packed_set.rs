@@ -190,10 +190,90 @@ fn read_varint(buf: &[u8], mut pos: usize) -> (usize, usize) {
     (result, pos)
 }
 
+use std::{
+    borrow::Borrow,
+    hash::{Hash, Hasher},
+};
+
 use indexmap::{IndexMap, IndexSet};
 
 /// Hashtable storage for a large generic set (the former `GenericSet` alias).
-pub type SetHashTable = IndexSet<Vec<u8>, foldhash::quality::RandomState>;
+type SetHashTable = IndexSet<SetMember, foldhash::quality::RandomState>;
+
+#[derive(Clone, Debug)]
+pub enum SetMember {
+    Inline {
+        len: u8,
+        bytes: [u8; Self::INLINE_CAPACITY],
+    },
+    Heap(Vec<u8>),
+}
+
+impl SetMember {
+    const INLINE_CAPACITY: usize = 23;
+
+    fn from_slice(member: &[u8]) -> Self {
+        if member.len() <= Self::INLINE_CAPACITY {
+            let len = match u8::try_from(member.len()) {
+                Ok(len) => len,
+                Err(_) => return Self::Heap(member.to_vec()),
+            };
+            let mut bytes = [0u8; Self::INLINE_CAPACITY];
+            bytes[..member.len()].copy_from_slice(member);
+            Self::Inline { len, bytes }
+        } else {
+            Self::Heap(member.to_vec())
+        }
+    }
+
+    fn from_vec(member: Vec<u8>) -> Self {
+        if member.len() <= Self::INLINE_CAPACITY {
+            Self::from_slice(&member)
+        } else {
+            Self::Heap(member)
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
+            Self::Heap(member) => member,
+        }
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        match self {
+            Self::Inline { len, bytes } => bytes[..usize::from(len)].to_vec(),
+            Self::Heap(member) => member,
+        }
+    }
+}
+
+impl Borrow<[u8]> for SetMember {
+    fn borrow(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl AsRef<[u8]> for SetMember {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl PartialEq for SetMember {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for SetMember {}
+
+impl Hash for SetMember {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state);
+    }
+}
 
 /// Storage-promotion thresholds: above these a packed set switches to the
 /// hashtable so membership/removal stay sub-linear. They only bound how large
@@ -271,7 +351,7 @@ impl GenericSet {
                 foldhash::quality::RandomState::default(),
             );
             for m in p.iter() {
-                h.insert(m.to_vec());
+                h.insert(SetMember::from_slice(m));
             }
             *self = GenericSet::Hash(h);
         }
@@ -285,7 +365,7 @@ impl GenericSet {
         }
         match self {
             GenericSet::Packed(p) => p.insert(&member),
-            GenericSet::Hash(h) => h.insert(member),
+            GenericSet::Hash(h) => h.insert(SetMember::from_vec(member)),
         }
     }
 
@@ -310,7 +390,7 @@ impl GenericSet {
                 if h.contains(member) {
                     false
                 } else {
-                    h.insert(member.to_vec())
+                    h.insert(SetMember::from_slice(member))
                 }
             }
         }
@@ -337,7 +417,7 @@ impl GenericSet {
                 p.remove(&member);
                 Some(member)
             }
-            GenericSet::Hash(h) => h.swap_remove_index(idx),
+            GenericSet::Hash(h) => h.swap_remove_index(idx).map(SetMember::into_vec),
         }
     }
 
@@ -364,7 +444,7 @@ impl GenericSet {
                 }
                 *p = np;
             }
-            GenericSet::Hash(h) => h.retain(|m| keep(m)),
+            GenericSet::Hash(h) => h.retain(|m| keep(m.as_slice())),
         }
     }
 
@@ -402,7 +482,7 @@ impl IntoIterator for GenericSet {
     fn into_iter(self) -> Self::IntoIter {
         let owned: Vec<Vec<u8>> = match self {
             GenericSet::Packed(p) => p.iter().map(<[u8]>::to_vec).collect(),
-            GenericSet::Hash(h) => h.into_iter().collect(),
+            GenericSet::Hash(h) => h.into_iter().map(SetMember::into_vec).collect(),
         };
         owned.into_iter()
     }
@@ -411,7 +491,7 @@ impl IntoIterator for GenericSet {
 /// Borrowing iterator over a `GenericSet`'s members in insertion order.
 pub enum GenericSetIter<'a> {
     Packed(PackedStrSetIter<'a>),
-    Hash(indexmap::set::Iter<'a, Vec<u8>>),
+    Hash(indexmap::set::Iter<'a, SetMember>),
 }
 
 impl<'a> Iterator for GenericSetIter<'a> {
@@ -2236,6 +2316,38 @@ mod tests {
         assert!(s.contains(&big1000));
         let got: Vec<&[u8]> = s.iter().collect();
         assert_eq!(got, vec![&b""[..], &big127, &big128, &big1000]);
+    }
+
+    #[test]
+    fn generic_hash_set_inline_members_preserve_indexset_semantics() {
+        let mut s = super::GenericSet::with_capacity_and_hasher(
+            PACKED_MAX_ENTRIES + 1,
+            foldhash::quality::RandomState::default(),
+        );
+        let long = b"abcdefghijklmnopqrstuvwxyz0123456789".to_vec();
+
+        assert!(s.insert_borrowed(b"alpha"));
+        assert!(s.insert_borrowed(b"beta"));
+        assert!(s.insert_borrowed(&long));
+        assert!(!s.insert_borrowed(b"alpha"));
+        assert_eq!(s.len(), 3);
+        assert!(s.contains(b"alpha"));
+        assert!(s.contains(&long));
+        assert!(!s.contains(b"delta"));
+        assert_eq!(
+            s.iter().collect::<Vec<_>>(),
+            vec![&b"alpha"[..], &b"beta"[..], long.as_slice()]
+        );
+        assert_eq!(s.get_index(1), Some(&b"beta"[..]));
+
+        assert!(s.shift_remove(b"beta"));
+        assert!(!s.shift_remove(b"beta"));
+        assert_eq!(
+            s.clone().into_iter().collect::<Vec<_>>(),
+            vec![b"alpha".to_vec(), long.clone()]
+        );
+        assert_eq!(s.pop_index(0), Some(b"alpha".to_vec()));
+        assert_eq!(s.into_iter().collect::<Vec<_>>(), vec![long]);
     }
 
     proptest! {
