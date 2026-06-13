@@ -56,7 +56,10 @@ def transcript(port, n):
 def full(port):
     return transcript(port, 4) + b"\n" + transcript(port, 200)
 
-a = full(18390); b = full(18391)
+_pp = [int(x) for x in sys.argv[1:] if x.isdigit()]
+_op = _pp[0] if len(_pp) > 0 else 18390
+_fp = _pp[1] if len(_pp) > 1 else 18391
+a = full(_op); b = full(_fp)
 ha = hashlib.sha256(a).hexdigest(); hb = hashlib.sha256(b).hexdigest()
 if "--emit" in sys.argv:
     print(f"oracle sha256 = {ha}  ({len(a)} bytes)")

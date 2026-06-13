@@ -63,7 +63,10 @@ def transcript(port):
         out.append(b" ".join(x.encode() for x in c) + b" => " + cmd(s, *c))
     return b"\n".join(out)
 
-a = transcript(18390); b = transcript(18391)
+_pp = [int(x) for x in sys.argv[1:] if x.isdigit()]
+_op = _pp[0] if len(_pp) > 0 else 18390
+_fp = _pp[1] if len(_pp) > 1 else 18391
+a = transcript(_op); b = transcript(_fp)
 ha = hashlib.sha256(a).hexdigest(); hb = hashlib.sha256(b).hexdigest()
 if "--emit" in sys.argv:
     print(f"oracle sha256 = {ha}  ({len(a)} bytes)")
