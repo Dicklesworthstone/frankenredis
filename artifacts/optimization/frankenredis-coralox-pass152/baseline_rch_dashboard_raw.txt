@@ -1,0 +1,56 @@
+  [2m2026-06-13T01:02:58.826338Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: bash -lc '
+set -euo pipefail
+env CARGO_TARGET_DIR=.rch-pass152-baseline-target cargo build -p fr-server --release >/tmp/fr_pass152_baseline_build.log 2>&1
+FR=.rch-pass152-baseline-target/release/frankenredis
+REDIS=legacy_redis_code/redis/src/redis-server
+BENCH=legacy_redis_code/redis/src/redis-benchmark
+FPORT=25130
+RPORT=25131
+N=200000
+PIPE=16
+CLIENTS=50
+KEYSPACE=100000
+REPS=5
+CMDS="set incr"
+FRPID=""
+RPID=""
+cleanup() {
+  if [ -n "${FRPID:-}" ] && kill -0 "$FRPID" 2>/dev/null; then kill "$FRPID" 2>/dev/null || true; fi
+  if [ -n "${RPID:-}" ] && kill -0 "$RPID" 2>/dev/null; then kill "$RPID" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+"$FR" --port "$FPORT" >/tmp/fr_pass152_baseline_server.log 2>&1 & FRPID=$!
+"$REDIS" --port "$RPORT" --save "" --appendonly no >/tmp/fr_pass152_baseline_redis.log 2>&1 & RPID=$!
+sleep 2
+ss -ltn | grep -q ":$FPORT"
+ss -ltn | grep -q ":$RPORT"
+bench_qps() {
+  local port="$1" cmd="$2" best=0 q out
+  for rep in $(seq 1 "$REPS"); do
+    out=$("$BENCH" -p "$port" -t "$cmd" -n "$N" -c "$CLIENTS" -P "$PIPE" -r "$KEYSPACE" -q 2>&1)
+    printf "%s\n%s\n" "--- port=$port cmd=$cmd rep=$rep ---" "$out"
+    q=$(printf "%s\n" "$out" | tr "\r" "\n" | awk "/requests per second/ {val=\$2} END {if (val != \"\") printf \"%.0f\", val}")
+    if [ -n "$q" ] && [ "$q" -gt "$best" ]; then best="$q"; fi
+  done
+  printf "BEST port=%s cmd=%s qps=%s\n" "$port" "$cmd" "$best"
+}
+printf "== pass152 baseline vs-redis release P%s c%s n%s best-of-%s ==\n" "$PIPE" "$CLIENTS" "$N" "$REPS"
+printf "cmd,redis_qps,fr_qps,redis_over_fr,status\n"
+for cmd in $CMDS; do
+  r=$(bench_qps "$RPORT" "$cmd" | tee /tmp/fr_pass152_r.log | awk -F= "/^BEST/ {print \$4}")
+  f=$(bench_qps "$FPORT" "$cmd" | tee /tmp/fr_pass152_f.log | awk -F= "/^BEST/ {print \$4}")
+  python3 - "$cmd" "$r" "$f" <<PY
+import sys
+cmd, r, f = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+ratio = r / f if f else 0.0
+status = "fr-faster" if f >= r else "FR-SLOWER"
+print(f"{cmd},{r},{f},{ratio:.6f},{status}")
+PY
+done
+'[0m
+    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
+
+== pass152 baseline vs-redis release P16 c50 n200000 best-of-5 ==
+cmd,redis_qps,fr_qps,redis_over_fr,status
+set,816326,956938,0.853060,fr-faster
+incr,900901,881057,1.022523,FR-SLOWER

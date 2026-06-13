@@ -1,0 +1,108 @@
+--- port=25077 cmd=set rep=1 ---
+ SET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          SET: rps=595968.0 (overall: 593593.6) avg_msec=1.176 (overall: 1.176)                                                                      SET: 595238.06 requests per second, p50=1.071 msec
+--- port=25077 cmd=set rep=2 ---
+ SET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          SET: 714285.75 requests per second, p50=0.855 msec
+--- port=25077 cmd=set rep=3 ---
+ SET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          SET: 710900.50 requests per second, p50=0.903 msec
+--- port=25076 cmd=set rep=1 ---
+ SET: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                           SET: rps=451328.0 (overall: 451328.0) avg_msec=1.750 (overall: 1.750)                                                                      SET: 487013.00 requests per second, p50=1.287 msec
+--- port=25076 cmd=set rep=2 ---
+ SET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          SET: rps=595200.0 (overall: 592828.7) avg_msec=1.185 (overall: 1.185)                                                                      SET: 592885.38 requests per second, p50=1.143 msec
+--- port=25076 cmd=set rep=3 ---
+ SET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          SET: 641025.62 requests per second, p50=1.111 msec
+--- port=25077 cmd=get rep=1 ---
+ GET: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                           GET: 691244.25 requests per second, p50=0.871 msec
+--- port=25077 cmd=get rep=2 ---
+ GET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          GET: 721153.81 requests per second, p50=0.855 msec
+--- port=25077 cmd=get rep=3 ---
+ GET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          GET: 793650.81 requests per second, p50=0.783 msec
+--- port=25076 cmd=get rep=1 ---
+ GET: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                           GET: 909090.88 requests per second, p50=0.751 msec
+--- port=25076 cmd=get rep=2 ---
+ GET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          GET: 914634.12 requests per second, p50=0.759 msec
+--- port=25076 cmd=get rep=3 ---
+ GET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          GET: 903614.50 requests per second, p50=0.767 msec
+--- port=25077 cmd=incr rep=1 ---
+ INCR: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           INCR: 738916.25 requests per second, p50=0.855 msec
+--- port=25077 cmd=incr rep=2 ---
+ INCR: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                            INCR: 862069.00 requests per second, p50=0.727 msec
+--- port=25077 cmd=incr rep=3 ---
+ INCR: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           INCR: 892857.12 requests per second, p50=0.663 msec
+--- port=25076 cmd=incr rep=1 ---
+ INCR: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           INCR: rps=306048.0 (overall: 303619.0) avg_msec=2.597 (overall: 2.597)                                                                       INCR: 390625.00 requests per second, p50=1.599 msec
+--- port=25076 cmd=incr rep=2 ---
+ INCR: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           INCR: rps=595264.0 (overall: 592892.4) avg_msec=1.223 (overall: 1.223)                                                                       INCR: 595238.06 requests per second, p50=1.119 msec
+--- port=25076 cmd=incr rep=3 ---
+ INCR: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                            INCR: 688073.44 requests per second, p50=1.007 msec
+--- port=25077 cmd=lpush rep=1 ---
+ LPUSH: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                            LPUSH: 967741.94 requests per second, p50=0.455 msec
+--- port=25077 cmd=lpush rep=2 ---
+ LPUSH: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                            LPUSH: 914634.12 requests per second, p50=0.447 msec
+--- port=25077 cmd=lpush rep=3 ---
+ LPUSH: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                             LPUSH: 837988.81 requests per second, p50=0.567 msec
+--- port=25076 cmd=lpush rep=1 ---
+ LPUSH: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                            LPUSH: 986842.12 requests per second, p50=0.439 msec
+--- port=25076 cmd=lpush rep=2 ---
+ LPUSH: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                            LPUSH: 949367.06 requests per second, p50=0.479 msec
+--- port=25076 cmd=lpush rep=3 ---
+ LPUSH: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                            LPUSH: 898203.62 requests per second, p50=0.479 msec
+--- port=25077 cmd=rpush rep=1 ---
+ RPUSH: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                            RPUSH: 986842.12 requests per second, p50=0.431 msec
+--- port=25077 cmd=rpush rep=2 ---
+ RPUSH: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                            RPUSH: 887573.94 requests per second, p50=0.487 msec
+--- port=25077 cmd=rpush rep=3 ---
+ RPUSH: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                            RPUSH: 887573.94 requests per second, p50=0.615 msec
+--- port=25076 cmd=rpush rep=1 ---
+ RPUSH: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                             RPUSH: 967741.94 requests per second, p50=0.455 msec
+--- port=25076 cmd=rpush rep=2 ---
+ RPUSH: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                             RPUSH: 925925.94 requests per second, p50=0.455 msec
+--- port=25076 cmd=rpush rep=3 ---
+ RPUSH: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                            RPUSH: 882352.94 requests per second, p50=0.535 msec
+--- port=25077 cmd=sadd rep=1 ---
+ SADD: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           SADD: 828729.31 requests per second, p50=0.711 msec
+--- port=25077 cmd=sadd rep=2 ---
+ SADD: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           SADD: 742574.25 requests per second, p50=0.807 msec
+--- port=25077 cmd=sadd rep=3 ---
+ SADD: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           SADD: 806451.62 requests per second, p50=0.727 msec
+--- port=25076 cmd=sadd rep=1 ---
+ SADD: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           SADD: 731707.31 requests per second, p50=0.903 msec
+--- port=25076 cmd=sadd rep=2 ---
+ SADD: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                            SADD: 785340.31 requests per second, p50=0.903 msec
+--- port=25076 cmd=sadd rep=3 ---
+ SADD: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           SADD: 738916.25 requests per second, p50=0.927 msec
+--- port=25077 cmd=hset rep=1 ---
+ HSET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           HSET: 728155.31 requests per second, p50=0.871 msec
+--- port=25077 cmd=hset rep=2 ---
+ HSET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           HSET: 731707.31 requests per second, p50=0.879 msec
+--- port=25077 cmd=hset rep=3 ---
+ HSET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           HSET: 785340.31 requests per second, p50=0.807 msec
+--- port=25076 cmd=hset rep=1 ---
+ HSET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           HSET: 769230.81 requests per second, p50=0.855 msec
+--- port=25076 cmd=hset rep=2 ---
+ HSET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           HSET: 753768.81 requests per second, p50=0.943 msec
+--- port=25076 cmd=hset rep=3 ---
+ HSET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           HSET: 666666.69 requests per second, p50=1.039 msec
+--- port=25077 cmd=zadd rep=1 ---
+ ZADD: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                            ZADD: rps=429004.0 (overall: 429004.0) avg_msec=1.704 (overall: 1.704)                                                                       ZADD: 348837.22 requests per second, p50=1.887 msec
+--- port=25077 cmd=zadd rep=2 ---
+ ZADD: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           ZADD: rps=323633.5 (overall: 322349.2) avg_msec=2.282 (overall: 2.282)                                                                       ZADD: 366748.16 requests per second, p50=1.951 msec
+--- port=25077 cmd=zadd rep=3 ---
+ ZADD: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           ZADD: rps=339840.0 (overall: 338486.1) avg_msec=2.190 (overall: 2.190)                                                                       ZADD: rps=252239.1 (overall: 295362.6) avg_msec=2.958 (overall: 2.518)                                                                       ZADD: 295857.97 requests per second, p50=2.431 msec
+--- port=25076 cmd=zadd rep=1 ---
+ ZADD: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                            ZADD: rps=446087.7 (overall: 446087.7) avg_msec=1.760 (overall: 1.760)                                                                       ZADD: 424929.19 requests per second, p50=1.647 msec
+--- port=25076 cmd=zadd rep=2 ---
+ ZADD: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                            ZADD: rps=353083.7 (overall: 353083.7) avg_msec=2.238 (overall: 2.238)                                                                       ZADD: 348027.84 requests per second, p50=2.031 msec
+--- port=25076 cmd=zadd rep=3 ---
+ ZADD: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           ZADD: rps=324160.0 (overall: 322868.5) avg_msec=2.450 (overall: 2.450)                                                                       ZADD: 309917.34 requests per second, p50=2.279 msec
+--- port=25077 cmd=spop rep=1 ---
+ SPOP: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           SPOP: 785340.31 requests per second, p50=0.847 msec
+--- port=25077 cmd=spop rep=2 ---
+ SPOP: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           SPOP: 986842.12 requests per second, p50=0.391 msec
+--- port=25077 cmd=spop rep=3 ---
+ SPOP: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           SPOP: 898203.62 requests per second, p50=0.415 msec
+--- port=25076 cmd=spop rep=1 ---
+ SPOP: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           SPOP: 641025.62 requests per second, p50=0.991 msec
+--- port=25076 cmd=spop rep=2 ---
+ SPOP: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           SPOP: 909090.88 requests per second, p50=0.415 msec
+--- port=25076 cmd=spop rep=3 ---
+ SPOP: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           SPOP: 717703.31 requests per second, p50=0.559 msec

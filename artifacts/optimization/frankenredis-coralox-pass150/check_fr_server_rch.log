@@ -1,0 +1,210 @@
+  [2m2026-06-13T00:54:35.443651Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: hz1 at root@87.99.133.171 (0 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:35.650115Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenredis-coralox-pass149-20260613T001226Z (hash: 3ea69445350f3119)[0m
+    [2;3mat[0m rch/src/hook.rs:5994 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:35.650164Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6016 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:37.887107Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker hz1...[0m
+    [2;3mat[0m rch/src/hook.rs:6046 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:37.887179Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z -> /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:40.662298Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2775ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:40.662383Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-bench -> /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-bench on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:41.051396Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 388ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:41.051502Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-command -> /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-command on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:41.449709Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 398ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:41.449793Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-config -> /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-config on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:41.836518Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 386ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:41.836615Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-conformance -> /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-conformance on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:42.233403Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 396ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:42.233486Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-eventloop -> /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-eventloop on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:42.617322Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 383ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:42.617441Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-expire -> /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-expire on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:43.012498Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 395ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:43.012604Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-persist -> /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-persist on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:43.407204Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 394ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:43.407310Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-protocol -> /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-protocol on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:43.838036Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 430ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:43.838153Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-repl -> /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-repl on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:44.232852Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 394ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:44.232972Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-runtime -> /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-runtime on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:44.625844Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 392ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:44.625954Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-sentinel -> /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-sentinel on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:45.033670Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 407ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:45.033769Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-server -> /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-server on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:45.424607Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 390ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:45.424689Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-store -> /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-store on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:45.802849Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 378ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:45.802907Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 93389 files, 14821832 bytes in 7906ms[0m
+    [2;3mat[0m rch/src/hook.rs:6209 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:46.748294Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: cargo check -p fr-server --all-targets[0m
+    [2;3mat[0m rch/src/hook.rs:6252 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:46.748358Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/tmp/cargo-target -> /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/.rch-target-hz1-job-29884606035526348-1781312077887098788-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded mio v1.2.0
+  Downloaded typenum v1.20.0
+  Downloaded cc v1.2.60
+  Downloaded cfg-if v1.0.4
+  Downloaded zmij v1.0.21
+  Downloaded indexmap v2.14.0
+  Downloaded mimalloc v0.1.49
+  Downloaded digest v0.11.2
+  Downloaded foldhash v0.1.5
+  Downloaded sha2 v0.11.0
+  Downloaded crypto-common v0.2.1
+  Downloaded hex v0.4.3
+  Downloaded itoa v1.0.18
+  Downloaded block-buffer v0.12.0
+  Downloaded hashbrown v0.17.0
+  Downloaded serde_json v1.0.149
+  Downloaded const-oid v0.10.2
+  Downloaded serde_core v1.0.228
+  Downloaded memchr v2.8.0
+  Downloaded equivalent v1.0.2
+  Downloaded hybrid-array v0.4.10
+  Downloaded libc v0.2.185
+  Downloaded shlex v1.3.0
+  Downloaded libmimalloc-sys v0.1.46
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded cpufeatures v0.3.0
+  Downloaded log v0.4.29
+   Compiling zmij v1.0.21
+   Compiling serde_core v1.0.228
+   Compiling serde_json v1.0.149
+    Checking typenum v1.20.0
+   Compiling libc v0.2.185
+   Compiling shlex v1.3.0
+   Compiling find-msvc-tools v0.1.9
+   Compiling itoa v1.0.18
+    Checking fr-protocol v0.1.0 (/data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-protocol)
+   Compiling memchr v2.8.0
+   Compiling cc v1.2.60
+    Checking hashbrown v0.17.0
+    Checking equivalent v1.0.2
+    Checking const-oid v0.10.2
+    Checking fr-sentinel v0.1.0 (/data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-sentinel)
+    Checking fr-persist v0.1.0 (/data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-persist)
+    Checking indexmap v2.14.0
+    Checking hybrid-array v0.4.10
+    Checking fr-expire v0.1.0 (/data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-expire)
+    Checking cpufeatures v0.3.0
+    Checking foldhash v0.1.5
+    Checking cfg-if v1.0.4
+    Checking fr-eventloop v0.1.0 (/data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-eventloop)
+    Checking fr-config v0.1.0 (/data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-config)
+    Checking fr-store v0.1.0 (/data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-store)
+    Checking hex v0.4.3
+   Compiling libmimalloc-sys v0.1.46
+    Checking fr-repl v0.1.0 (/data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-repl)
+    Checking log v0.4.29
+    Checking mio v1.2.0
+    Checking crypto-common v0.2.1
+    Checking block-buffer v0.12.0
+    Checking digest v0.11.2
+    Checking sha2 v0.11.0
+    Checking mimalloc v0.1.49
+   Compiling fr-command v0.1.0 (/data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-command)
+    Checking fr-runtime v0.1.0 (/data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-runtime)
+warning: method `is_zpop` is never used
+   --> crates/fr-runtime/src/lib.rs:365:8
+    |
+341 | impl PlainKeyedPopCmd {
+    | --------------------- method in this implementation
+...
+365 |     fn is_zpop(self) -> bool {
+    |        ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `fr-runtime` (lib) generated 1 warning
+    Checking fr-server v0.1.0 (/data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/crates/fr-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.19s
+  [2m2026-06-13T00:54:58.375617Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 11627ms[0m
+    [2;3mat[0m rch/src/hook.rs:6376 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:58.376053Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6425 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:58.376090Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:58.743577Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 367ms (1 files, 1260 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:58.743604Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 1260 bytes in 367ms[0m
+    [2;3mat[0m rch/src/hook.rs:6458 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:54:58.743704Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z/.rch-target-hz1-job-29884606035526348-1781312077887098788-0 on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:55:00.309435Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 1565ms (718 files, 11718 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T00:55:00.309467Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 718 files, 11718 bytes in 1565ms[0m
+    [2;3mat[0m rch/src/hook.rs:6582 [2;3mon[0m ThreadId(1)
+
+[RCH] remote hz1 (24.9s)

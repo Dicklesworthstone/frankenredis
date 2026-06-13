@@ -1,0 +1,9 @@
+cwd: /data/projects/.scratch/frankenredis-coralox-pass149-20260613T001226Z
+head: ea390360428ffd9c3886d28f6fbb01fac7d9507d
+branch: ## HEAD (no branch)
+ M .skill-loop-progress.md
+rustc: rustc 1.98.0-nightly (f20a92ec0 2026-06-07)
+cargo: cargo 1.98.0-nightly (0b1123a48 2026-06-01)
+rch: /home/ubuntu/.local/bin/rch
+redis-benchmark-path: redis-server-path: legacy-redis-dir: absent
+target-dir: /data/tmp/cargo-target
