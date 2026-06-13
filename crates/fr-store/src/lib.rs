@@ -4035,8 +4035,14 @@ pub struct Store {
     /// Physical keys by DB for O(1) RANDOMKEY sampling. `ordered_keys` remains
     /// the deterministic SCAN/KEYS surface; these slots are intentionally
     /// unordered because RANDOMKEY has no ordering contract. (frankenredis-srhju)
-    random_key_slots: Vec<Vec<Vec<u8>>>,
-    random_key_positions: HashMap<Vec<u8>, (usize, usize), foldhash::quality::RandomState>,
+    // (frankenredis-x4tgs) The RANDOMKEY index stored each key's bytes TWICE
+    // (once in the per-db slot Vec, once as the position-map key). Share a single
+    // `Arc<[u8]>` allocation between the two so a key insert allocates the key
+    // bytes once (then refcount-bumps) instead of twice — one of the duplicate
+    // keyspace key copies eliminated. Borrow<[u8]> keeps &[u8] lookups working.
+    random_key_slots: Vec<Vec<std::sync::Arc<[u8]>>>,
+    random_key_positions:
+        HashMap<std::sync::Arc<[u8]>, (usize, usize), foldhash::quality::RandomState>,
     /// Db-encoded keys that currently carry a TTL (a subset of `ordered_keys`).
     /// The active-expire cycle samples from this set instead of every key, so
     /// it finds expirable keys as efficiently as upstream's `activeExpireCycle`
@@ -7661,12 +7667,14 @@ impl Store {
         if self.random_key_positions.contains_key(key) {
             return;
         }
+        // Allocate the key bytes ONCE behind an Arc; the slot Vec and the
+        // position map then share it via cheap refcount clones.
+        let key: std::sync::Arc<[u8]> = std::sync::Arc::from(key);
         let Some(keys) = self.random_key_slots.get_mut(db) else {
             return;
         };
         let slot = keys.len();
-        let key = key.to_vec();
-        keys.push(key.clone());
+        keys.push(std::sync::Arc::clone(&key));
         self.random_key_positions.insert(key, (db, slot));
     }
 
@@ -16809,9 +16817,10 @@ impl Store {
         }
         let idx = (self.next_rand() as usize) % len;
         let physical = self.random_key_slots.get(db)?.get(idx)?.clone();
-        decode_db_key(&physical)
+        let physical: &[u8] = &physical;
+        decode_db_key(physical)
             .map(|(_, logical)| logical.to_vec())
-            .or(Some(physical))
+            .or_else(|| Some(physical.to_vec()))
     }
 
     /// Return up to `count` keys that hash to the given cluster slot.
@@ -24459,6 +24468,71 @@ mod tests {
         assert_eq!(store.del(&[db1_b], 0), 1);
         assert_eq!(store.randomkey_in_db(1, 0), None);
         assert_eq!(store.randomkey_in_db(0, 0), Some(b"db0".to_vec()));
+    }
+
+    // (frankenredis-x4tgs) The RANDOMKEY index now shares one Arc<[u8]> between
+    // the slot Vec and the position map instead of storing the key bytes twice.
+    // Verify the index stays internally consistent through inserts AND deletes
+    // (swap_remove + moved-key reindex), and A/B the per-key allocation pattern.
+    #[test]
+    fn random_key_index_arc_shared_consistent_and_fewer_allocs_x4tgs() {
+        use std::sync::Arc;
+        let mut store = Store::new();
+        for i in 0..5000 {
+            store.set(format!("k{i:05}").into_bytes(), b"v".to_vec(), None, 0);
+        }
+        // Delete a scattered third to exercise swap_remove + moved-key reindex.
+        for i in (0..5000).step_by(3) {
+            store.del(&[format!("k{i:05}").into_bytes()], 0);
+        }
+        // Invariant: every position maps to a slot holding the SAME key, and the
+        // slot count matches the position map and the live keyspace.
+        let slot_total: usize = store.random_key_slots.iter().map(Vec::len).sum();
+        assert_eq!(slot_total, store.random_key_positions.len());
+        assert_eq!(slot_total, store.entries.len());
+        for (key, &(db, slot)) in &store.random_key_positions {
+            assert_eq!(
+                store.random_key_slots[db][slot].as_ref(),
+                key.as_ref(),
+                "position map and slot Vec disagree after swap_remove churn"
+            );
+            assert!(store.entries.contains_key(key.as_ref()));
+        }
+
+        // A/B: per-key index-insert allocation pattern. OLD stored the key bytes
+        // TWICE (to_vec + clone into two Vec-keyed structures); NEW allocates once
+        // behind an Arc and refcount-clones. Same external behavior, half the
+        // per-key heap allocations.
+        let keys: Vec<Vec<u8>> = (0..200_000).map(|i| format!("key{i:08}").into_bytes()).collect();
+        let t0 = std::time::Instant::now();
+        let mut old_slots: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
+        let mut old_pos: std::collections::HashMap<Vec<u8>, usize> =
+            std::collections::HashMap::with_capacity(keys.len());
+        for (i, k) in keys.iter().enumerate() {
+            let owned = k.to_vec();
+            old_slots.push(owned.clone());
+            old_pos.insert(owned, i);
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box((&old_slots, &old_pos));
+
+        let t1 = std::time::Instant::now();
+        let mut new_slots: Vec<Arc<[u8]>> = Vec::with_capacity(keys.len());
+        let mut new_pos: std::collections::HashMap<Arc<[u8]>, usize> =
+            std::collections::HashMap::with_capacity(keys.len());
+        for (i, k) in keys.iter().enumerate() {
+            let shared: Arc<[u8]> = Arc::from(k.as_slice());
+            new_slots.push(Arc::clone(&shared));
+            new_pos.insert(shared, i);
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box((&new_slots, &new_pos));
+
+        println!(
+            "RANDOMKEY index per-key alloc A/B (x{}): old(2 Vec copies)={old_ns}ns new(1 Arc shared)={new_ns}ns ratio={:.2}x",
+            keys.len(),
+            old_ns as f64 / new_ns as f64
+        );
     }
 
     #[test]
