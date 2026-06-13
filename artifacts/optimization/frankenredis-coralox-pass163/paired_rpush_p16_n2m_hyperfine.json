@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "bash -lc 'set -euo pipefail\nBIN=/data/tmp/frankenredis-coralox-pass163-main-target/release/frankenredis\nBENCH=/data/projects/.scratch/frankenredis-coralox-pass163-20260613T080935Z/legacy_redis_code/redis/src/redis-benchmark\nPORT=24783\n\"$BIN\" --port \"$PORT\" >/tmp/fr_pass163_pair_base_server.log 2>&1 &\npid=$!\ntrap \"kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true\" EXIT\nfor _ in $(seq 1 100); do\n  if \"$BENCH\" -p \"$PORT\" -t ping -n 1 -q >/tmp/fr_pass163_pair_base_ping.log 2>&1; then\n    break\n  fi\n  sleep 0.03\ndone\n\"$BENCH\" -p \"$PORT\" -t rpush -n 2000000 -c 50 -P 16 -r 100000 -q >/tmp/fr_pass163_pair_base_bench.log\n'",
+      "mean": 2.14671894948,
+      "stddev": 0.24900990859855512,
+      "median": 2.0650788690799997,
+      "user": 1.25341828,
+      "system": 2.9122924199999995,
+      "min": 1.98992333808,
+      "max": 2.58739028308,
+      "times": [
+        1.98992333808,
+        2.07825782908,
+        2.01294442808,
+        2.0650788690799997,
+        2.58739028308
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "bash -lc 'set -euo pipefail\nBIN=/data/tmp/frankenredis-coralox-pass163-candidate-target/release/frankenredis\nBENCH=/data/projects/.scratch/frankenredis-coralox-pass163-20260613T080935Z/legacy_redis_code/redis/src/redis-benchmark\nPORT=24784\n\"$BIN\" --port \"$PORT\" >/tmp/fr_pass163_pair_cand_server.log 2>&1 &\npid=$!\ntrap \"kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true\" EXIT\nfor _ in $(seq 1 100); do\n  if \"$BENCH\" -p \"$PORT\" -t ping -n 1 -q >/tmp/fr_pass163_pair_cand_ping.log 2>&1; then\n    break\n  fi\n  sleep 0.03\ndone\n\"$BENCH\" -p \"$PORT\" -t rpush -n 2000000 -c 50 -P 16 -r 100000 -q >/tmp/fr_pass163_pair_cand_bench.log\n'",
+      "mean": 2.09559998068,
+      "stddev": 0.04439406456052482,
+      "median": 2.0998641450799997,
+      "user": 1.2196698799999999,
+      "system": 2.84375322,
+      "min": 2.04615545208,
+      "max": 2.1438449140799998,
+      "times": [
+        2.1438449140799998,
+        2.0998641450799997,
+        2.1333622120799998,
+        2.04615545208,
+        2.0547731800799998
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

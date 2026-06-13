@@ -1,0 +1,19 @@
+{
+  "input_sha256": "2c5e279d36a306e1b39827c4fd963c6e0e672057b53552b9703b05a413ddd912",
+  "input_bytes": 11864,
+  "results": [
+    {
+      "name": "baseline",
+      "sha256": "977d55d82d6bee6e2c88eb7fbff12d1d77bbc42e537ec9be911cf8f6401de620",
+      "bytes": 1704,
+      "stderr": ""
+    },
+    {
+      "name": "candidate",
+      "sha256": "977d55d82d6bee6e2c88eb7fbff12d1d77bbc42e537ec9be911cf8f6401de620",
+      "bytes": 1704,
+      "stderr": ""
+    }
+  ],
+  "outputs_equal": true
+}
