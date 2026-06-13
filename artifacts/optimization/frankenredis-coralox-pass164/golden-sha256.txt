@@ -1,0 +1,2 @@
+af9238da55071acaa676a78521cd66f8f46af931aebd1334533f4fe4754eaad3  artifacts/optimization/frankenredis-coralox-pass164/current-golden.txt
+af9238da55071acaa676a78521cd66f8f46af931aebd1334533f4fe4754eaad3  artifacts/optimization/frankenredis-coralox-pass164/candidate-golden.txt

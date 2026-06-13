@@ -1,0 +1,15 @@
+OK
+3
+5
+c
+b
+a
+d
+e
+3
+3
+OK
+WRONGTYPE Operation against a key holding the wrong kind of value
+
+WRONGTYPE Operation against a key holding the wrong kind of value
+
