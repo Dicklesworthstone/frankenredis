@@ -10199,7 +10199,12 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                entry.touch_write(now_ms);
+                // (frankenredis-hrq50) Update LRU/last-access on the write lookup
+                // (like redis lookupKeyWrite), but DEFER the modification_count bump
+                // to the `added > 0` branch below. Upstream t_set.c saddCommand only
+                // calls signalModifiedKey (which aborts WATCHers) inside `if (added)`,
+                // so a duplicate SADD that adds nothing must NOT abort a WATCH.
+                entry.touch(now_ms);
                 match &mut entry.value {
                     Value::Set(s) => {
                         // (gauntlet B2) Was this set intset-encoded *before* the
@@ -10237,6 +10242,8 @@ impl Store {
                                 max_listpack_entries,
                                 max_listpack_value,
                             );
+                            // (frankenredis-hrq50) Only a real add aborts WATCHers.
+                            entry.bump_mod_count();
                         }
                         self.dirty = self.dirty.saturating_add(added);
                         Ok(added)
