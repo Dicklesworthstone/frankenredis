@@ -208,7 +208,7 @@ proptest! {
         let mut store = fresh_store();
 
         store.set(key.clone(), old_value.clone(), None, 0);
-        let got_old = store.getset(key.clone(), new_value.clone(), 0).unwrap();
+        let got_old = store.getset(key.clone(), &new_value, 0).unwrap();
 
         prop_assert_eq!(got_old, Some(old_value));
         let got_new = store.get(&key, 0).unwrap();
@@ -222,10 +222,10 @@ proptest! {
                                    second in prop::collection::vec(any::<u8>(), 1..64)) {
         let mut store = fresh_store();
 
-        let set1 = store.setnx(key.clone(), first.clone(), 0);
+        let set1 = store.setnx(&key, &first, 0);
         prop_assert!(set1, "first SETNX should succeed");
 
-        let set2 = store.setnx(key.clone(), second, 0);
+        let set2 = store.setnx(&key, &second, 0);
         prop_assert!(!set2, "second SETNX should fail");
 
         let got = store.get(&key, 0).unwrap();
