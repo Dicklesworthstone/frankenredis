@@ -6688,7 +6688,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("incr", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("incr", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -6812,7 +6812,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("decr", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("decr", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -6955,7 +6955,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("decrby", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("decrby", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -7103,7 +7103,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("append", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("append", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -7268,7 +7268,10 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server.store.record_command_histogram_with_kind(
+            // (frankenredis-par0e) cmd.name_lower() is a static lowercase canonical
+            // name — record directly, skipping the per-command re-lowercase +
+            // UTF-8 validation, and hitting the lpush/rpush/sadd direct fields.
+            self.server.store.record_command_histogram_canonical_with_kind(
                 cmd.name_lower(),
                 elapsed_us,
                 kind,
@@ -7428,7 +7431,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("hset", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("hset", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -7586,7 +7589,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("zadd", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("zadd", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -7743,7 +7746,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("zincrby", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("zincrby", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -7893,7 +7896,10 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server.store.record_command_histogram_with_kind(
+            // (frankenredis-par0e) cmd.name_lower() is a static lowercase canonical
+            // name — record directly, skipping the per-command re-lowercase +
+            // UTF-8 validation, and hitting the lpush/rpush/sadd direct fields.
+            self.server.store.record_command_histogram_canonical_with_kind(
                 cmd.name_lower(),
                 elapsed_us,
                 kind,
@@ -8240,7 +8246,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("hget", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("hget", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -8345,7 +8351,7 @@ impl Runtime {
 
         if self.server.latency_tracking {
             // MGET never returns an error reply.
-            self.server.store.record_command_histogram_with_kind(
+            self.server.store.record_command_histogram_canonical_with_kind(
                 "mget",
                 elapsed_us,
                 CommandRecordKind::Success,
@@ -8457,7 +8463,7 @@ impl Runtime {
 
         if self.server.latency_tracking {
             // EXISTS never returns an error reply.
-            self.server.store.record_command_histogram_with_kind(
+            self.server.store.record_command_histogram_canonical_with_kind(
                 "exists",
                 elapsed_us,
                 CommandRecordKind::Success,
@@ -8584,7 +8590,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("strlen", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("strlen", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -8734,7 +8740,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("getrange", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("getrange", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -8879,7 +8885,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("hmget", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("hmget", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -9015,7 +9021,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("sismember", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("sismember", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -9151,7 +9157,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("hexists", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("hexists", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -9274,7 +9280,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("llen", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("llen", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -9412,7 +9418,10 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server.store.record_command_histogram_with_kind(
+            // (frankenredis-par0e) cmd.name_lower() is a static lowercase canonical
+            // name — record directly, skipping the per-command re-lowercase +
+            // UTF-8 validation, and hitting the lpush/rpush/sadd direct fields.
+            self.server.store.record_command_histogram_canonical_with_kind(
                 cmd.name_lower(),
                 elapsed_us,
                 kind,
@@ -9564,7 +9573,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind(cmd.name_lower(), elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind(cmd.name_lower(), elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -9690,7 +9699,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("scard", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("scard", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -9835,7 +9844,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("lindex", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("lindex", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -9982,7 +9991,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("zscore", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("zscore", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -10124,7 +10133,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("incrby", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("incrby", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -10187,7 +10196,7 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server.store.record_command_histogram_with_kind(
+            self.server.store.record_command_histogram_canonical_with_kind(
                 "set",
                 elapsed_us,
                 CommandRecordKind::Success,
@@ -10246,7 +10255,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_with_kind("get", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind("get", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {

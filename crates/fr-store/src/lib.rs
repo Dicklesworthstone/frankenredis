@@ -3541,6 +3541,14 @@ impl CommandHistogram {
 pub struct CommandHistogramTracker {
     get: Option<CommandHistogram>,
     set: Option<CommandHistogram>,
+    // (frankenredis-par0e) Direct fields for the hot borrowed-write commands,
+    // mirroring the get/set fast-fields: their commandstats record skips the
+    // `HashMap<String>` hash+probe (and, via record_canonical_with_kind, the
+    // per-command ASCII-lowercase + UTF-8 validation), matching redis indexing
+    // commandstats off the command struct rather than the name string.
+    lpush: Option<CommandHistogram>,
+    rpush: Option<CommandHistogram>,
+    sadd: Option<CommandHistogram>,
     histograms: HashMap<String, CommandHistogram, foldhash::quality::RandomState>,
 }
 
@@ -3589,7 +3597,13 @@ impl CommandHistogramTracker {
         self.record_canonical_with_kind(&key, latency_us, kind);
     }
 
-    fn record_canonical_with_kind(
+    /// Record under a name the caller guarantees is ALREADY the canonical
+    /// lowercase command fullname (e.g. a borrowed fast-path passing a static
+    /// lowercase literal or `cmd.name_lower()`). Skips the per-command
+    /// ASCII-lowercase + UTF-8 validation that `record_with_kind` performs;
+    /// byte-identical bucket to `record_with_kind` for canonical-lowercase input.
+    /// (frankenredis-par0e)
+    pub fn record_canonical_with_kind(
         &mut self,
         command: &str,
         latency_us: u64,
@@ -3603,6 +3617,24 @@ impl CommandHistogramTracker {
         }
         if command == "set" {
             self.set
+                .get_or_insert_with(CommandHistogram::default)
+                .record_with_kind(latency_us, kind);
+            return;
+        }
+        if command == "lpush" {
+            self.lpush
+                .get_or_insert_with(CommandHistogram::default)
+                .record_with_kind(latency_us, kind);
+            return;
+        }
+        if command == "rpush" {
+            self.rpush
+                .get_or_insert_with(CommandHistogram::default)
+                .record_with_kind(latency_us, kind);
+            return;
+        }
+        if command == "sadd" {
+            self.sadd
                 .get_or_insert_with(CommandHistogram::default)
                 .record_with_kind(latency_us, kind);
             return;
@@ -3635,6 +3667,15 @@ impl CommandHistogramTracker {
         if key == "set" {
             return self.set.as_ref();
         }
+        if key == "lpush" {
+            return self.lpush.as_ref();
+        }
+        if key == "rpush" {
+            return self.rpush.as_ref();
+        }
+        if key == "sadd" {
+            return self.sadd.as_ref();
+        }
         self.histograms.get(&key)
     }
 
@@ -3652,6 +3693,15 @@ impl CommandHistogramTracker {
         if let Some(hist) = &self.set {
             result.push(("set", hist));
         }
+        if let Some(hist) = &self.lpush {
+            result.push(("lpush", hist));
+        }
+        if let Some(hist) = &self.rpush {
+            result.push(("rpush", hist));
+        }
+        if let Some(hist) = &self.sadd {
+            result.push(("sadd", hist));
+        }
         result.sort_by(|a, b| a.0.cmp(b.0));
         result
     }
@@ -3661,9 +3711,15 @@ impl CommandHistogramTracker {
         if commands.is_empty() {
             let count = self.histograms.len()
                 + usize::from(self.get.is_some())
-                + usize::from(self.set.is_some());
+                + usize::from(self.set.is_some())
+                + usize::from(self.lpush.is_some())
+                + usize::from(self.rpush.is_some())
+                + usize::from(self.sadd.is_some());
             self.get = None;
             self.set = None;
+            self.lpush = None;
+            self.rpush = None;
+            self.sadd = None;
             self.histograms.clear();
             return count;
         }
@@ -3681,6 +3737,24 @@ impl CommandHistogramTracker {
                 }
                 if key == "set" {
                     return self.set.as_mut().map(|h| {
+                        h.reset();
+                        1
+                    });
+                }
+                if key == "lpush" {
+                    return self.lpush.as_mut().map(|h| {
+                        h.reset();
+                        1
+                    });
+                }
+                if key == "rpush" {
+                    return self.rpush.as_mut().map(|h| {
+                        h.reset();
+                        1
+                    });
+                }
+                if key == "sadd" {
+                    return self.sadd.as_mut().map(|h| {
                         h.reset();
                         1
                     });
@@ -5098,6 +5172,21 @@ impl Store {
     ) {
         self.command_histograms
             .record_with_kind(command, latency_us, kind);
+    }
+
+    /// Like `record_command_histogram_with_kind` but the caller guarantees
+    /// `canonical_lower` is ALREADY the canonical lowercase command fullname
+    /// (a borrowed fast-path passing a static literal or `cmd.name_lower()`),
+    /// skipping the per-command ASCII-lowercase + UTF-8 validation. Byte-identical
+    /// bucket. (frankenredis-par0e)
+    pub fn record_command_histogram_canonical_with_kind(
+        &mut self,
+        canonical_lower: &str,
+        latency_us: u64,
+        kind: CommandRecordKind,
+    ) {
+        self.command_histograms
+            .record_canonical_with_kind(canonical_lower, latency_us, kind);
     }
 
     /// Get histogram data for a specific command.
@@ -26882,6 +26971,81 @@ mod tests {
         let ratio = old_ns as f64 / new_ns as f64;
         println!(
             "command-stats record A/B (x{reps}): old(alloc)={old_ns}ns new(stackbuf)={new_ns}ns ratio={ratio:.2}x"
+        );
+    }
+
+    // (frankenredis-par0e) The borrowed-write fast path records commandstats via
+    // record_canonical_with_kind (skips per-command lowercase+utf8) and the new
+    // lpush/rpush/sadd direct fields. Prove byte-identical histogram state vs the
+    // canonicalizing record_with_kind path for every relevant command, plus the
+    // record A/B ratio for the lpush hot path.
+    #[test]
+    fn command_histogram_canonical_fastpath_matches_record_with_kind_and_reports_ab_ratio() {
+        use super::{CommandHistogram, CommandHistogramTracker, CommandRecordKind};
+
+        fn snapshot(t: &CommandHistogramTracker) -> Vec<(String, CommandHistogram)> {
+            t.all()
+                .into_iter()
+                .map(|(k, h)| (k.to_string(), h.clone()))
+                .collect()
+        }
+
+        // Same (canonical-lowercase) names + latencies + kinds through both paths.
+        let samples: &[(&str, u64, CommandRecordKind)] = &[
+            ("lpush", 3, CommandRecordKind::Success),
+            ("lpush", 7, CommandRecordKind::Failed),
+            ("rpush", 11, CommandRecordKind::Success),
+            ("sadd", 1, CommandRecordKind::Rejected),
+            ("sadd", 99, CommandRecordKind::Success),
+            ("get", 2, CommandRecordKind::Success),
+            ("set", 5, CommandRecordKind::Success),
+            ("hset", 4, CommandRecordKind::Success),
+            ("zadd", 8, CommandRecordKind::Failed),
+        ];
+
+        let mut canonical = CommandHistogramTracker::default();
+        let mut classic = CommandHistogramTracker::default();
+        for &(name, lat, kind) in samples {
+            canonical.record_canonical_with_kind(name, lat, kind);
+            classic.record_with_kind(name, lat, kind);
+        }
+        assert_eq!(
+            snapshot(&canonical),
+            snapshot(&classic),
+            "canonical fast-path histogram state must equal record_with_kind"
+        );
+        // The hot-write direct fields are reachable via get(), case-insensitively.
+        for name in ["lpush", "rpush", "sadd"] {
+            assert_eq!(
+                canonical.get(name).map(|h| h.calls),
+                classic.get(&name.to_uppercase()).map(|h| h.calls),
+                "{name} direct-field lookup must match (case-insensitive)"
+            );
+            assert!(canonical.get(name).is_some(), "{name} must be recorded");
+        }
+        // reset() accounts for the new fields too.
+        assert_eq!(canonical.reset(&[]), classic.reset(&[]));
+
+        // A/B: record the lpush hot path — old canonicalizing path
+        // (lowercase + from_utf8 + HashMap probe) vs new direct-field canonical.
+        let reps = 3_000_000usize;
+        let mut t1 = CommandHistogramTracker::default();
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            t1.record_with_kind(std::hint::black_box("lpush"), 1, CommandRecordKind::Success);
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(&t1);
+        let mut t2 = CommandHistogramTracker::default();
+        let s0 = std::time::Instant::now();
+        for _ in 0..reps {
+            t2.record_canonical_with_kind(std::hint::black_box("lpush"), 1, CommandRecordKind::Success);
+        }
+        let new_ns = s0.elapsed().as_nanos().max(1);
+        std::hint::black_box(&t2);
+        println!(
+            "lpush commandstats record A/B (x{reps}): old(lowercase+utf8+hashmap)={old_ns}ns new(direct field)={new_ns}ns ratio={:.2}x",
+            old_ns as f64 / new_ns as f64
         );
     }
 
