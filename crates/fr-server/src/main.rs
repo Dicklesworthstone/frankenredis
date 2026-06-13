@@ -2563,12 +2563,24 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
-                if let Some(keys) = borrowed_plain_mget_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_mget_borrowed(keys, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
+                if let Some(keys) = borrowed_plain_mget_args(&borrowed_args) {
+                    // (frankenredis-5gisf) MGET encodes its `*N` reply directly
+                    // into `out` (zero value clones) — FastEncodedReply, not the
+                    // owned-RespFrame FastReply path.
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_mget_borrowed_into(keys, ts, client_resp3, out)
+                        .is_some()
+                    {
+                        return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: parsed.consumed,
+                        });
+                    }
+                    copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                    return Ok(BorrowedMultibulkAction::Parsed {
+                        kind: parsed.kind,
                         consumed: parsed.consumed,
-                        response,
+                        argv_len,
                     });
                 }
                 if let Some(keys) = borrowed_plain_exists_args(&borrowed_args)

@@ -8854,11 +8854,22 @@ impl Runtime {
     /// nil element via `Store::mget`), so there is no error-stat path. Returns
     /// None (fall back to the generic path) on any disabling state.
     /// (frankenredis-uz39v)
-    pub fn execute_plain_mget_borrowed(
+    /// (frankenredis-5gisf) `_into` form: encodes the `*N` array of bulk strings
+    /// DIRECTLY into `out` rather than building an owned `RespFrame::Array` from
+    /// `Store::mget` (which clones every value via `string_owned` + allocates N
+    /// `RespFrame`s) — that owned-reply churn left MGET ~0.90x vs redis while the
+    /// already-`_into` GET/SMEMBERS/LRANGE paths lead. Byte-identical on the fast
+    /// path: `get_string_bytes` per key reproduces `Store::mget`'s keyspace-lookup
+    /// + touch-only-on-string semantics (the read gate forces maxmemory==0, so
+    /// LFU is off and can't differ), and a non-string key maps to a nil element
+    /// (NOT a WRONGTYPE error, matching MGET). Records ONE `mget` command.
+    pub fn execute_plain_mget_borrowed_into(
         &mut self,
         keys: &[&[u8]],
         now_ms: u64,
-    ) -> Option<RespFrame> {
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
         if !self.can_execute_plain_mget_borrowed(keys, now_ms) {
             return None;
         }
@@ -8875,21 +8886,31 @@ impl Runtime {
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = Instant::now();
-        let values = self.server.store.mget(keys, now_ms);
+        if !suppress_reply {
+            fr_protocol::encode_aggregate_header(keys.len(), false, out);
+        }
+        for key in keys {
+            let value = self.server.store.get_string_bytes(key, now_ms);
+            if !suppress_reply {
+                match value {
+                    Ok(v) => encode_bulk_string_slice(v.as_deref(), resp3, out),
+                    // MGET yields nil for a non-string (wrong-type) key, not an error.
+                    Err(_) => encode_bulk_string_slice(None, resp3, out),
+                }
+            }
+        }
         let elapsed_us = start.elapsed().as_micros() as u64;
-        let reply = RespFrame::Array(Some(
-            values.into_iter().map(RespFrame::BulkString).collect(),
-        ));
 
         self.record_plain_mget_borrowed_metrics(keys, elapsed_us, now_ms, packet_id);
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
 
-        Some(reply)
+        Some(())
     }
 
     fn record_plain_mget_borrowed_metrics(
@@ -22687,28 +22708,38 @@ mod tests {
         }
 
         let keys: [&[u8]; 4] = [b"a", b"missing", b"b", b"l"];
-        let fast_reply = fast
-            .execute_plain_mget_borrowed(&keys, 2)
-            .expect("default MGET should take borrowed fast path");
+        let mut out = Vec::new();
+        assert_eq!(
+            fast.execute_plain_mget_borrowed_into(&keys, 2, false, &mut out),
+            Some(()),
+            "default MGET should take borrowed fast path"
+        );
         let generic_reply =
             generic.execute_frame(command(&[b"MGET", b"a", b"missing", b"b", b"l"]), 2);
-        assert_eq!(fast_reply, generic_reply);
+        assert_eq!(out, generic_reply.to_bytes());
         // sanity on the shape: [\"1\", nil, \"2\", nil]
         assert_eq!(
-            fast_reply,
+            out,
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"1".to_vec())),
                 RespFrame::BulkString(None),
                 RespFrame::BulkString(Some(b"2".to_vec())),
                 RespFrame::BulkString(None),
             ]))
+            .to_bytes()
         );
 
         // single-key MGET also fast-pathed
-        let one = fast
-            .execute_plain_mget_borrowed(&[b"a"], 3)
-            .expect("single-key MGET should take borrowed fast path");
-        assert_eq!(one, generic.execute_frame(command(&[b"MGET", b"a"]), 3));
+        let mut one_out = Vec::new();
+        assert_eq!(
+            fast.execute_plain_mget_borrowed_into(&[b"a"], 3, false, &mut one_out),
+            Some(()),
+            "single-key MGET should take borrowed fast path"
+        );
+        assert_eq!(
+            one_out,
+            generic.execute_frame(command(&[b"MGET", b"a"]), 3).to_bytes()
+        );
 
         assert_eq!(
             fast.server.store.stat_total_commands_processed,
@@ -22741,9 +22772,17 @@ mod tests {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SET", b"a", b"1"]), 1);
         let keys: [&[u8]; 1] = [b"a"];
-        assert!(rt.execute_plain_mget_borrowed(&keys, 2).is_some());
+        let mut out = Vec::new();
+        assert!(
+            rt.execute_plain_mget_borrowed_into(&keys, 2, false, &mut out)
+                .is_some()
+        );
         rt.execute_frame(command(&[b"MULTI"]), 3);
-        assert!(rt.execute_plain_mget_borrowed(&keys, 4).is_none());
+        out.clear();
+        assert!(
+            rt.execute_plain_mget_borrowed_into(&keys, 4, false, &mut out)
+                .is_none()
+        );
     }
 
     #[test]
