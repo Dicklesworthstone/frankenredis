@@ -9048,6 +9048,66 @@ impl Store {
         }
     }
 
+    /// Borrow-scan variant of `hkeys` (`values = false`) / `hvals` (`values =
+    /// true`) for the zero-copy reply fast path: IDENTICAL bookkeeping to those
+    /// (keyspace hit/miss, `drop_expired_hash_fields`, LFU bump + `touch` before
+    /// the type check) but drives a single `SmembersScanEvent` sink — `Len(n)`
+    /// then one `Member(&[u8])` per field-name / value by borrow — so the runtime
+    /// encodes the `*N` array straight into the output buffer with no
+    /// `Vec<Vec<u8>>`/`Vec<RespFrame>` materialization. `Len(0)` for
+    /// missing/expired keys; `Err(WrongType)` for a non-hash value (after the LFU
+    /// bump + touch, matching `hkeys`/`hvals`). (frankenredis: HKEYS/HVALS
+    /// borrow-encode)
+    pub fn hcollection_borrow_scan(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        values: bool,
+        mut sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        }
+        self.drop_expired_hash_fields(key, now_ms);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                entry.touch(now_ms);
+                match &entry.value {
+                    Value::Hash(m) => {
+                        sink(SmembersScanEvent::Len(m.len()));
+                        if values {
+                            for v in m.values() {
+                                sink(SmembersScanEvent::Member(v));
+                            }
+                        } else {
+                            for k in m.keys() {
+                                sink(SmembersScanEvent::Member(k));
+                            }
+                        }
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                sink(SmembersScanEvent::Len(0));
+                Ok(())
+            }
+        }
+    }
+
     pub fn hkeys(&mut self, key: &[u8], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(Vec::new());

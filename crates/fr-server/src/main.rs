@@ -2420,6 +2420,22 @@ fn parse_borrowed_multibulk_action(
                         argv_len,
                     });
                 }
+                if let Some((key, values)) = borrowed_plain_hcoll_args(&borrowed_args) {
+                    if runtime
+                        .execute_plain_hcoll_borrowed_into(key, ts, values, out)
+                        .is_some()
+                    {
+                        return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: parsed.consumed,
+                        });
+                    }
+                    copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                    return Ok(BorrowedMultibulkAction::Parsed {
+                        kind: parsed.kind,
+                        consumed: parsed.consumed,
+                        argv_len,
+                    });
+                }
                 if let Some((key, value)) = borrowed_plain_set_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_set_borrowed(key, value, ts)
                 {
@@ -2791,6 +2807,15 @@ fn borrowed_plain_lrange_args<'a>(
 fn borrowed_plain_hgetall_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
     match borrowed_args {
         [command, key] if command.eq_ignore_ascii_case(b"HGETALL") => Some(*key),
+        _ => None,
+    }
+}
+
+/// `HKEYS key` / `HVALS key` -> (key, values?) where `values=true` for HVALS.
+fn borrowed_plain_hcoll_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], bool)> {
+    match borrowed_args {
+        [command, key] if command.eq_ignore_ascii_case(b"HKEYS") => Some((*key, false)),
+        [command, key] if command.eq_ignore_ascii_case(b"HVALS") => Some((*key, true)),
         _ => None,
     }
 }
