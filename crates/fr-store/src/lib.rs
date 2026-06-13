@@ -9,6 +9,7 @@ use packed_set::{GenericSet, HashFieldMap, ListValue, PackedZSet, PackedZSetIter
 use fr_expire::evaluate_expiry;
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use indexmap::IndexMap;
@@ -3718,6 +3719,18 @@ pub struct Store {
     digest_stale: bool,
     zintercard_cache: Option<ZIntercardCache>,
     hll_register_cache: HashMap<Vec<u8>, HllRegisterCache, foldhash::quality::RandomState>,
+    /// (frankenredis-c3he2) Memoized memory-usage estimate for the few LARGE
+    /// collections (hashtable/skiplist/large-stream branch), keyed by keyspace
+    /// key → `(modification_count, value_estimate_bytes)`. The value estimate is
+    /// a pure function of value contents + `force_*_encoding` flags, all of which
+    /// only change via writes that advance `modification_count`, so the entry is
+    /// byte-identical until the next write. Lets repeated `MEMORY USAGE` and the
+    /// periodic `used_memory` keyspace recompute skip the O(n) per-element walk.
+    /// Bounded to large collections only (small/listpack values estimate cheaply
+    /// and are never inserted), pruned at the `internal_entries_insert`/`remove`
+    /// and `clear` choke points exactly like `hll_register_cache`. Interior-mutable
+    /// so it can be filled from the `&self` recompute path.
+    mem_estimate_cache: RefCell<HashMap<Vec<u8>, (u64, usize), foldhash::quality::RandomState>>,
     db_key_counts: Vec<usize>,
     db_expires_counts: Vec<usize>,
     /// Number of databases (configurable at startup, default 16).
@@ -4179,6 +4192,7 @@ impl Default for Store {
             digest_stale: false,
             zintercard_cache: None,
             hll_register_cache: HashMap::default(),
+            mem_estimate_cache: RefCell::new(HashMap::default()),
             db_key_counts: vec![0; DEFAULT_NUM_DATABASES],
             db_expires_counts: vec![0; DEFAULT_NUM_DATABASES],
             database_count: DEFAULT_NUM_DATABASES,
@@ -5457,6 +5471,7 @@ impl Store {
             self.forget_volatile_key(key);
         }
         self.hll_register_cache.remove(key);
+        self.mem_estimate_cache.borrow_mut().remove(key);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
         Ok(next)
@@ -7389,6 +7404,7 @@ impl Store {
             self.forget_volatile_key(&key);
         }
         self.hll_register_cache.remove(&key);
+        self.mem_estimate_cache.borrow_mut().remove(&key);
         let old_entry = self.entries.insert(key.clone(), entry);
         self.update_expiry_deadline(old_expiry, new_expiry);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
@@ -7417,6 +7433,7 @@ impl Store {
     fn internal_entries_remove(&mut self, key: &[u8]) -> Option<Entry> {
         if let Some(entry) = self.entries.remove(key) {
             self.hll_register_cache.remove(key);
+            self.mem_estimate_cache.borrow_mut().remove(key);
             self.ordered_keys.remove(key);
             self.random_key_index_remove(key);
             self.forget_volatile_key(key);
@@ -7840,6 +7857,7 @@ impl Store {
         self.volatile_keys_dirty = false;
         self.expiry_deadline_counts.clear();
         self.hll_register_cache.clear();
+        self.mem_estimate_cache.borrow_mut().clear();
         self.hash_field_expires.clear();
         self.running_digest = 0;
         self.digest_stale = false;
@@ -16880,7 +16898,35 @@ impl Store {
         self.drop_if_expired(key, now_ms);
         self.entries
             .get(key)
-            .map(|entry| estimate_entry_memory_usage_bytes(key, entry))
+            .map(|entry| self.cached_entry_memory_usage_bytes(key, entry))
+    }
+
+    /// `estimate_entry_memory_usage_bytes`, but the O(n) value-walk for a large
+    /// collection (hashtable/skiplist/large-stream) is memoized in
+    /// `mem_estimate_cache`, keyed by key and validated against the entry's
+    /// `modification_count`. Byte-identical to the direct computation; only the
+    /// cost changes (O(n)→O(1) on a cache hit). Small/scalar/list values are
+    /// never cached — they estimate cheaply (lists already O(1)). (frankenredis-c3he2)
+    fn cached_entry_memory_usage_bytes(&self, key: &[u8], entry: &Entry) -> usize {
+        let fixed = estimate_key_memory_usage_bytes(key)
+            .saturating_add(estimate_expiry_memory_usage_bytes(entry));
+        if !value_estimate_is_expensive(&entry.value) {
+            return fixed.saturating_add(estimate_value_memory_usage_bytes(entry));
+        }
+        let mc = entry.modification_count;
+        if let Some(&(cmc, bytes)) = self.mem_estimate_cache.borrow().get(key)
+            && cmc == mc
+        {
+            return fixed.saturating_add(bytes);
+        }
+        let bytes = estimate_value_memory_usage_bytes(entry);
+        let mut cache = self.mem_estimate_cache.borrow_mut();
+        if let Some(slot) = cache.get_mut(key) {
+            *slot = (mc, bytes);
+        } else {
+            cache.insert(key.to_vec(), (mc, bytes));
+        }
+        fixed.saturating_add(bytes)
     }
 
     pub fn request_debug_reload(&mut self) {
@@ -16934,7 +16980,7 @@ impl Store {
         let usage = self
             .entries
             .iter()
-            .map(|(key, entry)| estimate_entry_memory_usage_bytes(key, entry))
+            .map(|(key, entry)| self.cached_entry_memory_usage_bytes(key, entry))
             .sum();
 
         self.cached_memory_usage_bytes.set(usage);
@@ -20065,6 +20111,23 @@ fn estimate_value_memory_usage_bytes(entry: &Entry) -> usize {
         Value::Set(members) => estimate_set_memory_usage_bytes(members),
         Value::SortedSet(members) => estimate_sorted_set_memory_usage_bytes(members),
         Value::Stream(entries) => estimate_stream_memory_usage_bytes(entries),
+    }
+}
+
+/// True when `entry`'s value is a large collection whose memory estimate costs
+/// an O(n) walk — the hashtable/skiplist (and large-stream) branches of the
+/// estimators. Small listpack-encoded collections and scalars are cheap to
+/// estimate directly, and lists already estimate in O(1) via `lp_bytes`, so
+/// those are never cached. Keeps the `mem_estimate_cache` bounded to the few
+/// genuinely large keys. (frankenredis-c3he2)
+fn value_estimate_is_expensive(value: &Value) -> bool {
+    const MEM_ESTIMATE_CACHE_MIN_LEN: usize = 128;
+    match value {
+        Value::Hash(fields) => fields.len() > MEM_ESTIMATE_CACHE_MIN_LEN,
+        Value::Set(members) => members.len() > MEM_ESTIMATE_CACHE_MIN_LEN,
+        Value::SortedSet(members) => members.len() > MEM_ESTIMATE_CACHE_MIN_LEN,
+        Value::Stream(entries) => entries.len() > MEM_ESTIMATE_CACHE_MIN_LEN,
+        Value::String(_) | Value::Integer(_) | Value::List(_) => false,
     }
 }
 
