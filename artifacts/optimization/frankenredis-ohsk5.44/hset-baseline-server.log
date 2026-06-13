@@ -1,0 +1,8 @@
+FrankenRedis v0.1.0 ready (mode=strict, port=24644)
+error: failed to bind to 127.0.0.1:24644: Address already in use (os error 98)
+error: failed to bind to 127.0.0.1:24644: Address already in use (os error 98)
+error: failed to bind to 127.0.0.1:24644: Address already in use (os error 98)
+error: failed to bind to 127.0.0.1:24644: Address already in use (os error 98)
+error: failed to bind to 127.0.0.1:24644: Address already in use (os error 98)
+error: failed to bind to 127.0.0.1:24644: Address already in use (os error 98)
+error: failed to bind to 127.0.0.1:24644: Address already in use (os error 98)

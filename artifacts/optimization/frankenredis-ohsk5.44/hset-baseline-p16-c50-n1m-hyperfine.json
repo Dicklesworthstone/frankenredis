@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/frankenredis-coralox-pass172-profile-target/release/fr-bench --port 24644 --clients 50 --pipeline 16 --requests 1000000 --workload hset --json-out artifacts/optimization/frankenredis-ohsk5.44/hset-baseline-last.json",
+      "mean": 1.3197097669885716,
+      "stddev": 0.07114078683807325,
+      "median": 1.32314555356,
+      "user": 0.85789504,
+      "system": 1.2064049799999998,
+      "min": 1.23652785756,
+      "max": 1.4147115455600001,
+      "times": [
+        1.32314555356,
+        1.2583811555600002,
+        1.23652785756,
+        1.36803896056,
+        1.4147115455600001,
+        1.38304187556,
+        1.25412142056
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

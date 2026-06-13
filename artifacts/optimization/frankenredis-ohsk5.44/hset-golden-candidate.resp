@@ -1,0 +1,18 @@
+:1
+:0
+:1
+$2
+v4
+*4
+$1
+f
+$2
+v4
+$1
+g
+$2
+v3
++OK
+-WRONGTYPE Operation against a key holding the wrong kind of value
+-ERR wrong number of arguments for 'hset' command
++OK

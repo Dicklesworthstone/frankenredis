@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/frankenredis-ohsk5-44-candidate-target/release/fr-bench --port 24647 --clients 50 --pipeline 16 --requests 1000000 --workload hset --json-out artifacts/optimization/frankenredis-ohsk5.44/hset-paired-baseline-last.json",
+      "mean": 1.5526394121199998,
+      "stddev": 0.4265186580428154,
+      "median": 1.44442824812,
+      "user": 0.9040260257142857,
+      "system": 1.31974282,
+      "min": 1.16284498812,
+      "max": 2.43407049312,
+      "times": [
+        1.16284498812,
+        1.29297451412,
+        1.44442824812,
+        1.34173975612,
+        1.46347280912,
+        1.7289450761199998,
+        2.43407049312
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/frankenredis-ohsk5-44-candidate-target/release/fr-bench --port 24648 --clients 50 --pipeline 16 --requests 1000000 --workload hset --json-out artifacts/optimization/frankenredis-ohsk5.44/hset-paired-candidate-last.json",
+      "mean": 1.6898313808342855,
+      "stddev": 0.16825710546307635,
+      "median": 1.68720562712,
+      "user": 0.9940163114285714,
+      "system": 1.5984541057142858,
+      "min": 1.45311508812,
+      "max": 1.94301926212,
+      "times": [
+        1.45311508812,
+        1.52258052012,
+        1.67150442112,
+        1.68720562712,
+        1.83341416012,
+        1.71798058712,
+        1.94301926212
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
