@@ -928,6 +928,24 @@ impl FullSortedSet {
         }
     }
 
+    /// Adaptive warming for the O(log n) rank-difference COUNT paths
+    /// (`score_bound_count` = ZCOUNT, `lex_count` = ZLEXCOUNT). Mirrors
+    /// `maybe_warm_rank_tree_for_index`: a large set hit repeatedly by a count
+    /// query builds the order-statistic treap so the count stops being an
+    /// O(range) BTreeMap walk and becomes a two-`rank_of` subtraction — exactly
+    /// what redis's zslGetRank-based zcount/zlexcount do. A one-shot count on a
+    /// cold set still pays only the O(range) scan (cheaper than building the
+    /// tree once), so cold zsets never regress. (frankenredis-p94tu)
+    fn maybe_warm_rank_tree_for_count(&mut self) {
+        if self.rank_tree.is_some() || self.dict.len() < ZSET_INDEX_TREE_WARM_MIN_LEN {
+            return;
+        }
+        self.deep_index_reads = self.deep_index_reads.saturating_add(1);
+        if self.deep_index_reads >= ZSET_INDEX_TREE_WARM_HITS {
+            let _ = self.ensure_rank_tree();
+        }
+    }
+
     fn index_slice_asc_adaptive(&mut self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
         self.maybe_warm_rank_tree_for_index(start_idx, count);
         self.index_slice_asc(start_idx, count)
@@ -1527,6 +1545,28 @@ impl SortedSet {
                     .count()
             }
         }
+    }
+
+    /// `score_bound_count` (ZCOUNT), but a large set hit repeatedly adaptively
+    /// warms the rank treap so the count switches from the O(range) scan to the
+    /// O(log n) rank-difference path. Byte-identical result either way (see the
+    /// `score_bound_count_warm_treap_rank_diff_isomorphic_i5896` test).
+    /// (frankenredis-p94tu)
+    fn score_bound_count_adaptive(&mut self, min: ScoreBound, max: ScoreBound) -> usize {
+        if let SortedSetInner::Full(full) = &mut self.inner {
+            full.maybe_warm_rank_tree_for_count();
+        }
+        self.score_bound_count(min, max)
+    }
+
+    /// `lex_count` (ZLEXCOUNT) with the same adaptive rank-treap warming as
+    /// `score_bound_count_adaptive`. Byte-identical result (see
+    /// `lex_count_warm_treap_rank_diff_isomorphic_7uonw`). (frankenredis-p94tu)
+    fn lex_count_adaptive(&mut self, min: &[u8], max: &[u8]) -> usize {
+        if let SortedSetInner::Full(full) = &mut self.inner {
+            full.maybe_warm_rank_tree_for_count();
+        }
+        self.lex_count(min, max)
     }
 
     #[cfg(test)]
@@ -12000,9 +12040,9 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
-                        let result = zs.score_bound_count(min, max);
+                        let result = zs.score_bound_count_adaptive(min, max);
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -12812,10 +12852,10 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
                         // (frankenredis-7st86) Range-count the single-score band.
-                        let result = zs.lex_count(min, max);
+                        let result = zs.lex_count_adaptive(min, max);
                         entry.touch(now_ms);
                         Ok(result)
                     }
