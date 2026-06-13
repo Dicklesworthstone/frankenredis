@@ -1,0 +1,18 @@
+:1
+:2
+:2
+:0
++OK
+-WRONGTYPE Operation against a key holding the wrong kind of value
++OK
+*4
+$14
+suppressed-off
+$1
+a
+$1
+b
+$15
+suppressed-skip
+:2
++OK

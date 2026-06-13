@@ -1,0 +1,68 @@
+{
+  "results": [
+    {
+      "command": "LABEL=baseline BIN='/data/projects/.scratch/frankenredis-coralox-pass181-20260613T2204Z/target-coralox-pass181-baseline/release/frankenredis' BENCH='/data/projects/.scratch/frankenredis-coralox-pass181-20260613T2204Z/legacy_redis_code/redis/src/redis-benchmark' PORT=24501 ART='artifacts/optimization/coralox-pass181-keyed-values-integer-20260613T2228Z' bash -lc '\"$BIN\" --port \"$PORT\" >\"$ART/$LABEL-hyperfine-$BASHPID.stdout\" 2>\"$ART/$LABEL-hyperfine-$BASHPID.stderr\" & pid=$!; trap \"kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true\" EXIT; sleep 0.5; \"$BENCH\" -p \"$PORT\" -t lpush -n 1000000 -c 50 -P 16 -r 100000 -q'",
+      "mean": 1.522396961382222,
+      "stddev": 0.030448640517191414,
+      "median": 1.53640966516,
+      "user": 0.5882048644444445,
+      "system": 1.3756804177777777,
+      "min": 1.48278978216,
+      "max": 1.56720633016,
+      "times": [
+        1.5383539131600001,
+        1.48278978216,
+        1.53640966516,
+        1.56720633016,
+        1.49333884716,
+        1.48780310416,
+        1.54468693416,
+        1.50509279216,
+        1.5458912841599999
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "LABEL=candidate BIN='/data/projects/.scratch/frankenredis-coralox-pass181-20260613T2204Z/target-coralox-pass181-candidate/release/frankenredis' BENCH='/data/projects/.scratch/frankenredis-coralox-pass181-20260613T2204Z/legacy_redis_code/redis/src/redis-benchmark' PORT=24502 ART='artifacts/optimization/coralox-pass181-keyed-values-integer-20260613T2228Z' bash -lc '\"$BIN\" --port \"$PORT\" >\"$ART/$LABEL-hyperfine-$BASHPID.stdout\" 2>\"$ART/$LABEL-hyperfine-$BASHPID.stderr\" & pid=$!; trap \"kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true\" EXIT; sleep 0.5; \"$BENCH\" -p \"$PORT\" -t lpush -n 1000000 -c 50 -P 16 -r 100000 -q'",
+      "mean": 1.551926228048889,
+      "stddev": 0.0397089129740318,
+      "median": 1.56181359116,
+      "user": 0.6057805311111112,
+      "system": 1.4038811955555555,
+      "min": 1.49078890916,
+      "max": 1.6139366451600001,
+      "times": [
+        1.53538026716,
+        1.49078890916,
+        1.58469363916,
+        1.57049374416,
+        1.5415187421599998,
+        1.6139366451600001,
+        1.56181359116,
+        1.49889020316,
+        1.56982031116
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
