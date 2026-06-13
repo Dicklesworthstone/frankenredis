@@ -1153,6 +1153,24 @@ impl SortedSet {
         self.members_at_indices(indices)
     }
 
+    /// Member at the `dict` IndexMap's unordered position `idx`, O(1) for the
+    /// Full encoding (the dict holds exactly the same members as `ordered`, so a
+    /// coprime-stride walk over `0..len()` visits every member exactly once).
+    /// Used by the de-clustered ZINTERCARD walk to get random access without
+    /// collecting or warming the order-statistic treap. The Packed branch is not
+    /// reached by that walk (gated to large => Full). (frankenredis-epxuu)
+    pub(crate) fn dict_member_at(&self, idx: usize) -> Option<Cow<'_, [u8]>> {
+        match &self.inner {
+            SortedSetInner::Full(full) => full
+                .dict
+                .get_index(idx)
+                .map(|(m, _)| Cow::Borrowed(m.as_slice())),
+            SortedSetInner::Packed(_) => {
+                self.iter().nth(idx).map(|(m, _)| Cow::Owned(m.to_vec()))
+            }
+        }
+    }
+
     fn iter_desc(&self) -> SortedSetIterDesc<'_> {
         match &self.inner {
             SortedSetInner::Packed(p) => SortedSetIterDesc::Packed(p.iter_desc()),
@@ -2681,6 +2699,49 @@ impl<'a> ZSetAlgebraInput<'a> {
             }
         }
     }
+
+    fn len(self) -> usize {
+        match self {
+            Self::SortedSet(zs) => zs.len(),
+            Self::Set(s) => s.len(),
+        }
+    }
+
+    /// Member at unordered position `idx` (zset dict / set index), O(1) on the
+    /// large encodings — both back onto an `IndexMap`/`IndexSet` with O(1)
+    /// `get_index`. Gives random access for the de-clustered ZINTERCARD walk
+    /// WITHOUT collecting or warming an order-statistic index. (frankenredis-epxuu)
+    fn member_at(self, idx: usize) -> Option<Cow<'a, [u8]>> {
+        match self {
+            Self::SortedSet(zs) => zs.dict_member_at(idx),
+            Self::Set(s) => s.get_index(idx),
+        }
+    }
+}
+
+/// A stride coprime to `len` (so a cyclic walk visits every index exactly once),
+/// seeded by `seed`. Used to de-cluster the ZINTERCARD/SINTERCARD-style early-stop
+/// walk so it does not depend on insertion/score order. (frankenredis-epxuu)
+fn zset_coprime_stride(len: usize, seed: u64) -> usize {
+    fn gcd(mut a: usize, mut b: usize) -> usize {
+        while b != 0 {
+            let t = a % b;
+            a = b;
+            b = t;
+        }
+        a
+    }
+    if len <= 2 {
+        return 1;
+    }
+    let mut stride = ((seed as usize) % len).max(1);
+    while gcd(stride, len) != 1 {
+        stride += 1;
+        if stride >= len {
+            stride = 1;
+        }
+    }
+    stride
 }
 
 fn canonical_string_value(value: Vec<u8>) -> Value {
@@ -11684,6 +11745,10 @@ impl Store {
         let count = if has_empty {
             0
         } else {
+            // (frankenredis-epxuu) Random seeds for the de-clustered walk, taken
+            // before `inputs` borrows self.entries.
+            let seed0 = self.next_rand();
+            let seed1 = self.next_rand();
             let inputs: Vec<ZSetAlgebraInput<'_>> = keys
                 .iter()
                 .map(|key| {
@@ -11694,16 +11759,65 @@ impl Store {
                 })
                 .collect::<Result<_, _>>()?;
 
+            // (frankenredis-epxuu) Iterate the SMALLEST input (redis's
+            // zinterGenericCommand sorts by cardinality; fr always used
+            // inputs[0], so `ZINTERCARD big small` scanned `big`). For a LIMIT'd
+            // large min input, also walk it in a DE-CLUSTERED coprime-stride
+            // order so the early-stop fires fast even when the intersection is
+            // bunched in one score region (a plain scan walked most of the set
+            // first). The COUNT is order-independent, so this is byte-identical;
+            // only WHEN `count >= limit` trips changes. Collecting the min
+            // input's member refs is cheap pointer copies for a zset (no
+            // membership lookups, no order-statistic-index warming).
+            let min_idx = (0..inputs.len())
+                .min_by_key(|&i| inputs[i].len())
+                .unwrap_or(0);
+            const ZINTERCARD_DECLUSTER_MIN: usize = 256;
+            let min_len = inputs[min_idx].len();
+
             let mut count = 0_u64;
-            inputs[0].for_each_until(|member, _| {
-                for input in inputs.iter().copied().skip(1) {
-                    if input.score(member).is_none() {
-                        return true;
+            if limit > 0 && min_len > ZINTERCARD_DECLUSTER_MIN {
+                let n = min_len;
+                let mut idx = (seed0 as usize) % n;
+                let stride = zset_coprime_stride(n, seed1);
+                for _ in 0..n {
+                    let pos = idx;
+                    idx = (idx + stride) % n;
+                    let Some(member) = inputs[min_idx].member_at(pos) else {
+                        continue;
+                    };
+                    let member = member.as_ref();
+                    let mut in_all = true;
+                    for (i, input) in inputs.iter().copied().enumerate() {
+                        if i == min_idx {
+                            continue;
+                        }
+                        if input.score(member).is_none() {
+                            in_all = false;
+                            break;
+                        }
+                    }
+                    if in_all {
+                        count = count.saturating_add(1);
+                        if count >= limit {
+                            break;
+                        }
                     }
                 }
-                count = count.saturating_add(1);
-                limit == 0 || count < limit
-            });
+            } else {
+                inputs[min_idx].for_each_until(|member, _| {
+                    for (i, input) in inputs.iter().copied().enumerate() {
+                        if i == min_idx {
+                            continue;
+                        }
+                        if input.score(member).is_none() {
+                            return true;
+                        }
+                    }
+                    count = count.saturating_add(1);
+                    limit == 0 || count < limit
+                });
+            }
             count
         };
 
