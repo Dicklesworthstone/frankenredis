@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:25169
+workload: lpush
+clients: 50  requests: 300000  pipeline: 16  keyspace: 100000  datasize: 3
+elapsed: 581 ms  throughput: 516261.19 ops/sec
+latency(us): min=162 p50=1416 p95=2063 p99=5555 p999=6731 max=6763 mean=1528.09
+bytes: sent=18216846 received=1200140 key_prefix=pass168:lpush:last

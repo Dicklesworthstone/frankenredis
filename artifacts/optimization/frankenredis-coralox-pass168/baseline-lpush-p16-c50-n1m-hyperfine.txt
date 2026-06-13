@@ -1,0 +1,4 @@
+Benchmark 1: /data/tmp/frankenredis-coralox-pass168-release/release/fr-bench --port 25168 --workload lpush --requests 1000000 --clients 50 --pipeline 16 --keyspace 100000
+  Time (mean ± σ):      5.899 s ±  4.837 s    [User: 0.800 s, System: 1.248 s]
+  Range (min … max):    2.263 s … 16.123 s    10 runs
+ 

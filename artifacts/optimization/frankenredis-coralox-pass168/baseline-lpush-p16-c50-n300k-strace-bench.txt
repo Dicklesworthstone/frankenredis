@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:25172
+workload: lpush
+clients: 50  requests: 300000  pipeline: 16  keyspace: 100000  datasize: 3
+elapsed: 521 ms  throughput: 575233.17 ops/sec
+latency(us): min=182 p50=1168 p95=1816 p99=5419 p999=23471 max=23967 mean=1371.50
+bytes: sent=17016609 received=1200146 key_prefix=pass168:strace

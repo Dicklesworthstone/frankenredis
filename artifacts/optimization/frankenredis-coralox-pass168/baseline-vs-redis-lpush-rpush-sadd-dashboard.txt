@@ -1,0 +1,5 @@
+== vs-redis pipelined throughput fresh-state (P16, -c50, -n300000, best-of-3) ==
+cmd          redis         fr   redis/fr
+lpush      1003344     990099      1.01x  FR-SLOWER
+rpush      1067615    1060070      1.01x  FR-SLOWER
+sadd        840336     920245      0.91x  fr-faster

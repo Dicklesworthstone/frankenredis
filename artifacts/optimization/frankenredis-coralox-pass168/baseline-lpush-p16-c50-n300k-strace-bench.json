@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781350253697,
+  "host": "127.0.0.1",
+  "port": 25172,
+  "workload": "lpush",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 100000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "pass168:strace",
+  "total_time_ms": 521,
+  "ops_per_sec": 575233.1701903035,
+  "bytes_sent": 17016609,
+  "bytes_received": 1200146,
+  "latency_us": {
+    "min": 182,
+    "p50": 1168,
+    "p95": 1816,
+    "p99": 5419,
+    "p999": 23471,
+    "max": 23967,
+    "mean": 1371.4950600000009,
+    "samples": 300000
+  }
+}

@@ -1,0 +1,3 @@
+baseline_mean_s 1.654649730
+candidate_mean_s 1.805752672
+speedup_ratio 0.916321

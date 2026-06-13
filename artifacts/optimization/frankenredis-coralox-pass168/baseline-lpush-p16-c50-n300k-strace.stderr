@@ -1,0 +1,1 @@
+strace: attach: ptrace(PTRACE_SEIZE, 16316): Operation not permitted
