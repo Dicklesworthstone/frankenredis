@@ -26966,8 +26966,11 @@ fn sort_generic(
                 .map(|(_, idx)| elements[*idx].clone())
                 .collect();
             elements = reordered;
-            limit_offset = 0;
-            limit_count = -1;
+            // (frankenredis-wc0i6) `limit_offset`/`limit_count` are reset
+            // UNCONDITIONALLY after this if/else-if/else chain (the shared
+            // "neutralise the LIMIT" block), so setting them here is a dead store
+            // (clippy::unused_assignments). The other arms already rely on that
+            // shared reset; drop the redundant per-arm assignment.
         } else if !alpha {
             // Numeric sort: parse sort keys as f64
             let mut scored: Vec<(f64, usize)> = Vec::with_capacity(elements.len());
