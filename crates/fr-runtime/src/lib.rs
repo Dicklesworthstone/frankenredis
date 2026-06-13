@@ -21138,11 +21138,13 @@ fn apply_rdb_entries_to_store(
                 }
             }
             RdbValue::Hash(fields) => {
-                for (field, value) in fields {
-                    store
-                        .hset(&key, field.clone(), value.clone(), now_ms)
-                        .map_err(|_| PersistError::InvalidFrame)?;
-                }
+                // (frankenredis-rdbhashbulk) Seed every field in one keyspace
+                // lookup instead of N separate hsets.
+                let pairs: Vec<(Vec<u8>, Vec<u8>)> =
+                    fields.iter().map(|(f, v)| (f.clone(), v.clone())).collect();
+                store
+                    .hset_many(&key, pairs, now_ms)
+                    .map_err(|_| PersistError::InvalidFrame)?;
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
                         &key,
@@ -21155,11 +21157,11 @@ fn apply_rdb_entries_to_store(
                 // Seed the hash with every field, then reinstate per-field
                 // deadlines via hash_field_expires directly so the persist
                 // state round-trips. (br-frankenredis-th7q)
-                for (field, value, _) in fields {
-                    store
-                        .hset(&key, field.clone(), value.clone(), now_ms)
-                        .map_err(|_| PersistError::InvalidFrame)?;
-                }
+                let pairs: Vec<(Vec<u8>, Vec<u8>)> =
+                    fields.iter().map(|(f, v, _)| (f.clone(), v.clone())).collect();
+                store
+                    .hset_many(&key, pairs, now_ms)
+                    .map_err(|_| PersistError::InvalidFrame)?;
                 for (field, _, deadline) in fields {
                     if let Some(abs_ms) = deadline {
                         store

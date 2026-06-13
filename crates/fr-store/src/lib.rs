@@ -8201,6 +8201,55 @@ impl Store {
         result
     }
 
+    /// (frankenredis-rdbhashbulk) Insert many fields into a hash in ONE keyspace
+    /// lookup. The RDB-load / DEBUG-RELOAD path seeded every field via a separate
+    /// `hset`, each paying ~3 redundant keyspace probes (`drop_if_expired` +
+    /// `contains_key` LFU check + `internal_entry`) — O(fields) wasted probes on
+    /// a large hash. This does one `internal_entry`, moves every field into the
+    /// map, then applies the encoding/touch/digest/dirty bookkeeping once.
+    ///
+    /// Byte-identical to inserting the same fields one at a time with `hset`:
+    /// the final `HashFieldMap` is the same (per-field `insert` in order), the
+    /// one-way `force_hash_hashtable_encoding` flag is a function of the final
+    /// size so refreshing once at the end matches refreshing per insert, `dirty`
+    /// and `modification_count` advance by `fields.len()`, and `last_access_ms`
+    /// is set to `now_ms`. Under an LFU policy each field's `bump_lfu_freq` +
+    /// `next_rand()` advance is observable (OBJECT FREQ / PRNG state), so that
+    /// case delegates to per-field `hset` to preserve the exact sequence.
+    pub fn hset_many(
+        &mut self,
+        key: &[u8],
+        fields: Vec<(Vec<u8>, Vec<u8>)>,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        if fields.is_empty() {
+            return Ok(());
+        }
+        if self.lfu_tracking_enabled() {
+            for (field, value) in fields {
+                self.hset(key, field, value, now_ms)?;
+            }
+            return Ok(());
+        }
+        self.drop_if_expired(key, now_ms);
+        let max_entries = self.hash_max_listpack_entries;
+        let max_value = self.hash_max_listpack_value;
+        let count = fields.len() as u64;
+        let entry = self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
+        let Value::Hash(m) = &mut entry.value else {
+            return Err(StoreError::WrongType);
+        };
+        for (field, value) in fields {
+            m.insert(field, value);
+        }
+        entry.touch(now_ms);
+        entry.modification_count = entry.modification_count.wrapping_add(count);
+        Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(count);
+        Ok(())
+    }
+
     /// (frankenredis-hsetfast) Borrowed-field variant of [`Self::hset`]. Result
     /// and final state are byte-identical to `hset(key, field.to_vec(), value, ..)`
     /// for every input, but no owned field key is allocated when the field already
