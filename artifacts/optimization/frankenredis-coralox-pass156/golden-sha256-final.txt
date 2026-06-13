@@ -1,0 +1,2 @@
+1c2bef06633674267b63b5a5ffb51a08cf39e8bd1b2736d05df05a2767044271  artifacts/optimization/frankenredis-coralox-pass156/golden-baseline-final.out
+1c2bef06633674267b63b5a5ffb51a08cf39e8bd1b2736d05df05a2767044271  artifacts/optimization/frankenredis-coralox-pass156/golden-candidate-final.out

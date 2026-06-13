@@ -1,0 +1,11 @@
+baseline: n=8 qps_mean=326957.89 qps_median=321290.33 qps_geomean=326438.47 avg_ms_median=2.473 p50_ms_median=1.775 p95_ms_median=3.207
+candidate: n=8 qps_mean=339869.91 qps_median=339569.81 qps_geomean=339283.85 avg_ms_median=2.333 p50_ms_median=1.675 p95_ms_median=2.919
+seed=357: baseline=320000.00 candidate=329489.28 ratio=1.0297
+seed=358: baseline=310559.00 candidate=313479.62 ratio=1.0094
+seed=359: baseline=349040.12 candidate=313971.72 ratio=0.8995
+seed=360: baseline=335008.38 candidate=360360.34 ratio=1.0757
+seed=457: baseline=307692.31 candidate=349650.34 ratio=1.1364
+seed=458: baseline=322580.66 candidate=327332.25 ratio=1.0147
+seed=459: baseline=361663.66 candidate=364963.53 ratio=1.0091
+seed=460: baseline=309119.00 candidate=359712.22 ratio=1.1637
+paired_ratio_mean=1.0423 paired_ratio_median=1.0222 paired_ratio_geomean=1.0394 wins=7/8

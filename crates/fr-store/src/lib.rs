@@ -2015,6 +2015,18 @@ impl SetValue {
         SetValue::Int(Vec::new())
     }
 
+    fn from_single_borrowed(member: &[u8], max_intset_entries: usize) -> Self {
+        if max_intset_entries > 0
+            && let Some(n) = Self::canonical_int(member)
+        {
+            return SetValue::Int(vec![n]);
+        }
+        let mut set =
+            GenericSet::with_capacity_and_hasher(1, foldhash::quality::RandomState::default());
+        set.insert_borrowed(member);
+        SetValue::Generic(set)
+    }
+
     pub fn len(&self) -> usize {
         match self {
             SetValue::Int(v) => v.len(),
@@ -10236,14 +10248,28 @@ impl Store {
                 }
             }
             None => {
-                let mut s = GenericSet::default();
-                let mut added = 0_u64;
-                for m in members {
-                    if s.insert_borrowed(m.as_ref()) {
-                        added += 1;
+                let (s, added) = if let [member] = members {
+                    (
+                        SetValue::from_single_borrowed(member.as_ref(), max_intset_entries),
+                        1,
+                    )
+                } else {
+                    let mut s = SetValue::new();
+                    let mut added = 0_u64;
+                    for m in members {
+                        if s.insert_borrowed(m.as_ref(), max_intset_entries) {
+                            added += 1;
+                        }
                     }
-                }
-                let entry = self.set_entry(s, None, now_ms);
+                    (s, added)
+                };
+                let mut entry = Entry::new(Value::Set(Box::new(s)), None, now_ms);
+                Self::refresh_set_encoding_flags(
+                    &mut entry,
+                    max_intset_entries,
+                    max_listpack_entries,
+                    max_listpack_value,
+                );
                 self.internal_entries_insert(key.to_vec(), entry);
                 self.dirty = self.dirty.saturating_add(added);
                 Ok(added)
@@ -16930,7 +16956,8 @@ impl Store {
         // have unique members — bulk-build the dest in one O(n) BTreeMap pass.
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
-        let zs = SortedSet::from_unique_pairs_with_limits(members, zset_max_entries, zset_max_value);
+        let zs =
+            SortedSet::from_unique_pairs_with_limits(members, zset_max_entries, zset_max_value);
         self.internal_entries_insert(
             dest.to_vec(),
             Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
@@ -20241,8 +20268,8 @@ fn estimate_list_memory_usage_bytes(items: &ListValue) -> usize {
     // per-entry model over-counted integer elements vs vendored redis (e.g.
     // MEMORY USAGE of an int list reported high), whereas the int-aware count
     // matches redis 7.2.4 byte-for-byte on listpack-encoded lists.
-    let payload = (items.listpack_byte_len() as usize)
-        .saturating_sub(REDIS_LISTPACK_HEADER_AND_EOF_BYTES);
+    let payload =
+        (items.listpack_byte_len() as usize).saturating_sub(REDIS_LISTPACK_HEADER_AND_EOF_BYTES);
     let listpack_bytes =
         redis_allocation_size(REDIS_LISTPACK_HEADER_AND_EOF_BYTES.saturating_add(payload));
     if listpack_bytes <= 8 * 1024 {

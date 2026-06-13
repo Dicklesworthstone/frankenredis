@@ -1,0 +1,3 @@
+>> fr pid=3902917, load: -t sadd -P 16 -c 50 -n 3000000 -r 100000
+== throughput ==
+== fr-code self-time hotspots (DSO=frankenredis) ==
