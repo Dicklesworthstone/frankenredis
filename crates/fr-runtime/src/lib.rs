@@ -5380,9 +5380,19 @@ impl Runtime {
         // First drain any messages from the per-client Store (legacy path for
         // single-session tests), then drain from the global outbox.
         let mut msgs = self.server.store.drain_pending_pubsub();
-        let client_id = self.session.client_id;
-        if let Some(outbox) = self.server.pubsub_outbox.remove(&client_id) {
-            msgs.extend(outbox);
+        // (frankenredis-pubsubdrain) drain_pending_pubsub runs after EVERY
+        // command for EVERY client, but the global pub/sub outbox is empty for
+        // any workload without active subscribers (the overwhelmingly common
+        // case). Guard the per-client `pubsub_outbox.remove` — a hash + bucket
+        // probe that showed up at ~0.7% self in a pipelined LPUSH profile —
+        // behind an O(1) `is_empty()` check on the whole map. Byte-identical:
+        // when the outbox is empty, `remove(&client_id)` returns `None` and
+        // contributes nothing, so skipping it cannot change the result.
+        if !self.server.pubsub_outbox.is_empty() {
+            let client_id = self.session.client_id;
+            if let Some(outbox) = self.server.pubsub_outbox.remove(&client_id) {
+                msgs.extend(outbox);
+            }
         }
         msgs
     }
