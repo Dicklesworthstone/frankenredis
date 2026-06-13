@@ -5572,6 +5572,24 @@ impl Store {
         entry
     }
 
+    /// (frankenredis-v4ba8) Build a sorted-set destination `Entry` with its
+    /// encoding RE-DERIVED from the result content (listpack vs skiplist) under
+    /// the current thresholds. Every *STORE / cross-key zset destination
+    /// (ZUNIONSTORE/ZINTERSTORE/ZDIFFSTORE/ZRANGESTORE) must use this: post-a0p5p
+    /// OBJECT ENCODING reads the sticky `force_zset_skiplist_encoding` flag only,
+    /// so a raw `Entry::new` left it unset and an over-threshold result wrongly
+    /// reported `listpack` where redis (whose dest is rebuilt member-by-member)
+    /// reports `skiplist`.
+    fn zset_dest_entry(&self, zs: SortedSet, now_ms: u64) -> Entry {
+        let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms);
+        Self::refresh_zset_encoding_flag(
+            &mut entry,
+            self.zset_max_listpack_entries,
+            self.zset_max_listpack_value,
+        );
+        entry
+    }
+
     /// Get a string value. Returns `None` if the key doesn't exist.
     /// Returns `Err(WrongType)` if the key holds a non-string value.
     pub fn get(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
@@ -12934,6 +12952,12 @@ impl Store {
         // forced-skiplist sizing here so OBJECT ENCODING matches byte-for-byte.
         if force_skiplist {
             entry.force_zset_skiplist_encoding = true;
+        } else {
+            // (frankenredis-v4ba8) Rank-mode ZRANGESTORE: re-derive listpack vs
+            // skiplist from the result content. Post-a0p5p OBJECT ENCODING reads
+            // the sticky flag only, so the stale "derives naturally" assumption
+            // left an over-threshold rank result reporting listpack.
+            Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
         }
         self.internal_entries_insert(key, entry);
         // (frankenredis-bhd3u) Writing the destination set is a keyspace
@@ -16862,10 +16886,9 @@ impl Store {
             let pairs: Vec<(Vec<u8>, f64)> = combined.into_iter().collect();
             let zs =
                 SortedSet::from_unique_pairs_with_limits(pairs, zset_max_entries, zset_max_value);
-            self.internal_entries_insert(
-                dest.to_vec(),
-                Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
-            );
+            // (frankenredis-v4ba8) re-derive listpack/skiplist from the result.
+            let entry = self.zset_dest_entry(zs, now_ms);
+            self.internal_entries_insert(dest.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
             self.dirty = self.dirty.saturating_add(1);
@@ -17034,10 +17057,9 @@ impl Store {
         self.stream_last_ids.remove(dest);
 
         if count > 0 {
-            self.internal_entries_insert(
-                dest.to_vec(),
-                Entry::new(Value::SortedSet(Box::new(result)), None, now_ms),
-            );
+            // (frankenredis-v4ba8) re-derive listpack/skiplist from the result.
+            let entry = self.zset_dest_entry(result, now_ms);
+            self.internal_entries_insert(dest.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
             self.dirty = self.dirty.saturating_add(1);
@@ -18090,10 +18112,9 @@ impl Store {
         let zset_max_value = self.zset_max_listpack_value;
         let pairs: Vec<(Vec<u8>, f64)> = members.into_iter().collect();
         let zs = SortedSet::from_unique_pairs_with_limits(pairs, zset_max_entries, zset_max_value);
-        self.internal_entries_insert(
-            dest.to_vec(),
-            Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
-        );
+        // (frankenredis-v4ba8) re-derive listpack/skiplist from the result.
+        let entry = self.zset_dest_entry(zs, now_ms);
+        self.internal_entries_insert(dest.to_vec(), entry);
         self.dirty = self.dirty.saturating_add(1);
     }
 
@@ -18118,10 +18139,9 @@ impl Store {
         let zset_max_value = self.zset_max_listpack_value;
         let zs =
             SortedSet::from_unique_pairs_with_limits(members, zset_max_entries, zset_max_value);
-        self.internal_entries_insert(
-            dest.to_vec(),
-            Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms),
-        );
+        // (frankenredis-v4ba8) re-derive listpack/skiplist from the result.
+        let entry = self.zset_dest_entry(zs, now_ms);
+        self.internal_entries_insert(dest.to_vec(), entry);
         self.dirty = self.dirty.saturating_add(1);
     }
 
