@@ -10649,6 +10649,51 @@ impl Store {
             return Ok(0);
         }
 
+        // (frankenredis-kl9ox) For a LIMIT'd SINTERCARD over a large set, walk the
+        // min set in a DE-CLUSTERED order so the early-stop fires fast even when
+        // the intersection is bunched in one region of insertion order (e.g.
+        // sequential keys). Redis iterates its dict in hash-bucket order, which
+        // de-clusters for free; fr's IndexSet iterates insertion-ordered, so a
+        // plain scan can walk most of the set before reaching the first matches.
+        // The visited order does NOT affect the COUNT, so this is byte-identical;
+        // only WHEN `count >= limit` trips changes. A random start plus a stride
+        // coprime to the length is a single-pass permutation (every index exactly
+        // once), so the non-early-stop count stays exact. Gated to min_card large
+        // enough that the set is hashtable/intset-encoded (get_index is O(1)) and
+        // that clustering actually costs something; small sets keep the original
+        // sequential iter (cheap regardless of order). next_rand() makes the order
+        // unpredictable per call, like redis's per-server hash seed.
+        const SINTERCARD_DECLUSTER_MIN: usize = 256;
+        let declustered = limit > 0 && min_card > SINTERCARD_DECLUSTER_MIN;
+        let (walk_start, walk_stride) = if declustered {
+            fn coprime_stride(len: usize, seed: u64) -> usize {
+                fn gcd(mut a: usize, mut b: usize) -> usize {
+                    while b != 0 {
+                        let t = a % b;
+                        a = b;
+                        b = t;
+                    }
+                    a
+                }
+                if len <= 2 {
+                    return 1;
+                }
+                let mut stride = ((seed as usize) % len).max(1);
+                while gcd(stride, len) != 1 {
+                    stride += 1;
+                    if stride >= len {
+                        stride = 1;
+                    }
+                }
+                stride
+            }
+            let start = (self.next_rand() as usize) % min_card;
+            let stride = coprime_stride(min_card, self.next_rand());
+            (start, stride)
+        } else {
+            (0, 1)
+        };
+
         let min_set = match self.entries.get(keys[min_idx]) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => s,
@@ -10657,25 +10702,65 @@ impl Store {
             None => return Ok(0),
         };
 
+        if !declustered {
+            // Original sequential path (small sets / no LIMIT): byte-identical.
+            let mut count = 0_u64;
+            'members: for member in min_set.iter() {
+                let member = member.as_ref();
+                for (i, key) in keys.iter().enumerate() {
+                    if i == min_idx {
+                        continue;
+                    }
+                    match self.entries.get(*key) {
+                        Some(entry) => match &entry.value {
+                            Value::Set(s) if s.contains(member) => {}
+                            Value::Set(_) => continue 'members,
+                            _ => return Err(StoreError::WrongType),
+                        },
+                        None => return Ok(0),
+                    }
+                }
+                count = count.saturating_add(1);
+                if limit > 0 && count >= limit {
+                    return Ok(limit);
+                }
+            }
+            return Ok(count);
+        }
+
+        // De-clustered coprime-stride walk (large set + LIMIT). get_index is O(1)
+        // on the hashtable/intset encodings reached here.
         let mut count = 0_u64;
-        'members: for member in min_set.iter() {
+        let mut idx = walk_start;
+        for _ in 0..min_card {
+            let Some(member) = min_set.get_index(idx) else {
+                break;
+            };
+            idx = (idx + walk_stride) % min_card;
             let member = member.as_ref();
+            let mut in_all = true;
             for (i, key) in keys.iter().enumerate() {
                 if i == min_idx {
                     continue;
                 }
                 match self.entries.get(*key) {
                     Some(entry) => match &entry.value {
-                        Value::Set(s) if s.contains(member) => {}
-                        Value::Set(_) => continue 'members,
+                        Value::Set(s) => {
+                            if !s.contains(member) {
+                                in_all = false;
+                                break;
+                            }
+                        }
                         _ => return Err(StoreError::WrongType),
                     },
                     None => return Ok(0),
                 }
             }
-            count = count.saturating_add(1);
-            if limit > 0 && count >= limit {
-                return Ok(limit);
+            if in_all {
+                count = count.saturating_add(1);
+                if limit > 0 && count >= limit {
+                    return Ok(limit);
+                }
             }
         }
         Ok(count)
