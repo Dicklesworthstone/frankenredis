@@ -1459,6 +1459,55 @@ impl SortedSet {
         offset: usize,
         take: usize,
     ) -> Vec<(Vec<u8>, f64)> {
+        // (frankenredis-yozwx) Deep LIMIT offset: jump to the start rank via the
+        // order-statistic treap (rank_of bounds + select) instead of an O(offset)
+        // BTreeMap walk — O(take*log n). Same rank logic as score_bound_count's
+        // i5896 path, so byte-identical to the scan; only used when the offset
+        // skip dominates the emitted slice (else the scan is cheaper) and the
+        // treap is warm + consistent. Cold/packed/shallow fall through to the scan.
+        if take != usize::MAX
+            && let SortedSetInner::Full(full) = &self.inner
+            && let Some(tree) = &full.rank_tree
+            && tree.len() == full.dict.len()
+        {
+            let below = match min {
+                ScoreBound::Inclusive(s) => tree.rank_of(&ScoreMember::min_for_score(s)),
+                ScoreBound::Exclusive(s) => tree.rank_of(&ScoreMember::max_for_score(s)),
+            };
+            let atorbelow = match max {
+                ScoreBound::Inclusive(s) => tree.rank_of(&ScoreMember::max_for_score(s)),
+                ScoreBound::Exclusive(s) => tree.rank_of(&ScoreMember::min_for_score(s)),
+            };
+            if atorbelow <= below || offset >= atorbelow - below {
+                return Vec::new();
+            }
+            let n_emit = (atorbelow - below - offset).min(take);
+            // select() is O(log n) per element; the scan is O(offset + n_emit).
+            // Only jump when the offset skip is the dominant cost.
+            if offset > n_emit.saturating_mul(24) {
+                let mut out = Vec::with_capacity(n_emit.min(4096));
+                if rev {
+                    let top = atorbelow - 1 - offset;
+                    for k in 0..n_emit {
+                        if let Some(sm) = tree.select(top - k)
+                            && let Some(m) = sm.member.as_actual()
+                        {
+                            out.push((m.clone(), sm.score));
+                        }
+                    }
+                } else {
+                    let start = below + offset;
+                    for r in start..start + n_emit {
+                        if let Some(sm) = tree.select(r)
+                            && let Some(m) = sm.member.as_actual()
+                        {
+                            out.push((m.clone(), sm.score));
+                        }
+                    }
+                }
+                return out;
+            }
+        }
         match &self.inner {
             SortedSetInner::Packed(p) => {
                 if rev {
@@ -1505,6 +1554,25 @@ impl SortedSet {
                 }
             }
         }
+    }
+
+    /// `score_bound_range_limited` with adaptive treap warming: a large zset hit
+    /// by a deep-offset LIMIT query builds the order-statistic treap so the jump
+    /// path can fire. Byte-identical result. (frankenredis-yozwx)
+    fn score_bound_range_limited_adaptive(
+        &mut self,
+        min: ScoreBound,
+        max: ScoreBound,
+        rev: bool,
+        offset: usize,
+        take: usize,
+    ) -> Vec<(Vec<u8>, f64)> {
+        if take != usize::MAX && offset > 0 {
+            if let SortedSetInner::Full(full) = &mut self.inner {
+                full.maybe_warm_rank_tree_for_index(offset, take);
+            }
+        }
+        self.score_bound_range_limited(min, max, rev, offset, take)
     }
 
     fn score_bound_range(
@@ -12251,10 +12319,11 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
                         let take = count.unwrap_or(usize::MAX);
-                        let result = zs.score_bound_range_limited(min, max, rev, offset, take);
+                        let result =
+                            zs.score_bound_range_limited_adaptive(min, max, rev, offset, take);
                         entry.touch(now_ms);
                         Ok(result)
                     }
