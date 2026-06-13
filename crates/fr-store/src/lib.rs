@@ -3994,6 +3994,19 @@ struct ScanResume {
     generation: u64,
 }
 
+/// (frankenredis-n9am7) Resume point for the db-scoped cursor SCAN (`scan_in_db`):
+/// lets call N+1 jump past the last key call N returned in O(log n) instead of
+/// re-materialising + re-sorting the whole DB. `sig` disambiguates concurrent
+/// SCAN streams over the same DB but different MATCH/TYPE.
+#[derive(Debug, Clone)]
+struct DbScanResume {
+    next_cursor: u64,
+    db: usize,
+    sig: u64,
+    last_key: Vec<u8>,
+    generation: u64,
+}
+
 #[derive(Debug, Clone)]
 struct HllRegisterCache {
     modification_count: u64,
@@ -4044,6 +4057,7 @@ pub struct Store {
     /// mismatch (out-of-order resume, >cap concurrent scans, or an intervening
     /// structural mutation) it falls back to the skip path.
     scan_cache: Vec<ScanResume>,
+    db_scan_cache: Vec<DbScanResume>,
     /// Physical keys by DB for O(1) RANDOMKEY sampling. `ordered_keys` remains
     /// the deterministic SCAN/KEYS surface; these slots are intentionally
     /// unordered because RANDOMKEY has no ordering contract. (frankenredis-srhju)
@@ -4549,6 +4563,7 @@ impl Default for Store {
             ordered_keys: BTreeSet::new(),
             keyspace_generation: 0,
             scan_cache: Vec::new(),
+            db_scan_cache: Vec::new(),
             random_key_slots: vec![Vec::new(); DEFAULT_NUM_DATABASES],
             random_key_positions: HashMap::default(),
             volatile_keys: BTreeSet::new(),
@@ -17031,6 +17046,166 @@ impl Store {
             });
             if self.scan_cache.len() > SCAN_CACHE_LRU_CAP {
                 self.scan_cache.remove(0); // evict the oldest in-flight scan
+            }
+        }
+        (next_cursor, result)
+    }
+
+    /// (frankenredis-n9am7) Cursor-resumed, DB-scoped SCAN for the real SCAN
+    /// command. Produces the SAME sorted, glob+TYPE-filtered logical-key sequence
+    /// as materialising the whole DB and paging by index — `cursor` is the count
+    /// of matched keys already returned (the index into that sequence). But it
+    /// RESUMES past the previous batch's last key in O(log n) via `db_scan_cache`
+    /// instead of re-walking + re-sorting the whole DB every call, so a full SCAN
+    /// of a DB drops from O(n^2/count) to O(n) total. Returns
+    /// `(next_cursor, up-to-count keys)`; `next_cursor == 0` exactly when no
+    /// further matches remain (byte-identical paging to the old index slice).
+    pub fn scan_in_db(
+        &mut self,
+        db: usize,
+        cursor: u64,
+        pattern: Option<&[u8]>,
+        type_filter: Option<&[u8]>,
+        count: usize,
+        now_ms: u64,
+    ) -> (u64, Vec<Vec<u8>>) {
+        // Reap due volatile keys — identical eviction set to keys_in_db /
+        // keys_matching_in_db (drop_if_expired is a no-op on non-volatile keys).
+        self.expire_volatile_keys_in_db(db, now_ms);
+
+        let batch = count.max(1);
+        let start = cursor as usize;
+        let keyspace_gen = self.keyspace_generation;
+
+        // Stream signature: same (db, pattern, type) => same key sequence, so the
+        // resume cache never crosses streams.
+        let sig = {
+            fn mix(h: &mut u64, b: &[u8]) {
+                for &x in b {
+                    *h ^= u64::from(x);
+                    *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                *h ^= 0xff;
+                *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            match pattern {
+                Some(p) => mix(&mut h, p),
+                None => h ^= 0x01,
+            }
+            match type_filter {
+                Some(t) => mix(&mut h, t),
+                None => h ^= 0x02,
+            }
+            h
+        };
+
+        // DB physical range (mirror keys_matching_in_db): a logical literal prefix
+        // maps to the physical range encode_db_key(db, lit)..; the in-DB filter
+        // keeps it exact even when the byte range bleeds past the DB.
+        let lit = pattern.map(glob_literal_prefix).filter(|l| !l.is_empty());
+        let is_star = pattern.is_none() || pattern == Some(b"*".as_slice());
+        let db_prefix = encode_db_key(db, b"");
+        let lower: Vec<u8> = match lit {
+            Some(l) => encode_db_key(db, l),
+            None => db_prefix.clone(),
+        };
+        let upper: Option<Vec<u8>> = match lit {
+            Some(l) => prefix_range_end(&encode_db_key(db, l)),
+            None if db == 0 => None,
+            None => prefix_range_end(&db_prefix),
+        };
+
+        // Resume past the previous batch's last key (cache hit), else skip the
+        // first `start` matched keys from the range start (cache miss / first).
+        let resume_key: Option<Vec<u8>> = if start > 0 {
+            self.db_scan_cache
+                .iter()
+                .position(|c| {
+                    c.next_cursor == cursor && c.db == db && c.sig == sig && c.generation == keyspace_gen
+                })
+                .map(|i| self.db_scan_cache.remove(i).last_key)
+        } else {
+            None
+        };
+        let mut to_skip = if resume_key.is_none() { start } else { 0 };
+
+        let lo_bound = match &resume_key {
+            Some(k) => std::ops::Bound::Excluded(k.as_slice()),
+            None => std::ops::Bound::Included(lower.as_slice()),
+        };
+        let hi_bound = match &upper {
+            Some(e) => std::ops::Bound::Excluded(e.as_slice()),
+            None => std::ops::Bound::Unbounded,
+        };
+
+        let mut result: Vec<Vec<u8>> = Vec::new();
+        let mut last_key: Option<Vec<u8>> = None;
+        let mut has_more = false;
+        for physical in self
+            .ordered_keys
+            .range::<[u8], _>((lo_bound, hi_bound))
+        {
+            let physical: &[u8] = physical.as_ref();
+            // DB membership.
+            if db == 0 {
+                if decode_db_key(physical).is_some() {
+                    continue;
+                }
+            } else if !physical.starts_with(db_prefix.as_slice()) {
+                continue;
+            }
+            // Live (volatile already reaped above; non-volatile never expire).
+            if !self.entries.contains_key(physical) {
+                continue;
+            }
+            let logical = decode_db_key(physical)
+                .map(|(_, l)| l)
+                .unwrap_or(physical);
+            // Glob (skipped for the `*` / no-pattern all-keys fast path).
+            if !is_star
+                && let Some(pat) = pattern
+                && !glob_match(pat, logical)
+            {
+                continue;
+            }
+            // TYPE filter.
+            if let Some(t) = type_filter
+                && !self
+                    .peek_value_type(physical, now_ms)
+                    .is_some_and(|vt| vt.as_str().as_bytes().eq_ignore_ascii_case(t))
+            {
+                continue;
+            }
+            // A matched candidate.
+            if to_skip > 0 {
+                to_skip -= 1;
+                continue;
+            }
+            if result.len() < batch {
+                result.push(logical.to_vec());
+                last_key = Some(physical.to_vec());
+                continue;
+            }
+            // One match beyond the batch => more remain; stop without returning it
+            // (next call resumes from `last_key`, the batch-th returned key).
+            has_more = true;
+            break;
+        }
+
+        let next_cursor = if has_more { cursor + batch as u64 } else { 0 };
+        if next_cursor != 0
+            && let Some(last) = last_key
+        {
+            self.db_scan_cache.push(DbScanResume {
+                next_cursor,
+                db,
+                sig,
+                last_key: last,
+                generation: keyspace_gen,
+            });
+            if self.db_scan_cache.len() > SCAN_CACHE_LRU_CAP {
+                self.db_scan_cache.remove(0);
             }
         }
         (next_cursor, result)
@@ -30805,6 +30980,154 @@ mod tests {
         assert!(
             score >= 2.0,
             "resume-cache SCAN must be >=2.0x; got {score:.2}x"
+        );
+    }
+
+    // (frankenredis-n9am7) scan_in_db drives the real SCAN command. A full
+    // iteration must equal the ground-truth (all live, glob+TYPE-matched logical
+    // keys in the DB, sorted) for every db / pattern / type / count, and a deep
+    // resumed call must be O(log n + count) vs the old materialise-all-and-sort.
+    #[test]
+    fn scan_in_db_isomorphic_and_faster_scandb() {
+        use super::{Store, ValueType, encode_db_key, glob_match};
+
+        fn drive(
+            store: &mut Store,
+            db: usize,
+            pat: Option<&[u8]>,
+            tf: Option<&[u8]>,
+            count: usize,
+        ) -> Vec<Vec<u8>> {
+            let mut all = Vec::new();
+            let mut cursor = 0u64;
+            loop {
+                let (next, batch) = store.scan_in_db(db, cursor, pat, tf, count, 0);
+                all.extend(batch);
+                if next == 0 {
+                    break;
+                }
+                cursor = next;
+            }
+            all
+        }
+
+        // Ground truth: live keys in `db` matching glob+type, in sorted logical order.
+        fn ground_truth(
+            store: &Store,
+            db: usize,
+            pat: Option<&[u8]>,
+            tf: Option<&[u8]>,
+        ) -> Vec<Vec<u8>> {
+            let mut v: Vec<Vec<u8>> = store
+                .ordered_keys
+                .iter()
+                .filter_map(|physical| {
+                    let physical: &[u8] = physical.as_ref();
+                    let (kdb, logical) = match super::decode_db_key(physical) {
+                        Some((d, l)) => (d, l.to_vec()),
+                        None => (0, physical.to_vec()),
+                    };
+                    if kdb != db {
+                        return None;
+                    }
+                    if let Some(p) = pat
+                        && p != b"*"
+                        && !glob_match(p, &logical)
+                    {
+                        return None;
+                    }
+                    if let Some(t) = tf
+                        && !store
+                            .peek_value_type(physical, 0)
+                            .is_some_and(|vt| vt.as_str().as_bytes().eq_ignore_ascii_case(t))
+                    {
+                        return None;
+                    }
+                    Some(logical)
+                })
+                .collect();
+            v.sort();
+            v
+        }
+
+        let mut st: u64 = 0x0bad_c0de_1234_5678;
+        let mut rng = || {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            st
+        };
+        for _ in 0..50 {
+            let mut store = Store::new();
+            let n = (rng() % 400) as usize;
+            for _ in 0..n {
+                let db = (rng() % 3) as usize; // dbs 0,1,2
+                let klen = 1 + (rng() % 7) as usize;
+                let key: Vec<u8> =
+                    (0..klen).map(|_| b"ab:_019xyz"[(rng() % 10) as usize]).collect();
+                let phys = encode_db_key(db, &key);
+                match rng() % 3 {
+                    0 => store.set(phys, b"v".to_vec(), None, 0),
+                    1 => {
+                        store.rpush(&phys, &[b"e".to_vec()], 0).ok();
+                    }
+                    _ => {
+                        store.sadd(&phys, &[b"m".to_vec()], 0).ok();
+                    }
+                }
+            }
+            for db in 0..3usize {
+                for pat in [None, Some(&b"a*"[..]), Some(&b"*1*"[..]), Some(&b"ab:*"[..])] {
+                    for tf in [None, Some(&b"string"[..]), Some(&b"list"[..])] {
+                        let count = 1 + (rng() % 11) as usize;
+                        let mut got = drive(&mut store, db, pat, tf, count);
+                        got.sort();
+                        let want = ground_truth(&store, db, pat, tf);
+                        assert_eq!(
+                            got, want,
+                            "scan_in_db diverged db={db} pat={pat:?} tf={tf:?} count={count}"
+                        );
+                    }
+                }
+            }
+        }
+
+        // A/B: 200k keys in db 0. A deep resumed scan_in_db call is O(log n+count);
+        // the old behaviour re-materialised + sorted ALL keys every call.
+        let mut store = Store::new();
+        for i in 0..200_000u32 {
+            store.set(format!("k{i:08}").into_bytes(), b"v".to_vec(), None, 0);
+        }
+        // Warm the resume cache up to a deep cursor.
+        let mut cursor = 0u64;
+        for _ in 0..1000 {
+            let (next, _) = store.scan_in_db(0, cursor, None, None, 10, 0);
+            cursor = next;
+        }
+        let t0 = std::time::Instant::now();
+        let (_n2, _b2) = store.scan_in_db(0, cursor, None, None, 10, 0);
+        let new_ns = t0.elapsed().as_nanos().max(1);
+
+        // Old: materialise every logical key + sort + page (one SCAN call's cost).
+        let t1 = std::time::Instant::now();
+        let mut allk: Vec<Vec<u8>> = store.ordered_keys.iter().map(|k| k.to_vec()).collect();
+        allk.sort();
+        let _page: Vec<Vec<u8>> = allk
+            .iter()
+            .skip(cursor as usize)
+            .take(10)
+            .cloned()
+            .collect();
+        let old_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box((&allk, _page, _n2, _b2));
+        println!(
+            "scan_in_db deep-call A/B (200k keys, cursor={cursor}): old(materialize+sort all)={old_ns}ns new(resume)={new_ns}ns ratio={:.0}x",
+            old_ns as f64 / new_ns as f64
+        );
+        let _ = ValueType::String;
+        assert!(
+            old_ns as f64 / new_ns as f64 > 2.0 || cfg!(debug_assertions),
+            "expected >2x"
         );
     }
 

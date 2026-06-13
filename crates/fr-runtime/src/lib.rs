@@ -18739,55 +18739,22 @@ impl Runtime {
             }
         }
 
-        // (frankenredis-9cg1c) When MATCH carries a literal prefix, pull only
-        // the matching keys via keys_matching_in_db, which range-prunes fr's
-        // ORDERED keyspace to the prefix (O(log n + matches)) instead of
-        // materializing + glob-filtering every key in the DB on every SCAN call —
-        // the same asymmetry KEYS exploits (2wgom). Byte-identical: it applies the
-        // SAME glob_match and reaps the SAME due-volatile set, so the matched
-        // logical-key set (and the cursor-indexed page) is unchanged.
-        let logical_keys = match pattern {
-            Some(pat) => self
-                .server
-                .store
-                .keys_matching_in_db(self.session.selected_db, pat, now_ms),
-            None => self
-                .server
-                .store
-                .keys_in_db(self.session.selected_db, now_ms),
-        };
-        let mut filtered = Vec::new();
-        for logical_key in logical_keys {
-            // `pattern` was already applied by keys_matching_in_db above.
-            if let Some(expected_type) = type_filter {
-                let physical = encode_db_key(self.session.selected_db, &logical_key);
-                let expected = std::str::from_utf8(expected_type).unwrap_or("");
-                if self
-                    .server
-                    .store
-                    .key_type(&physical, now_ms)
-                    .is_none_or(|actual| !actual.eq_ignore_ascii_case(expected))
-                {
-                    continue;
-                }
-            }
-            filtered.push(logical_key);
-        }
-        filtered.sort();
-
-        if cursor >= filtered.len() as u64 {
-            return Ok(RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"0".to_vec())),
-                RespFrame::Array(Some(Vec::new())),
-            ])));
-        }
-
-        let cursor = cursor as usize;
-        let end = cursor.saturating_add(count.max(1)).min(filtered.len());
-        let next_cursor = if end >= filtered.len() { 0 } else { end };
-        let batch = filtered[cursor..end]
-            .iter()
-            .cloned()
+        // (frankenredis-n9am7) Resume past the previous batch's last key via
+        // scan_in_db (O(log n + count)) instead of re-materialising, re-glob/TYPE-
+        // filtering and re-sorting the ENTIRE DB on every SCAN call — which was
+        // O(n)/call, i.e. O(n^2/count) to iterate a large DB. Byte-identical: it
+        // walks the same DB-scoped, glob+TYPE-filtered, sorted logical-key
+        // sequence and pages it by the same matched-count cursor index.
+        let (next_cursor, keys) = self.server.store.scan_in_db(
+            self.session.selected_db,
+            cursor,
+            pattern,
+            type_filter,
+            count,
+            now_ms,
+        );
+        let batch = keys
+            .into_iter()
             .map(|key| RespFrame::BulkString(Some(key)))
             .collect();
         Ok(RespFrame::Array(Some(vec![
