@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781358078215,
+  "host": "127.0.0.1",
+  "port": 25271,
+  "workload": "lpush",
+  "clients": 50,
+  "requests": 1000000,
+  "pipeline": 16,
+  "keyspace": 100000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "y3bpt:cand",
+  "total_time_ms": 1466,
+  "ops_per_sec": 681965.089497825,
+  "bytes_sent": 53338985,
+  "bytes_received": 5007032,
+  "latency_us": {
+    "min": 59,
+    "p50": 1091,
+    "p95": 1173,
+    "p99": 6959,
+    "p999": 7927,
+    "max": 8247,
+    "mean": 1160.919721999999,
+    "samples": 1000000
+  }
+}

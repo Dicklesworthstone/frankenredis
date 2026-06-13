@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/frankenredis-y3bpt-baseline-target/release/fr-bench --port 25274 --workload lpush --clients 50 --pipeline 16 --requests 5000000 --keyspace 100000 --key-prefix y3bpt:paired5 --json-out artifacts/optimization/frankenredis-y3bpt/paired-n5m/baseline-last.json",
+      "mean": 9.9771328054,
+      "stddev": 1.3595360012028894,
+      "median": 10.5941491782,
+      "user": 3.79997124,
+      "system": 5.6464474,
+      "min": 7.6832983662,
+      "max": 10.9252374042,
+      "times": [
+        7.6832983662,
+        9.7999394832,
+        10.8830395952,
+        10.5941491782,
+        10.9252374042
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/frankenredis-y3bpt-candidate-target/release/fr-bench --port 25275 --workload lpush --clients 50 --pipeline 16 --requests 5000000 --keyspace 100000 --key-prefix y3bpt:paired5 --json-out artifacts/optimization/frankenredis-y3bpt/paired-n5m/candidate-last.json",
+      "mean": 9.6440348814,
+      "stddev": 1.2342313655484412,
+      "median": 10.0946854042,
+      "user": 3.8220510400000003,
+      "system": 5.4382264,
+      "min": 7.7294699391999995,
+      "max": 10.7756724122,
+      "times": [
+        7.7294699391999995,
+        9.1435190012,
+        10.0946854042,
+        10.7756724122,
+        10.4768276502
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

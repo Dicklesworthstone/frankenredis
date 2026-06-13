@@ -1,0 +1,230 @@
+  [2m2026-06-13T13:36:53.670282Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1152480 at root@109.205.181.92 (4 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:36:53.884157Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenredis-coralox-3uwif-appendix-20260613 (hash: 31b90ba9c2f23d60)[0m
+    [2;3mat[0m rch/src/hook.rs:5994 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:36:53.884212Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6016 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:36:57.290081Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker vmi1152480...[0m
+    [2;3mat[0m rch/src/hook.rs:6046 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:36:57.290215Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613 -> /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613 on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:05.667595Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 8377ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:05.667769Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-bench -> /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-bench on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:07.757323Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2089ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:07.757463Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-command -> /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-command on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:09.856179Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2098ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:09.856378Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-config -> /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-config on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:11.973779Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2117ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:11.973902Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-conformance -> /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-conformance on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:14.258239Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2284ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:14.258393Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-eventloop -> /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-eventloop on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:16.335490Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2077ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:16.335671Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-expire -> /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-expire on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:18.344140Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2008ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:18.344273Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-persist -> /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-persist on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:20.430081Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2085ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:20.430212Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-protocol -> /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-protocol on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:22.394351Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1964ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:22.394510Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-repl -> /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-repl on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:24.369005Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1974ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:24.369143Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-runtime -> /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-runtime on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:26.307280Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1938ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:26.307418Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-sentinel -> /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-sentinel on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:28.333739Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2026ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:28.333868Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-server -> /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-server on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:30.321154Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1987ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:30.321300Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store -> /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:32.315984Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1994ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:32.316026Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 94983 files, 4796911 bytes in 35018ms[0m
+    [2;3mat[0m rch/src/hook.rs:6209 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:36.718405Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: env cargo test -p fr-server --bin frankenredis borrowed_plain_keyed_value_packet_parser -- --nocapture[0m
+    [2;3mat[0m rch/src/hook.rs:6252 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:37:36.718450Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/tmp/frankenredis-y3bpt-test-target -> /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/.rch-target-vmi1152480-job-29884606035528306-1781357817290072759-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded block-buffer v0.12.0
+  Downloaded cpufeatures v0.3.0
+  Downloaded digest v0.11.2
+  Downloaded itoa v1.0.18
+  Downloaded crypto-common v0.2.1
+  Downloaded cfg-if v1.0.4
+  Downloaded hex v0.4.3
+  Downloaded mimalloc v0.1.49
+  Downloaded equivalent v1.0.2
+  Downloaded zmij v1.0.21
+  Downloaded foldhash v0.1.5
+  Downloaded shlex v1.3.0
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded hybrid-array v0.4.10
+  Downloaded sha2 v0.11.0
+  Downloaded serde_core v1.0.228
+  Downloaded log v0.4.29
+  Downloaded const-oid v0.10.2
+  Downloaded cc v1.2.60
+  Downloaded serde_json v1.0.149
+  Downloaded memchr v2.8.0
+  Downloaded indexmap v2.14.0
+  Downloaded mio v1.2.0
+  Downloaded typenum v1.20.0
+  Downloaded hashbrown v0.17.0
+  Downloaded libmimalloc-sys v0.1.46
+  Downloaded libc v0.2.185
+   Compiling serde_core v1.0.228
+   Compiling typenum v1.20.0
+   Compiling zmij v1.0.21
+   Compiling serde_json v1.0.149
+   Compiling libc v0.2.185
+   Compiling find-msvc-tools v0.1.9
+   Compiling memchr v2.8.0
+   Compiling shlex v1.3.0
+   Compiling itoa v1.0.18
+   Compiling fr-protocol v0.1.0 (/data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-protocol)
+   Compiling hashbrown v0.17.0
+   Compiling const-oid v0.10.2
+   Compiling equivalent v1.0.2
+   Compiling foldhash v0.1.5
+   Compiling cc v1.2.60
+   Compiling fr-persist v0.1.0 (/data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-persist)
+   Compiling fr-sentinel v0.1.0 (/data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-sentinel)
+   Compiling fr-expire v0.1.0 (/data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-expire)
+   Compiling indexmap v2.14.0
+   Compiling cpufeatures v0.3.0
+   Compiling cfg-if v1.0.4
+   Compiling fr-repl v0.1.0 (/data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-repl)
+   Compiling fr-eventloop v0.1.0 (/data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-eventloop)
+   Compiling hybrid-array v0.4.10
+   Compiling log v0.4.29
+   Compiling fr-config v0.1.0 (/data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-config)
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.1
+   Compiling hex v0.4.3
+   Compiling mio v1.2.0
+   Compiling fr-store v0.1.0 (/data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store)
+   Compiling libmimalloc-sys v0.1.46
+   Compiling digest v0.11.2
+   Compiling sha2 v0.11.0
+   Compiling fr-command v0.1.0 (/data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-command)
+   Compiling mimalloc v0.1.49
+warning: value assigned to `limit_offset` is never read
+     --> crates/fr-command/src/lib.rs:26964:13
+      |
+26964 |             limit_offset = 0;
+      |             ^^^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+27047 |         limit_offset = 0;
+      |         ---------------- `limit_offset` is overwritten here before the previous value is read
+      |
+      = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `limit_count` is never read
+     --> crates/fr-command/src/lib.rs:26965:13
+      |
+26965 |             limit_count = -1;
+      |             ^^^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+27048 |         limit_count = -1;
+      |         ---------------- `limit_count` is overwritten here before the previous value is read
+
+   Compiling fr-runtime v0.1.0 (/data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-runtime)
+warning: method `is_zpop` is never used
+   --> crates/fr-runtime/src/lib.rs:365:8
+    |
+341 | impl PlainKeyedPopCmd {
+    | --------------------- method in this implementation
+...
+365 |     fn is_zpop(self) -> bool {
+    |        ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `fr-command` (lib) generated 2 warnings
+   Compiling fr-server v0.1.0 (/data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-server)
+warning: `fr-runtime` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.83s
+     Running unittests src/main.rs (.rch-target-vmi1152480-job-29884606035528306-1781357817290072759-0/debug/deps/frankenredis-f8779d87274b519f)
+
+running 2 tests
+test tests::borrowed_plain_keyed_value_packet_parser_defers_other_shapes ... ok
+test tests::borrowed_plain_keyed_value_packet_parser_accepts_canonical_lpush ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 83 filtered out; finished in 0.00s
+
+  [2m2026-06-13T13:38:04.210569Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 27492ms[0m
+    [2;3mat[0m rch/src/hook.rs:6376 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:38:04.210944Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6425 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:38:04.210985Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613 on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:38:06.285032Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 2074ms (1 files, 1303 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-13T13:38:06.285059Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 1303 bytes in 2074ms[0m
+    [2;3mat[0m rch/src/hook.rs:6458 [2;3mon[0m ThreadId(1)
+
+[RCH] remote vmi1152480 (72.6s)

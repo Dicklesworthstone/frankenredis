@@ -1,0 +1,11 @@
+Benchmark 1: /data/tmp/frankenredis-y3bpt-baseline-target/release/fr-bench --port 25274 --workload lpush --clients 50 --pipeline 16 --requests 5000000 --keyspace 100000 --key-prefix y3bpt:paired5 --json-out artifacts/optimization/frankenredis-y3bpt/paired-n5m/baseline-last.json
+  Time (mean ± σ):      9.977 s ±  1.360 s    [User: 3.800 s, System: 5.646 s]
+  Range (min … max):    7.683 s … 10.925 s    5 runs
+ 
+Benchmark 2: /data/tmp/frankenredis-y3bpt-candidate-target/release/fr-bench --port 25275 --workload lpush --clients 50 --pipeline 16 --requests 5000000 --keyspace 100000 --key-prefix y3bpt:paired5 --json-out artifacts/optimization/frankenredis-y3bpt/paired-n5m/candidate-last.json
+  Time (mean ± σ):      9.644 s ±  1.234 s    [User: 3.822 s, System: 5.438 s]
+  Range (min … max):    7.729 s … 10.776 s    5 runs
+ 
+Summary
+  /data/tmp/frankenredis-y3bpt-candidate-target/release/fr-bench --port 25275 --workload lpush --clients 50 --pipeline 16 --requests 5000000 --keyspace 100000 --key-prefix y3bpt:paired5 --json-out artifacts/optimization/frankenredis-y3bpt/paired-n5m/candidate-last.json ran
+    1.03 ± 0.19 times faster than /data/tmp/frankenredis-y3bpt-baseline-target/release/fr-bench --port 25274 --workload lpush --clients 50 --pipeline 16 --requests 5000000 --keyspace 100000 --key-prefix y3bpt:paired5 --json-out artifacts/optimization/frankenredis-y3bpt/paired-n5m/baseline-last.json

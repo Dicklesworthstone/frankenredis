@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781358207293,
+  "host": "127.0.0.1",
+  "port": 25274,
+  "workload": "lpush",
+  "clients": 50,
+  "requests": 5000000,
+  "pipeline": 16,
+  "keyspace": 100000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "y3bpt:paired5",
+  "total_time_ms": 10923,
+  "ops_per_sec": 457742.0466504842,
+  "bytes_sent": 283895897,
+  "bytes_received": 30000000,
+  "latency_us": {
+    "min": 108,
+    "p50": 1576,
+    "p95": 2055,
+    "p99": 8887,
+    "p999": 10655,
+    "max": 12319,
+    "mean": 1738.5255143999952,
+    "samples": 5000000
+  }
+}

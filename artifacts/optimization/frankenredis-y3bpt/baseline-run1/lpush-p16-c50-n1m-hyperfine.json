@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/frankenredis-y3bpt-baseline-target/release/fr-bench --port 25268 --workload lpush --clients 50 --pipeline 16 --requests 1000000 --keyspace 100000 --key-prefix y3bpt:base --json-out artifacts/optimization/frankenredis-y3bpt/baseline-run1/lpush-p16-c50-n1m-last.json",
+      "mean": 1.592692368702857,
+      "stddev": 0.14471584983503313,
+      "median": 1.5783104855599999,
+      "user": 0.7705317028571429,
+      "system": 1.1434827171428572,
+      "min": 1.4683760445599998,
+      "max": 1.90394341456,
+      "times": [
+        1.4683760445599998,
+        1.59122824456,
+        1.58072649156,
+        1.5006389915599998,
+        1.52562290856,
+        1.5783104855599999,
+        1.90394341456
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
