@@ -10296,7 +10296,11 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                entry.touch_write(now_ms);
+                // (frankenredis-h87t6) Touch LRU on the write lookup, but defer the
+                // modification_count bump to a real removal — upstream t_set.c
+                // sremCommand wraps signalModifiedKey in `if (deleted)`, so SREM of
+                // an absent member (returns 0) must not abort a WATCHing client.
+                entry.touch(now_ms);
                 match &mut entry.value {
                     Value::Set(s) => {
                         let mut removed = 0_u64;
@@ -10308,10 +10312,14 @@ impl Store {
                             }
                         }
                         if s.is_empty() {
+                            // Emptying the set deletes the key — a real modification
+                            // (internal_entries_remove signals it); only reached when
+                            // removed > 0.
                             self.internal_entries_remove(key);
                             self.stream_groups.remove(key);
                             self.stream_last_ids.remove(key);
                         } else if removed > 0 {
+                            entry.bump_mod_count();
                             Self::mark_digest_stale_fields(
                                 &mut self.digest_stale,
                                 &mut self.digest_mutations,
