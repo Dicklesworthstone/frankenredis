@@ -4011,7 +4011,13 @@ pub struct Store {
     /// observable: SCAN walks the sorted `ordered_keys`, and RANDOMKEY /
     /// eviction sampling are already nondeterministic. (frankenredis-8kuy1)
     entries: HashMap<Vec<u8>, Entry, foldhash::quality::RandomState>,
-    ordered_keys: BTreeSet<Vec<u8>>,
+    // (frankenredis-x4tgs) `ordered_keys` shares the SAME per-key `Arc<[u8]>` as
+    // `random_key_slots` / `random_key_positions` (allocated once at the insert
+    // choke point), so the SCAN/KEYS ordered index no longer stores a third
+    // duplicate copy of every key's bytes. `Arc<[u8]>` orders/​hashes via `[u8]`
+    // (lexicographic), identical to the prior `Vec<u8>`, so SCAN/KEYS order and
+    // every `&[u8]` range/lookup are byte-for-byte unchanged.
+    ordered_keys: BTreeSet<std::sync::Arc<[u8]>>,
     /// (frankenredis-3e92e) Monotonic counter bumped on every STRUCTURAL
     /// keyspace mutation (key insert / remove / flush). Used to validate the
     /// SCAN resume cache: a cached resume point is only trusted when the
@@ -4842,15 +4848,18 @@ impl Store {
                 .ordered_keys
                 .iter()
                 .filter(|key| decode_db_key(key).is_none())
-                .cloned()
+                .map(|k| k.to_vec())
                 .collect();
         }
 
         let prefix = encode_db_key(db, b"");
         self.ordered_keys
-            .range(prefix.clone()..)
+            .range::<[u8], _>((
+                std::ops::Bound::Included(prefix.as_slice()),
+                std::ops::Bound::Unbounded,
+            ))
             .take_while(|key| key.starts_with(&prefix))
-            .cloned()
+            .map(|k| k.to_vec())
             .collect()
     }
 
@@ -7394,14 +7403,20 @@ impl Store {
         // cannot match (they don't carry the required literal prefix).
         let lit = glob_literal_prefix(pattern);
         let candidates: Vec<Vec<u8>> = if lit.is_empty() {
-            self.ordered_keys.iter().cloned().collect()
+            self.ordered_keys.iter().map(|k| k.to_vec()).collect()
         } else if let Some(end) = prefix_range_end(lit) {
             self.ordered_keys
-                .range(lit.to_vec()..end)
-                .cloned()
+                .range::<[u8], _>((
+                    std::ops::Bound::Included(lit),
+                    std::ops::Bound::Excluded(end.as_slice()),
+                ))
+                .map(|k| k.to_vec())
                 .collect()
         } else {
-            self.ordered_keys.range(lit.to_vec()..).cloned().collect()
+            self.ordered_keys
+                .range::<[u8], _>((std::ops::Bound::Included(lit), std::ops::Bound::Unbounded))
+                .map(|k| k.to_vec())
+                .collect()
         };
         for key in &candidates {
             self.drop_if_expired(key, now_ms);
@@ -7471,7 +7486,10 @@ impl Store {
                 let prefix = encode_db_key(db, b"");
                 for key in self
                     .ordered_keys
-                    .range(prefix.clone()..)
+                    .range::<[u8], _>((
+                        std::ops::Bound::Included(prefix.as_slice()),
+                        std::ops::Bound::Unbounded,
+                    ))
                     .take_while(|key| key.starts_with(&prefix))
                 {
                     Self::push_logical_key_if_match(&mut result, key, pattern, is_star);
@@ -7491,15 +7509,21 @@ impl Store {
             };
             if let Some(end) = prefix_range_end(&lower) {
                 self.ordered_keys
-                    .range(lower.clone()..end)
+                    .range::<[u8], _>((
+                        std::ops::Bound::Included(lower.as_slice()),
+                        std::ops::Bound::Excluded(end.as_slice()),
+                    ))
                     .filter(|k| in_db(k))
-                    .cloned()
+                    .map(|k| k.to_vec())
                     .collect()
             } else {
                 self.ordered_keys
-                    .range(lower.clone()..)
+                    .range::<[u8], _>((
+                        std::ops::Bound::Included(lower.as_slice()),
+                        std::ops::Bound::Unbounded,
+                    ))
                     .filter(|k| in_db(k))
-                    .cloned()
+                    .map(|k| k.to_vec())
                     .collect()
             }
         };
@@ -7657,19 +7681,16 @@ impl Store {
         })
     }
 
-    fn random_key_index_insert(&mut self, db: usize, key: &[u8]) {
+    fn random_key_index_insert(&mut self, db: usize, key: std::sync::Arc<[u8]>) {
         if db >= self.database_count {
             return;
         }
         if db >= self.random_key_slots.len() {
             self.random_key_slots.resize_with(db + 1, Vec::new);
         }
-        if self.random_key_positions.contains_key(key) {
+        if self.random_key_positions.contains_key(key.as_ref()) {
             return;
         }
-        // Allocate the key bytes ONCE behind an Arc; the slot Vec and the
-        // position map then share it via cheap refcount clones.
-        let key: std::sync::Arc<[u8]> = std::sync::Arc::from(key);
         let Some(keys) = self.random_key_slots.get_mut(db) else {
             return;
         };
@@ -7804,8 +7825,12 @@ impl Store {
             }
         }
         if is_new_key {
-            self.ordered_keys.insert(key.clone());
-            self.random_key_index_insert(db, &key);
+            // (frankenredis-x4tgs) Allocate the key bytes ONCE behind an Arc and
+            // share that single allocation across the ordered index, the slot Vec,
+            // and the position map (refcount clones, no extra byte copies).
+            let shared: std::sync::Arc<[u8]> = std::sync::Arc::from(key.as_slice());
+            self.ordered_keys.insert(std::sync::Arc::clone(&shared));
+            self.random_key_index_insert(db, shared);
             // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
             // resume points.
             self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
@@ -16931,7 +16956,7 @@ impl Store {
     /// `range` resume and the `skip` fallback.
     fn scan_walk<'a>(
         &'a self,
-        keys: impl Iterator<Item = &'a Vec<u8>>,
+        keys: impl Iterator<Item = &'a std::sync::Arc<[u8]>>,
         start: usize,
         batch_size: usize,
         pattern: Option<&[u8]>,
@@ -16940,9 +16965,9 @@ impl Store {
         let mut pos = start;
         let mut processed = 0;
         let mut result = Vec::new();
-        let mut last_examined: Option<&'a Vec<u8>> = None;
+        let mut last_examined: Option<&'a std::sync::Arc<[u8]>> = None;
         for key in keys {
-            let Some(entry) = self.entries.get(key) else {
+            let Some(entry) = self.entries.get(key.as_ref()) else {
                 continue;
             };
             pos += 1;
@@ -16955,19 +16980,19 @@ impl Store {
                 continue;
             }
             if let Some(pat) = pattern
-                && !glob_match(pat, key)
+                && !glob_match(pat, key.as_ref())
             {
                 if processed >= batch_size {
                     break;
                 }
                 continue;
             }
-            result.push(key.clone());
+            result.push(key.to_vec());
             if processed >= batch_size {
                 break;
             }
         }
-        (pos, result, last_examined.cloned())
+        (pos, result, last_examined.map(|k| k.to_vec()))
     }
 
     /// HSCAN: cursor-based iteration over hash fields.
@@ -19250,7 +19275,7 @@ impl Store {
     /// Return all key names in the store (sorted for determinism).
     #[must_use]
     pub fn all_keys(&self) -> Vec<Vec<u8>> {
-        self.ordered_keys.iter().cloned().collect()
+        self.ordered_keys.iter().map(|k| k.to_vec()).collect()
     }
 
     /// Drop stale TTL-bearing keys before snapshot serialization.
@@ -30837,7 +30862,7 @@ mod tests {
                     0,
                 );
             }
-            let all: Vec<Vec<u8>> = store.ordered_keys.iter().cloned().collect();
+            let all: Vec<Vec<u8>> = store.ordered_keys.iter().map(|k| k.to_vec()).collect();
             for &count in &[1usize, 3, 7, 16] {
                 let lru = interleaved(&mut store, 5, count, 0);
                 let single = interleaved(&mut store, 5, count, 1);
