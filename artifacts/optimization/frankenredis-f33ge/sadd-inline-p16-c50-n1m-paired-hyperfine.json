@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "bash -c 'DIR=artifacts/optimization/frankenredis-f33ge; PORT=24530; BIN=target-coralox-pass180-baseline/release-perf/frankenredis; LOG=\"$DIR/baseline-sadd-inline-server-$PORT-$$.log\"; \"$BIN\" --bind 127.0.0.1 --port \"$PORT\" >\"$LOG\" 2>&1 & pid=$!; sleep 0.25; legacy_redis_code/redis/src/redis-benchmark -h 127.0.0.1 -p \"$PORT\" -c 50 -n 1000000 -P 16 -r 100000 --seed 123 -q SADD s __rand_int__ >\"$DIR/baseline-sadd-inline-redisbench-last.txt\"; status=$?; kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; exit $status'",
+      "mean": 1.4258401936514287,
+      "stddev": 0.03194478595585205,
+      "median": 1.43872748208,
+      "user": 0.8501510085714286,
+      "system": 1.4047228314285714,
+      "min": 1.37627337908,
+      "max": 1.46686907608,
+      "times": [
+        1.40209071908,
+        1.40569458908,
+        1.37627337908,
+        1.43992620308,
+        1.4512999070800001,
+        1.46686907608,
+        1.43872748208
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "bash -c 'DIR=artifacts/optimization/frankenredis-f33ge; PORT=24531; BIN=/data/tmp/frankenredis-f33ge-candidate-target/release-perf/frankenredis; LOG=\"$DIR/candidate-sadd-inline-server-$PORT-$$.log\"; \"$BIN\" --bind 127.0.0.1 --port \"$PORT\" >\"$LOG\" 2>&1 & pid=$!; sleep 0.25; legacy_redis_code/redis/src/redis-benchmark -h 127.0.0.1 -p \"$PORT\" -c 50 -n 1000000 -P 16 -r 100000 --seed 123 -q SADD s __rand_int__ >\"$DIR/candidate-sadd-inline-redisbench-last.txt\"; status=$?; kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; exit $status'",
+      "mean": 1.4166135907942858,
+      "stddev": 0.0810980015975066,
+      "median": 1.40199054308,
+      "user": 0.7934928657142858,
+      "system": 1.4302669742857144,
+      "min": 1.34103836608,
+      "max": 1.58154308408,
+      "times": [
+        1.41191205008,
+        1.3902160290799999,
+        1.40199054308,
+        1.34103836608,
+        1.44308475908,
+        1.58154308408,
+        1.34651030408
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

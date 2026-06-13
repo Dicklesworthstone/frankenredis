@@ -1,0 +1,4 @@
+1788 artifacts/optimization/frankenredis-f33ge/sadd-inline-golden-input.resp
+2267 artifacts/optimization/frankenredis-f33ge/baseline-sadd-inline-golden-output.resp
+2267 artifacts/optimization/frankenredis-f33ge/candidate-sadd-inline-golden-output.resp
+6322 total

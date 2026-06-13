@@ -1,0 +1,3 @@
+96e2d3b02a940e96b18ff52e9802e1d4ee95b88e8bb9529d301f5625aadcf66e  artifacts/optimization/frankenredis-f33ge/sadd-inline-golden-input.resp
+cf30bcec868aed0590b3a98a66c7256bff1b6e74426a1e22b9fb19dfea5670eb  artifacts/optimization/frankenredis-f33ge/baseline-sadd-inline-golden-output.resp
+cf30bcec868aed0590b3a98a66c7256bff1b6e74426a1e22b9fb19dfea5670eb  artifacts/optimization/frankenredis-f33ge/candidate-sadd-inline-golden-output.resp
