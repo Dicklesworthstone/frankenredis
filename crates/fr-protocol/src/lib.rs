@@ -141,6 +141,18 @@ pub fn encode_bulk_string_slice(value: Option<&[u8]>, resp3: bool, out: &mut Vec
     }
 }
 
+/// Write a RESP aggregate header for an array (`*N\r\n`) or, when `resp3_set`,
+/// a RESP3 set (`~N\r\n`). Byte-identical to `RespFrame::Array(Some(..))` /
+/// `RespFrame::Set(Some(..))`'s header, letting borrow-encoded reply paths emit
+/// a collection without materializing a `Vec<RespFrame>`. Pair with one
+/// `encode_bulk_string_slice` per element.
+pub fn encode_aggregate_header(len: usize, resp3_set: bool, out: &mut Vec<u8>) {
+    out.reserve(1 + decimal_usize_len(len) + 2);
+    out.extend_from_slice(if resp3_set { b"~" } else { b"*" });
+    push_usize(out, len);
+    out.extend_from_slice(b"\r\n");
+}
+
 fn decimal_u64_len(mut n: u64) -> usize {
     let mut len = 1;
     while n >= 10 {

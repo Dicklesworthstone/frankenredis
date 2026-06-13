@@ -278,6 +278,10 @@ fn plain_get_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"GET".to_vec(), key.to_vec()]
 }
 
+fn plain_smembers_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"SMEMBERS".to_vec(), key.to_vec()]
+}
+
 fn plain_hget_owned_argv(key: &[u8], field: &[u8]) -> Vec<Vec<u8>> {
     vec![b"HGET".to_vec(), key.to_vec(), field.to_vec()]
 }
@@ -8030,6 +8034,99 @@ impl Runtime {
         Some(())
     }
 
+    /// Borrow-encoded SMEMBERS fast path: streams the set straight into `out`
+    /// (RESP2 array `*N` / RESP3 set `~N` header + one bulk string per member)
+    /// with NO `Vec<Vec<u8>>` materialization and NO `Vec<RespFrame>` — the read
+    /// counterpart of the GET fast path, eliminating two copies of every member
+    /// on large SMEMBERS replies. Mirrors the generic path's bookkeeping exactly:
+    /// the shared `plain_borrowed_default_key_read_allows` gate (falls back to
+    /// generic dispatch when tracking/monitor/multi/etc. are active), keyspace
+    /// hit/miss + LFU + touch inside `smembers_borrow_scan`, and the
+    /// slowlog/latency/histogram metrics. Returns `None` to fall back.
+    /// (frankenredis: SMEMBERS borrow-encode)
+    pub fn execute_plain_smembers_borrowed_into(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < b"SMEMBERS".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("smembers");
+        self.session.last_argv_len_sum = b"SMEMBERS".len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let result = self.server.store.smembers_borrow_scan(key, now_ms, |ev| {
+            if suppress_reply {
+                return;
+            }
+            match ev {
+                fr_store::SmembersScanEvent::Len(n) => {
+                    fr_protocol::encode_aggregate_header(n, resp3, out);
+                }
+                fr_store::SmembersScanEvent::Member(m) => {
+                    fr_protocol::encode_bulk_string_slice(Some(m), resp3, out);
+                }
+            }
+        });
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let mut error_reply = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            error_reply = Some(reply);
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_smembers_borrowed_metrics(key, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
     pub fn execute_plain_get_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
         if !self.can_execute_plain_get_borrowed(key, now_ms) {
             return None;
@@ -10280,6 +10377,65 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'GET' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    /// SMEMBERS sibling of `record_plain_get_borrowed_metrics` (slowlog,
+    /// latency-tracker sample, command histogram, slow-command threat) — the
+    /// generic dispatch records these for SMEMBERS too, so the borrow-encode fast
+    /// path must as well. (frankenredis: SMEMBERS borrow-encode)
+    fn record_plain_smembers_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_smembers_owned_argv(key));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_smembers_owned_argv(key));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("smembers", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_smembers_owned_argv(key));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'SMEMBERS' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),

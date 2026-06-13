@@ -2137,6 +2137,15 @@ impl From<std::collections::HashMap<Vec<u8>, f64>> for SortedSet {
 /// leading zeros, no `+`, within i64 range), so e.g. `"007"` is a non-integer
 /// member that never lives in an intset.
 ///
+/// Event stream driven by [`Store::smembers_borrow_scan`]: the set cardinality
+/// (emitted once, first) followed by each member by borrow. Lets a reply path
+/// write the RESP aggregate header then each element with zero per-member
+/// allocation. (frankenredis: SMEMBERS borrow-encode)
+pub enum SmembersScanEvent<'a> {
+    Len(usize),
+    Member(&'a [u8]),
+}
+
 /// This is the foundational storage type for the intset memory optimisation
 /// (frankenredis-hjob8); it is verified in isolation here and wired into
 /// `Value::Set` in a follow-up.
@@ -10860,6 +10869,56 @@ impl Store {
                 _ => Err(StoreError::WrongType),
             },
             None => Ok(Vec::new()),
+        }
+    }
+
+    /// Borrow-scan variant of `smembers` for the zero-copy reply fast path: does
+    /// the IDENTICAL bookkeeping (keyspace hit/miss via `record_keyspace_lookup`,
+    /// LFU bump, `touch`) but, instead of cloning every member into a
+    /// `Vec<Vec<u8>>`, drives a single `sink` with a `Len(card)` event followed by
+    /// one `Member(&[u8])` per member (by borrow) — so the runtime can encode
+    /// straight into the output buffer with no per-member allocation. A single
+    /// sink (vs two closures) avoids aliasing the caller's `&mut out`. Emits
+    /// `Len(0)` and no members for a missing key (matching SMEMBERS's empty
+    /// reply); returns `Err(WrongType)` for a non-set value (no events emitted).
+    /// (frankenredis: SMEMBERS borrow-encode)
+    pub fn smembers_borrow_scan(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        mut sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => match &entry.value {
+                Value::Set(s) => {
+                    sink(SmembersScanEvent::Len(s.len()));
+                    for m in s.iter() {
+                        sink(SmembersScanEvent::Member(m.as_ref()));
+                    }
+                    if lfu_tracking_enabled {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    }
+                    entry.touch(now_ms);
+                    Ok(())
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => {
+                sink(SmembersScanEvent::Len(0));
+                Ok(())
+            }
         }
     }
 
