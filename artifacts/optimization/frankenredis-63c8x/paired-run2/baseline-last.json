@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781355161251,
+  "host": "127.0.0.1",
+  "port": 25245,
+  "workload": "lpush",
+  "clients": 50,
+  "requests": 1000000,
+  "pipeline": 16,
+  "keyspace": 100000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "63c8x:pair2base",
+  "total_time_ms": 1528,
+  "ops_per_sec": 654336.4671871084,
+  "bytes_sent": 58339516,
+  "bytes_received": 5006755,
+  "latency_us": {
+    "min": 68,
+    "p50": 1087,
+    "p95": 1416,
+    "p99": 7923,
+    "p999": 10087,
+    "max": 10495,
+    "mean": 1211.2385570000008,
+    "samples": 1000000
+  }
+}

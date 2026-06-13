@@ -1,0 +1,4 @@
+Benchmark 1: /data/tmp/frankenredis-63c8x-baseline-target/release/fr-bench --port 25241 --workload lpush --clients 50 --pipeline 16 --requests 1000000 --keyspace 100000 --key-prefix 63c8x:base --json-out artifacts/optimization/frankenredis-63c8x/baseline-run1/lpush-p16-c50-n1m-last.json
+  Time (mean ± σ):      1.353 s ±  0.078 s    [User: 0.742 s, System: 1.161 s]
+  Range (min … max):    1.276 s …  1.515 s    7 runs
+ 

@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781355106558,
+  "host": "127.0.0.1",
+  "port": 25244,
+  "workload": "lpush",
+  "clients": 50,
+  "requests": 1000000,
+  "pipeline": 16,
+  "keyspace": 100000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "63c8x:paircand",
+  "total_time_ms": 1302,
+  "ops_per_sec": 767840.6073959512,
+  "bytes_sent": 57338977,
+  "bytes_received": 5006747,
+  "latency_us": {
+    "min": 83,
+    "p50": 999,
+    "p95": 1285,
+    "p99": 1457,
+    "p999": 1568,
+    "max": 2143,
+    "mean": 1030.6993829999979,
+    "samples": 1000000
+  }
+}

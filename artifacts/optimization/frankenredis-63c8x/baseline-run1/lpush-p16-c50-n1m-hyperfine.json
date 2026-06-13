@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/frankenredis-63c8x-baseline-target/release/fr-bench --port 25241 --workload lpush --clients 50 --pipeline 16 --requests 1000000 --keyspace 100000 --key-prefix 63c8x:base --json-out artifacts/optimization/frankenredis-63c8x/baseline-run1/lpush-p16-c50-n1m-last.json",
+      "mean": 1.3528778514657145,
+      "stddev": 0.07844179862827218,
+      "median": 1.3370070151800002,
+      "user": 0.7418920571428572,
+      "system": 1.1605270914285712,
+      "min": 1.27614519818,
+      "max": 1.51530469818,
+      "times": [
+        1.31643910618,
+        1.29971579318,
+        1.3676075601800002,
+        1.3370070151800002,
+        1.51530469818,
+        1.27614519818,
+        1.3579255891800002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
