@@ -16455,8 +16455,18 @@ impl Store {
                             return Ok((0, Vec::new()));
                         }
 
+                        // (frankenredis-ir0ut) Resume at `pos` via O(1) get_index
+                        // on the hashtable (IndexMap) encoding instead of
+                        // iter().skip(start), which is O(start) per batch and makes
+                        // a full HSCAN O(N²/batch). Byte-identical: get_index walks
+                        // the same insertion order as iter(). The listpack path
+                        // already short-circuited above; only the hashtable path
+                        // (where get_index is O(1)) reaches here.
                         let mut processed = 0;
-                        for (field, value) in h.iter().skip(start) {
+                        while pos < total_fields {
+                            let Some((field, value)) = h.get_index(pos) else {
+                                break;
+                            };
                             pos += 1;
                             processed += 1;
                             if let Some(pat) = pattern
@@ -16541,10 +16551,19 @@ impl Store {
                         }
 
                         let batch_size = count.max(1);
+                        let total_members = s.len();
                         let mut result = Vec::new();
                         let mut pos = start;
+                        // (frankenredis-ir0ut) Resume at `pos` via O(1) get_index on
+                        // the hashtable (IndexSet) encoding instead of
+                        // iter().skip(start) = O(start) per batch (a full SSCAN was
+                        // O(N²/batch)). Byte-identical insertion-order walk; the
+                        // intset/listpack path short-circuited above.
                         let mut processed = 0;
-                        for member in s.iter().skip(start) {
+                        while pos < total_members {
+                            let Some(member) = s.get_index(pos) else {
+                                break;
+                            };
                             pos += 1;
                             processed += 1;
                             if let Some(pat) = pattern
@@ -16561,7 +16580,7 @@ impl Store {
                             }
                         }
 
-                        let next = if pos >= s.len() { 0 } else { pos as u64 };
+                        let next = if pos >= total_members { 0 } else { pos as u64 };
                         // SCAN-family commands are read-only: do NOT touch LRU
                         Ok((next, result))
                     }
