@@ -21812,13 +21812,27 @@ fn apply_rdb_entries_to_store(
                 }
             }
             RdbValue::SetHashtable(members) => {
-                // (frankenredis-39is8) Plain RDB_TYPE_SET decodes to a hashtable
-                // set: replay the members, then pin the encoding so the load does
-                // not re-derive a smaller one from content.
+                // (frankenredis-nom8d) Replicate redis rdbLoadObject's RDB_TYPE_SET
+                // decision exactly: a plain set with MORE than set-max-intset-
+                // entries members is created as a hashtable directly; otherwise it
+                // is rebuilt and RE-DERIVES its encoding from content under the
+                // current config (intset when all-int-and-fits, else listpack, else
+                // hashtable). So a hashtable set that has shrunk to fit listpack
+                // reloads as `listpack` (matching redis), while a genuine intset-
+                // overflow set (len > intset-max) still reloads as `hashtable`.
+                // The old 39is8 unconditional force pinned the shrunk case to
+                // hashtable (its "load preserves the saved encoding" premise was
+                // wrong — same class as the a0p5p reload phantom). The len check is
+                // needed because bulk sadd re-derives via set_fits_* (which would
+                // pick listpack for an all-int set whose count only overflows
+                // intset-max), not the incremental intset-overflow→hashtable path.
+                let over_intset = members.len() > store.set_max_intset_entries;
                 store
                     .sadd(&key, members, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
-                store.force_set_hashtable_encoding(&key);
+                if over_intset {
+                    store.force_set_hashtable_encoding(&key);
+                }
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
                         &key,

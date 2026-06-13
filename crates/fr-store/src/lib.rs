@@ -19779,6 +19779,28 @@ impl Store {
         let mut entry = Entry::new(value, expires_at_ms, now_ms);
         entry.force_set_listpack_encoding = force_set_listpack_encoding;
         entry.force_set_hashtable_encoding = force_set_hashtable_encoding;
+        // (frankenredis-nom8d) RESTORE re-derives HASH/ZSET encoding from the
+        // loaded content under the CURRENT config, matching redis rdbLoadObject
+        // (which converts a listpack hash/zset whose length exceeds the current
+        // threshold UP to hashtable/skiplist on load). Without this, post-a0p5p
+        // OBJECT ENCODING reads the force flag only — never set on this direct-
+        // deserialize path — so an over-threshold restored hash/zset wrongly
+        // reported `listpack`. (Sets keep the type-byte mapping: their reload
+        // encoding follows the intset-overflow rule that the replay/sadd path
+        // models; see fr-runtime RdbValue::SetHashtable.)
+        match &entry.value {
+            Value::Hash(_) => Self::refresh_hash_encoding_flag(
+                &mut entry,
+                self.hash_max_listpack_entries,
+                self.hash_max_listpack_value,
+            ),
+            Value::SortedSet(_) => Self::refresh_zset_encoding_flag(
+                &mut entry,
+                self.zset_max_listpack_entries,
+                self.zset_max_listpack_value,
+            ),
+            _ => {}
+        }
         self.internal_entries_insert(key.to_vec(), entry);
         if let Some(last_id) = restored_stream_last_id {
             self.stream_last_ids.insert(key.to_vec(), last_id);

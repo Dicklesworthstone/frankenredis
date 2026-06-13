@@ -47,13 +47,11 @@ OR=int(sys.argv[1]); FRp=int(sys.argv[2])
 od=R(OR); fd=R(FRp)
 DIV=[]
 
-# Open frankenredis-nom8d: RESTORE/RDB-load must re-derive encoding from
-# content+config (convert up AND down), not pin from the RDB type byte.
-KNOWN_NOM8D = {
-    "B-restore-after-reload/hash(kr)",
-    "B-restore-after-reload/zset(kr)",
-    "C-shrink-reload/set-str",
-}
+# frankenredis-nom8d FIXED: RESTORE re-derives hash/zset encoding from content+
+# config (fr-store restore_key), and RDB_TYPE_SET reload re-derives via the
+# redis rdbLoadObject len>intset-max rule (fr-runtime). Empty so any NEW
+# divergence hard-fails.
+KNOWN_NOM8D = set()
 
 def reset():
     for d in (od,fd):
