@@ -86,9 +86,24 @@ def parse_aof(path):
     return out
 
 
+def _parse_fr_bin(argv):
+    # Accept both the bare positional form (`propagation_rewrite_gate.py <fr-bin>`)
+    # and the self-launcher flag form the suite runner (run_parity_differs.sh) uses
+    # to drive --bin/--redis-bin gates: `--bin <fr> [--redis-bin <rd>]`. The
+    # runner detects self-launchers by grepping for `--bin`/`--redis-bin`, so this
+    # gate must recognize them or it gets fed `--oracle/--fr` and crashes.
+    for i, a in enumerate(argv):
+        if a == "--bin" and i + 1 < len(argv):
+            return argv[i + 1]
+    # bare positional (skip any --flag tokens)
+    for a in argv:
+        if not a.startswith("-"):
+            return a
+    return os.environ.get("CARGO_TARGET_DIR", "/data/tmp/cargo-target") + "/release/frankenredis"
+
+
 def main():
-    fr_bin = sys.argv[1] if len(sys.argv) > 1 else (
-        os.environ.get("CARGO_TARGET_DIR", "/data/tmp/cargo-target") + "/release/frankenredis")
+    fr_bin = _parse_fr_bin(sys.argv[1:])
     port = free_port()
     tmp = tempfile.mkdtemp(prefix="fr-prop-")
     aof = os.path.join(tmp, "appendonly.aof")
