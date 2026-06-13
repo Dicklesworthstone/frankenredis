@@ -92,8 +92,11 @@ def transcript(port):
     blob = b"\n".join(label + b" => " + reply for label, reply in out)
     return blob
 
-a = transcript(17380)
-b = transcript(17381)
+_pp = [int(x) for x in sys.argv[1:] if x.isdigit()]
+_op = _pp[0] if len(_pp) > 0 else 17380
+_fp = _pp[1] if len(_pp) > 1 else 17381
+a = transcript(_op)
+b = transcript(_fp)
 ha = hashlib.sha256(a).hexdigest()
 hb = hashlib.sha256(b).hexdigest()
 if "--emit" in sys.argv:
