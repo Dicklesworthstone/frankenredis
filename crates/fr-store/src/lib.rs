@@ -4010,7 +4010,13 @@ pub struct Store {
     /// defeated) at a fraction of the cost. Iteration order is not an
     /// observable: SCAN walks the sorted `ordered_keys`, and RANDOMKEY /
     /// eviction sampling are already nondeterministic. (frankenredis-8kuy1)
-    entries: HashMap<Vec<u8>, Entry, foldhash::quality::RandomState>,
+    // (frankenredis-x4tgs) The canonical key copy. Shares the SAME per-key
+    // `Arc<[u8]>` as ordered_keys / random_key_slots / random_key_positions
+    // (allocated once at the insert choke point), so each key's bytes live in
+    // exactly ONE allocation across the whole keyspace (was 4-5). `Arc<[u8]>`
+    // hashes/orders via `<[u8]>` identically to the prior `Vec<u8>`, so bucket
+    // placement and every `&[u8]` lookup are byte-for-byte unchanged.
+    entries: HashMap<std::sync::Arc<[u8]>, Entry, foldhash::quality::RandomState>,
     // (frankenredis-x4tgs) `ordered_keys` shares the SAME per-key `Arc<[u8]>` as
     // `random_key_slots` / `random_key_positions` (allocated once at the insert
     // choke point), so the SCAN/KEYS ordered index no longer stores a third
@@ -6160,12 +6166,12 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(&key) {
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key.as_slice()) {
             self.next_rand()
         } else {
             0
         };
-        let (old, lfu_state) = match self.entries.get_mut(&key) {
+        let (old, lfu_state) = match self.entries.get_mut(key.as_slice()) {
             Some(entry) => {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -7423,7 +7429,7 @@ impl Store {
         }
         let mut result: Vec<Vec<u8>> = candidates
             .into_iter()
-            .filter(|key| self.entries.contains_key(key) && glob_match(pattern, key))
+            .filter(|key| self.entries.contains_key(key.as_slice()) && glob_match(pattern, key))
             .collect();
         result.sort();
         result
@@ -7534,7 +7540,7 @@ impl Store {
 
         let mut result: Vec<Vec<u8>> = candidates
             .into_iter()
-            .filter(|key| self.entries.contains_key(key))
+            .filter(|key| self.entries.contains_key(key.as_slice()))
             .filter_map(|key| {
                 let logical = decode_db_key(&key)
                     .map(|(_, logical)| logical)
@@ -7735,7 +7741,7 @@ impl Store {
             self.entries
                 .iter()
                 .filter(|(_, entry)| entry.expiry_ms().is_some())
-                .map(|(key, _)| key.clone()),
+                .map(|(key, _)| key.to_vec()),
         );
         self.volatile_keys_dirty = false;
     }
@@ -7809,11 +7815,11 @@ impl Store {
 
     fn internal_entries_insert(&mut self, key: Vec<u8>, mut entry: Entry) -> Option<Entry> {
         let db = decode_db_key(&key).map(|(db, _)| db).unwrap_or(0);
-        let is_new_key = !self.entries.contains_key(&key);
-        let old_expiry = self.entries.get(&key).and_then(Entry::expiry_ms);
+        let is_new_key = !self.entries.contains_key(key.as_slice());
+        let old_expiry = self.entries.get(key.as_slice()).and_then(Entry::expiry_ms);
         let new_expiry = entry.expiry_ms();
         let new_is_stream = matches!(&entry.value, Value::Stream(_));
-        if let Some(old_entry) = self.entries.get(&key) {
+        if let Some(old_entry) = self.entries.get(key.as_slice()) {
             entry.modification_count = old_entry.modification_count.wrapping_add(1);
         }
 
@@ -7824,17 +7830,22 @@ impl Store {
                 self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
             }
         }
-        if is_new_key {
-            // (frankenredis-x4tgs) Allocate the key bytes ONCE behind an Arc and
-            // share that single allocation across the ordered index, the slot Vec,
-            // and the position map (refcount clones, no extra byte copies).
+        // (frankenredis-x4tgs) For a NEW key, allocate the key bytes ONCE behind
+        // an Arc and share that single allocation across entries, the ordered
+        // index, the slot Vec, and the position map (refcount clones, no extra
+        // byte copies). For an OVERWRITE there is no new allocation at all — the
+        // value is replaced in place below, keeping the existing Arc key.
+        let shared: Option<std::sync::Arc<[u8]>> = if is_new_key {
             let shared: std::sync::Arc<[u8]> = std::sync::Arc::from(key.as_slice());
             self.ordered_keys.insert(std::sync::Arc::clone(&shared));
-            self.random_key_index_insert(db, shared);
+            self.random_key_index_insert(db, std::sync::Arc::clone(&shared));
             // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
             // resume points.
             self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
-        }
+            Some(shared)
+        } else {
+            None
+        };
         // Keep the volatile-key sampling set in sync lazily: deadline counts
         // remain exact, and the sorted key view is rebuilt only when a due
         // expiry consumer needs key-order iteration. (frankenredis-yvg7h)
@@ -7845,7 +7856,16 @@ impl Store {
         }
         self.hll_register_cache.remove(&key);
         self.mem_estimate_cache.borrow_mut().remove(&key);
-        let old_entry = self.entries.insert(key.clone(), entry);
+        let old_entry = match shared {
+            // New key: insert the shared Arc as the canonical key.
+            Some(shared) => self.entries.insert(shared, entry),
+            // Overwrite: replace the value in place, reusing the existing Arc key
+            // (no new key allocation on the hot SET-existing path).
+            None => self
+                .entries
+                .get_mut(key.as_slice())
+                .map(|slot| std::mem::replace(slot, entry)),
+        };
         self.update_expiry_deadline(old_expiry, new_expiry);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         if let Some(old) = old_entry {
@@ -8237,7 +8257,7 @@ impl Store {
         for key in &keys_to_check {
             let should_evict = evaluate_expiry(
                 now_ms,
-                self.entries.get(key).and_then(|entry| entry.expiry_ms()),
+                self.entries.get(key.as_slice()).and_then(|entry| entry.expiry_ms()),
             )
             .should_evict;
             if should_evict {
@@ -8316,7 +8336,7 @@ impl Store {
             .entries
             .keys()
             .filter(|key| key.starts_with(prefix))
-            .cloned()
+            .map(|k| k.to_vec())
             .collect();
         let removed = keys.len() as u64;
         for key in keys {
@@ -8339,7 +8359,7 @@ impl Store {
                     .map(|(entry_db, _)| entry_db == db)
                     .unwrap_or(db == 0)
             })
-            .cloned()
+            .map(|k| k.to_vec())
             .collect();
         let removed = keys.len() as u64;
         for key in keys {
@@ -8366,13 +8386,13 @@ impl Store {
             .entries
             .keys()
             .filter(|key| key.starts_with(left_prefix))
-            .cloned()
+            .map(|k| k.to_vec())
             .collect();
         let right_keys: Vec<Vec<u8>> = self
             .entries
             .keys()
             .filter(|key| key.starts_with(right_prefix))
-            .cloned()
+            .map(|k| k.to_vec())
             .collect();
 
         let left_count = left_keys.len();
@@ -8513,7 +8533,7 @@ impl Store {
                     .map(|(db, _)| db == left_db)
                     .unwrap_or(left_db == 0)
             })
-            .cloned()
+            .map(|k| k.to_vec())
             .collect();
         let right_keys: Vec<Vec<u8>> = self
             .entries
@@ -8523,7 +8543,7 @@ impl Store {
                     .map(|(db, _)| db == right_db)
                     .unwrap_or(right_db == 0)
             })
-            .cloned()
+            .map(|k| k.to_vec())
             .collect();
 
         let left_count = left_keys.len();
@@ -16769,11 +16789,11 @@ impl Store {
         // This is much faster than expiring all keys in an O(N) scan.
         for _ in 0..100 {
             let idx = (self.next_rand() as usize) % self.entries.len();
-            let key = self.entries.keys().nth(idx).cloned()?;
+            let key = self.entries.keys().nth(idx).map(|k| k.to_vec())?;
 
             // Check if it's expired. If so, drop it (with stats/notifications) and try again.
             self.drop_if_expired(&key, now_ms);
-            if self.entries.contains_key(&key) {
+            if self.entries.contains_key(key.as_slice()) {
                 return Some(key);
             }
             if self.entries.is_empty() {
@@ -16787,9 +16807,9 @@ impl Store {
         let mut result = None;
         for (key, entry) in &self.entries {
             if evaluate_expiry(now_ms, entry.expiry_ms()).should_evict {
-                expired_keys.push(key.clone());
+                expired_keys.push(key.to_vec());
             } else {
-                result = Some(key.clone());
+                result = Some(key.to_vec());
                 break;
             }
         }
@@ -16819,7 +16839,7 @@ impl Store {
             .entries
             .keys()
             .filter(|key| key.starts_with(prefix))
-            .cloned()
+            .map(|k| k.to_vec())
             .collect();
         if matching.is_empty() {
             return None;
@@ -16857,7 +16877,7 @@ impl Store {
                 crc16_slot(k) == slot && !evaluate_expiry(now_ms, e.expiry_ms()).should_evict
             })
             .take(count)
-            .map(|(k, _)| k.clone())
+            .map(|(k, _)| k.to_vec())
             .collect()
     }
 
@@ -17728,7 +17748,7 @@ impl Store {
                 .entries
                 .iter()
                 .filter(|(_, entry)| !volatile_only || entry.expires_at_ms.is_some())
-                .map(|(key, _)| key.clone())
+                .map(|(key, _)| key.to_vec())
                 .collect();
         }
 
@@ -17752,7 +17772,7 @@ impl Store {
             .enumerate()
         {
             if selected_indices.contains(&eligible_idx) {
-                sampled.push(key.clone());
+                sampled.push(key.to_vec());
             }
         }
         sampled
@@ -17762,7 +17782,7 @@ impl Store {
         let mut best_key: Option<Vec<u8>> = None;
         let mut best_access = u64::MAX;
         for key in keys {
-            let Some(entry) = self.entries.get(key) else {
+            let Some(entry) = self.entries.get(key.as_slice()) else {
                 continue;
             };
             if entry.last_access_ms < best_access
@@ -17785,7 +17805,7 @@ impl Store {
         let mut best_freq = u8::MAX;
         let mut best_access = u64::MAX;
         for key in keys {
-            let Some(entry) = self.entries.get(key) else {
+            let Some(entry) = self.entries.get(key.as_slice()) else {
                 continue;
             };
             let freq = entry.current_lfu_freq(now_ms, self.lfu_decay_time);
@@ -17807,7 +17827,7 @@ impl Store {
         let mut best_key: Option<Vec<u8>> = None;
         let mut best_ttl = u64::MAX;
         for key in keys {
-            let Some(entry) = self.entries.get(key) else {
+            let Some(entry) = self.entries.get(key.as_slice()) else {
                 continue;
             };
             if let Some(expires_at_ms) = entry.expiry_ms()
@@ -17858,7 +17878,7 @@ impl Store {
                 }
                 let rand_val = self.next_rand();
                 let idx = rand_val as usize % n;
-                self.entries.keys().nth(idx).cloned()
+                self.entries.keys().nth(idx).map(|k| k.to_vec())
             }
 
             MaxmemoryPolicy::VolatileRandom => {
@@ -17876,7 +17896,7 @@ impl Store {
                     .iter()
                     .filter(|(_, e)| e.expires_at_ms.is_some())
                     .nth(idx)
-                    .map(|(k, _)| k.clone())
+                    .map(|(k, _)| k.to_vec())
             }
         }
     }
@@ -19314,7 +19334,7 @@ impl Store {
     #[must_use]
     pub fn to_aof_commands(&mut self, now_ms: u64) -> Vec<Vec<Vec<u8>>> {
         // Expire stale keys first so they aren't serialized.
-        let all_keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
+        let all_keys: Vec<Vec<u8>> = self.entries.keys().map(|k| k.to_vec()).collect();
         for key in &all_keys {
             self.drop_if_expired(key, now_ms);
         }
@@ -19334,8 +19354,8 @@ impl Store {
             .entries
             .keys()
             .map(|physical| {
-                let (db, logical) = decode_db_key(physical).unwrap_or((0, physical.as_slice()));
-                (db, logical.to_vec(), physical.clone())
+                let (db, logical) = decode_db_key(physical).unwrap_or((0, &physical[..]));
+                (db, logical.to_vec(), physical.to_vec())
             })
             .collect();
         keys.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
@@ -19343,7 +19363,7 @@ impl Store {
         let mut current_db = None;
 
         for (db, logical_key, physical_key) in keys {
-            let Some(entry) = self.entries.get(&physical_key) else {
+            let Some(entry) = self.entries.get(physical_key.as_slice()) else {
                 continue;
             };
 
@@ -29873,7 +29893,7 @@ mod tests {
                 .entries
                 .iter()
                 .filter(|(_, e)| !volatile_only || e.expires_at_ms.is_some())
-                .map(|(k, _)| k.clone())
+                .map(|(k, _)| k.to_vec())
                 .collect();
             let sample_limit = sample_limit.max(1);
             if candidates.len() <= sample_limit {
@@ -42439,7 +42459,7 @@ mod tests {
                             decode_db_key(&physical_key).unwrap_or((0, physical_key.as_slice()));
                         let entry = store
                             .entries
-                            .get(&physical_key)
+                            .get(physical_key.as_slice())
                             .expect("all_keys entries must exist");
                         let value = match &entry.value {
                             crate::Value::String(bytes) => AofValueSnapshot::String(bytes.to_vec()),
