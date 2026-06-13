@@ -14151,7 +14151,12 @@ fn require_count_fits_half_long_range(count: i64) -> Result<(), CommandError> {
     Ok(())
 }
 
-fn parse_i64_arg(arg: &[u8]) -> Result<i64, CommandError> {
+/// Strict redis `string2ll` integer parse (rejects leading `+`, leading zeros,
+/// embedded space). Public so the borrowed LRANGE fast path parses index args
+/// IDENTICALLY to the generic dispatch — guaranteeing the fast path accepts
+/// exactly the same inputs (and falls back, never diverging, on any the generic
+/// path would reject). (frankenredis: LRANGE borrow-encode)
+pub fn parse_i64_arg(arg: &[u8]) -> Result<i64, CommandError> {
     let slen = arg.len();
     if slen == 0 || slen > 20 {
         return Err(CommandError::InvalidInteger);

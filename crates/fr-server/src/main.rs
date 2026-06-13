@@ -2387,6 +2387,22 @@ fn parse_borrowed_multibulk_action(
                         argv_len,
                     });
                 }
+                if let Some((key, start, stop)) = borrowed_plain_lrange_args(&borrowed_args) {
+                    if runtime
+                        .execute_plain_lrange_borrowed_into(key, start, stop, ts, out)
+                        .is_some()
+                    {
+                        return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: parsed.consumed,
+                        });
+                    }
+                    copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                    return Ok(BorrowedMultibulkAction::Parsed {
+                        kind: parsed.kind,
+                        consumed: parsed.consumed,
+                        argv_len,
+                    });
+                }
                 if let Some((key, value)) = borrowed_plain_set_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_set_borrowed(key, value, ts)
                 {
@@ -2740,6 +2756,17 @@ fn borrowed_plain_set_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8
 fn borrowed_plain_smembers_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
     match borrowed_args {
         [command, key] if command.eq_ignore_ascii_case(b"SMEMBERS") => Some(*key),
+        _ => None,
+    }
+}
+
+fn borrowed_plain_lrange_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(&'a [u8], &'a [u8], &'a [u8])> {
+    match borrowed_args {
+        [command, key, start, stop] if command.eq_ignore_ascii_case(b"LRANGE") => {
+            Some((*key, *start, *stop))
+        }
         _ => None,
     }
 }

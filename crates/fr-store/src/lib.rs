@@ -9813,6 +9813,68 @@ impl Store {
         }
     }
 
+    /// Borrow-scan variant of `lrange` for the zero-copy reply fast path: IDENTICAL
+    /// bookkeeping and index normalization to `lrange` (keyspace hit/miss, LFU bump
+    /// before the type check, chunk-level `iter_from` seek, `touch` only on a
+    /// non-empty in-range result) but drives a single `SmembersScanEvent` sink —
+    /// `Len(count)` then one `Member(&[u8])` per element by borrow — so the runtime
+    /// encodes straight into the output buffer with no `Vec<Vec<u8>>`/`Vec<RespFrame>`
+    /// materialization. Emits `Len(0)` (no members, no touch) for missing keys and
+    /// out-of-range windows, matching `lrange`'s empty reply; `Err(WrongType)` for a
+    /// non-list value. (frankenredis: LRANGE borrow-encode)
+    pub fn lrange_borrow_scan(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        now_ms: u64,
+        mut sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::List(l) => {
+                        let len = l.len() as i64;
+                        let s = normalize_index(start, len).max(0);
+                        let e = normalize_index(stop, len).min(len - 1);
+                        if s > e || s >= len || e < 0 {
+                            sink(SmembersScanEvent::Len(0));
+                            return Ok(());
+                        }
+                        let s = s as usize;
+                        let e = e as usize;
+                        sink(SmembersScanEvent::Len(e - s + 1));
+                        for m in l.iter_from(s).take(e - s + 1) {
+                            sink(SmembersScanEvent::Member(m));
+                        }
+                        entry.touch(now_ms);
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                sink(SmembersScanEvent::Len(0));
+                Ok(())
+            }
+        }
+    }
+
     pub fn lindex(
         &mut self,
         key: &[u8],
