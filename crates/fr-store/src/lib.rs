@@ -15942,7 +15942,11 @@ impl Store {
                 })
                 .collect::<Result<_, _>>()?;
 
-            let mut result = SortedSet::new();
+            // (frankenredis-zsetbulk) Collect the intersection survivors (each
+            // smallest-set member is visited once, so members are unique) and
+            // bulk-build the dest in one O(n) BTreeMap pass instead of N
+            // incremental inserts.
+            let mut pairs: Vec<(Vec<u8>, f64)> = Vec::new();
             let min_weight = weights.get(min_idx).copied().unwrap_or(1.0);
             inputs[min_idx].for_each(|member, score| {
                 let mut aggregate_score = normalize_weighted_score(score, min_weight);
@@ -15957,13 +15961,10 @@ impl Store {
                     aggregate_score =
                         aggregate_scores(aggregate_score, other_score * weight, aggregate);
                 }
-                result.insert_with_limits(
-                    member.to_vec(),
-                    aggregate_score,
-                    zset_max_entries,
-                    zset_max_value,
-                );
+                pairs.push((member.to_vec(), aggregate_score));
             });
+            let result =
+                SortedSet::from_unique_pairs_with_limits(pairs, zset_max_entries, zset_max_value);
             let count = result.len();
             (result, count)
         };
