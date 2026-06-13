@@ -8410,18 +8410,24 @@ impl Store {
             return 0;
         }
 
-        let left_keys: Vec<Vec<u8>> = self
-            .entries
-            .keys()
-            .filter(|key| key.starts_with(left_prefix))
-            .map(|k| k.to_vec())
-            .collect();
-        let right_keys: Vec<Vec<u8>> = self
-            .entries
-            .keys()
-            .filter(|key| key.starts_with(right_prefix))
-            .map(|k| k.to_vec())
-            .collect();
+        // (frankenredis-x8kef) Gather each side via an ordered_keys prefix-range
+        // walk (O(log n + matches)) instead of scanning the whole keyspace twice.
+        // Byte-identical: range [p, prefix_end(p)) then a starts_with guard is
+        // exactly the keys `starts_with(p)` would have kept (the guard covers the
+        // no-upper-bound case where prefix_end overflows).
+        let prefix_keys = |this: &Self, p: &[u8]| -> Vec<Vec<u8>> {
+            let hi = match prefix_range_end(p) {
+                Some(e) => std::ops::Bound::Excluded(e),
+                None => std::ops::Bound::Unbounded,
+            };
+            this.ordered_keys
+                .range::<[u8], _>((std::ops::Bound::Included(p), hi.as_ref().map(Vec::as_slice)))
+                .take_while(|k| k.starts_with(p))
+                .map(|k| k.to_vec())
+                .collect()
+        };
+        let left_keys: Vec<Vec<u8>> = prefix_keys(self, left_prefix);
+        let right_keys: Vec<Vec<u8>> = prefix_keys(self, right_prefix);
 
         let left_count = left_keys.len();
         let right_count = right_keys.len();
@@ -8553,26 +8559,14 @@ impl Store {
             return 0;
         }
 
-        let left_keys: Vec<Vec<u8>> = self
-            .entries
-            .keys()
-            .filter(|key| {
-                decode_db_key(key)
-                    .map(|(db, _)| db == left_db)
-                    .unwrap_or(left_db == 0)
-            })
-            .map(|k| k.to_vec())
-            .collect();
-        let right_keys: Vec<Vec<u8>> = self
-            .entries
-            .keys()
-            .filter(|key| {
-                decode_db_key(key)
-                    .map(|(db, _)| db == right_db)
-                    .unwrap_or(right_db == 0)
-            })
-            .map(|k| k.to_vec())
-            .collect();
+        // (frankenredis-x8kef) Enumerate each DB's physical keys via the ordered
+        // index instead of scanning the WHOLE keyspace twice. For a non-zero DB
+        // this is an O(log n + db_size) prefix-range walk rather than O(total),
+        // so SWAPDB between small DBs in a large keyspace no longer touches the
+        // unrelated DBs. Byte-identical key set (ordered_physical_keys_in_db
+        // applies the SAME db-membership predicate).
+        let left_keys: Vec<Vec<u8>> = self.ordered_physical_keys_in_db(left_db);
+        let right_keys: Vec<Vec<u8>> = self.ordered_physical_keys_in_db(right_db);
 
         let left_count = left_keys.len();
         let right_count = right_keys.len();
@@ -27275,6 +27269,77 @@ mod tests {
                 .hash_field_expires
                 .contains_key(&(b"db0:h".to_vec(), b"f".to_vec())),
             "old (db0:h, f) row must be gone"
+        );
+    }
+
+    // (frankenredis-x8kef) SWAPDB now enumerates each DB's keys via the ordered
+    // index instead of scanning the whole keyspace twice. The enumerated set must
+    // be byte-identical to the old `entries.keys().filter(db)` set, and finding a
+    // small DB in a large keyspace must be O(log n + db_size), not O(total).
+    #[test]
+    fn swapdb_db_enumeration_isomorphic_and_faster_swapdb() {
+        use super::{Store, encode_db_key};
+
+        // Old reference: full-keyspace scan + db-membership filter.
+        fn old_enum(store: &Store, db: usize) -> Vec<Vec<u8>> {
+            let mut v: Vec<Vec<u8>> = store
+                .entries
+                .keys()
+                .filter(|key| {
+                    super::decode_db_key(key)
+                        .map(|(d, _)| d == db)
+                        .unwrap_or(db == 0)
+                })
+                .map(|k| k.to_vec())
+                .collect();
+            v.sort();
+            v
+        }
+
+        // Isomorphism across DBs 0,1,2,3 on a mixed keyspace.
+        let mut store = Store::new();
+        for i in 0..600u32 {
+            let db = (i % 4) as usize;
+            store.set(encode_db_key(db, format!("k{i:04}").as_bytes()), b"v".to_vec(), None, 0);
+        }
+        for db in 0..4usize {
+            let mut got = store.ordered_physical_keys_in_db(db);
+            got.sort();
+            assert_eq!(got, old_enum(&store, db), "db {db} enumeration mismatch");
+        }
+
+        // A/B: 200k keys in DB 0, ~50 in DB 3. Old scans all 200_050 keys; new
+        // walks only DB 3's prefix range.
+        let mut store = Store::new();
+        for i in 0..200_000u32 {
+            store.set(format!("k{i:08}").into_bytes(), b"v".to_vec(), None, 0);
+        }
+        for i in 0..50u32 {
+            store.set(encode_db_key(3, format!("d{i:04}").as_bytes()), b"v".to_vec(), None, 0);
+        }
+        let reps = 2000;
+        let t0 = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            acc += old_enum(&store, 3).len();
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..reps {
+            acc2 += store.ordered_physical_keys_in_db(3).len();
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+        assert_eq!(acc, acc2);
+        println!(
+            "SWAPDB db-enumeration A/B (200050 keys, find 50 in DB3, x{reps}): old(full scan)={old_ns}ns new(prefix range)={new_ns}ns ratio={:.0}x",
+            old_ns as f64 / new_ns as f64
+        );
+        assert!(
+            old_ns as f64 / new_ns as f64 > 2.0 || cfg!(debug_assertions),
+            "expected >2x"
         );
     }
 
