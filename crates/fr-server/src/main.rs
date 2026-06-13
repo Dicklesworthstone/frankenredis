@@ -2403,6 +2403,23 @@ fn parse_borrowed_multibulk_action(
                         argv_len,
                     });
                 }
+                if let Some(key) = borrowed_plain_hgetall_args(&borrowed_args) {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_hgetall_borrowed_into(key, ts, client_resp3, out)
+                        .is_some()
+                    {
+                        return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: parsed.consumed,
+                        });
+                    }
+                    copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                    return Ok(BorrowedMultibulkAction::Parsed {
+                        kind: parsed.kind,
+                        consumed: parsed.consumed,
+                        argv_len,
+                    });
+                }
                 if let Some((key, value)) = borrowed_plain_set_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_set_borrowed(key, value, ts)
                 {
@@ -2767,6 +2784,13 @@ fn borrowed_plain_lrange_args<'a>(
         [command, key, start, stop] if command.eq_ignore_ascii_case(b"LRANGE") => {
             Some((*key, *start, *stop))
         }
+        _ => None,
+    }
+}
+
+fn borrowed_plain_hgetall_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
+    match borrowed_args {
+        [command, key] if command.eq_ignore_ascii_case(b"HGETALL") => Some(*key),
         _ => None,
     }
 }

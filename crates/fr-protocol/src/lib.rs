@@ -153,6 +153,26 @@ pub fn encode_aggregate_header(len: usize, resp3_set: bool, out: &mut Vec<u8>) {
     out.extend_from_slice(b"\r\n");
 }
 
+/// Write a field-value collection header for `pairs` entries: a RESP3 map
+/// (`%pairs\r\n`) when `resp3`, else a flat RESP2 array of `2*pairs` elements
+/// (`*2pairs\r\n`). Byte-identical to `RespFrame::Map(Some(..))` (RESP3) /
+/// `RespFrame::Array(Some(..))` with interleaved field,value (RESP2). Follow with
+/// `encode_bulk_string_slice` for each field then value. (frankenredis: HGETALL
+/// borrow-encode)
+pub fn encode_map_header(pairs: usize, resp3: bool, out: &mut Vec<u8>) {
+    if resp3 {
+        out.reserve(1 + decimal_usize_len(pairs) + 2);
+        out.extend_from_slice(b"%");
+        push_usize(out, pairs);
+    } else {
+        let flat = pairs * 2;
+        out.reserve(1 + decimal_usize_len(flat) + 2);
+        out.extend_from_slice(b"*");
+        push_usize(out, flat);
+    }
+    out.extend_from_slice(b"\r\n");
+}
+
 fn decimal_u64_len(mut n: u64) -> usize {
     let mut len = 1;
     while n >= 10 {
