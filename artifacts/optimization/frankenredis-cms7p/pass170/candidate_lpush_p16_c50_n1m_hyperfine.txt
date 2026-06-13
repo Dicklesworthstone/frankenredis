@@ -1,0 +1,3 @@
+Benchmark 1: /data/tmp/frankenredis-cms7p-candidate-target/release-perf/fr-bench --port 24200 --workload lpush --clients 50 --pipeline 16 --requests 1000000 --keyspace 100000
+  Time (mean ± σ):      2.683 s ±  0.817 s    [User: 0.720 s, System: 1.251 s]
+  Range (min … max):    1.729 s …  3.934 s    7 runs

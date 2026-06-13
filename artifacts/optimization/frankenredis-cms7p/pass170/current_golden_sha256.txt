@@ -1,0 +1,2 @@
+c05d3bd93a2b51ea00e0acbc9f3ff77642c929c4bc5bac981281d2b5bce4a1b2  artifacts/optimization/frankenredis-cms7p/pass170/current_golden_input.resp
+5c269b8508946fe15a294b09e4d28549ca013b905520ff2ac5bebe99c3961f81  artifacts/optimization/frankenredis-cms7p/pass170/current_golden_output.resp

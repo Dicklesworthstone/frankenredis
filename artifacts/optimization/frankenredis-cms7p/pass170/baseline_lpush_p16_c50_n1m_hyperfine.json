@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/frankenredis-3uwif-release-perf-target/release-perf/fr-bench --port 24197 --workload lpush --clients 50 --pipeline 16 --requests 1000000 --keyspace 100000",
+      "mean": 2.7281525749342856,
+      "stddev": 0.6611866267909458,
+      "median": 2.81050927522,
+      "user": 0.7363531400000001,
+      "system": 1.2524809057142856,
+      "min": 1.9473871882200002,
+      "max": 3.80982132722,
+      "times": [
+        2.03340299022,
+        1.9473871882200002,
+        2.4390632262199996,
+        2.81628062822,
+        2.81050927522,
+        3.24060338922,
+        3.80982132722
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

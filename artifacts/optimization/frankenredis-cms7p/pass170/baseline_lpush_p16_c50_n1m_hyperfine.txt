@@ -1,0 +1,3 @@
+Benchmark 1: /data/tmp/frankenredis-3uwif-release-perf-target/release-perf/fr-bench --port 24197 --workload lpush --clients 50 --pipeline 16 --requests 1000000 --keyspace 100000
+  Time (mean ± σ):      2.728 s ±  0.661 s    [User: 0.736 s, System: 1.252 s]
+  Range (min … max):    1.947 s …  3.810 s    7 runs

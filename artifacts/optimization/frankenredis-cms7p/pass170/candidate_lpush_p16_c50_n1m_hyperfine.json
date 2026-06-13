@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/frankenredis-cms7p-candidate-target/release-perf/fr-bench --port 24200 --workload lpush --clients 50 --pipeline 16 --requests 1000000 --keyspace 100000",
+      "mean": 2.6829775104057143,
+      "stddev": 0.8167287110595309,
+      "median": 2.58641752012,
+      "user": 0.7196117571428571,
+      "system": 1.2511275142857141,
+      "min": 1.72934239712,
+      "max": 3.93449617412,
+      "times": [
+        1.72934239712,
+        1.98090398112,
+        2.22847507212,
+        2.58641752012,
+        2.73545743912,
+        3.58574998912,
+        3.93449617412
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
