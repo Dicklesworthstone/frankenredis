@@ -12887,11 +12887,15 @@ impl Store {
                     let e_idx = e.min(len as i64 - 1) as usize;
                     let count = e_idx - s_idx + 1;
                     // Collect the members in rank range [s_idx, e_idx]; the
-                    // order-statistic tree (when already built) jumps to s_idx in
-                    // O(log n) instead of an O(s_idx) linear skip over the
-                    // filter_map iterator. (frankenredis-2ispi)
+                    // order-statistic tree jumps to s_idx in O(log n) instead of
+                    // an O(s_idx) linear skip over the filter_map iterator
+                    // (frankenredis-2ispi). Use the ADAPTIVE slice so a fresh
+                    // zset hit by ZREMRANGEBYRANK (e.g. a rate-limiter trimming
+                    // old entries) builds the treap rather than paying the
+                    // O(s_idx) skip on every call — the cold path that left this
+                    // at O(n). (frankenredis-idtng)
                     let to_remove: Vec<Vec<u8>> = zs
-                        .index_slice_asc(s_idx, count)
+                        .index_slice_asc_adaptive(s_idx, count)
                         .into_iter()
                         .map(|(m, _)| m)
                         .collect();
