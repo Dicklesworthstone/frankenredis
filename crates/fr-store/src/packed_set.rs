@@ -929,6 +929,19 @@ impl PackedList {
             pos: 0,
         }
     }
+
+    /// Iterator starting at element index `start`. A packed list is bounded by
+    /// `PACKED_MAX_ENTRIES`, so the O(start) varint walk is trivially cheap.
+    /// (frankenredis-3r9lz)
+    pub fn iter_from(&self, start: usize) -> PackedListIter<'_> {
+        let mut it = self.iter();
+        for _ in 0..start {
+            if it.next().is_none() {
+                break;
+            }
+        }
+        it
+    }
 }
 
 impl<'a> FromIterator<&'a [u8]> for PackedList {
@@ -1152,6 +1165,54 @@ impl ChunkedList {
             chunks: self.chunks.iter(),
             current: None,
         }
+    }
+
+    /// Forward iterator starting at element index `start`, seeking at the CHUNK
+    /// level from whichever end is closer — O(min(start, len-start)/chunk + chunk)
+    /// instead of the O(start) element-by-element `iter().skip(start)`. Mirrors
+    /// redis's quicklistIndex, which walks ~start/128 nodes from the nearest end.
+    /// (frankenredis-3r9lz)
+    fn iter_from(&self, start: usize) -> ChunkedListIter<'_> {
+        if start >= self.len {
+            return ChunkedListIter {
+                chunks: self.chunks.range(self.chunks.len()..),
+                current: None,
+            };
+        }
+        let (chunk_idx, base) = if start * 2 <= self.len {
+            let mut base = 0usize;
+            let mut idx = 0usize;
+            for chunk in self.chunks.iter() {
+                let n = chunk.elems.len();
+                if start < base + n {
+                    break;
+                }
+                base += n;
+                idx += 1;
+            }
+            (idx, base)
+        } else {
+            let mut base = self.len;
+            let mut idx = self.chunks.len();
+            for chunk in self.chunks.iter().rev() {
+                base -= chunk.elems.len();
+                idx -= 1;
+                if start >= base {
+                    break;
+                }
+            }
+            (idx, base)
+        };
+        let local = start - base;
+        let mut chunks = self.chunks.range(chunk_idx..);
+        let current = chunks.next().map(|c| {
+            let mut it = c.elems.iter();
+            for _ in 0..local {
+                it.next();
+            }
+            it
+        });
+        ChunkedListIter { chunks, current }
     }
 }
 
@@ -1610,6 +1671,16 @@ impl ListValue {
         match &self.repr {
             ListRepr::Packed(p) => ListValueIter::Packed(p.iter()),
             ListRepr::Deque(d) => ListValueIter::Deque(d.iter()),
+        }
+    }
+
+    /// Forward iterator starting at element index `start`, seeking at the chunk
+    /// level for the large (quicklist) encoding so LRANGE with a deep start is
+    /// O(start/chunk + count) not O(start). (frankenredis-3r9lz)
+    pub fn iter_from(&self, start: usize) -> ListValueIter<'_> {
+        match &self.repr {
+            ListRepr::Packed(p) => ListValueIter::Packed(p.iter_from(start)),
+            ListRepr::Deque(d) => ListValueIter::Deque(d.iter_from(start)),
         }
     }
 }

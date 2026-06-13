@@ -9395,9 +9395,10 @@ impl Store {
                         }
                         let s = s as usize;
                         let e = e as usize;
+                        // (frankenredis-3r9lz) Seek to `s` at the chunk level
+                        // (O(s/chunk)) instead of an O(s) element-by-element skip.
                         let result: Vec<Vec<u8>> = l
-                            .iter()
-                            .skip(s)
+                            .iter_from(s)
                             .take(e - s + 1)
                             .map(<[u8]>::to_vec)
                             .collect();
