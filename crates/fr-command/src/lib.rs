@@ -26796,10 +26796,53 @@ fn sort_generic(
         i += 1;
     }
 
+    // ── Determine if sorting should be skipped (BY with constant pattern) ──
+    let dontsort = by_pattern.as_ref().is_some_and(|p| !p.contains(&b'*'));
+
     // ── Get elements from the source key ─────────────────────────────
-    let mut elements = store
-        .sort_elements(key, now_ms)
-        .map_err(CommandError::Store)?;
+    // (frankenredis-oun4r) dontsort over a LIST with a real LIMIT: load ONLY the
+    // natural-order window via the chunk-seeking lrange instead of materialising
+    // the whole list and truncating it (O(limit) not O(n)). The natural order of
+    // a list under dontsort is its element order (ASC) or its reverse (DESC), and
+    // GET/STORE/output all run on the post-LIMIT window — so the windowed load is
+    // byte-identical. Sets/zsets and the no-LIMIT case keep the full path.
+    let limit_restricts = limit_offset > 0 || limit_count >= 0;
+    let windowed = dontsort
+        && limit_restricts
+        && store.value_type(key, now_ms) == Some(ValueType::List);
+    let mut elements = if windowed {
+        let len = store.llen(key, now_ms).map_err(CommandError::Store)? as i64;
+        let start = limit_offset.clamp(0, len);
+        let count = if limit_count < 0 {
+            len - start
+        } else {
+            limit_count.min(len - start).max(0)
+        };
+        let window = if count == 0 {
+            Vec::new()
+        } else if !desc {
+            store
+                .lrange(key, start, start + count - 1, now_ms)
+                .map_err(CommandError::Store)?
+        } else {
+            // DESC dontsort = reverse(list), windowed. reverse(list)[start..start+count]
+            // == list[len-start-count .. len-start] reversed.
+            let mut w = store
+                .lrange(key, len - start - count, len - start - 1, now_ms)
+                .map_err(CommandError::Store)?;
+            w.reverse();
+            w
+        };
+        // The window is already the final post-LIMIT output; neutralise the
+        // shared LIMIT block below.
+        limit_offset = 0;
+        limit_count = -1;
+        window
+    } else {
+        store
+            .sort_elements(key, now_ms)
+            .map_err(CommandError::Store)?
+    };
 
     if elements.is_empty() {
         if let Some(dest) = store_dest {
@@ -26809,11 +26852,10 @@ fn sort_generic(
         return Ok(RespFrame::Array(Some(Vec::new())));
     }
 
-    // ── Determine if sorting should be skipped (BY with constant pattern) ──
-    let dontsort = by_pattern.as_ref().is_some_and(|p| !p.contains(&b'*'));
-
     // ── Sort the elements ────────────────────────────────────────────
-    if dontsort {
+    if windowed {
+        // Already loaded in final natural order + windowed; nothing to sort.
+    } else if dontsort {
         // BY nosort: preserve natural order. (upstream sort.c)
         let is_set = store
             .value_type(key, now_ms)
