@@ -1054,15 +1054,35 @@ impl ChunkedList {
         if idx >= self.len {
             return None;
         }
-        let mut base = 0usize;
-        for (chunk_idx, chunk) in self.chunks.iter().enumerate() {
-            let next = base + chunk.len();
-            if idx < next {
-                return Some((chunk_idx, idx - base));
+        // (frankenredis-vizeb) Walk from whichever END is nearer, mirroring
+        // redis quicklist's head/tail-relative node walk: front for the first
+        // half, back for the second. A front-only scan made deep-tail access
+        // (LINDEX/LSET key -1 on a long list) O(num_chunks); choosing the
+        // nearer end makes it O(min(idx, len-1-idx) / chunk) — O(1) at either
+        // end. Byte-identical: the chunks partition the list in order, so the
+        // (chunk_idx, local_idx) returned is exactly the front-walk result.
+        if idx < self.len / 2 {
+            let mut base = 0usize;
+            for (chunk_idx, chunk) in self.chunks.iter().enumerate() {
+                let next = base + chunk.len();
+                if idx < next {
+                    return Some((chunk_idx, idx - base));
+                }
+                base = next;
             }
-            base = next;
+            None
+        } else {
+            // `base` tracks the index of the first element of the current chunk
+            // as we sweep chunks from the back.
+            let mut base = self.len;
+            for (chunk_idx, chunk) in self.chunks.iter().enumerate().rev() {
+                base -= chunk.len();
+                if idx >= base {
+                    return Some((chunk_idx, idx - base));
+                }
+            }
+            None
         }
-        None
     }
 
     fn push_back(&mut self, elem: Vec<u8>) {
@@ -2083,8 +2103,8 @@ impl<'a> Iterator for PackedZSetIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ListRepr, ListValue, PACKED_MAX_ENTRIES, PackedList, PackedStrMap, PackedStrSet,
-        PackedZSet, zset_cmp,
+        ChunkedList, LIST_CHUNK_TARGET, ListRepr, ListValue, PACKED_MAX_ENTRIES, PackedList,
+        PackedStrMap, PackedStrSet, PackedZSet, zset_cmp,
     };
     use indexmap::{IndexMap, IndexSet};
     use proptest::prelude::*;
@@ -2557,5 +2577,82 @@ mod tests {
         assert_eq!(m.shift_remove(b"a"), Some(b"1".to_vec()));
         assert_eq!(m.get_index(0), Some((&b"b"[..], &b"22222"[..])));
         assert_eq!(m.len(), 2);
+    }
+
+    // (frankenredis-vizeb) ChunkedList::locate now walks from the nearer end.
+    // It MUST return exactly the same (chunk_idx, local_idx) as a front-only walk
+    // for every index, and ListValue::get must return the right element from both
+    // halves. A/B: deep-tail locate goes O(num_chunks) -> O(1).
+    #[test]
+    fn chunked_list_locate_nearer_end_isomorphic_and_faster_listidx() {
+        // Front-only reference == the pre-listidx implementation.
+        fn front_only_locate(cl: &ChunkedList, idx: usize) -> Option<(usize, usize)> {
+            if idx >= cl.len {
+                return None;
+            }
+            let mut base = 0usize;
+            for (chunk_idx, chunk) in cl.chunks.iter().enumerate() {
+                let next = base + chunk.len();
+                if idx < next {
+                    return Some((chunk_idx, idx - base));
+                }
+                base = next;
+            }
+            None
+        }
+
+        // Several lengths straddling chunk boundaries (LIST_CHUNK_TARGET=128).
+        for &n in &[1usize, 127, 128, 129, 1000, 4096] {
+            let d: VecDeque<Vec<u8>> = (0..n).map(|i| format!("e{i}").into_bytes()).collect();
+            let cl = ChunkedList::from(d);
+            assert_eq!(cl.len(), n);
+            for idx in 0..n {
+                assert_eq!(
+                    cl.locate(idx),
+                    front_only_locate(&cl, idx),
+                    "n={n} idx={idx}: nearer-end locate diverged from front-only"
+                );
+                // And the located element is the right one.
+                assert_eq!(cl.get(idx), Some(format!("e{idx}").into_bytes().as_slice()));
+            }
+            assert_eq!(cl.locate(n), None);
+        }
+
+        // A/B: deep-tail locate. Old front-walk is O(num_chunks); new is O(1).
+        let n = 400_000usize;
+        let d: VecDeque<Vec<u8>> = (0..n).map(|i| format!("e{i}").into_bytes()).collect();
+        let cl = ChunkedList::from(d);
+        let tail = n - 1;
+        let reps = 200_000usize;
+
+        let mut acc = 0usize;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            acc += front_only_locate(std::hint::black_box(&cl), std::hint::black_box(tail))
+                .map_or(0, |(c, _)| c);
+        }
+        let old_ns = t0.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc);
+
+        let mut acc2 = 0usize;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            acc2 += cl
+                .locate(std::hint::black_box(tail))
+                .map_or(0, |(c, _)| c);
+        }
+        let new_ns = t1.elapsed().as_nanos().max(1);
+        std::hint::black_box(acc2);
+
+        let chunks = (n + LIST_CHUNK_TARGET - 1) / LIST_CHUNK_TARGET;
+        println!(
+            "ChunkedList tail-locate A/B (n={n}, {chunks} chunks, x{reps}): front-walk={old_ns}ns nearer-end={new_ns}ns ratio={:.1}x",
+            old_ns as f64 / new_ns as f64
+        );
+        assert!(
+            (old_ns as f64 / new_ns as f64) > 2.0 || cfg!(debug_assertions),
+            "expected >2x, got {:.1}x",
+            old_ns as f64 / new_ns as f64
+        );
     }
 }
