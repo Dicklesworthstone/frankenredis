@@ -7121,12 +7121,20 @@ impl Store {
                 // hash crosses the listpack threshold, vendored keeps it
                 // at `hashtable` even if a later CONFIG SET raises the
                 // threshold or fields are deleted.
-                let fits_listpack = !entry.force_hash_hashtable_encoding
-                    && m.len() <= self.hash_max_listpack_entries
-                    && m.iter().all(|(k, v)| {
-                        k.len() <= self.hash_max_listpack_value
-                            && v.len() <= self.hash_max_listpack_value
-                    });
+                //
+                // (frankenredis-a0p5p) Conversion is decided FORWARD-ONLY at
+                // WRITE time: `refresh_hash_encoding_flag` sets
+                // `force_hash_hashtable_encoding` on every mutating path
+                // (hset/hsetnx/hincr*/RESTORE/COPY/RDB replay) whenever the hash
+                // crosses either listpack threshold under the THEN-current
+                // config, and the flag is one-way sticky. So the flag is the
+                // complete record of conversions — OBJECT ENCODING reads it and
+                // must NOT re-derive from the CURRENT config + size. Re-deriving
+                // wrongly flipped a never-crossed listpack hash to `hashtable`
+                // after a bare CONFIG SET hash-max-listpack-* lowering with no
+                // intervening write (upstream only converts on the next write).
+                let _ = m;
+                let fits_listpack = !entry.force_hash_hashtable_encoding;
                 match (fits_listpack, hash_has_field_ttl) {
                     (true, false) => "listpack",
                     (false, false) => "hashtable",
@@ -7177,29 +7185,37 @@ impl Store {
                 }
             }
             Value::Set(s) => {
+                // (frankenredis-a0p5p) Conversion is FORWARD-ONLY at write time:
+                // `refresh_set_encoding_flags` sets `force_set_listpack_encoding`
+                // / `force_set_hashtable_encoding` whenever a write makes the set
+                // stop fitting intset / listpack under the THEN-current config,
+                // and the markers are one-way sticky. A force-unset set therefore
+                // never crossed a threshold at any write, so it is exactly intset
+                // (when still integer-only) or listpack — read the markers and
+                // the intrinsic variant, do NOT re-derive against the CURRENT
+                // config (which wrongly converted on a bare CONFIG SET
+                // set-max-{intset,listpack}-* lowering with no intervening write).
                 if entry.force_set_hashtable_encoding {
                     "hashtable"
                 } else if entry.force_set_listpack_encoding {
                     "listpack"
-                } else if Self::set_fits_intset(s, self.set_max_intset_entries) {
+                } else if s.is_intset() {
                     "intset"
-                } else if Self::set_fits_listpack(
-                    s,
-                    self.set_max_listpack_entries,
-                    self.set_max_listpack_value,
-                ) {
-                    "listpack"
                 } else {
-                    "hashtable"
+                    "listpack"
                 }
             }
             Value::SortedSet(zs) => {
                 // (frankenredis-yp503) Sticky skiplist encoding (same
                 // one-way promotion as hashes / sets).
-                if !entry.force_zset_skiplist_encoding
-                    && zs.len() <= self.zset_max_listpack_entries
-                    && zs.keys().all(|k| k.len() <= self.zset_max_listpack_value)
-                {
+                // (frankenredis-a0p5p) Conversion is FORWARD-ONLY at write time
+                // (`refresh_zset_encoding_flag` sets the sticky marker on every
+                // zadd/zincr*/RESTORE/COPY/RDB replay that crosses a threshold),
+                // so read the marker only — re-deriving from the CURRENT config +
+                // size wrongly flipped a never-crossed listpack zset to
+                // `skiplist` after a bare CONFIG SET zset-max-listpack-* lowering.
+                let _ = zs;
+                if !entry.force_zset_skiplist_encoding {
                     "listpack"
                 } else {
                     "skiplist"
