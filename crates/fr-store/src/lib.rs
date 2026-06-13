@@ -9388,7 +9388,9 @@ impl Store {
         values: &[M],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -9456,7 +9458,9 @@ impl Store {
         values: &[M],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -29477,6 +29481,27 @@ mod tests {
         assert_eq!(store.lpop(b"l", 0).unwrap(), Some(b"b".to_vec()));
         assert_eq!(store.rpop(b"l", 0).unwrap(), Some(b"c".to_vec()));
         assert_eq!(store.llen(b"l", 0).unwrap(), 1);
+    }
+
+    #[test]
+    fn list_push_reaps_expired_key_before_mutation() {
+        let mut store = Store::new();
+        store.set_with_abs_expiry(b"l".to_vec(), b"old".to_vec(), Some(10), 0);
+
+        assert_eq!(store.lpush(b"l", &[b"new".to_vec()], 20).unwrap(), 1);
+        assert_eq!(store.take_lazy_expired_propagation(), vec![b"l".to_vec()]);
+        assert_eq!(
+            store.lrange(b"l", 0, -1, 20).unwrap(),
+            vec![b"new".to_vec()]
+        );
+
+        store.set_with_abs_expiry(b"r".to_vec(), b"old".to_vec(), Some(10), 0);
+        assert_eq!(store.rpush(b"r", &[b"new".to_vec()], 20).unwrap(), 1);
+        assert_eq!(store.take_lazy_expired_propagation(), vec![b"r".to_vec()]);
+        assert_eq!(
+            store.lrange(b"r", 0, -1, 20).unwrap(),
+            vec![b"new".to_vec()]
+        );
     }
 
     #[test]

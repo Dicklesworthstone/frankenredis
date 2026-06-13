@@ -1,0 +1,3 @@
+e8eae7df83dcc3aaf85047b91c48b077099bc27976b80cdb817ad16faae6a15d  artifacts/optimization/frankenredis-cms7p/golden/list-push-expiry-golden.resp
+0ae52cb40e2687096669173b4bf060219b9079b66a7be54f61ac963c711820e8  artifacts/optimization/frankenredis-cms7p/golden/baseline.output.resp
+0ae52cb40e2687096669173b4bf060219b9079b66a7be54f61ac963c711820e8  artifacts/optimization/frankenredis-cms7p/golden/candidate.output.resp

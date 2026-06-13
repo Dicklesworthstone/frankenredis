@@ -1,0 +1,5 @@
+Benchmark 1: /data/tmp/frankenredis-cms7p-candidate-target/release/fr-bench --port 25228 --workload lpush --clients 50 --pipeline 16 --requests 5000000 --keyspace 100000 --key-prefix cms7p:pair5 --json-out artifacts/optimization/frankenredis-cms7p/paired-run2-n5m-candidate-first/candidate-last.json
+  Time (mean ± σ):      6.835 s ±  0.237 s    [User: 3.331 s, System: 5.027 s]
+  Range (min … max):    6.567 s …  7.033 s    5 runs
+ 
+Benchmark 2: /data/tmp/frankenredis-cms7p-baseline-target/release/fr-bench --port 25227 --workload lpush --clients 50 --pipeline 16 --requests 5000000 --keyspace 100000 --key-prefix cms7p:pair5 --json-out artifacts/optimization/frankenredis-cms7p/paired-run2-n5m-candidate-first/baseline-last.json

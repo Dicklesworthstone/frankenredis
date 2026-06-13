@@ -1,0 +1,11 @@
+Benchmark 1: /data/tmp/frankenredis-cms7p-candidate-target/release/fr-bench --port 25230 --workload lpush --clients 50 --pipeline 16 --requests 5000000 --keyspace 100000 --key-prefix cms7p:pair5 --json-out artifacts/optimization/frankenredis-cms7p/paired-run3-n5m-candidate-first/candidate-last.json
+  Time (mean ± σ):      6.667 s ±  0.305 s    [User: 3.403 s, System: 5.103 s]
+  Range (min … max):    6.326 s …  7.087 s    5 runs
+ 
+Benchmark 2: /data/tmp/frankenredis-cms7p-baseline-target/release/fr-bench --port 25229 --workload lpush --clients 50 --pipeline 16 --requests 5000000 --keyspace 100000 --key-prefix cms7p:pair5 --json-out artifacts/optimization/frankenredis-cms7p/paired-run3-n5m-candidate-first/baseline-last.json
+  Time (mean ± σ):      7.586 s ±  0.123 s    [User: 3.485 s, System: 5.477 s]
+  Range (min … max):    7.393 s …  7.700 s    5 runs
+ 
+Summary
+  /data/tmp/frankenredis-cms7p-candidate-target/release/fr-bench --port 25230 --workload lpush --clients 50 --pipeline 16 --requests 5000000 --keyspace 100000 --key-prefix cms7p:pair5 --json-out artifacts/optimization/frankenredis-cms7p/paired-run3-n5m-candidate-first/candidate-last.json ran
+    1.14 ± 0.06 times faster than /data/tmp/frankenredis-cms7p-baseline-target/release/fr-bench --port 25229 --workload lpush --clients 50 --pipeline 16 --requests 5000000 --keyspace 100000 --key-prefix cms7p:pair5 --json-out artifacts/optimization/frankenredis-cms7p/paired-run3-n5m-candidate-first/baseline-last.json

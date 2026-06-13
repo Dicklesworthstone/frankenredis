@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/frankenredis-cms7p-baseline-target/release/fr-bench --port 25225 --workload lpush --clients 50 --pipeline 16 --requests 1000000 --keyspace 100000 --key-prefix cms7p:pair --json-out artifacts/optimization/frankenredis-cms7p/paired-run1/baseline-last.json",
+      "mean": 1.46028774724,
+      "stddev": 0.13173681063346726,
+      "median": 1.4285835708399999,
+      "user": 0.7388716599999999,
+      "system": 1.1179846999999998,
+      "min": 1.32892110434,
+      "max": 1.8008021623400001,
+      "times": [
+        1.32892110434,
+        1.4401416173400001,
+        1.43379524234,
+        1.49148973734,
+        1.8008021623400001,
+        1.51869847934,
+        1.37232225534,
+        1.38451956534,
+        1.40881540934,
+        1.42337189934
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/frankenredis-cms7p-candidate-target/release/fr-bench --port 25226 --workload lpush --clients 50 --pipeline 16 --requests 1000000 --keyspace 100000 --key-prefix cms7p:pair --json-out artifacts/optimization/frankenredis-cms7p/paired-run1/candidate-last.json",
+      "mean": 1.33888654084,
+      "stddev": 0.0652302885410632,
+      "median": 1.32951810334,
+      "user": 0.7512114599999999,
+      "system": 1.1405453,
+      "min": 1.24553552334,
+      "max": 1.42955638534,
+      "times": [
+        1.42894727234,
+        1.42955638534,
+        1.3030144323400001,
+        1.26508106934,
+        1.36164788734,
+        1.2995643643400001,
+        1.35139703334,
+        1.24553552334,
+        1.3964822673400001,
+        1.3076391733400001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

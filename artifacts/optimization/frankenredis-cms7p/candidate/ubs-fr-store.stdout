@@ -1,0 +1,633 @@
+ℹ Ignoring paths from /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/.ubsignore → **/tests/** **/test/** **/testing/** **/benches/** **/bench/** **/examples/** target .git legacy_redis_code crates/fr-conformance golden_outputs baselines artifacts scripts *_test.rs *_tests.rs test_*.rs tests.rs .idea .vscode *.swp *.swo *.md docs
+ℹ Preparing shadow workspace for 1 specified file(s)
+ℹ Scanning shadow workspace at /data/tmp/tmp.DIOOjjWEZy/files_scan
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗              ║
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝              ║
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗                ║
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝                ║
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗              ║
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝              ║
+║                                                                              ║
+║  ██████╗ ██╗   ██╗ ██████╗         __       __                               ║
+║  ██╔══██╗██║   ██║██╔════╝         \ `-'"-'` /                               ║
+║  ██████╔╝██║   ██║██║  ███╗        / \_   _/ \                               ║
+║  ██╔══██╗██║   ██║██║   ██║        |  d\_/b  |                               ║
+║  ██████╔╝╚██████╔╝╚██████╔╝       .'\   V   /'.                              ║
+║  ╚═════╝  ╚═════╝  ╚═════╝        /   '-...-'   \                            ║
+║                                  | /         \ |                             ║
+║                                  \/\         /\/                             ║
+║                                  ==(||)---(||)==                             ║
+║                                                                              ║
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗              ║
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗             ║
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝             ║
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗             ║
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║             ║
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝                  ║
+║                                                                              ║
+║   JS / TS • PYTHON • C / C++ • RUST • GO • JAVA • RUBY                       ║
+║   SWIFT • C# • ELIXIR                                                        ║
+║                    UBS: ULTIMATE BUG SCANNER • SARIF FUSION ☄️               ║
+║                                                                              ║
+║                                                                              ║
+║                     Night Owl QA                                             ║
+║                     “We see bugs before you do.”                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+UBS Meta-Runner v5.3.2  2026-06-13 08:27:36
+Project: /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613
+Format:  text
+Detected: rust
+
+──────── rust ────────
+
+╔═══════════════════════════════════════════════════════════════════╗ 
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗   ║ 
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝   ║ 
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗     ║ 
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝     ║ 
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗   ║ 
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝   ║ 
+║                                            /\                     ║ 
+║  ██████╗ ██╗   ██╗ ██████╗                ( /   @ @    ()         ║ 
+║  ██╔══██╗██║   ██║██╔════╝                 \  __| |__  /          ║ 
+║  ██████╔╝██║   ██║██║  ███╗                 -/   "   \-           ║ 
+║  ██╔══██╗██║   ██║██║   ██║                /-|       |-\          ║ 
+║  ██████╔╝╚██████╔╝╚██████╔╝               / /-\     /-\ \         ║ 
+║  ╚═════╝  ╚═════╝  ╚═════╝                 / /-`---'-\\ \          ║ 
+║                                             /         \           ║ 
+║                                                                   ║ 
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗   ║ 
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗  ║ 
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝  ║ 
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗  ║ 
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║  ║ 
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝       ║ 
+║                                                                   ║ 
+║  Rust module • ownership sanity, unsafe & async spotlights        ║ 
+║  UBS module: rust • cargo-aware targeting, low-noise caching      ║ 
+║  ASCII homage: Ferris crab (ASCII Art Archive)                    ║ 
+║  Run standalone: modules/ubs-rust.sh --help                       ║ 
+║                                                                   ║ 
+║  Night Owl QA                                                     ║ 
+║  “We see bugs before you do.”                                     ║ 
+╚═══════════════════════════════════════════════════════════════════╝ 
+                                                                      
+
+Project:  /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613
+Started:  2026-06-13 08:27:37
+Files:    1 source files (rs)
+
+✓ ast-grep available (ast-grep) - full AST analysis enabled
+✓ cargo detected
+  ✓ clippy available
+  ✓ rustfmt available
+  ✓ cargo-audit available
+  ✓ cargo-deny available
+  ⚠ cargo-udeps not installed
+  ⚠ cargo-outdated not installed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OWNERSHIP & ERROR HANDLING MACROS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: unwrap/expect, panic/unreachable/todo/unimplemented, dbg/println
+Panic-prone and debug macros frequently leak into production and cause crashes
+
+• unwrap()/expect() usage
+  ⚠ Warning (3046 found)
+    Potential panics via unwrap/expect
+    Prefer `?` or match to propagate/handle errors
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:16366 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L16366)
+                  let a = u64::from_ne_bytes(dc.try_into().unwrap());
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:16367 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L16367)
+                  let b = u64::from_ne_bytes(sc.try_into().unwrap());
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:16385 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L16385)
+                  let b = u64::from_ne_bytes(sc.try_into().unwrap());
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:24014 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L24014)
+              store
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:24015 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L24015)
+                  .sentinel_state
+
+• panic!/unreachable!/todo!/unimplemented!
+  🔥 CRITICAL (16 found)
+    panic! macro(s) present
+    Avoid panic! in library code
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:26546 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L26546)
+                  other => panic!("small string should be inline, got {other:?}"),
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:35703 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L35703)
+                      .unwrap_or_else(|e| panic!("INCRBYFLOAT {delta_text:?} errored: {e:?}"));
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:35905 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L35905)
+                      .unwrap_or_else(|e| panic!("{delta} should be accepted, got {e:?}"));
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:38945 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L38945)
+                      .unwrap_or_else(|_| panic!("all-zeros len {len} should restore like redis"));
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:41208 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L41208)
+                      .unwrap_or_else(|_| panic!("flag {flag} must load"));
+  ⚠ Warning (9 found)
+    unreachable! may panic if reached
+    Double-check logic
+
+• dbg!/println!/eprintln!
+  ℹ Info (101 found)
+    println! found - prefer logging
+  ℹ Info (41 found)
+    eprintln! found - prefer logging
+
+• Guard clauses that still unwrap later
+  ✓ OK No guard/unwrap mismatches detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. UNSAFE & MEMORY OPERATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: unsafe blocks, transmute/uninitialized/zeroed/forget, raw ffi hazards
+These patterns may introduce UB, memory leaks, or hard-to-debug crashes
+
+• unsafe { ... } blocks
+  ✓ OK No unsafe blocks detected
+
+• transmute, uninitialized, zeroed, assume_init, forget
+
+• CStr::from_bytes_with_nul_unchecked
+
+• get_unchecked / from_utf8_unchecked / from_raw_parts
+
+• Unsafe Send/Sync impls
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. CONCURRENCY & ASYNC PITFALLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: Arc<Mutex>, Rc<RefCell>, blocking ops in async, await-in-loop, spawn misuse
+Concurrency misuse leads to deadlocks, head-of-line blocking, and performance issues
+
+• Arc<Mutex<..>> / Rc<RefCell<..>> / RwLock
+
+• Mutex::lock().unwrap()/expect()
+
+• await inside loops (sequentialism)
+
+• Blocking ops inside async (thread::sleep, std::fs)
+
+• block_on within async context
+
+• std::thread::spawn within async
+
+• tokio::spawn usage (heuristic for detached tasks)
+
+• Async error path coverage
+  ✓ OK No tokio::spawn usage detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. NUMERIC & FLOATING-POINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: float equality, division/modulo by variable, potential overflow hints
+Numeric bugs cause subtle logic errors or panics in debug builds (overflow)
+
+• Floating-point equality comparisons
+  ℹ Info (19 found)
+    Float equality/inequality check
+    Consider epsilon comparisons
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:22679 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L22679)
+          if score == 0.0 { 0.0 } else { score }
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:23249 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L23249)
+          if x == 1.0 {
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:23268 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L23268)
+          if x == 0.0 || x == 1.0 {
+
+• Division/modulo by variable (verify non-zero)
+  ℹ Info (97 found)
+    Division by variables - guard zero divisors
+  ℹ Info (40 found)
+    Modulo by variables - guard zero divisors
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. COLLECTIONS & ITERATORS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: clone in loops, collect then iterate, nth(0), length checks
+Iterator misuse often leads to unnecessary allocations or slow paths
+
+• clone() occurrences & clone() in loops
+  ℹ Info (212 found)
+    clone() usages - audit for necessity
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:298 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L298)
+                  out.push(arg.clone());
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:432 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L432)
+                  *counts.entry(pending_entry.consumer.clone()).or_default() += 1;
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:470 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L470)
+                  .map(|(consumer, &count)| (consumer.clone(), count))
+  ⚠ Warning (147 found)
+    clone() inside loops - potential perf hit
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:298 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L298)
+      out.push(arg.clone());
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:432 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L432)
+      *counts.entry(pending_entry.consumer.clone()).or_default() += 1;
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:509 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L509)
+      consumer.clone(),
+
+• collect::<Vec<_>>() then for
+  ℹ Info (4 found)
+    collect::<Vec<_>>() usage - consider streaming
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:20422 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L20422)
+                  entries
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:20423 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L20423)
+                      .into_iter()
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:20424 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L20424)
+                      .map(|entry| entry.to_bytes())
+
+• nth(0) → next()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. STRING & ALLOCATION SMELLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: needless allocations, format!(literal), to_owned().to_string()
+Unnecessary allocations and conversions reduce performance
+
+• to_owned().to_string() chain
+
+• format!("literal") with no placeholders
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. FILESYSTEM & PROCESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: blocking std::fs in async, process::Command usage heuristics
+I/O misuse or command construction from untrusted input can be risky
+
+• std::fs usage (general inventory)
+  ℹ Info (5 found)
+    std::fs operations present - consider async equivalents where applicable
+
+• std::process::Command usage
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. SECURITY FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: TLS verification disabled, weak hash algos, security-sensitive non-crypto randomness, timing-unsafe secret comparisons, JWT verification bypasses, shell command injection, request-derived response headers/open redirects/host-header absolute URLs/outbound URLs/SQL/regex, unbounded request body reads, credentialed CORS, HTTP URLs, secrets
+Security misconfigurations can lead to credential leaks, command injection, and MITM attacks
+
+• Weak hash algorithms (MD5/SHA1)
+  ✓ OK No MD5/SHA1 found
+
+• TLS verification disabled
+
+• Security-sensitive non-crypto randomness
+  ✓ OK No security-sensitive non-crypto randomness detected
+
+• Secret/token comparisons without timing-safe equality
+  🔥 CRITICAL (228 found)
+    Secret, signature, or token compared with ==/!=
+    Use subtle::ConstantTimeEq, ring::constant_time::verify_slices_are_equal, crypto_memcmp, or a reviewed constant-time helper for bearer tokens, HMACs, CSRF values, reset secrets, API keys, and signatures
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:173 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L173)
+      if (flags & NOTIFY_ALL) == NOTIFY_ALL {
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:287 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L287)
+      if slargc != argc && j == slargc - 1 {
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:621 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L621)
+      .all(|(member, score)| other.get_score(member).is_some_and(|other| other == score))
+
+• JWT decode, validation bypass, or missing claim binding
+  🔥 CRITICAL (8 found)
+    JWT decode/validation bypass risk
+    Use jsonwebtoken::decode with a real DecodingKey and Validation that keeps signature, expiration, issuer, and audience checks enabled and required; avoid dangerous::insecure_decode, dangerous_unsafe_decode, insecure_disable_signature_validation(), validate_exp=false, and validate_aud=false
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:15873 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L15873)
+      pub fn hll_debug_decode(
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:15887 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L15887)
+      HllEncoding::Sparse => Ok(Some(hll_sparse_decode(&registers)?)),
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:23234 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L23234)
+      fn hll_sparse_decode(registers: &[u8]) -> Result<String, StoreError> {
+
+• Shell command execution through -c/-lc
+  ✓ OK No shell -c/-lc Command usage detected
+
+• Command::new executable from untrusted-looking value
+
+• Path join/push with untrusted-looking segment
+  ⚠ Warning (3 found)
+    Path join/push with untrusted-looking segment
+    Reject absolute paths and '..' components; canonicalize and verify the result stays under the intended root
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:41947 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L41947)
+      std::fs::read(corpus_root.join(name))
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:42080 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L42080)
+      std::fs::read(corpus_root.join(name))
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:42262 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L42262)
+      let bytes = std::fs::read(corpus_root.join(name))
+
+• Archive entry paths joined into extraction destination
+
+• Predictable temp-file writes
+
+• Request-derived open redirects
+  ✓ OK No request-derived open redirect sinks detected
+
+• Host header used for absolute URL construction
+  ✓ OK No Host-header-derived absolute URL construction detected
+
+• Request-derived response headers
+  ✓ OK No request-derived response header values detected
+
+• Request-derived outbound HTTP URLs
+  ✓ OK No request-derived outbound HTTP URL sinks detected
+
+• Request-derived SQL construction
+  ✓ OK No request-derived SQL construction sinks detected
+
+• Request-controlled regex patterns
+  ✓ OK No request-controlled regex compilation detected
+
+• Unbounded request body reads
+  ✓ OK No unbounded request body reads detected
+
+• CORS credential policy
+  ✓ OK No unsafe CORS credential policy detected
+
+• Plain http:// URLs
+
+• Hardcoded secrets/credentials
+  ✓ OK No hardcoded secrets detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. CODE QUALITY MARKERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: TODO, FIXME, HACK, NOTE
+Technical debt markers indicate incomplete or problematic code
+  ✓ OK No TODO/FIXME/HACK markers found
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. MODULE & VISIBILITY ISSUES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: pub use wildcards, glob imports, re-exports
+Overly broad visibility complicates API stability and encapsulation
+
+• Wildcard imports (use crate::* or ::*)
+  ℹ Info (1 found)
+    Wildcard imports found; prefer explicit names
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:42583 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L42583)
+              use proptest::prelude::*;
+
+• pub use re-exports (inventory)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. TESTS & BENCHES HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: ignored tests, todo! in tests, println!/dbg! in tests
+Ensure tests do not hide failures or produce noisy output
+
+• #[ignore] tests
+  ℹ Info (2 found)
+    #[ignore] tests present - verify intent
+
+• todo!/unimplemented! in tests
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. LINTS & STYLE (fmt/clippy)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo fmt -- --check, cargo clippy
+Formatter and lints help maintain consistent style and catch many issues
+  ✓ OK Formatting is clean
+  ✓ OK No clippy warnings/errors
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. BUILD HEALTH (check/test)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo check, cargo test --no-run
+Ensures the project compiles and tests build
+  ✓ OK cargo check clean
+  ✓ OK Tests build clean
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. DEPENDENCY HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo audit, cargo deny check, cargo udeps, cargo outdated
+Keeps dependencies safe, minimal, and up-to-date
+  ✓ OK No known advisories (cargo-audit)
+  ✓ OK cargo-deny clean
+  ℹ Info (1 found)
+    cargo-udeps not installed; skipping unused dep scan
+  ℹ Info (1 found)
+    cargo-outdated not installed; skipping update report
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15. API MISUSE (COMMON)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: nth(0), DefaultHasher, expect_err/unwrap_err, Option::unwrap_or_default in hot paths
+Common footguns and readability hazards
+
+• std::collections::hash_map::DefaultHasher
+
+• unwrap_err()/expect_err() usage inventory
+  ℹ Info (42 found)
+    unwrap_err/expect_err present - ensure test-only or justified
+
+• Option::unwrap_or_default inventory
+  ℹ Info (6 found)
+    unwrap_or_default present - validate default semantics
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+16. DOMAIN-SPECIFIC HEURISTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: reqwest builder, SQL string concatenation (heuristic), serde_json::from_str without context
+Domain patterns that often hint at bugs
+
+• reqwest::ClientBuilder inventory
+
+• serde_json::from_str without error context (heuristic)
+
+• SQL string concatenation (heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+17. AST-GREP RULE PACK FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ℹ Info (0 found)
+    AST rule pack staged
+    Run with --format=sarif to emit SARIF from the rule pack
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+18. META STATISTICS & INVENTORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: crate counts, bin/lib targets, feature flags (Cargo.toml heuristic)
+High-level view of the project layout
+
+• Cargo.toml features (heuristic count)
+  ℹ Info (1 found)
+    No Cargo.toml at project root (workspace? set PROJECT_DIR accordingly)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+19. RESOURCE LIFECYCLE CORRELATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: std::thread::spawn without join, tokio::spawn without await, TcpStream without shutdown
+Rust relies on explicit joins/shutdowns even with RAII—leaks create zombie work
+
+• Resource lifecycle correlation
+  ✓ OK All tracked resource acquisitions have matching cleanups
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+20. ASYNC LOCKING ACROSS AWAIT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: locks acquired in async fns and potentially held across await
+Holding locks across await can deadlock, starve tasks, and cause latency spikes; std::sync locks can block executor threads
+
+• std::sync lock usage inside async fn (blocking risk)
+  ✓ OK No obvious std::sync lock usage inside async fns
+
+• Potential std::sync guard held across await (heuristic)
+
+• Potential async lock guard held across await (tokio/async locks heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+21. PANIC SURFACES & UNWINDING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: assert macros, direct indexing, unreachable_unchecked/unwrap_unchecked, panic/unwrap inside Drop
+Panics in destructors or UB hints can crash/abort in subtle ways; these can slip past linting depending on cfg/features
+
+• assert!/assert_eq!/assert_ne! inventory
+  ⚠ Warning (1893 found)
+    assert! macros present (panic surface)
+    If these are runtime invariants, consider explicit error handling; ensure not reachable by untrusted input
+
+• unreachable_unchecked / unwrap_unchecked
+
+• direct indexing / slicing panic surfaces
+  ⚠ Warning (431 found)
+    Direct indexing/slicing may panic
+    Use get()/get_mut(), checked ranges, or prior bounds checks when indexes can come from input
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:292 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L292)
+                  let mut s = arg[..SLOWLOG_ENTRY_MAX_STRING].to_vec();
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:1268 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L1268)
+                          let x = &min[1..];
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:1270 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L1270)
+                          if min[0] == b'(' {
+
+• panic!/unwrap/expect inside Drop
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+22. SUSPICIOUS CASTS & TRUNCATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: pervasive `as` casts, try_into().unwrap, numeric narrowing patterns
+`as` casts can silently truncate or change sign; conversion panics may be missed in uncommon input paths
+
+• `as` cast inventory
+  ℹ Info (460 found)
+    `as` casts present (possible truncation/sign bugs)
+    Prefer TryFrom/TryInto for correctness or document invariants
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:2677 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L2677)
+                      len: value.len() as u8,
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:2690 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L2690)
+                      len: value.len() as u8,
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:6836 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L6836)
+                                  (!((1_u16 << (8 - ((range_start & 7) as u32))) - 1) & 0xFF) as u8;
+
+• len()/count() narrowed via `as`
+  ⚠ Warning (4 found)
+    Length/count narrowed with `as` cast
+    Use TryFrom/TryInto or explicit checked bounds before storing sizes in narrow integer fields
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:2677 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L2677)
+                      len: value.len() as u8,
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:2690 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L2690)
+                      len: value.len() as u8,
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:20382 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L20382)
+              buf.push(0x80 | entry.len() as u8);
+
+• try_into().unwrap()/expect() (panic on conversion failure)
+  ⚠ Warning (9 found)
+    try_into().unwrap()/expect() present
+    Handle conversion errors explicitly; panics can be input-dependent
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:16366 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L16366)
+                  let a = u64::from_ne_bytes(dc.try_into().unwrap());
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:16367 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L16367)
+                  let b = u64::from_ne_bytes(sc.try_into().unwrap());
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:16385 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L16385)
+                  let b = u64::from_ne_bytes(sc.try_into().unwrap());
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+23. PARSING & VALIDATION ROBUSTNESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: parse/from_str/env-var unwraps, decode unwraps, missing error context
+Parsing and decoding failures often happen in prod on edge inputs; unwrap/expect turns them into panics
+
+• parse::<T>().unwrap()/expect()
+  ⚠ Warning (16 found)
+    parse::<T>().unwrap()/expect() present
+    Validate input or propagate errors with context
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:43116 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L43116)
+                  String::from_utf8_lossy(bytes)
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:43117 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L43117)
+                      .parse::<usize>()
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:43118 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L43118)
+                      .expect("generated SELECT arg must stay numeric")
+
+• serde/toml deserialization unwrap()/expect()
+
+• env::var(...).unwrap()/expect()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+24. PERF/DoS HOTSPOTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: regex compilation in loops, chars().nth(n), format!/allocations in loops
+Some perf pitfalls become DoS risks on large inputs or hot paths; these often evade linting in non-bench builds
+
+• Regex::new occurrences and in-loop compilation
+  ✓ OK No regex::Regex::new detected
+
+• chars().nth(n)/nth_back(n) (O(n))
+
+• format!/to_string/allocations inside loops (heuristic)
+  ⚠ Warning (116 found)
+    String allocation inside loop
+    Consider preallocating buffers, using write!, or restructuring to reduce allocations
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:290 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L290)
+      out.push(format!("... ({} more arguments)", argc - slargc + 1).into_bytes());
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:294 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L294)
+      format!("... ({} more bytes)", arg.len() - SLOWLOG_ENTRY_MAX_STRING).as_bytes(),
+      /data/projects/.scratch/frankenredis-coralox-3uwif-appendix-20260613/crates/fr-store/src/lib.rs:504 (https://github.com/Dicklesworthstone/frankenredis/blob/7c94b904deed8705e08c3dace4675cd270efe12f/crates/fr-store/src/lib.rs#L504)
+      let pending_id = format!("{pending_ms}-{pending_seq}");
+
+═══════════════════════════════════════════════════════════════════════════
+                    🎯 SCAN COMPLETE 🎯                                  
+═══════════════════════════════════════════════════════════════════════════
+
+Summary Statistics:
+  Files scanned:    1
+  Critical issues:  252
+  Warning issues:   5674
+  Info items:       1033
+
+Priority Actions:
+  🔥 FIX CRITICAL ISSUES IMMEDIATELY
+  These cause crashes, security vulnerabilities, or data corruption
+  ⚠ Review and fix WARNING items
+  These cause bugs, performance issues, or maintenance problems
+  ℹ Consider INFO suggestions
+  Code quality improvements and best practices
+
+Scan completed at: 2026-06-13 08:29:13
+
+Tip: Run with -v/--verbose for more code samples per finding.
+Add to CI: ./ubs --ci --fail-on-warning . > rust-bug-scan.txt
+
+
+──────── Combined Summary ────────
+Files: 1
+Critical: 252
+Warning: 5674
+Info: 1033

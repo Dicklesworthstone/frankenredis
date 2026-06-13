@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/frankenredis-cms7p-candidate-target/release/fr-bench --port 25230 --workload lpush --clients 50 --pipeline 16 --requests 5000000 --keyspace 100000 --key-prefix cms7p:pair5 --json-out artifacts/optimization/frankenredis-cms7p/paired-run3-n5m-candidate-first/candidate-last.json",
+      "mean": 6.6673406215,
+      "stddev": 0.30472137791057685,
+      "median": 6.6094906081,
+      "user": 3.403237839999999,
+      "system": 5.1026558600000005,
+      "min": 6.3262219770999994,
+      "max": 7.0872043581,
+      "times": [
+        7.0872043581,
+        6.3262219770999994,
+        6.8508106671,
+        6.6094906081,
+        6.4629754970999995
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/frankenredis-cms7p-baseline-target/release/fr-bench --port 25229 --workload lpush --clients 50 --pipeline 16 --requests 5000000 --keyspace 100000 --key-prefix cms7p:pair5 --json-out artifacts/optimization/frankenredis-cms7p/paired-run3-n5m-candidate-first/baseline-last.json",
+      "mean": 7.586309751499999,
+      "stddev": 0.12338544527237001,
+      "median": 7.6296442341,
+      "user": 3.4848060399999996,
+      "system": 5.47707246,
+      "min": 7.3930480451,
+      "max": 7.6999547261,
+      "times": [
+        7.6999547261,
+        7.3930480451,
+        7.5408327701,
+        7.668068982099999,
+        7.6296442341
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

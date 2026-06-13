@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/frankenredis-cms7p-candidate-target/release/fr-bench --port 25224 --workload lpush --clients 50 --pipeline 16 --requests 1000000 --keyspace 100000 --key-prefix cms7p:cand --json-out artifacts/optimization/frankenredis-cms7p/candidate-run1/lpush-p16-c50-n1m-last.json",
+      "mean": 1.4917292539285716,
+      "stddev": 0.07592400450632628,
+      "median": 1.4895499825,
+      "user": 0.7708281314285713,
+      "system": 1.1650740457142856,
+      "min": 1.3968572625000002,
+      "max": 1.6267310555,
+      "times": [
+        1.6267310555,
+        1.4643917545,
+        1.4895499825,
+        1.3968572625000002,
+        1.4233928205000002,
+        1.5322655865,
+        1.5089163155
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
