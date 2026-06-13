@@ -384,6 +384,9 @@ impl PlainKeyedPopCmd {
     /// LPOP/RPOP/SPOP reply with a single bulk string (the popped element);
     /// ZPOPMIN/ZPOPMAX reply with a `[member, score]` flat array. The borrowed
     /// fast path uses this to pick the reply shape. (frankenredis-zpopfast)
+    // (wc0i6) Reply-shape helper kept for the borrowed ZPOP fast-path wiring; not
+    // yet called, so allow until the caller lands (vs deleting in-flight groundwork).
+    #[allow(dead_code)]
     fn is_zpop(self) -> bool {
         matches!(self, PlainKeyedPopCmd::Zpopmin | PlainKeyedPopCmd::Zpopmax)
     }
@@ -7736,6 +7739,10 @@ impl Runtime {
         Some(reply)
     }
 
+    // (frankenredis-wc0i6) Borrowed-fast-path metrics recorders take the key +
+    // timing + packet/failed context the generic dispatch records; a param-struct
+    // refactor would be pure churn, so allow the arg count.
+    #[allow(clippy::too_many_arguments)]
     fn record_plain_zincrby_borrowed_metrics(
         &mut self,
         key: &[u8],
@@ -9944,6 +9951,7 @@ impl Runtime {
         Some(reply)
     }
 
+    #[allow(clippy::too_many_arguments)] // (wc0i6) see record_plain_zincrby_borrowed_metrics
     fn record_plain_rank_borrowed_metrics(
         &mut self,
         cmd: PlainRankCmd,
@@ -10861,6 +10869,7 @@ impl Runtime {
 
     /// LRANGE sibling of `record_plain_smembers_borrowed_metrics`. (frankenredis:
     /// LRANGE borrow-encode)
+    #[allow(clippy::too_many_arguments)] // (wc0i6) see record_plain_zincrby_borrowed_metrics
     fn record_plain_lrange_borrowed_metrics(
         &mut self,
         key: &[u8],
