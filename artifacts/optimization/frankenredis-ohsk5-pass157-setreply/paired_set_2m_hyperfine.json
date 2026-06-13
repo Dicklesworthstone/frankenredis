@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "env BIN=/data/tmp/frankenredis-ohsk5-pass157-baseline-target/release/frankenredis PORT=24163 BENCH=./legacy_redis_code/redis/src/redis-benchmark bash -lc '\"$BIN\" --port \"$PORT\" >/tmp/fr_set2_base.log 2>&1 & pid=$!; trap \"kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true\" EXIT; for _ in $(seq 1 50); do ss -ltn 2>/dev/null | grep -q :$PORT && break; sleep 0.1; done; \"$BENCH\" -p \"$PORT\" -t set -n 2000000 -c 50 -P 16 -r 100000 -q >/dev/null'",
+      "mean": 2.3980479688571426,
+      "stddev": 0.12540696348151215,
+      "median": 2.3993995879999996,
+      "user": 1.7271340857142856,
+      "system": 2.8535964428571425,
+      "min": 2.148040318,
+      "max": 2.516829164,
+      "times": [
+        2.148040318,
+        2.389050517,
+        2.498490671,
+        2.475738001,
+        2.516829164,
+        2.3993995879999996,
+        2.3587875229999997
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "env BIN=/data/tmp/frankenredis-ohsk5-pass157-setreply-candidate-target/release/frankenredis PORT=24164 BENCH=./legacy_redis_code/redis/src/redis-benchmark bash -lc '\"$BIN\" --port \"$PORT\" >/tmp/fr_set2_cand.log 2>&1 & pid=$!; trap \"kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true\" EXIT; for _ in $(seq 1 50); do ss -ltn 2>/dev/null | grep -q :$PORT && break; sleep 0.1; done; \"$BENCH\" -p \"$PORT\" -t set -n 2000000 -c 50 -P 16 -r 100000 -q >/dev/null'",
+      "mean": 2.2533521782857138,
+      "stddev": 0.11628482791898481,
+      "median": 2.26786458,
+      "user": 1.605815657142857,
+      "system": 2.716854442857143,
+      "min": 2.0614021449999997,
+      "max": 2.45057374,
+      "times": [
+        2.2682206359999997,
+        2.0614021449999997,
+        2.26786458,
+        2.45057374,
+        2.2149894029999997,
+        2.213484832,
+        2.296929912
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "results": [
+    {
+      "command": "env BIN=/data/tmp/frankenredis-ohsk5-pass157-baseline-target/release/frankenredis PORT=24161 BENCH=./legacy_redis_code/redis/src/redis-benchmark bash -lc '\"$BIN\" --port \"$PORT\" >/tmp/fr_set_base.log 2>&1 & pid=$!; trap \"kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true\" EXIT; for _ in $(seq 1 50); do ss -ltn 2>/dev/null | grep -q :$PORT && break; sleep 0.1; done; \"$BENCH\" -p \"$PORT\" -t set -n 1000000 -c 50 -P 16 -r 100000 -q >/dev/null'",
+      "mean": 1.2583450328088892,
+      "stddev": 0.0359026531737786,
+      "median": 1.26760427692,
+      "user": 0.8911950333333333,
+      "system": 1.4609501177777775,
+      "min": 1.21267877492,
+      "max": 1.30883875192,
+      "times": [
+        1.26760427692,
+        1.29645117692,
+        1.21668763192,
+        1.28444121592,
+        1.21267877492,
+        1.24883979592,
+        1.30883875192,
+        1.26992690892,
+        1.21963676192
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "env BIN=/data/tmp/frankenredis-ohsk5-pass157-setreply-candidate-target/release/frankenredis PORT=24162 BENCH=./legacy_redis_code/redis/src/redis-benchmark bash -lc '\"$BIN\" --port \"$PORT\" >/tmp/fr_set_cand.log 2>&1 & pid=$!; trap \"kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true\" EXIT; for _ in $(seq 1 50); do ss -ltn 2>/dev/null | grep -q :$PORT && break; sleep 0.1; done; \"$BENCH\" -p \"$PORT\" -t set -n 1000000 -c 50 -P 16 -r 100000 -q >/dev/null'",
+      "mean": 1.2162313003644445,
+      "stddev": 0.04951558202360901,
+      "median": 1.21503985892,
+      "user": 0.8440269222222222,
+      "system": 1.418881117777778,
+      "min": 1.1447453219200001,
+      "max": 1.2726741349200001,
+      "times": [
+        1.21503985892,
+        1.24811909892,
+        1.1650679049200001,
+        1.1888621989200001,
+        1.26861483092,
+        1.1447453219200001,
+        1.2726741349200001,
+        1.17601392892,
+        1.26694442492
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
