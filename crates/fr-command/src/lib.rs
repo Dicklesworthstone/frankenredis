@@ -25012,11 +25012,19 @@ fn compute_debug_digest(store: &mut Store, now_ms: u64, keys: Option<&[&[u8]]>) 
     let mut digest = [0u8; 20];
 
     if let Some(key_list) = keys {
+        // (frankenredis-0667f) Keys are stored DB-namespaced (encode_db_key:
+        // db 0 = raw, db N = \0frdb\0-prefixed). DEBUG DIGEST-VALUE must look up
+        // the key in the client's SELECTed DB, else any key in a non-zero DB
+        // digests to the empty 0000... value. The per-key path only uses the key
+        // for lookup (the value alone is mixed, not the name), so namespacing the
+        // physical key is sufficient and byte-identical for db 0.
+        let db = store.dispatch_client_ctx.db_index;
         for key in key_list {
-            store.expire_key_if_stale(key, now_ms);
-            if store.get_value_and_expiry(key).is_some() {
+            let pk = fr_store::encode_db_key(db, key);
+            store.expire_key_if_stale(&pk, now_ms);
+            if store.get_value_and_expiry(&pk).is_some() {
                 let mut object_digest = [0u8; 20];
-                mix_debug_object_digest(store, key, now_ms, &mut object_digest);
+                mix_debug_object_digest(store, &pk, now_ms, &mut object_digest);
                 for (dst, src) in digest.iter_mut().zip(object_digest) {
                     *dst ^= src;
                 }
