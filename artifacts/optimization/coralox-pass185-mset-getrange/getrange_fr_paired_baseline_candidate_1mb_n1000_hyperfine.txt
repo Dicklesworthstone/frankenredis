@@ -1,0 +1,11 @@
+Benchmark 1: fr-baseline
+  Time (mean ± σ):     678.9 ms ±  30.3 ms    [User: 218.3 ms, System: 511.1 ms]
+  Range (min … max):   632.6 ms … 724.4 ms    10 runs
+
+Benchmark 2: fr-candidate
+  Time (mean ± σ):     662.9 ms ±  31.4 ms    [User: 195.8 ms, System: 516.1 ms]
+  Range (min … max):   616.0 ms … 720.6 ms    10 runs
+
+Summary
+  fr-candidate ran
+    1.02 ± 0.07 times faster than fr-baseline

@@ -1,0 +1,3 @@
+Benchmark 1: fr-baseline
+  Time (mean ± σ):     704.5 ms ±  46.2 ms    [User: 234.0 ms, System: 550.2 ms]
+  Range (min … max):   625.3 ms … 778.4 ms    10 runs
