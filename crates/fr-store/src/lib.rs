@@ -2218,6 +2218,20 @@ impl SetValue {
         matches!(self, SetValue::Int(_))
     }
 
+    /// (frankenredis-v4ba8) True when every member is intset-eligible (a canonical
+    /// i64), regardless of cardinality. An `Int` set is all-integer by
+    /// construction; a `Generic` set is all-integer only if every member parses
+    /// via the same `canonical_int` rule the encoder uses to build intsets. Used
+    /// by the set-algebra STORE path to mirror redis's incremental intset overflow
+    /// (an all-int result over set-max-intset-entries converts to hashtable, not
+    /// listpack).
+    pub(crate) fn all_integers(&self) -> bool {
+        match self {
+            SetValue::Int(_) => true,
+            SetValue::Generic(g) => g.iter().all(|m| Self::canonical_int(m).is_some()),
+        }
+    }
+
     /// The canonical i64 for `member`, or `None` if it is not a canonical
     /// integer (and therefore can never live in an intset).
     fn canonical_int(member: &[u8]) -> Option<i64> {
@@ -5538,6 +5552,28 @@ impl Store {
         }
     }
 
+    /// (frankenredis-v4ba8) Set-algebra STORE destinations are built incrementally
+    /// by redis, so an ALL-INTEGER result whose cardinality exceeds
+    /// set-max-intset-entries converts intset->HASHTABLE (the intset-overflow
+    /// path), NOT listpack. `refresh_set_encoding_flags` alone picks listpack for
+    /// such a result (the bulk `Generic` set no longer fits intset by count but
+    /// still fits listpack). Apply the overflow->hashtable promotion on the
+    /// rebuild path only — `set_entry`/`set_value_entry` are called solely by
+    /// SINTERSTORE/SUNIONSTORE/SDIFFSTORE; one-shot `SADD` of the same content
+    /// stays listpack in redis (batch-create path) and never reaches here.
+    fn promote_set_algebra_intset_overflow(entry: &mut Entry, max_intset_entries: usize) {
+        if entry.force_set_hashtable_encoding {
+            return;
+        }
+        if let Value::Set(s) = &entry.value
+            && s.len() > max_intset_entries
+            && s.all_integers()
+        {
+            entry.force_set_hashtable_encoding = true;
+            entry.force_set_listpack_encoding = false;
+        }
+    }
+
     fn set_entry(&self, set: GenericSet, expires_at_ms: Option<u64>, now_ms: u64) -> Entry {
         let set = SetValue::from_index_set(set, self.set_max_intset_entries);
         let mut entry = Entry::new(Value::Set(Box::new(set)), expires_at_ms, now_ms);
@@ -5547,6 +5583,7 @@ impl Store {
             self.set_max_listpack_entries,
             self.set_max_listpack_value,
         );
+        Self::promote_set_algebra_intset_overflow(&mut entry, self.set_max_intset_entries);
         entry
     }
 
@@ -5569,6 +5606,7 @@ impl Store {
             self.set_max_listpack_entries,
             self.set_max_listpack_value,
         );
+        Self::promote_set_algebra_intset_overflow(&mut entry, self.set_max_intset_entries);
         entry
     }
 

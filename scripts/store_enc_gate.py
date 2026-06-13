@@ -43,7 +43,7 @@ DIV=[]
 # SADD of the same content is listpack in redis too, so the fix must live in the
 # rebuild path, not the shared refresh. Tracked so this gate fails only on a NEW
 # (esp. zset) regression and flags when the set facet is fixed.
-KNOWN_V4BA8 = {"sunionstore-intset-overflow"}
+KNOWN_V4BA8 = set()  # frankenredis-v4ba8 FULLY FIXED (zset + set-algebra facets)
 def norm(x):
     if isinstance(x,bytes): return x.decode("latin1")
     if isinstance(x,list): return tuple(norm(e) for e in x)
