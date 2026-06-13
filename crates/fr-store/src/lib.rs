@@ -20123,7 +20123,19 @@ fn estimate_hash_memory_usage_bytes(fields: &HashFieldMap) -> usize {
 }
 
 fn estimate_list_memory_usage_bytes(items: &ListValue) -> usize {
-    let payload: usize = items.iter().map(estimate_listpack_entry_bytes).sum();
+    // (frankenredis-listmem-o1) The list already maintains its exact
+    // single-listpack `lpBytes` incrementally in O(1) (`ListValue::lp_bytes`,
+    // exposed via `listpack_byte_len`), built from the integer-aware
+    // `list_lp_entry_bytes` that mirrors redis listpack encoding. Deriving the
+    // payload from it — `payload = lpBytes - header/EOF overhead` — drops the
+    // former O(n) `estimate_listpack_entry_bytes` rescan that walked the whole
+    // list on every `used_memory` sample (the dominant non-I/O cost under
+    // sustained LPUSH). It is also strictly more accurate: the old string-only
+    // per-entry model over-counted integer elements vs vendored redis (e.g.
+    // MEMORY USAGE of an int list reported high), whereas the int-aware count
+    // matches redis 7.2.4 byte-for-byte on listpack-encoded lists.
+    let payload = (items.listpack_byte_len() as usize)
+        .saturating_sub(REDIS_LISTPACK_HEADER_AND_EOF_BYTES);
     let listpack_bytes =
         redis_allocation_size(REDIS_LISTPACK_HEADER_AND_EOF_BYTES.saturating_add(payload));
     if listpack_bytes <= 8 * 1024 {
