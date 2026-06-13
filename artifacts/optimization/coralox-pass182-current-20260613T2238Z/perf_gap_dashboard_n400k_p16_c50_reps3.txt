@@ -1,0 +1,11 @@
+== vs-redis pipelined throughput (P16, -c50, -n400000, best-of-3) ==
+cmd          redis         fr   redis/fr
+set         800000     919540      0.87x  fr-faster
+get         845666     932400      0.91x  fr-faster
+incr        877193     860215      1.02x  FR-SLOWER
+lpush      1017811     925925      1.10x  FR-SLOWER
+rpush      1038961     900900      1.15x  FR-SLOWER
+sadd        963855     900900      1.07x  FR-SLOWER
+hset        770712     829875      0.93x  fr-faster
+zadd        391389     429645      0.91x  fr-faster
+spop       1007556    1047120      0.96x  fr-faster
