@@ -9945,8 +9945,52 @@ impl Store {
                 }
                 match &mut entry.value {
                     Value::List(l) => {
+                        // (frankenredis-387i6) For a small bounded count, redis
+                        // stops after `count` matches; fr's retain visited every
+                        // element AND on_remove_bulk re-scanned the whole list to
+                        // recompute lp_bytes — O(n) regardless of count. Early-stop
+                        // the find and remove by index (ListValue::remove is
+                        // incremental), so LREM of a few near the front/back is
+                        // O(pos + count) not O(n). Large count / count==0 keep the
+                        // single-pass retain (O(n), the right complexity there).
+                        const LREM_INDEX_REMOVE_MAX: usize = 128;
                         let mut removed = 0_u64;
-                        if count > 0 {
+                        if count > 0 && (count as usize) <= LREM_INDEX_REMOVE_MAX {
+                            let limit = count as usize;
+                            let mut idxs: Vec<usize> = Vec::with_capacity(limit);
+                            for (i, v) in l.iter().enumerate() {
+                                if v == value {
+                                    idxs.push(i);
+                                    if idxs.len() >= limit {
+                                        break;
+                                    }
+                                }
+                            }
+                            for &i in idxs.iter().rev() {
+                                l.remove(i);
+                            }
+                            removed = idxs.len() as u64;
+                        } else if count < 0
+                            && count.unsigned_abs() as usize <= LREM_INDEX_REMOVE_MAX
+                        {
+                            let limit = count.unsigned_abs() as usize;
+                            let len = l.len();
+                            // iter_rev yields back-to-front, so the collected
+                            // indices descend — remove them in that order.
+                            let mut idxs: Vec<usize> = Vec::with_capacity(limit);
+                            for (k, v) in l.iter_rev().enumerate() {
+                                if v == value {
+                                    idxs.push(len - 1 - k);
+                                    if idxs.len() >= limit {
+                                        break;
+                                    }
+                                }
+                            }
+                            for &i in &idxs {
+                                l.remove(i);
+                            }
+                            removed = idxs.len() as u64;
+                        } else if count > 0 {
                             let limit = count as u64;
                             l.retain(|v| {
                                 if removed < limit && v == value {
@@ -36389,6 +36433,135 @@ mod tests {
         let removed = store.lrem(b"l", 0, b"a", 0).unwrap();
         assert_eq!(removed, 2);
         assert_eq!(store.llen(b"l", 0).unwrap(), 1);
+    }
+
+    // (frankenredis-387i6) The bounded-count early-stop / index-remove path must
+    // produce a removal set byte-identical to the single-pass retain oracle for
+    // every count regime (positive small/large, negative small/large, zero) and
+    // every match distribution. A naive Vec LREM is the reference.
+    #[test]
+    fn lrem_index_remove_matches_retain_oracle() {
+        fn oracle(list: &[Vec<u8>], count: i64, target: &[u8]) -> Vec<Vec<u8>> {
+            let mut out = Vec::with_capacity(list.len());
+            if count > 0 {
+                let mut left = count as usize;
+                for v in list {
+                    if left > 0 && v.as_slice() == target {
+                        left -= 1;
+                    } else {
+                        out.push(v.clone());
+                    }
+                }
+            } else if count < 0 {
+                // Remove the last |count| matches: walk back-to-front, then
+                // restore original order.
+                let mut left = count.unsigned_abs() as usize;
+                let mut rev: Vec<Vec<u8>> = Vec::with_capacity(list.len());
+                for v in list.iter().rev() {
+                    if left > 0 && v.as_slice() == target {
+                        left -= 1;
+                    } else {
+                        rev.push(v.clone());
+                    }
+                }
+                rev.reverse();
+                out = rev;
+            } else {
+                for v in list {
+                    if v.as_slice() != target {
+                        out.push(v.clone());
+                    }
+                }
+            }
+            out
+        }
+
+        // Deterministic LCG so the proof is reproducible (no Date/rand needed).
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) as u32
+        };
+        // Cover both list reprs by exercising small (listpack) and large (deque)
+        // lists, and counts straddling LREM_INDEX_REMOVE_MAX (128).
+        let counts: [i64; 11] = [1, 2, 3, 5, 64, 128, 129, 200, -1, -5, -130];
+        for trial in 0..400u32 {
+            let len = (next() % 500 + 1) as usize;
+            // Small member alphabet so matches are dense and span the whole list.
+            let alphabet = 1 + (next() % 4) as u64; // 1..=4 distinct values
+            let list: Vec<Vec<u8>> = (0..len)
+                .map(|_| format!("v{}", next() as u64 % alphabet).into_bytes())
+                .collect();
+            let target = format!("v{}", next() as u64 % (alphabet + 1)).into_bytes();
+            let count = counts[(next() as usize) % counts.len()];
+
+            let mut store = Store::new();
+            store.rpush(b"l", &list, 0).unwrap();
+            let removed = store.lrem(b"l", count, &target, 0).unwrap();
+            let got = store.lrange(b"l", 0, -1, 0).unwrap();
+
+            let expected = oracle(&list, count, &target);
+            let expected_removed = (list.len() - expected.len()) as u64;
+            assert_eq!(
+                removed, expected_removed,
+                "trial {trial}: count={count} len={len} removed mismatch"
+            );
+            assert_eq!(
+                got, expected,
+                "trial {trial}: count={count} len={len} target={target:?} residual list mismatch"
+            );
+        }
+    }
+
+    // (frankenredis-387i6) Concrete before/after timing for the LREM bounded
+    // early-stop lever. `cargo test -- --ignored --nocapture lrem_bench`.
+    #[test]
+    #[ignore]
+    fn lrem_bench_index_vs_retain() {
+        use std::time::Instant;
+        const N: usize = 300_000;
+        // Every-other element matches "X" (the bead's workload).
+        let build = || -> Vec<Vec<u8>> {
+            (0..N)
+                .map(|i| if i % 2 == 0 { b"X".to_vec() } else { b"y".to_vec() })
+                .collect()
+        };
+
+        // NEW path: Store::lrem with small bounded count (early-stop + index remove).
+        let mut store = Store::new();
+        store.rpush(b"l", &build(), 0).unwrap();
+        let t = Instant::now();
+        let removed_new = store.lrem(b"l", 5, b"X", 0).unwrap();
+        let new_us = t.elapsed().as_secs_f64() * 1e6;
+
+        // OLD path: single-pass retain over the whole list + O(n) on_remove_bulk
+        // rescan (what the bounded branch used to do).
+        let mut store2 = Store::new();
+        store2.rpush(b"l", &build(), 0).unwrap();
+        let mut removed_old = 0u64;
+        let t = Instant::now();
+        if let Some(entry) = store2.entries.get_mut(b"l".as_slice()) {
+            if let Value::List(l) = &mut entry.value {
+                let limit = 5u64;
+                l.retain(|v| {
+                    if removed_old < limit && v == b"X" {
+                        removed_old += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+        }
+        let old_us = t.elapsed().as_secs_f64() * 1e6;
+
+        assert_eq!(removed_new, 5);
+        assert_eq!(removed_old, 5);
+        eprintln!(
+            "LREM 5 X over {N}-elem list: OLD(retain+bulk-rescan)={old_us:.0}us  NEW(early-stop+index)={new_us:.0}us  speedup={:.1}x",
+            old_us / new_us
+        );
+        assert!(new_us * 5.0 < old_us, "expected >=5x speedup, got {:.1}x", old_us / new_us);
     }
 
     #[test]
