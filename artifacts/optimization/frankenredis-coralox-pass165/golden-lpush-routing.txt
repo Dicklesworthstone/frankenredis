@@ -1,0 +1,4 @@
+input sha256 = b616e89b3d03d365c042ec2383a73c987a7dd43d54ce88c091a82d8ec7645068 (401 bytes)
+baseline sha256 = c4a2d062abdffc07a2dc90066d20a53a049cffc259e708d0556a095fac0c5ade (122 bytes)
+candidate sha256 = c4a2d062abdffc07a2dc90066d20a53a049cffc259e708d0556a095fac0c5ade (122 bytes)
+byte_equal = True

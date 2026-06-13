@@ -1,0 +1,3 @@
+Benchmark 1: /data/projects/.scratch/frankenredis-coralox-pass165b-20260613T091500Z/legacy_redis_code/redis/src/redis-benchmark -p 23964 -t lpush -n 1000000 -c 50 -P 16 -r 100000 -q
+  Time (mean ± σ):      1.030 s ±  0.042 s    [User: 0.198 s, System: 0.818 s]
+  Range (min … max):    0.950 s …  1.080 s    10 runs

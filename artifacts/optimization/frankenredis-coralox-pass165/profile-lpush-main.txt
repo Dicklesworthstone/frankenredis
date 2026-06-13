@@ -1,0 +1,36 @@
+perf_event_paranoid=1
+>> fr pid=2633862, load: -t lpush -P 16 -c 50 -n 2000000 -r 100000
+== throughput ==
+  throughput summary: 974658.88 requests per second
+== fr-code self-time hotspots (DSO=frankenredis) ==
+     6.82%     0.00%  frankenredis  [.] __syscall_cancel_arch_end
+     6.60%     0.00%  frankenredis  [.] 0xffffffffaf60012b
+     6.01%     2.10%  frankenredis  [.] <fr_runtime::Runtime>::execute_plain_keyed_values_write_borrowed
+     5.95%     0.00%  frankenredis  [.] 0xffffffffb0c20551
+     4.56%     0.27%  frankenredis  [.] <mio::net::tcp::stream::TcpStream as std::io::Write>::write
+     4.42%     0.24%  frankenredis  [.] <&std::os::unix::net::stream::UnixStream as std::io::Write>::write
+     4.29%     0.00%  frankenredis  [.] 0xc3590043b7f215ff
+     4.29%     0.00%  frankenredis  [.] __send
+     3.91%     2.55%  frankenredis  [.] fr_protocol::parse_command_args_borrowed_into
+     3.68%     0.00%  frankenredis  [.] 0xffffffffaf924d8f
+     3.68%     0.00%  frankenredis  [.] 0xffffffffb08efbe4
+     3.05%     2.36%  frankenredis  [.] <fr_runtime::Runtime>::plain_borrowed_default_key_write_allows
+     3.04%     0.00%  frankenredis  [.] 0xffffffffb08efb7a
+     3.04%     0.00%  frankenredis  [.] 0xffffffffb0a735f6
+     2.81%     0.00%  frankenredis  [.] 0xffffffffb0a24b30
+     2.43%     0.23%  frankenredis  [.] <std::sys::pal::unix::time::Timespec>::now
+     2.22%     0.00%  frankenredis  [.] clock_gettime@@GLIBC_2.17
+     2.16%     0.32%  frankenredis  [.] <std::time::Instant>::elapsed
+     2.02%     0.00%  frankenredis  [.] __memmove_avx_unaligned_erms
+     1.95%     1.05%  frankenredis  [.] frankenredis::process_buffered_frames
+     1.93%     0.00%  frankenredis  [.] 0x00007d9eb3bad986
+     1.80%     0.00%  frankenredis  [.] _start
+     1.80%     0.00%  frankenredis  [.] __libc_start_main@@GLIBC_2.34
+     1.80%     0.00%  frankenredis  [.] main
+     1.80%     0.00%  frankenredis  [.] std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+     1.78%     0.00%  frankenredis  [.] 0xffffffffb0a23c3b
+     1.78%     1.13%  frankenredis  [.] <fr_store::packed_set::ListValue>::push_front
+     1.71%     1.00%  frankenredis  [.] frankenredis::parse_borrowed_multibulk_action
+     1.68%     1.59%  frankenredis  [.] <fr_store::Store>::lpush::<&[u8]>
+     1.66%     0.00%  frankenredis  [.] <mio::poll::Poll>::poll
+>> perf data: /data/tmp/claude-1000/profile_hot_path_2633515.data
