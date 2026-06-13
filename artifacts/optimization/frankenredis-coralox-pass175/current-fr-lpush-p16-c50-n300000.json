@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781371563022,
+  "host": "127.0.0.1",
+  "port": 26379,
+  "workload": "lpush",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "pass175:fr:lpush",
+  "total_time_ms": 318,
+  "ops_per_sec": 941375.2388319972,
+  "bytes_sent": 17316548,
+  "bytes_received": 1410000,
+  "latency_us": {
+    "min": 152,
+    "p50": 800,
+    "p95": 1041,
+    "p99": 1447,
+    "p999": 1763,
+    "max": 1887,
+    "mean": 830.0697733333341,
+    "samples": 300000
+  }
+}

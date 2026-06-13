@@ -1,0 +1,12 @@
+:1
+:0
+$1
+2
+*2
+$1
+f
+$1
+2
++OK
+-WRONGTYPE Operation against a key holding the wrong kind of value
++OK

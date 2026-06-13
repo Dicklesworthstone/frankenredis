@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:26380
+workload: hget
+clients: 50  requests: 300000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 368 ms  throughput: 813017.09 ops/sec
+latency(us): min=64 p50=859 p95=1419 p99=1894 p999=2559 max=3119 mean=961.74
+bytes: sent=17966591 received=2700000 key_prefix=pass175:redis:hget

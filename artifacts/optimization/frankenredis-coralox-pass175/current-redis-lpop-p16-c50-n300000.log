@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:26380
+workload: lpop
+clients: 50  requests: 300000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 430 ms  throughput: 697460.88 ops/sec
+latency(us): min=61 p50=1012 p95=1718 p99=2279 p999=3015 max=3569 mean=1115.18
+bytes: sent=14666383 received=2699800 key_prefix=pass175:redis:lpop

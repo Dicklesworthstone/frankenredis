@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "bash artifacts/optimization/frankenredis-coralox-pass174/run_hset_bench_once.sh baseline /data/tmp/frankenredis-pass175-current-target/release-perf/frankenredis /data/tmp/frankenredis-pass175-current-target/release-perf/fr-bench 26381 pass175:baseline 1000000 artifacts/optimization/frankenredis-coralox-pass175",
+      "mean": 1.1138057931199998,
+      "stddev": 0.04953669675583645,
+      "median": 1.13508956812,
+      "user": 1.2259998314285714,
+      "system": 1.6766205028571426,
+      "min": 1.04409160712,
+      "max": 1.17167381512,
+      "times": [
+        1.07847829112,
+        1.06755713212,
+        1.14385116712,
+        1.1558989711199998,
+        1.13508956812,
+        1.04409160712,
+        1.17167381512
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

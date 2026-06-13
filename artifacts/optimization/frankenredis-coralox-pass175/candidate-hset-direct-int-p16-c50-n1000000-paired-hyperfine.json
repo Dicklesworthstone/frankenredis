@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "bash artifacts/optimization/frankenredis-coralox-pass174/run_hset_bench_once.sh baseline-paired /data/tmp/frankenredis-pass175-current-target/release-perf/frankenredis /data/tmp/frankenredis-pass175-current-target/release-perf/fr-bench 26384 pass175:paired:baseline 1000000 artifacts/optimization/frankenredis-coralox-pass175",
+      "mean": 1.0907229721342857,
+      "stddev": 0.022625417725010085,
+      "median": 1.08380947442,
+      "user": 1.2069979428571427,
+      "system": 1.751603071428571,
+      "min": 1.06630227242,
+      "max": 1.12461957442,
+      "times": [
+        1.06630227242,
+        1.0748000074200001,
+        1.12461957442,
+        1.10514030842,
+        1.06999122142,
+        1.11039794642,
+        1.08380947442
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "bash artifacts/optimization/frankenredis-coralox-pass174/run_hset_bench_once.sh candidate-paired /data/tmp/frankenredis-pass175-candidate-target/release-perf/frankenredis /data/tmp/frankenredis-pass175-candidate-target/release-perf/fr-bench 26385 pass175:paired:candidate 1000000 artifacts/optimization/frankenredis-coralox-pass175",
+      "mean": 1.14522675742,
+      "stddev": 0.08452132465423697,
+      "median": 1.1165177104200001,
+      "user": 1.2708462285714284,
+      "system": 1.7933247857142856,
+      "min": 1.06819151742,
+      "max": 1.3121242184200002,
+      "times": [
+        1.06819151742,
+        1.0981348694200002,
+        1.3121242184200002,
+        1.19930850442,
+        1.09133721742,
+        1.1165177104200001,
+        1.1309732644200001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

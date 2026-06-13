@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781371562365,
+  "host": "127.0.0.1",
+  "port": 26379,
+  "workload": "incr",
+  "clients": 50,
+  "requests": 300000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 3,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "pass175:fr:incr",
+  "total_time_ms": 318,
+  "ops_per_sec": 940868.3351015856,
+  "bytes_sent": 14666752,
+  "bytes_received": 1410000,
+  "latency_us": {
+    "min": 106,
+    "p50": 775,
+    "p95": 1138,
+    "p99": 1475,
+    "p999": 5951,
+    "max": 5967,
+    "mean": 831.9295533333343,
+    "samples": 300000
+  }
+}
