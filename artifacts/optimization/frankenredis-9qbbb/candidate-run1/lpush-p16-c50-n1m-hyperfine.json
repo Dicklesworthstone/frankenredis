@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/frankenredis-9qbbb-candidate-target/release/fr-bench --port 25265 --workload lpush --clients 50 --pipeline 16 --requests 1000000 --keyspace 100000 --key-prefix 9qbbb:cand --json-out artifacts/optimization/frankenredis-9qbbb/candidate-run1/lpush-p16-c50-n1m-last.json",
+      "mean": 1.5183533874057142,
+      "stddev": 0.09710797523467124,
+      "median": 1.50814056712,
+      "user": 0.80098436,
+      "system": 1.2165365628571432,
+      "min": 1.38027317712,
+      "max": 1.6390772101200002,
+      "times": [
+        1.57380867212,
+        1.6390772101200002,
+        1.50814056712,
+        1.45608910612,
+        1.62298391512,
+        1.44810106412,
+        1.38027317712
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

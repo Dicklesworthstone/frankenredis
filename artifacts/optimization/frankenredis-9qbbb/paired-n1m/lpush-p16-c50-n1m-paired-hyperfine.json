@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/frankenredis-9qbbb-baseline-target/release/fr-bench --port 25266 --workload lpush --clients 50 --pipeline 16 --requests 1000000 --keyspace 100000 --key-prefix 9qbbb:paired --json-out artifacts/optimization/frankenredis-9qbbb/paired-n1m/baseline-last.json",
+      "mean": 1.4991984873485713,
+      "stddev": 0.04211313154637037,
+      "median": 1.49757633292,
+      "user": 0.7255094057142857,
+      "system": 1.1994354600000001,
+      "min": 1.44778124692,
+      "max": 1.5823880419199998,
+      "times": [
+        1.47903333692,
+        1.49922326292,
+        1.47662234992,
+        1.5823880419199998,
+        1.51176483992,
+        1.44778124692,
+        1.49757633292
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/frankenredis-9qbbb-candidate-target/release/fr-bench --port 25267 --workload lpush --clients 50 --pipeline 16 --requests 1000000 --keyspace 100000 --key-prefix 9qbbb:paired --json-out artifacts/optimization/frankenredis-9qbbb/paired-n1m/candidate-last.json",
+      "mean": 1.4928728097771429,
+      "stddev": 0.10115409708942354,
+      "median": 1.48239739092,
+      "user": 0.730772977142857,
+      "system": 1.1855423171428572,
+      "min": 1.36796694492,
+      "max": 1.6635946229199998,
+      "times": [
+        1.52097699192,
+        1.48239739092,
+        1.36796694492,
+        1.38563048392,
+        1.6635946229199998,
+        1.55530483892,
+        1.47423839492
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
