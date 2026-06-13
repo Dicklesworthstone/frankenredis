@@ -1438,6 +1438,17 @@ pub struct ListValue {
     /// under -2 cannot pollute a non-default report); the next mutation under
     /// the current config re-evaluates it. (frankenredis-lsetql)
     fill: i64,
+    /// True once a grow-WRITE (`note_command_grow` / `note_lset_grow`) has
+    /// evaluated `forced_quicklist` under a real `list-max-listpack-size`.
+    /// Upstream decides listpack↔quicklist only at write time and the result is
+    /// sticky, so for a write-decided list OBJECT ENCODING must trust the tracked
+    /// flag REGARDLESS of a later bare `CONFIG SET list-max-listpack-size` (a
+    /// threshold change with no intervening write must not flip the reported
+    /// encoding). Bulk-built lists (load / RESTORE / COPY, via `From`/
+    /// `FromIterator`) have no write-time decision under a non-default fill, so
+    /// they keep `false` and the non-default report re-derives from current
+    /// content. (frankenredis-a0p5p)
+    decided_by_write: bool,
 }
 
 impl Default for ListValue {
@@ -1447,6 +1458,7 @@ impl Default for ListValue {
             lp_bytes: LIST_LP_OVERHEAD,
             forced_quicklist: false,
             fill: -2,
+            decided_by_write: false,
         }
     }
 }
@@ -1476,6 +1488,7 @@ impl ListValue {
     /// byte lengths of the newly-added elements. (frankenredis-rc49s)
     pub fn note_command_grow(&mut self, lp_before_command: u64, raw_add: u64, fill: i64) {
         self.fill = fill;
+        self.decided_by_write = true;
         // After an ADD command the post-mutation length equals redis's
         // `lpLength(before) + add_length`, so `self.len()` is the count redis
         // feeds `quicklistNodeExceedsLimit`.
@@ -1494,6 +1507,7 @@ impl ListValue {
     /// (frankenredis-lsetql)
     pub fn note_lset_grow(&mut self, value_raw_len: u64, fill: i64) {
         self.fill = fill;
+        self.decided_by_write = true;
         if !self.forced_quicklist
             && list_node_exceeds_limit(fill, self.lp_bytes + value_raw_len, self.len() as u64 + 1)
         {
@@ -1576,6 +1590,21 @@ impl ListValue {
     /// is the default `-2`. (frankenredis-rc49s)
     #[must_use]
     pub fn reports_quicklist_default(&self) -> bool {
+        self.forced_quicklist
+    }
+
+    /// True when a grow-write has evaluated the sticky listpack→quicklist
+    /// decision under a real `list-max-listpack-size` (vs a bulk-built list whose
+    /// flag is only the stateless construction-time estimate). (frankenredis-a0p5p)
+    #[must_use]
+    pub fn encoding_decided_by_write(&self) -> bool {
+        self.decided_by_write
+    }
+
+    /// The raw sticky listpack→quicklist flag (quicklist iff true), to be trusted
+    /// only when `encoding_decided_by_write()`. (frankenredis-a0p5p)
+    #[must_use]
+    pub fn is_forced_quicklist(&self) -> bool {
         self.forced_quicklist
     }
 
@@ -1782,6 +1811,7 @@ impl From<VecDeque<Vec<u8>>> for ListValue {
             lp_bytes: LIST_LP_OVERHEAD,
             forced_quicklist: false,
             fill: -2,
+            decided_by_write: false,
         };
         list.rebuild_growth_state();
         list

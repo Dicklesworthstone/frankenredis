@@ -7177,17 +7177,26 @@ impl Store {
                     } else {
                         "listpack"
                     }
-                } else if l.forced_for_fill(self.list_max_listpack_size)
-                    || !self.list_fits_legacy_listpack_size(l)
-                {
-                    // Non-default budget: redis's listpack→quicklist transition
-                    // is sticky, so trust the per-command conversion decision
-                    // (made under this same budget) even after the list shrinks
-                    // back under the limit — e.g. LSET on a full listpack, or a
-                    // grow-then-pop above the half-limit hysteresis. Fall back to
-                    // the stateless current-content check for lists whose sticky
-                    // flag was not set under this budget (bulk loads / RESTORE).
-                    // (frankenredis-lsetql)
+                } else if l.encoding_decided_by_write() {
+                    // (frankenredis-a0p5p) A grow-write already decided this list's
+                    // encoding under a real list-max-listpack-size, and upstream's
+                    // listpack↔quicklist transition is one-way sticky and happens
+                    // ONLY at write time. So a bare `CONFIG SET list-max-listpack-size`
+                    // with no intervening write must NOT change the report — trust
+                    // the tracked flag regardless of the current fill. (Previously
+                    // the non-default branch re-derived via list_fits_legacy_listpack_size,
+                    // wrongly flipping a never-crossed listpack list to quicklist
+                    // after a threshold lowering, and a crossed-then-shrunk list per
+                    // the lsetql hysteresis.)
+                    if l.is_forced_quicklist() {
+                        "quicklist"
+                    } else {
+                        "listpack"
+                    }
+                } else if !self.list_fits_legacy_listpack_size(l) {
+                    // Bulk-built (load / RESTORE / COPY) with no write-time decision
+                    // under this fill: re-derive from current content, matching
+                    // upstream's bulk listpack→quicklist conversion test. (lsetql)
                     "quicklist"
                 } else {
                     "listpack"
