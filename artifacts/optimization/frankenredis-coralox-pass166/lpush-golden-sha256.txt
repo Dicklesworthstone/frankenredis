@@ -1,0 +1,3 @@
+cc52ea28475c23886a67d3c37fea3cbd07281d3689b0ffce6d48ac8dd7e2b82c  artifacts/optimization/frankenredis-coralox-pass166/lpush-golden-input.resp
+e13d16f81580e42629e7e8c8dcee3de9cbeba0b31c915707ef980abb5cca17e8  artifacts/optimization/frankenredis-coralox-pass166/lpush-current-golden.resp
+e13d16f81580e42629e7e8c8dcee3de9cbeba0b31c915707ef980abb5cca17e8  artifacts/optimization/frankenredis-coralox-pass166/lpush-candidate-golden.resp

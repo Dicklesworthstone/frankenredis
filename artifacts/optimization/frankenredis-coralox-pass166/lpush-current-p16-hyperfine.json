@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "BIN=/data/tmp/cargo-target-frankenredis-coralox-pass166-current/release/frankenredis CMD=lpush N=300000 CLIENTS=50 PIPE=16 KEYSPACE=100000 PORT=25166 artifacts/optimization/frankenredis-coralox-pass158/run_bench_once.sh",
+      "mean": 0.32339073658,
+      "stddev": 0.014835060977668567,
+      "median": 0.32231454478,
+      "user": 0.18917346,
+      "system": 0.43327542,
+      "min": 0.30267618028,
+      "max": 0.35038189928,
+      "times": [
+        0.31541952528,
+        0.34061008428,
+        0.35038189928,
+        0.30990821328,
+        0.33298811228,
+        0.32552652528,
+        0.31910256428,
+        0.30267618028,
+        0.31086228028,
+        0.32643198128
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
