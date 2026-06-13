@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:6504
+workload: hset
+clients: 50  requests: 1000000  pipeline: 16  keyspace: 10000  datasize: 3
+elapsed: 1022 ms  throughput: 977840.04 ops/sec
+latency(us): min=195 p50=751 p95=1170 p99=1550 p999=2271 max=3353 mean=806.47
+bytes: sent=81338655 received=4000000 key_prefix=pass173-paired-candidate-hset
