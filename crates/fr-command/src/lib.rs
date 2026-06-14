@@ -27095,17 +27095,54 @@ fn sort_generic(
             .map(|el| RespFrame::BulkString(Some(el.clone())))
             .collect()
     } else {
+        // (frankenredis-5gisf GET-facet) Precompute each GET pattern's `*`
+        // split ONCE (the pattern is constant across all elements) and reuse a
+        // single scratch key buffer for every element×pattern substitution,
+        // instead of re-scanning for `*` and allocating a fresh lookup-key Vec
+        // per call inside sort_lookup_get_pattern (sliced.len()*patterns allocs
+        // -> 0, mirroring the numeric_fast BY buffer-reuse above). Byte-exact:
+        // the substituted key, the resolve (string / `->` hash deref), and the
+        // missing/wrong-type handling are unchanged.
+        enum GetPlan<'a> {
+            Element,           // `GET #` -> the element itself
+            NoStar,            // pattern without `*` -> always NULL (upstream)
+            Sub(&'a [u8], &'a [u8]), // text before/after the single `*`
+        }
+        let plans: Vec<GetPlan> = get_patterns
+            .iter()
+            .map(|pat| {
+                if pat.as_slice() == b"#" {
+                    GetPlan::Element
+                } else if let Some(pos) = pat.iter().position(|&b| b == b'*') {
+                    GetPlan::Sub(&pat[..pos], &pat[pos + 1..])
+                } else {
+                    GetPlan::NoStar
+                }
+            })
+            .collect();
         let mut out = Vec::with_capacity(sliced.len() * get_patterns.len());
+        let mut keybuf: Vec<u8> = Vec::new();
+        let missing = |use_store: bool| {
+            if use_store {
+                RespFrame::BulkString(Some(Vec::new()))
+            } else {
+                RespFrame::BulkString(None)
+            }
+        };
         for el in &sliced {
-            for pat in &get_patterns {
-                let val = sort_lookup_get_pattern(store, pat, el, now_ms);
-                match val {
-                    Some(v) => out.push(RespFrame::BulkString(Some(v))),
-                    None => {
-                        if use_store {
-                            out.push(RespFrame::BulkString(Some(Vec::new())));
-                        } else {
-                            out.push(RespFrame::BulkString(None));
+            for plan in &plans {
+                match plan {
+                    GetPlan::Element => out.push(RespFrame::BulkString(Some(el.clone()))),
+                    GetPlan::NoStar => out.push(missing(use_store)),
+                    GetPlan::Sub(pre, post) => {
+                        keybuf.clear();
+                        keybuf.reserve(pre.len() + el.len() + post.len());
+                        keybuf.extend_from_slice(pre);
+                        keybuf.extend_from_slice(el);
+                        keybuf.extend_from_slice(post);
+                        match sort_resolve_key_or_hash(store, &keybuf, now_ms) {
+                            Some(v) => out.push(RespFrame::BulkString(Some(v))),
+                            None => out.push(missing(use_store)),
                         }
                     }
                 }
@@ -27180,28 +27217,11 @@ fn sort_lookup_by_pattern(
     sort_resolve_key_or_hash(store, &lookup_key, now_ms)
 }
 
-/// Look up a value using a GET pattern for the SORT command.
-/// `GET #` returns the element itself.
-fn sort_lookup_get_pattern(
-    store: &mut Store,
-    pattern: &[u8],
-    element: &[u8],
-    now_ms: u64,
-) -> Option<Vec<u8>> {
-    // GET # returns the element itself
-    if pattern == b"#" {
-        return Some(element.to_vec());
-    }
-
-    // Substitute * with element value
-    let pos = pattern.iter().position(|&b| b == b'*')?;
-    let mut lookup_key = Vec::with_capacity(pattern.len() + element.len());
-    lookup_key.extend_from_slice(&pattern[..pos]);
-    lookup_key.extend_from_slice(element);
-    lookup_key.extend_from_slice(&pattern[pos + 1..]);
-
-    sort_resolve_key_or_hash(store, &lookup_key, now_ms)
-}
+// (frankenredis-5gisf GET-facet) The former `sort_lookup_get_pattern` helper
+// (one fresh lookup-key Vec per element×pattern) was inlined into the GET
+// output loop above with a precomputed `*` split and a reused scratch buffer
+// (alloc -> 0). `GET #`, no-`*`, and the string/`->`-hash resolve are handled
+// by the GetPlan match there.
 
 /// Resolve a key that may contain `->` for hash field dereference.
 /// Without `->`, looks up as a string key.
