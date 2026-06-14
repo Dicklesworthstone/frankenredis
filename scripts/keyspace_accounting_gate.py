@@ -87,8 +87,11 @@ class Conn:
 SEED = [
     ["set", "k", "hello"], ["set", "n", "10"], ["sadd", "sx", "1", "2", "3"],
     ["sadd", "sy", "2", "3", "4"], ["hset", "hx", "f", "v"], ["rpush", "lx", "a", "b"],
-    ["zadd", "zx", "1", "a", "2", "b"], ["setbit", "bx", "20", "1"],
+    ["zadd", "zx", "1", "a", "2", "b"], ["zadd", "zy", "2", "b", "3", "c"],
+    ["setbit", "bx", "20", "1"],
     ["xadd", "xs", "1-1", "f", "v"], ["set", "e", "v"],
+    ["pfadd", "hll", "x", "y", "z"], ["geoadd", "g", "13.36", "38.11", "p1"],
+    ["geoadd", "g", "15.08", "37.5", "p2"],
 ]
 
 # (args, expected_hit_delta, expected_miss_delta) — expectations are asserted
@@ -106,6 +109,13 @@ READS_HIT = [
     ["zmscore", "zx", "a", "b"], ["zrank", "zx", "a"], ["xlen", "xs"],
     ["object", "encoding", "k"], ["sintercard", "2", "sx", "sy"], ["mget", "k", "n"],
     ["hscan", "hx", "0"], ["sscan", "sx", "0"], ["zscan", "zx", "0"],
+    # read-only set / zset algebra (record_source_key_lookups over each source key)
+    ["sinter", "sx", "sy"], ["sunion", "sx", "sy"], ["sdiff", "sx", "sy"],
+    ["zdiff", "2", "zx", "zy"], ["zinter", "2", "zx", "zy"],
+    ["zintercard", "2", "zx", "zy"], ["zunion", "2", "zx", "zy"],
+    ["pfcount", "hll"], ["geodist", "g", "p1", "p2"], ["geopos", "g", "p1"],
+    ["geohash", "g", "p1"], ["sort_ro", "lx", "ALPHA"], ["zrange", "zx", "0", "-1"],
+    ["zrangebyscore", "zx", "0", "10"], ["zrangebylex", "zx", "-", "+"],
 ]
 READS_MISS = [
     ["get", "no"], ["strlen", "no"], ["getrange", "no", "0", "1"], ["ttl", "no"],

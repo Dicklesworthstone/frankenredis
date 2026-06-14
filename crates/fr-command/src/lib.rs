@@ -6176,9 +6176,13 @@ fn geodist(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         1.0
     };
 
-    let score1 = store.zscore(&argv[1], &argv[2], now_ms)?;
-    let score2 = store.zscore(&argv[1], &argv[3], now_ms)?;
-    let (Some(score1), Some(score2)) = (score1, score2) else {
+    // (frankenredis keyspace-acct) Upstream geo.c::geodistCommand does ONE
+    // lookupKeyReadOrReply for the key, then reads both members from that object.
+    // Two separate store.zscore calls each bumped keyspace_hits -> 2 vs redis's 1.
+    // Record the key lookup once, then read both scores via the no-stat zmscore.
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
+    let scores = store.zmscore(&argv[1], &[argv[2].as_slice(), argv[3].as_slice()], now_ms)?;
+    let (Some(score1), Some(score2)) = (scores[0], scores[1]) else {
         return Ok(RespFrame::BulkString(None));
     };
 
@@ -13422,6 +13426,10 @@ fn zrangebylex(
             "ERR syntax error, WITHSCORES not supported in combination with BYLEX".to_string(),
         ));
     }
+    // (frankenredis keyspace-acct) Legacy ZRANGEBYLEX must record the keyspace
+    // hit/miss like upstream's lookupKeyReadOrReply (zrangebylex_limited is
+    // no-stat; the unified ZRANGE BYLEX path records separately).
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
     // LIMIT pushed into the lex walk — O(offset+count). (frankenredis-qchm7)
     let members = store.zrangebylex_limited(
         &argv[1],
@@ -13457,6 +13465,8 @@ fn zrevrangebylex(
             "ERR syntax error, WITHSCORES not supported in combination with BYLEX".to_string(),
         ));
     }
+    // (frankenredis keyspace-acct) Record the keyspace hit/miss like upstream.
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
     // REV + LIMIT pushed into the lex walk: zrevrangebylex(key, max, min) is
     // zrangebylex_limited(key, min, max, rev=true). (frankenredis-qchm7)
     let members = store.zrangebylex_limited(
@@ -13516,6 +13526,10 @@ fn pfcount(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         return Err(CommandError::WrongArity("PFCOUNT"));
     }
     let keys: Vec<&[u8]> = argv[1..].iter().map(|k| k.as_slice()).collect();
+    // (frankenredis keyspace-acct) Upstream hyperloglog.c::pfcountCommand does
+    // lookupKeyRead per source key, bumping keyspace_hits/misses; store.pfcount
+    // is no-stat, so record the per-key lookups here to match.
+    record_source_key_lookups(store, &keys, now_ms);
     let count = store.pfcount(&keys, now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
