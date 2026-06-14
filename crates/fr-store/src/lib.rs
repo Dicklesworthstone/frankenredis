@@ -6674,6 +6674,32 @@ impl Store {
         Ok(bitfield_read(bytes.as_ref(), bit_offset, bits, signed))
     }
 
+    /// Read a bitfield WITHOUT recording a keyspace hit/miss. Used by the
+    /// BITFIELD command's per-op reads: upstream bitfieldGeneric looks the key
+    /// up ONCE for the whole command (lookupKeyWrite when any SET/INCRBY op is
+    /// present — no keyspace stats; lookupKeyRead recorded once when all ops are
+    /// GET). The command handler records that single lookup itself, so each
+    /// per-op read here must be no-stat to avoid over-counting (e.g. INCRBY's
+    /// read-modify-write, or a multi-GET read-only BITFIELD). WRONGTYPE for a
+    /// non-string present key, as `bitfield_get`.
+    pub fn bitfield_get_no_stat(
+        &mut self,
+        key: &[u8],
+        bit_offset: u64,
+        bits: u8,
+        signed: bool,
+        now_ms: u64,
+    ) -> Result<i64, StoreError> {
+        if !self.drop_if_expired(key, now_ms) {
+            return Ok(bitfield_read(&[], bit_offset, bits, signed));
+        }
+        let bytes = match self.entries.get(key) {
+            Some(entry) => entry.value.string_bytes().ok_or(StoreError::WrongType)?,
+            None => Cow::Borrowed(&[][..]),
+        };
+        Ok(bitfield_read(bytes.as_ref(), bit_offset, bits, signed))
+    }
+
     /// Write an arbitrary-width integer field to the string at `key`.
     /// Create/zero-extend the string backing `key` so a write of `bits` at
     /// `bit_offset` would fit, WITHOUT writing a value. Mirrors upstream

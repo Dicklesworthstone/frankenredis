@@ -13565,6 +13565,12 @@ fn pfmerge(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("PFMERGE"));
     }
+    // Upstream pfmergeCommand does a lookupKeyRead over EVERY key arg — the
+    // destination AND each source (it reads them all to merge, then writes the
+    // dest) — so each records a keyspace hit/miss. store.pfmerge is no-stat;
+    // record one lookup per key arg (dest first, then sources) before merging.
+    let all_keys: Vec<&[u8]> = argv[1..].iter().map(|k| k.as_slice()).collect();
+    record_source_key_lookups(store, &all_keys, now_ms);
     let sources: Vec<&[u8]> = argv[2..].iter().map(|k| k.as_slice()).collect();
     store.pfmerge(&argv[1], &sources, now_ms)?;
     Ok(RespFrame::SimpleString("OK".to_string()))
@@ -25651,6 +25657,7 @@ fn bitfield_cmd(
     // execution loop interleaved per-op store access, so a valid early op
     // surfaced WRONGTYPE before a later op's arg error, and an op-less command
     // skipped the type check entirely. Validate all args first, then type-check.
+    let mut has_write = false;
     {
         let mut j = 2;
         while j < argv.len() {
@@ -25683,6 +25690,7 @@ fn bitfield_cmd(
                     return invalid_offset();
                 }
                 if needs_value {
+                    has_write = true;
                     parse_i64_arg(&argv[j + 3])?;
                 }
                 j += if needs_value { 4 } else { 3 };
@@ -25714,6 +25722,14 @@ fn bitfield_cmd(
         None | Some(ValueType::String) => {}
         Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
     }
+    // Keyspace accounting: upstream bitfieldGeneric looks the key up ONCE for the
+    // whole command — lookupKeyWrite (no keyspace stats) when any SET/INCRBY op
+    // is present, else lookupKeyRead (one hit/miss). Record that single read here
+    // only in the all-GET (read-only) case; the per-op store reads below are
+    // no-stat so they never double-count.
+    if !has_write {
+        record_source_key_lookups(store, &[key.as_slice()], now_ms);
+    }
 
     let mut results: Vec<RespFrame> = Vec::new();
     let mut overflow_mode = BitfieldOverflow::Wrap;
@@ -25743,7 +25759,7 @@ fn bitfield_cmd(
                 }
             };
             let val = store
-                .bitfield_get(key, bit_offset, bits, signed, now_ms)
+                .bitfield_get_no_stat(key, bit_offset, bits, signed, now_ms)
                 .map_err(CommandError::Store)?;
             results.push(RespFrame::Integer(val));
             i += 3;
@@ -25844,9 +25860,10 @@ fn bitfield_cmd(
             };
             let increment = parse_i64_arg(&argv[i + 3])?;
 
-            // Read current value
+            // Read current value (no-stat: this is a write command, so the
+            // single keyspace lookup was already accounted for above).
             let current = store
-                .bitfield_get(key, bit_offset, bits, signed, now_ms)
+                .bitfield_get_no_stat(key, bit_offset, bits, signed, now_ms)
                 .map_err(CommandError::Store)?;
 
             let (new_val, i64_overflowed) = current.overflowing_add(increment);
@@ -25976,12 +25993,16 @@ fn bitfield_ro_cmd(
         ));
     }
     // Read-only branch: type-check the key once (WRONGTYPE for a non-string
-    // present key, even with no GET op). No-stat peek leaves keyspace accounting
-    // to the per-GET store access below.
+    // present key, even with no GET op). No-stat peek; the single read-only
+    // keyspace lookup is recorded once below (per-GET reads are no-stat).
     match store.peek_value_type(key, now_ms) {
         None | Some(ValueType::String) => {}
         Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
     }
+    // BITFIELD_RO is always read-only: upstream does one lookupKeyRead for the
+    // whole command. Record that single hit/miss; the per-GET store reads below
+    // are no-stat so a multi-GET BITFIELD_RO records exactly one, like redis.
+    record_source_key_lookups(store, &[key.as_slice()], now_ms);
 
     let mut results: Vec<RespFrame> = Vec::new();
     let mut i = 2;
@@ -25994,7 +26015,7 @@ fn bitfield_ro_cmd(
             let bit_offset =
                 bitfield_parse_offset(&argv[i + 2], bits).expect("GET offset validated");
             let val = store
-                .bitfield_get(key, bit_offset, bits, signed, now_ms)
+                .bitfield_get_no_stat(key, bit_offset, bits, signed, now_ms)
                 .map_err(CommandError::Store)?;
             results.push(RespFrame::Integer(val));
             i += 3;

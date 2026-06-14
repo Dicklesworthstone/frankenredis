@@ -150,6 +150,17 @@ STORE_AND_MOVE = [
     ["lcs", "k", "e", "idx"],
     # write-family pop / miss forms
     ["lmpop", "1", "no", "left"], ["zmpop", "1", "no", "min"], ["zpopmin", "no"],
+    # more reads (record hit/miss)
+    ["hkeys", "hx"], ["hvals", "hx"], ["hkeys", "no"], ["hvals", "no"],
+    ["sintercard", "1", "sx", "limit", "1"], ["lpos", "lx", "a", "count", "0"],
+    # writes (must NOT bump counters) incl. read-modify and HLL merge
+    ["bitfield", "bx", "get", "u8", "0"], ["bitfield", "bx", "incrby", "u8", "0", "1"],
+    ["pfadd", "hll", "q"], ["pfmerge", "hd", "hll"], ["pfmerge", "hd", "hll", "no"],
+    ["getex", "k", "ex", "100"], ["getex", "k", "persist"], ["getex", "no", "ex", "100"],
+    ["zadd", "zx", "incr", "1", "a"], ["incrbyfloat", "n", "1.5"],
+    ["hincrbyfloat", "hx", "f", "1.5"], ["hincrby", "hx", "cnt", "1"],
+    ["setrange", "k", "0", "Z"], ["hsetnx", "hx", "nf", "1"],
+    ["zadd", "zx", "gt", "ch", "9", "a"],
 ]
 READS_MISS = [
     ["get", "no"], ["strlen", "no"], ["getrange", "no", "0", "1"], ["ttl", "no"],
