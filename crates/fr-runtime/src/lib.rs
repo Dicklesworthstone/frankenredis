@@ -445,6 +445,40 @@ fn plain_cardinality_owned_argv(cmd: PlainCardinalityCmd, key: &[u8]) -> Vec<Vec
     vec![cmd.name_upper().as_bytes().to_vec(), key.to_vec()]
 }
 
+/// `TTL key` / `PTTL key` / `TYPE key` — single-key metadata reads that return
+/// an Integer (TTL/PTTL) or a SimpleString (TYPE) and never error. They lacked a
+/// borrow fast path and fell to the owned-argv generic dispatch — measured
+/// ~0.34-0.44x FR-SLOWER under deep pipelining (the per-command machinery, not
+/// allocation: same finding as the PING fast path). (frankenredis-keymeta-fastpath)
+#[derive(Copy, Clone)]
+pub enum PlainKeyMetaCmd {
+    Ttl,
+    Pttl,
+    Type,
+}
+
+impl PlainKeyMetaCmd {
+    fn name_upper(self) -> &'static str {
+        match self {
+            PlainKeyMetaCmd::Ttl => "TTL",
+            PlainKeyMetaCmd::Pttl => "PTTL",
+            PlainKeyMetaCmd::Type => "TYPE",
+        }
+    }
+
+    fn name_lower(self) -> &'static str {
+        match self {
+            PlainKeyMetaCmd::Ttl => "ttl",
+            PlainKeyMetaCmd::Pttl => "pttl",
+            PlainKeyMetaCmd::Type => "type",
+        }
+    }
+}
+
+fn plain_keymeta_owned_argv(cmd: PlainKeyMetaCmd, key: &[u8]) -> Vec<Vec<u8>> {
+    vec![cmd.name_upper().as_bytes().to_vec(), key.to_vec()]
+}
+
 /// `ZRANK key member` / `ZREVRANK key member` (no WITHSCORE) — single-member
 /// rank reads returning an Integer rank or a nil bulk string, sharing one
 /// borrowed fast path (mirrors the ZSCORE/LINDEX read paths). They lacked a fast
@@ -10086,6 +10120,133 @@ impl Runtime {
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
                 output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    fn can_execute_plain_keymeta_borrowed(
+        &mut self,
+        cmd: PlainKeyMetaCmd,
+        key: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < cmd.name_upper().len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Conservative borrowed fast path for `TTL` / `PTTL` / `TYPE`. Calls the
+    /// SAME `store.pttl` / `store.key_type` the generic handlers call (so the
+    /// keyspace hit/miss accounting and TTL round-half-up math are identical),
+    /// gated by `plain_borrowed_default_key_read_allows`, skipping only the
+    /// owned-argv materialization + generic dispatch machinery. Never errors
+    /// (TTL/PTTL/TYPE have no WRONGTYPE). (frankenredis-keymeta-fastpath)
+    pub fn execute_plain_keymeta_borrowed(
+        &mut self,
+        cmd: PlainKeyMetaCmd,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_keymeta_borrowed(cmd, key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_argv_len_sum = cmd.name_upper().len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let reply = match cmd {
+            PlainKeyMetaCmd::Ttl => RespFrame::Integer(match self.server.store.pttl(key, now_ms) {
+                fr_store::PttlValue::KeyMissing => -2,
+                fr_store::PttlValue::NoExpiry => -1,
+                fr_store::PttlValue::Remaining(ms) => ms.saturating_add(500) / 1000,
+            }),
+            PlainKeyMetaCmd::Pttl => RespFrame::Integer(match self.server.store.pttl(key, now_ms) {
+                fr_store::PttlValue::KeyMissing => -2,
+                fr_store::PttlValue::NoExpiry => -1,
+                fr_store::PttlValue::Remaining(ms) => ms,
+            }),
+            PlainKeyMetaCmd::Type => RespFrame::SimpleString(
+                self.server
+                    .store
+                    .key_type(key, now_ms)
+                    .unwrap_or("none")
+                    .to_string(),
+            ),
+        };
+        let elapsed_us = start.elapsed().as_micros() as u64;
+
+        self.record_plain_keymeta_borrowed_metrics(cmd, key, elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(reply)
+    }
+
+    fn record_plain_keymeta_borrowed_metrics(
+        &mut self,
+        cmd: PlainKeyMetaCmd,
+        key: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_keymeta_owned_argv(cmd, key));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_keymeta_owned_argv(cmd, key));
+            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            self.server.store.record_command_histogram_canonical_with_kind(
+                cmd.name_lower(),
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_keymeta_owned_argv(cmd, key));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command '{}' took {}us, exceeding budget {}ms",
+                    cmd.name_upper(),
+                    elapsed_us,
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
             });
         }
     }
@@ -22481,7 +22642,7 @@ mod tests {
     use super::{
         ACL_FILE_NOT_CONFIGURED_ERR, AOF_DISK_ERROR_WRITE_DENIED, AclPubsubDefault, ClientSession,
         ClientUnblockMode, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER,
-        OutputBufferClassLimit, RDB_DISK_ERROR_WRITE_DENIED, Runtime, ServerState,
+        OutputBufferClassLimit, PlainKeyMetaCmd, RDB_DISK_ERROR_WRITE_DENIED, Runtime, ServerState,
         acl_list_entries_from_rules, build_hello_response, canonical_static_config_param,
         canonicalize_acl_rules, classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
@@ -22837,6 +22998,83 @@ mod tests {
             "MULTI PING must defer to generic (queue)"
         );
         assert!(tx_out.is_empty());
+    }
+
+    #[test]
+    fn plain_keymeta_borrowed_matches_generic_ttl_pttl_type() {
+        // (frankenredis-keymeta-fastpath) TTL/PTTL/TYPE borrow fast path must
+        // equal generic dispatch across key states (missing, no-expiry, with
+        // expiry) and every value type, and increment the same stat counters.
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"s", b"v"]), 1);
+            rt.execute_frame(command(&[b"SET", b"e", b"v"]), 1);
+            rt.execute_frame(command(&[b"PEXPIRE", b"e", b"100000"]), 1);
+            rt.execute_frame(command(&[b"RPUSH", b"l", b"a"]), 1);
+            rt.execute_frame(command(&[b"HSET", b"h", b"f", b"v"]), 1);
+            rt.execute_frame(command(&[b"SADD", b"st", b"1"]), 1);
+            rt.execute_frame(command(&[b"ZADD", b"z", b"1", b"a"]), 1);
+        }
+
+        let cases: [(PlainKeyMetaCmd, &[u8], &[u8]); 18] = [
+            (PlainKeyMetaCmd::Ttl, b"s", b"TTL"),
+            (PlainKeyMetaCmd::Ttl, b"e", b"TTL"),
+            (PlainKeyMetaCmd::Ttl, b"missing", b"TTL"),
+            (PlainKeyMetaCmd::Pttl, b"s", b"PTTL"),
+            (PlainKeyMetaCmd::Pttl, b"e", b"PTTL"),
+            (PlainKeyMetaCmd::Pttl, b"missing", b"PTTL"),
+            (PlainKeyMetaCmd::Type, b"s", b"TYPE"),
+            (PlainKeyMetaCmd::Type, b"e", b"TYPE"),
+            (PlainKeyMetaCmd::Type, b"l", b"TYPE"),
+            (PlainKeyMetaCmd::Type, b"h", b"TYPE"),
+            (PlainKeyMetaCmd::Type, b"st", b"TYPE"),
+            (PlainKeyMetaCmd::Type, b"z", b"TYPE"),
+            (PlainKeyMetaCmd::Type, b"missing", b"TYPE"),
+            (PlainKeyMetaCmd::Ttl, b"l", b"TTL"),
+            (PlainKeyMetaCmd::Ttl, b"z", b"TTL"),
+            (PlainKeyMetaCmd::Pttl, b"h", b"PTTL"),
+            (PlainKeyMetaCmd::Pttl, b"st", b"PTTL"),
+            (PlainKeyMetaCmd::Type, b"s", b"TYPE"),
+        ];
+        let mut ts = 2;
+        for (cmd, key, name) in cases {
+            let f = direct
+                .execute_plain_keymeta_borrowed(cmd, key, ts)
+                .expect("keymeta fast path should engage");
+            let g = generic.execute_frame(command(&[name, key]), ts);
+            assert_eq!(f, g, "cmd={name:?} key={key:?}");
+            ts += 1;
+        }
+        assert_eq!(
+            direct.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            direct.session.last_command_name,
+            generic.session.last_command_name
+        );
+
+        // Disabled state (SELECT 1) -> defer to generic.
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"s", b"v"]), 1);
+        assert!(
+            rt.execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Ttl, b"s", 2)
+                .is_some()
+        );
+        rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
+        assert!(
+            rt.execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Ttl, b"s", 4)
+                .is_none()
+        );
     }
 
     #[test]

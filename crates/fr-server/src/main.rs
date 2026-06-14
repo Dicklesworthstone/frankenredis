@@ -36,8 +36,8 @@ use fr_eventloop::{
 use fr_protocol::{BorrowedCommandArgsKind, ParserConfig, RespFrame, RespParseError};
 use fr_repl::ReplOffset;
 use fr_runtime::{
-    ClientSession, ClientUnblockMode, PlainCardinalityCmd, PlainKeyedPopCmd, PlainKeyedValuesCmd,
-    PlainRankCmd, Runtime,
+    ClientSession, ClientUnblockMode, PlainCardinalityCmd, PlainKeyMetaCmd, PlainKeyedPopCmd,
+    PlainKeyedValuesCmd, PlainRankCmd, Runtime,
 };
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token, Waker};
@@ -2632,6 +2632,14 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some((cmd, key)) = borrowed_plain_keymeta_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_keymeta_borrowed(cmd, key, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_cardinality_borrowed(cmd, key, ts)
                 {
@@ -3149,6 +3157,24 @@ fn borrowed_plain_scard_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u
         [command, key] if command.eq_ignore_ascii_case(b"SCARD") => Some(*key),
         _ => None,
     }
+}
+
+fn borrowed_plain_keymeta_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(PlainKeyMetaCmd, &'a [u8])> {
+    let [command, key] = borrowed_args else {
+        return None;
+    };
+    let cmd = if command.eq_ignore_ascii_case(b"TTL") {
+        PlainKeyMetaCmd::Ttl
+    } else if command.eq_ignore_ascii_case(b"PTTL") {
+        PlainKeyMetaCmd::Pttl
+    } else if command.eq_ignore_ascii_case(b"TYPE") {
+        PlainKeyMetaCmd::Type
+    } else {
+        return None;
+    };
+    Some((cmd, *key))
 }
 
 fn borrowed_plain_cardinality_args<'a>(
