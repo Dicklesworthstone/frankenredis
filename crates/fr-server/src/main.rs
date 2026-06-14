@@ -2749,6 +2749,14 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some(key) = borrowed_plain_memory_usage_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_memory_usage_borrowed(key, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some(key) = borrowed_plain_bitcount_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_bitcount_borrowed(key, ts)
                 {
@@ -3318,6 +3326,18 @@ fn borrowed_plain_object_encoding_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Opt
     match borrowed_args {
         [command, sub, key]
             if command.eq_ignore_ascii_case(b"OBJECT") && sub.eq_ignore_ascii_case(b"ENCODING") =>
+        {
+            Some(*key)
+        }
+        _ => None,
+    }
+}
+
+/// Only `MEMORY USAGE key` (argc 3, no SAMPLES); SAMPLES/other forms fall to generic.
+fn borrowed_plain_memory_usage_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
+    match borrowed_args {
+        [command, sub, key]
+            if command.eq_ignore_ascii_case(b"MEMORY") && sub.eq_ignore_ascii_case(b"USAGE") =>
         {
             Some(*key)
         }
