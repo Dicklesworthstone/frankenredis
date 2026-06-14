@@ -93,12 +93,7 @@ SEQ = [
     ["hset", "h", "f", "v"], ["zadd", "z", "1", "a"], ["setbit", "bm", "100", "1"],
     # reads: hits
     ["get", "s"], ["get", "s2"], ["strlen", "s"], ["ttl", "s"], ["pttl", "s"],
-    ["type", "s"], ["type", "l"], ["getbit", "bm", "100"],
-    # NOTE: `BITCOUNT <present-key>` is intentionally OMITTED — it is a KNOWN
-    # keyspace_hits double-count (the command prechecks type via a counting
-    # store.key_type AND store.bitcount counts again -> 2 hits vs redis's 1).
-    # Tracked in frankenredis-9s4ls (multi-crate fix). The missing-key form
-    # in the misses section below IS correct (single miss) and stays in the gate.
+    ["type", "s"], ["type", "l"], ["getbit", "bm", "100"], ["bitcount", "bm"],
     ["lpos", "l", "b"], ["object", "encoding", "s"], ["object", "encoding", "l"],
     ["mget", "s", "s2"], ["llen", "l"], ["scard", "st"], ["zcard", "z"], ["hlen", "h"],
     ["sismember", "st", "1"], ["hexists", "h", "f"], ["zscore", "z", "a"], ["hget", "h", "f"],

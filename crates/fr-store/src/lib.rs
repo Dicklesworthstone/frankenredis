@@ -6875,7 +6875,14 @@ impl Store {
         unit: BitRangeUnit,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        // (frankenredis-9s4ls) Use the NO-STAT drop_if_expired, not
+        // record_keyspace_lookup: both production callers (the generic
+        // bitcountCommand and the borrowed fast path) already record the single
+        // keyspace hit/miss via the store.key_type precheck they run for the
+        // upstream WRONGTYPE-before-argv-parse precedence (oss8i). Counting again
+        // here double-bumped keyspace_hits for a present key (2 vs redis's 1).
+        // drop_if_expired keeps the expiry-reap + missing -> 0 behavior, no stat.
+        if !self.drop_if_expired(key, now_ms) {
             return Ok(0);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
