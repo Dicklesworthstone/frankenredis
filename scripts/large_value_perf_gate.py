@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""large_value_perf_gate.py — deep-pipelined SET/GET throughput vs vendored
-redis 7.2.4 across value sizes, to track the large-value framing gap.
+"""large_value_perf_gate.py — deep-pipelined SET (read side) + GET (write side)
+throughput vs vendored redis 7.2.4 across value sizes, to track the large-value
+framing gap in BOTH directions.
 
 Profiling evidence for frankenredis-largeval-bigbulk-zerocopy-qesp3: fr is FASTER
 than redis on small/medium values (per-op machinery wins) but its throughput
@@ -59,6 +60,29 @@ def bench_set(port, vsize, n, reps=5):
     return n / best, (vsize * n) / best / 1e6  # ops/s, MB/s
 
 
+def bench_get(port, vsize, n, reps=5):
+    s = conn(port)
+    # seed the key, then deep-pipeline GET. Each reply is
+    # "$<vsize>\r\n<vsize bytes>\r\n" — count reply bytes (split-proof).
+    s.sendall(b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$%d\r\n%s\r\n" % (vsize, b"x" * vsize))
+    while b"+OK" not in s.recv(100):
+        pass
+    one = b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n"
+    pipe = one * n
+    per = len(b"$%d\r\n" % vsize) + vsize + 2
+    want = per * n
+    best = 1e9
+    for _ in range(reps):
+        t = time.perf_counter()
+        s.sendall(pipe)
+        got = 0
+        while got < want:
+            got += len(s.recv(1 << 20))
+        best = min(best, time.perf_counter() - t)
+    s.close()
+    return n / best, (vsize * n) / best / 1e6
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
@@ -76,24 +100,27 @@ def main():
 
     sizes = [(64, 30000), (1024, 20000), (4096, 15000), (16384, 8000),
              (65536, 3000), (262144, 1200), (1048576, 400)]
-    print("=" * 78)
     below = []
-    for vs, n in sizes:
-        fo, fm = bench_set(FR, vs, n)
-        ro, rm = bench_set(OR, vs, n)
-        ratio = fo / ro
-        flag = "  <-- below min" if ratio < min_ratio else ""
-        if ratio < min_ratio:
-            below.append((vs, ratio))
-        print(f"SET val={vs:>8}B  fr={fo:>9.0f} op/s ({fm:6.0f} MB/s)  "
-              f"redis={ro:>9.0f} ({rm:6.0f} MB/s)  ratio={ratio:.2f}x{flag}")
+    for op, fn in (("SET", bench_set), ("GET", bench_get)):
+        print("=" * 78)
+        for vs, n in sizes:
+            fo, fm = fn(FR, vs, n)
+            ro, rm = fn(OR, vs, n)
+            ratio = fo / ro
+            flag = "  <-- below min" if ratio < min_ratio else ""
+            if ratio < min_ratio:
+                below.append((op, vs, ratio))
+            print(f"{op} val={vs:>8}B  fr={fo:>9.0f} op/s ({fm:6.0f} MB/s)  "
+                  f"redis={ro:>9.0f} ({rm:6.0f} MB/s)  ratio={ratio:.2f}x{flag}")
     print("=" * 78)
     if below:
-        print(f"{len(below)} size(s) below {min_ratio}x (large-value framing gap, "
-              f"bead largeval-bigbulk-zerocopy): " +
-              ", ".join(f"{vs}B={r:.2f}x" for vs, r in below))
+        # SET below-min == read-side big-bulk lever; GET below-min == write-side
+        # scatter-gather lever (both in bead largeval-bigbulk-zerocopy-qesp3).
+        print(f"{len(below)} (op,size) below {min_ratio}x (large-value framing gap, "
+              f"bead largeval-bigbulk-zerocopy-qesp3): " +
+              ", ".join(f"{op} {vs}B={r:.2f}x" for op, vs, r in below))
     else:
-        print(f"all sizes >= {min_ratio}x vs redis 7.2.4")
+        print(f"all SET/GET sizes >= {min_ratio}x vs redis 7.2.4")
     return 0
 
 
