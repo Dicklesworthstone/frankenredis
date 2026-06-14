@@ -597,6 +597,10 @@ fn plain_lpos_owned_argv(key: &[u8], element: &[u8]) -> Vec<Vec<u8>> {
     vec![b"LPOS".to_vec(), key.to_vec(), element.to_vec()]
 }
 
+fn plain_object_encoding_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"OBJECT".to_vec(), b"ENCODING".to_vec(), key.to_vec()]
+}
+
 fn plain_bitcount_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"BITCOUNT".to_vec(), key.to_vec()]
 }
@@ -10022,6 +10026,118 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'GETBIT' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    fn can_execute_plain_object_encoding_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"ENCODING".len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Conservative borrowed fast path for `OBJECT ENCODING key` (the common
+    /// introspection form; OBJECT REFCOUNT/IDLETIME/FREQ/HELP fall to generic).
+    /// Calls the SAME store.object_encoding the generic handler calls (identical
+    /// keyspace hit/miss accounting), returning the encoding bulk string or nil
+    /// for a missing key. OBJECT is a container command, so the cmdstat / CLIENT
+    /// INFO command name is the `object|encoding` parent|sub form (matched here).
+    /// Never errors. (cold-cmd audit)
+    pub fn execute_plain_object_encoding_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_object_encoding_borrowed(key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        // Container command -> CLIENT INFO / cmdstat name is `object|encoding`
+        // (write_client_info_command_name lowercases the parent|sub form).
+        self.session.last_command_name.push_str("object|encoding");
+        // last_argv_len_sum = sum of the live arg byte lengths; OBJECT and
+        // ENCODING are case-invariant 6 + 8 bytes regardless of how they were
+        // typed, plus the key.
+        self.session.last_argv_len_sum = b"OBJECT".len() + b"ENCODING".len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let encoding = self.server.store.object_encoding(key, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match encoding {
+            Some(enc) => RespFrame::BulkString(Some(enc.as_bytes().to_vec())),
+            None => RespFrame::BulkString(None),
+        };
+
+        self.record_plain_object_encoding_borrowed_metrics(key, elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(reply)
+    }
+
+    fn record_plain_object_encoding_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_object_encoding_owned_argv(key));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_object_encoding_owned_argv(key));
+            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "object|encoding",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_object_encoding_owned_argv(key));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'OBJECT|ENCODING' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -23820,6 +23936,52 @@ mod tests {
             generic.server.store.stat_total_error_replies
         );
         // optioned form is rejected by the fr-server recognizer (argc 3 only).
+    }
+
+    #[test]
+    fn plain_object_encoding_borrowed_matches_generic() {
+        // (cold-cmd audit) OBJECT ENCODING key borrow == generic across encodings
+        // + missing key (nil), with the container `object|encoding` command name
+        // and matching keyspace-stat accounting.
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"i", b"12345"]), 1);
+            rt.execute_frame(command(&[b"SET", b"s", b"hello world this is not an int"]), 1);
+            rt.execute_frame(command(&[b"RPUSH", b"l", b"a"]), 1);
+            rt.execute_frame(command(&[b"SADD", b"is", b"1", b"2", b"3"]), 1);
+            rt.execute_frame(command(&[b"HSET", b"h", b"f", b"v"]), 1);
+            rt.execute_frame(command(&[b"ZADD", b"z", b"1", b"a"]), 1);
+        }
+        let mut ts = 2;
+        for key in [b"i".as_slice(), b"s", b"l", b"is", b"h", b"z", b"missing"] {
+            let f = direct
+                .execute_plain_object_encoding_borrowed(key, ts)
+                .expect("object encoding fast path should engage");
+            let g = generic.execute_frame(command(&[b"OBJECT", b"ENCODING", key]), ts);
+            assert_eq!(f, g, "key={key:?}");
+            ts += 1;
+        }
+        assert_eq!(
+            direct.session.last_command_name,
+            generic.session.last_command_name,
+            "container command name must be object|encoding"
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        // case-insensitive subcommand still recognized + canonical name
+        let mut lc = Runtime::default_strict();
+        lc.execute_frame(command(&[b"SET", b"i", b"1"]), 1);
+        assert!(
+            lc.execute_plain_object_encoding_borrowed(b"i", 2).is_some()
+        );
+        assert_eq!(lc.session.last_command_name, "object|encoding");
     }
 
     #[test]
