@@ -8705,6 +8705,25 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             }
         };
 
+        // (frankenredis-xrgkscount) Upstream t_stream.c::xreadCommand looks each
+        // stream key up TWICE via lookupKeyRead — once in the parse/resolution
+        // loop and once in the serve loop. store.xreadgroup below performs only
+        // the serve-loop lookup (records one hit). For a key that will actually
+        // serve (an existing stream WITH the requested group) record the
+        // resolution-loop lookup too, so the valid path counts 2 hits like
+        // upstream. Keys that error out (missing/wrong-type/no-group/bad-id) are
+        // looked up exactly once below (or in the bad-id branch above), matching
+        // upstream's single resolution-loop lookup for those — same shape as the
+        // XREAD fix (lnglj, 58996991e). Stat-only; reply/data unchanged.
+        if matches!(
+            store.peek_value_type(key, now_ms),
+            Some(fr_store::ValueType::Stream)
+        ) && store
+            .stream_consumer_groups(key)
+            .is_some_and(|groups| groups.contains_key(group.as_slice()))
+        {
+            store.exists_no_touch(key, now_ms);
+        }
         let read_options = StreamGroupReadOptions {
             cursor,
             noack,

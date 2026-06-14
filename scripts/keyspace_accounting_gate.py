@@ -112,6 +112,12 @@ STREAM_CG = [
     ["xgroup", "createconsumer", "cg", "gA", "c9"],
     ["xgroup", "delconsumer", "cg", "gA", "cc"], ["xgroup", "destroy", "cg", "gA"],
     ["xgroup", "setid", "cg", "gA", "0"], ["xsetid", "cg", "100-0"],
+    # XREADGROUP looks each stream key up TWICE upstream (resolution + serve
+    # loops) -> 2 hits on a serving key; fr recorded only 1 until the
+    # xrgkscount fix. History read (cc holds a PEL) + a fresh '>' both serve.
+    ["xreadgroup", "group", "gA", "cc", "count", "10", "streams", "cg", "0"],
+    ["xreadgroup", "group", "gA", "cc", "count", "10", "streams", "cg", ">"],
+    ["xreadgroup", "group", "gA", "cc", "count", "10", "streams", "nost", ">"],
 ]
 
 # (args, expected_hit_delta, expected_miss_delta) — expectations are asserted
