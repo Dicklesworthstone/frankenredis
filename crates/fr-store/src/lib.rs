@@ -6989,7 +6989,13 @@ impl Store {
         unit: BitRangeUnit,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        // (frankenredis-9s4ls sibling) NO-STAT drop_if_expired, not
+        // record_keyspace_lookup: the bitposCommand handler (and the borrowed
+        // fast path) already record the single keyspace hit/miss via the
+        // store.key_type precheck (run for the missing-key short-circuit + the
+        // WRONGTYPE-before-argv-parse precedence), so counting here too double-
+        // bumped keyspace_hits for a present key. Same class as the BITCOUNT fix.
+        if !self.drop_if_expired(key, now_ms) {
             return if bit { Ok(-1) } else { Ok(0) };
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();

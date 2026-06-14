@@ -95,6 +95,7 @@ SEQ = [
     # reads: hits
     ["get", "s"], ["get", "s2"], ["strlen", "s"], ["ttl", "s"], ["pttl", "s"],
     ["type", "s"], ["type", "l"], ["getbit", "bm", "100"], ["bitcount", "bm"],
+    ["bitpos", "bm", "1"], ["bitpos", "bm", "0"],
     ["lpos", "l", "b"], ["object", "encoding", "s"], ["object", "encoding", "l"],
     ["mget", "s", "s2"], ["llen", "l"], ["scard", "st"], ["zcard", "z"], ["hlen", "h"],
     ["sismember", "st", "1"], ["hexists", "h", "f"], ["zscore", "z", "a"], ["hget", "h", "f"],
@@ -109,7 +110,7 @@ SEQ = [
     ["object", "encoding", "nope"], ["strlen", "nope"], ["llen", "nope"],
     ["sismember", "nope", "x"], ["getrange", "nope", "0", "1"], ["exists", "nope"],
     ["expiretime", "nope"], ["pexpiretime", "nope"], ["xlen", "nope"],
-    ["hstrlen", "nope", "f"], ["memory", "usage", "nope"],
+    ["hstrlen", "nope", "f"], ["memory", "usage", "nope"], ["bitpos", "nope", "1"],
     # writes
     ["incr", "s"], ["expire", "s", "10000"], ["append", "s2", "!"],
     ["mset", "k1", "v1", "k2", "v2"], ["set", "k3", "v3"],

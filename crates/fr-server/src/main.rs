@@ -2765,6 +2765,14 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some((key, bit_arg)) = borrowed_plain_bitpos_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_bitpos_borrowed(key, bit_arg, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if borrowed_plain_command_count_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_command_count_borrowed(ts)
                 {
@@ -3368,6 +3376,14 @@ fn borrowed_plain_memory_usage_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option
 }
 
 /// Only the no-range `BITCOUNT key` form (argc 2); ranged forms fall to generic.
+/// Only the no-range `BITPOS key bit` form (argc 3); ranged forms fall to generic.
+fn borrowed_plain_bitpos_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
+    match borrowed_args {
+        [command, key, bit] if command.eq_ignore_ascii_case(b"BITPOS") => Some((*key, *bit)),
+        _ => None,
+    }
+}
+
 fn borrowed_plain_bitcount_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
     match borrowed_args {
         [command, key] if command.eq_ignore_ascii_case(b"BITCOUNT") => Some(*key),
