@@ -2391,6 +2391,23 @@ fn parse_borrowed_multibulk_action(
                         argv_len,
                     });
                 }
+                if let Some(msg) = borrowed_plain_echo_args(&borrowed_args) {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_echo_borrowed_into(msg, ts, client_resp3, out)
+                        .is_some()
+                    {
+                        return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: parsed.consumed,
+                        });
+                    }
+                    copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                    return Ok(BorrowedMultibulkAction::Parsed {
+                        kind: parsed.kind,
+                        consumed: parsed.consumed,
+                        argv_len,
+                    });
+                }
                 if let Some(key) = borrowed_plain_get_args(&borrowed_args) {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if runtime
@@ -2932,6 +2949,14 @@ fn borrowed_plain_get_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]
 /// `Some(Some(msg))`. Returns the outer `None` for anything else (incl. >1 arg,
 /// which the generic path rejects with the arity error). The inner option is the
 /// optional echo message. (frankenredis-ping-fastpath)
+/// `ECHO message` (argc 2 only); wrong-arity falls to generic.
+fn borrowed_plain_echo_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
+    match borrowed_args {
+        [command, msg] if command.eq_ignore_ascii_case(b"ECHO") => Some(*msg),
+        _ => None,
+    }
+}
+
 fn borrowed_plain_ping_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<Option<&'a [u8]>> {
     match borrowed_args {
         [command] if command.eq_ignore_ascii_case(b"PING") => Some(None),

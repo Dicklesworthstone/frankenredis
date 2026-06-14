@@ -297,6 +297,10 @@ fn plain_ping_owned_argv(msg: Option<&[u8]>) -> Vec<Vec<u8>> {
     }
 }
 
+fn plain_echo_owned_argv(msg: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"ECHO".to_vec(), msg.to_vec()]
+}
+
 fn plain_smembers_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"SMEMBERS".to_vec(), key.to_vec()]
 }
@@ -8383,6 +8387,99 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'PING' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    /// Borrow-encoded ECHO fast path: writes the bulk echo of the message
+    /// straight into `out` with zero allocations (the keyless twin of PING).
+    /// `ECHO message` requires exactly one argument; the recognizer only matches
+    /// that shape, so wrong-arity defers to generic. Falls back via the shared
+    /// read gate (subscriber/MULTI/etc. defer to the generic path, which produces
+    /// the identical bulk reply). (cold-cmd audit)
+    pub fn execute_plain_echo_borrowed_into(
+        &mut self,
+        msg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("echo");
+        self.session.last_argv_len_sum = b"ECHO".len() + msg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+
+        let start = Instant::now();
+        if !suppress_reply {
+            encode_bulk_string_slice(Some(msg), resp3, out);
+        }
+        let elapsed_us = start.elapsed().as_micros() as u64;
+
+        self.record_plain_echo_borrowed_metrics(msg, elapsed_us, now_ms, packet_id);
+
+        Some(())
+    }
+
+    fn record_plain_echo_borrowed_metrics(
+        &mut self,
+        msg: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_echo_owned_argv(msg));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_echo_owned_argv(msg));
+            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "echo",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_echo_owned_argv(msg));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'ECHO' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -23982,6 +24079,34 @@ mod tests {
             lc.execute_plain_object_encoding_borrowed(b"i", 2).is_some()
         );
         assert_eq!(lc.session.last_command_name, "object|encoding");
+    }
+
+    #[test]
+    fn plain_echo_borrowed_into_matches_generic_bytes() {
+        // (cold-cmd audit) ECHO message _into must write exactly the bytes generic
+        // dispatch produces (a bulk string, protocol-invariant), for normal,
+        // empty, and binary messages; RESP2 == RESP3.
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for msg in [b"hello".as_slice(), b"", b"\x00\xff\r\nx"] {
+            for resp3 in [false, true] {
+                let mut out = Vec::new();
+                assert_eq!(
+                    direct.execute_plain_echo_borrowed_into(msg, 2, resp3, &mut out),
+                    Some(()),
+                    "echo fast path should engage (resp3={resp3})"
+                );
+                let g = generic
+                    .execute_frame(command(&[b"ECHO", msg]), 2)
+                    .to_bytes();
+                assert_eq!(out, g, "msg={msg:?} resp3={resp3}");
+            }
+        }
+        assert_eq!(direct.session.last_command_name, "echo");
+        assert_eq!(
+            direct.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
     }
 
     #[test]
