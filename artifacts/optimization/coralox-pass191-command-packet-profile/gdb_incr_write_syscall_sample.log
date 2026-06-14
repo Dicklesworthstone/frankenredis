@@ -1,0 +1,77 @@
+
+Thread 3 (Thread 0x7ffff77be6c0 (LWP 3471580) "fr-writer-1"):
+#0  syscall () at ../sysdeps/unix/sysv/linux/x86_64/syscall.S:38
+#1  0x0000555555a3af06 in std::sys::pal::unix::futex::futex_wait () at library/std/src/sys/pal/unix/futex.rs:73
+#2  std::sys::sync::mutex::futex::Mutex::lock_contended () at library/std/src/sys/sync/mutex/futex.rs:61
+#3  0x00005555559e08c2 in lock () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sys/sync/mutex/futex.rs:33
+#4  lock<std::sync::mpsc::Receiver<frankenredis::WriterJob>> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sync/poison/mutex.rs:492
+#5  {closure#0} () at crates/fr-server/src/main.rs:488
+#6  __rust_begin_short_backtrace<frankenredis::{impl#6}::new::{closure_env#0}, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sys/backtrace.rs:166
+#7  0x00005555559e3b0a in {closure#0}<frankenredis::{impl#6}::new::{closure_env#0}, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/thread/lifecycle.rs:70
+#8  call_once<(), std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<frankenredis::{impl#6}::new::{closure_env#0}, ()>> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/core/src/panic/unwind_safe.rs:275
+#9  do_call<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<frankenredis::{impl#6}::new::{closure_env#0}, ()>>, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/panicking.rs:575
+#10 catch_unwind<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<frankenredis::{impl#6}::new::{closure_env#0}, ()>>> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/panicking.rs:543
+#11 catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<frankenredis::{impl#6}::new::{closure_env#0}, ()>>, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/panic.rs:359
+#12 {closure#1}<frankenredis::{impl#6}::new::{closure_env#0}, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/thread/lifecycle.rs:68
+#13 call_once<std::thread::lifecycle::spawn_unchecked::{closure_env#1}<frankenredis::{impl#6}::new::{closure_env#0}, ()>, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/core/src/ops/function.rs:250
+#14 0x0000555555a500b4 in alloc::boxed::{impl#31}::call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::alloc::Global> () at library/alloc/src/boxed.rs:2277
+#15 std::sys::thread::unix::{impl#2}::new::thread_start () at library/std/src/sys/thread/unix.rs:118
+#16 0x00007ffff7ca3d64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:448
+#17 0x00007ffff7d373fc in __GI___clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 2 (Thread 0x7ffff79bf6c0 (LWP 3471579) "fr-writer-0"):
+#0  syscall () at ../sysdeps/unix/sysv/linux/x86_64/syscall.S:38
+#1  0x00005555559e39f7 in std::sys::pal::unix::futex::futex_wait () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sys/pal/unix/futex.rs:73
+#2  std::sys::sync::thread_parking::futex::Parker::park () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sys/sync/thread_parking/futex.rs:55
+#3  std::thread::thread::Thread::park () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/thread/thread.rs:121
+#4  wait_until () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sync/mpmc/context.rs:143
+#5  {closure#1}<frankenredis::WriterJob> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sync/mpmc/array.rs:402
+#6  0x00005555559df02c in {closure#0}<std::sync::mpmc::array::{impl#1}::recv::{closure_env#1}<frankenredis::WriterJob>, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sync/mpmc/context.rs:49
+#7  {closure#1}<std::sync::mpmc::array::{impl#1}::recv::{closure_env#1}<frankenredis::WriterJob>, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sync/mpmc/context.rs:57
+#8  try_with<core::cell::Cell<core::option::Option<std::sync::mpmc::context::Context>>, std::sync::mpmc::context::{impl#0}::with::{closure_env#1}<std::sync::mpmc::array::{impl#1}::recv::{closure_env#1}<frankenredis::WriterJob>, ()>, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/thread/local.rs:463
+#9  with<std::sync::mpmc::array::{impl#1}::recv::{closure_env#1}<frankenredis::WriterJob>, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sync/mpmc/context.rs:53
+#10 recv<frankenredis::WriterJob> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sync/mpmc/array.rs:390
+#11 recv<frankenredis::WriterJob> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sync/mpmc/mod.rs:1013
+#12 recv<frankenredis::WriterJob> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sync/mpsc.rs:881
+#13 {closure#0} () at crates/fr-server/src/main.rs:491
+#14 __rust_begin_short_backtrace<frankenredis::{impl#6}::new::{closure_env#0}, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sys/backtrace.rs:166
+#15 0x00005555559e3b0a in {closure#0}<frankenredis::{impl#6}::new::{closure_env#0}, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/thread/lifecycle.rs:70
+#16 call_once<(), std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<frankenredis::{impl#6}::new::{closure_env#0}, ()>> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/core/src/panic/unwind_safe.rs:275
+#17 do_call<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<frankenredis::{impl#6}::new::{closure_env#0}, ()>>, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/panicking.rs:575
+#18 catch_unwind<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<frankenredis::{impl#6}::new::{closure_env#0}, ()>>> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/panicking.rs:543
+#19 catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<frankenredis::{impl#6}::new::{closure_env#0}, ()>>, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/panic.rs:359
+#20 {closure#1}<frankenredis::{impl#6}::new::{closure_env#0}, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/thread/lifecycle.rs:68
+#21 call_once<std::thread::lifecycle::spawn_unchecked::{closure_env#1}<frankenredis::{impl#6}::new::{closure_env#0}, ()>, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/core/src/ops/function.rs:250
+#22 0x0000555555a500b4 in alloc::boxed::{impl#31}::call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::alloc::Global> () at library/alloc/src/boxed.rs:2277
+#23 std::sys::thread::unix::{impl#2}::new::thread_start () at library/std/src/sys/thread/unix.rs:118
+#24 0x00007ffff7ca3d64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:448
+#25 0x00007ffff7d373fc in __GI___clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 1 (Thread 0x7ffff7e68d40 (LWP 3471554) "frankenredis"):
+#0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
+#1  0x00007ffff7ca013c in __internal_syscall_cancel (a1=<optimized out>, a2=<optimized out>, a3=<optimized out>, a4=<optimized out>, a5=0, a6=0, nr=44) at ./nptl/cancellation.c:49
+#2  __syscall_cancel (a1=<optimized out>, a2=<optimized out>, a3=<optimized out>, a4=<optimized out>, a5=a5@entry=0, a6=a6@entry=0, nr=44) at ./nptl/cancellation.c:75
+#3  0x00007ffff7d3900f in __libc_send (fd=<optimized out>, buf=<optimized out>, len=<optimized out>, flags=<optimized out>) at ../sysdeps/unix/sysv/linux/send.c:28
+#4  0x0000555555a09ab0 in std::sys::net::connection::socket::TcpStream::write () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sys/net/connection/socket/mod.rs:433
+#5  std::net::tcp::{impl#4}::write () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/net/tcp.rs:740
+#6  {closure#0} () at /data/tmp/rch-cargo-home-vmi1156319-3375490-1781407526364238689/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#7  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /data/tmp/rch-cargo-home-vmi1156319-3375490-1781407526364238689/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/selector/stateless_io_source.rs:21
+#8  do_io<std::net::tcp::TcpStream, mio::net::tcp::stream::{impl#3}::write::{closure_env#0}, usize> () at /data/tmp/rch-cargo-home-vmi1156319-3375490-1781407526364238689/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/io_source.rs:69
+#9  write () at /data/tmp/rch-cargo-home-vmi1156319-3375490-1781407526364238689/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/net/tcp/stream.rs:301
+#10 try_flush () at crates/fr-server/src/main.rs:422
+#11 0x00005555559ea3fb in drive_client_output () at crates/fr-server/src/main.rs:5704
+#12 0x00005555559e48ba in handle_readable () at crates/fr-server/src/main.rs:1972
+#13 0x00005555559fa9ca in main () at crates/fr-server/src/main.rs:1279
+#14 0x00005555559de8e3 in call_once<fn() -> std::process::ExitCode, ()> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/core/src/ops/function.rs:250
+#15 __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sys/backtrace.rs:166
+#16 0x00005555559e1d29 in {closure#0}<std::process::ExitCode> () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/rt.rs:206
+#17 0x0000555555a4a45e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#18 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:575
+#19 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:543
+#20 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#21 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#22 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:575
+#23 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:543
+#24 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#25 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#26 0x0000555555a1086c in main ()

@@ -1,0 +1,7 @@
+:1
+:2
++OK
+-ERR increment or decrement would overflow
++OK
+-ERR value is not an integer or out of range
++OK
