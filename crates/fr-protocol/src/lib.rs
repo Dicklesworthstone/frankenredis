@@ -1096,7 +1096,19 @@ pub fn parse_command_frame(
         match input.get(cursor) {
             None => return Err(RespParseError::Incomplete),
             Some(&b'$') => {}
-            Some(&other) => return Err(RespParseError::ExpectedBulk(other)),
+            Some(&other) => {
+                // (frankenredis-mbulkdefer) Match upstream
+                // networking.c::processMultibulkBuffer, which locates the
+                // element's line terminator (strchr '\r') BEFORE checking the
+                // type byte: a malformed element whose line hasn't fully
+                // arrived must WAIT (Incomplete), not error early. read_line
+                // yields Incomplete (no `\r\n` yet, within the line cap),
+                // LineTooLong (over cap == upstream "too big bulk count
+                // string"), or Ok (line complete -> the type byte is
+                // definitively wrong -> ExpectedBulk).
+                read_line(input, cursor)?;
+                return Err(RespParseError::ExpectedBulk(other));
+            }
         }
         let (item, consumed) = parse_bulk(input, cursor + 1, config, false)?;
         // A `$-1` null bulk is a valid *reply* but never a command argument.
@@ -1196,7 +1208,15 @@ fn parse_command_args_borrowed_into_inner<'a>(
         match input.get(cursor) {
             None => return Err(RespParseError::Incomplete),
             Some(&b'$') => {}
-            Some(&other) => return Err(RespParseError::ExpectedBulk(other)),
+            Some(&other) => {
+                // (frankenredis-mbulkdefer) Mirror upstream
+                // processMultibulkBuffer: find the element's line terminator
+                // before checking the type byte, so a malformed element whose
+                // line hasn't fully arrived WAITS (Incomplete) instead of
+                // erroring early. See the owned-parser twin above.
+                read_line(input, cursor)?;
+                return Err(RespParseError::ExpectedBulk(other));
+            }
         }
         let (arg, consumed) = parse_bulk_slice(input, cursor + 1, config)?;
         let Some(arg) = arg else {
@@ -1845,6 +1865,36 @@ mod tests {
                 parse_command_frame_borrowed(input, &cfg).unwrap_err(),
                 expected,
                 "input {input:?}"
+            );
+            assert_eq!(
+                parse_command_frame(input, &cfg).unwrap_err(),
+                expected,
+                "owned input {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn multibulk_bad_element_defers_error_until_line_complete() {
+        // (frankenredis-mbulkdefer) Upstream processMultibulkBuffer locates an
+        // element's line terminator BEFORE checking its type byte: a malformed
+        // (non-`$`) element whose line hasn't fully arrived must return
+        // Incomplete (wait), and only error once the `\r\n` is present — both
+        // for the borrowed (live) and owned parsers.
+        let cfg = ParserConfig::default();
+        let cases = [
+            // (input, expected): no terminator yet -> Incomplete (wait); with the
+            // `\r\n` present -> the type-byte error stands.
+            (&b"*1\r\nPING"[..], RespParseError::Incomplete),
+            (&b"*2\r\n$4\r\nPING\r\nGARBAGE"[..], RespParseError::Incomplete),
+            (&b"*1\r\nPING\r\n"[..], RespParseError::ExpectedBulk(b'P')),
+            (&b"*2\r\n$4\r\nPING\r\nGARBAGE\r\n"[..], RespParseError::ExpectedBulk(b'G')),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                parse_command_frame_borrowed(input, &cfg).unwrap_err(),
+                expected,
+                "borrowed input {input:?}"
             );
             assert_eq!(
                 parse_command_frame(input, &cfg).unwrap_err(),
