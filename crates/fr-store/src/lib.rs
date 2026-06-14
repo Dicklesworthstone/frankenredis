@@ -21201,7 +21201,7 @@ fn decode_listpack_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
         .map(|entries| {
             entries
                 .into_iter()
-                .map(|entry| entry.to_bytes())
+                .map(fr_persist::listpack::ListpackEntry::into_bytes)
                 .collect::<Vec<_>>()
         })
         .map_err(|_| StoreError::InvalidDumpPayload)

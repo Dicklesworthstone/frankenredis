@@ -1,0 +1,5 @@
+redis_payload_len=39042 sha256=e91767f7c57ee00fb7ace3955d59039e31a14fa48e82782d85643772adf1d76e
+current_payload_len=39033 sha256=68d60e1e2c804f57710d47bd18c33a3fb411eda2b8223193d430ed866dc60013
+candidate_payload_len=39033 sha256=68d60e1e2c804f57710d47bd18c33a3fb411eda2b8223193d430ed866dc60013
+current dump_ops=1224.01/s restore_ops=1766.64/s dump_MB=7.81
+candidate dump_ops=1283.16/s restore_ops=2153.07/s dump_MB=7.81

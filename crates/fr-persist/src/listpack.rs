@@ -35,6 +35,17 @@ impl ListpackEntry {
             ListpackEntry::String(bytes) => bytes.clone(),
         }
     }
+
+    /// Consuming form of [`Self::to_bytes`]. String entries can move their
+    /// decoded payload out directly; integer entries still format to their
+    /// canonical decimal byte string.
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        match self {
+            ListpackEntry::Integer(n) => n.to_string().into_bytes(),
+            ListpackEntry::String(bytes) => bytes,
+        }
+    }
 }
 
 /// Decoder failure modes. Narrow set — callers either succeed or reject.
@@ -618,6 +629,15 @@ mod tests {
         assert_eq!(ListpackEntry::Integer(-1).to_bytes(), b"-1".to_vec());
         assert_eq!(
             ListpackEntry::String(b"hello".to_vec()).to_bytes(),
+            b"hello".to_vec()
+        );
+    }
+
+    #[test]
+    fn into_bytes_moves_string_payload_and_formats_ints() {
+        assert_eq!(ListpackEntry::Integer(42).into_bytes(), b"42".to_vec());
+        assert_eq!(
+            ListpackEntry::String(b"hello".to_vec()).into_bytes(),
             b"hello".to_vec()
         );
     }
