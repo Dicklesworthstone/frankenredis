@@ -1782,48 +1782,58 @@ fn encode_compact_list_quicklist2(
     items: &[Vec<u8>],
     thresholds: &CompactRdbThresholds,
 ) -> Option<Vec<u8>> {
-    // Pack all items into a single listpack node (container=2 PACKED).
-    // Upstream lists are always quicklist-encoded; large lists span
-    // multiple PACKED nodes, but the simple single-node form covers
-    // the common case while staying upstream-compatible. If a single
-    // element exceeds the listpack-size budget, emit a PLAIN node
-    // (container=1) carrying the raw bytes.
+    // Upstream lists are ALWAYS quicklist-encoded (RDB_TYPE_LIST_QUICKLIST_2):
+    // items are split into PACKED listpack nodes each bounded by
+    // list_max_listpack_size (default 8192 B), with an over-budget single item
+    // emitted as a PLAIN node (container=1). The previous form only handled the
+    // single-node case and returned None for a large all-small-item list,
+    // forcing the caller onto the legacy RDB_TYPE_LIST (type 1) — which redis
+    // 7.2 never emits. Build the multi-node form, tracking each node's listpack
+    // byte size incrementally (listpack_entry_encoded_len is O(1)) so packing
+    // stays O(n) and the node boundaries match the DUMP encoder
+    // (encode_dump_quicklist2 / frankenredis-list-dump-quicklist-reencode-q5ody).
     if items.is_empty() {
         return None;
     }
-    let refs: Vec<&[u8]> = items.iter().map(Vec::as_slice).collect();
-    let lp = encode_listpack_strings_blob(&refs)?;
-    if lp.len() > thresholds.list_max_listpack_size {
-        // Try splitting into one-item-per-node PLAIN nodes when any
-        // single item exceeds the per-node budget. Mirrors upstream's
-        // quicklist-fallback path. Small lists with one giant element
-        // hit this branch.
-        if items
-            .iter()
-            .any(|item| item.len() > thresholds.list_max_listpack_size)
-        {
-            let mut buf = Vec::new();
-            rdb_encode_length(&mut buf, items.len());
-            for item in items {
-                if item.len() > thresholds.list_max_listpack_size {
-                    rdb_encode_length(&mut buf, 1); // PLAIN container
-                    rdb_encode_string(&mut buf, item);
-                } else {
-                    let one_lp = encode_listpack_strings_blob(&[item.as_slice()])?;
-                    rdb_encode_length(&mut buf, 2); // PACKED container
-                    // rdbSaveRawString → LZF-aware (frankenredis listpack DUMP LZF parity)
-                    rdb_encode_string(&mut buf, &one_lp);
-                }
-            }
-            return Some(buf);
-        }
-        return None;
-    }
+    let budget = thresholds.list_max_listpack_size;
     let mut buf = Vec::new();
-    rdb_encode_length(&mut buf, 1); // node count = 1
-    rdb_encode_length(&mut buf, 2); // container = PACKED
-    // rdbSaveRawString → LZF-aware (frankenredis listpack DUMP LZF parity)
-    rdb_encode_string(&mut buf, &lp);
+    let mut node_payloads: Vec<(u8, Vec<u8>)> = Vec::new(); // (container, payload)
+    let mut packed: Vec<&[u8]> = Vec::new();
+    let mut packed_bytes = LISTPACK_BLOB_OVERHEAD;
+    let flush = |packed: &mut Vec<&[u8]>,
+                 node_payloads: &mut Vec<(u8, Vec<u8>)>|
+     -> Option<()> {
+        if !packed.is_empty() {
+            let lp = encode_listpack_strings_blob(packed)?;
+            node_payloads.push((2, lp)); // PACKED
+            packed.clear();
+        }
+        Some(())
+    };
+    for item in items {
+        if item.len() > budget {
+            // Over-budget single element → its own PLAIN node.
+            flush(&mut packed, &mut node_payloads)?;
+            packed_bytes = LISTPACK_BLOB_OVERHEAD;
+            node_payloads.push((1, item.clone())); // PLAIN (raw bytes)
+            continue;
+        }
+        let entry_bytes = listpack_entry_encoded_len(item);
+        if !packed.is_empty() && packed_bytes + entry_bytes > budget {
+            flush(&mut packed, &mut node_payloads)?;
+            packed_bytes = LISTPACK_BLOB_OVERHEAD;
+        }
+        packed.push(item.as_slice());
+        packed_bytes += entry_bytes;
+    }
+    flush(&mut packed, &mut node_payloads)?;
+
+    rdb_encode_length(&mut buf, node_payloads.len());
+    for (container, payload) in &node_payloads {
+        rdb_encode_length(&mut buf, *container as usize);
+        // rdbSaveRawString → LZF-aware (frankenredis listpack DUMP LZF parity)
+        rdb_encode_string(&mut buf, payload);
+    }
     Some(buf)
 }
 
@@ -2168,6 +2178,55 @@ fn encode_listpack_entry(buf: &mut Vec<u8>, entry: &[u8]) {
 /// integer-looking strings are emitted with the same compact integer
 /// encodings `lpAppend` would choose upstream. Returns `None` when
 /// the total wire size doesn't fit in a u32.
+/// Listpack frame overhead: 6-byte header (4 total-bytes + 2 element count) +
+/// 1-byte 0xFF terminator. Matches `encode_listpack_strings_blob`.
+const LISTPACK_BLOB_OVERHEAD: usize = 7;
+
+/// O(1) encoded byte length of one listpack entry — must EXACTLY equal the bytes
+/// `encode_listpack_entry` appends for `entry` (header/payload + backlen), so a
+/// running sum reproduces `encode_listpack_strings_blob(..).len()` without
+/// encoding. Used to pack quicklist nodes incrementally in O(n).
+fn listpack_entry_encoded_len(entry: &[u8]) -> usize {
+    fn backlen_len(len: usize) -> usize {
+        if len <= 127 {
+            1
+        } else if len < 16_383 {
+            2
+        } else if len < 2_097_151 {
+            3
+        } else if len < 268_435_455 {
+            4
+        } else {
+            5
+        }
+    }
+    let data_len = if let Some(value) = parse_listpack_integer(entry) {
+        if (0..=127).contains(&value) {
+            1
+        } else if (-4096..=4095).contains(&value) {
+            2
+        } else if i16::try_from(value).is_ok() {
+            3
+        } else if (-8_388_608..=8_388_607).contains(&value) {
+            4
+        } else if i32::try_from(value).is_ok() {
+            5
+        } else {
+            9
+        }
+    } else {
+        let header = if entry.len() < 64 {
+            1
+        } else if entry.len() < 4096 {
+            2
+        } else {
+            5
+        };
+        header + entry.len()
+    };
+    data_len + backlen_len(data_len)
+}
+
 fn encode_listpack_strings_blob(entries: &[&[u8]]) -> Option<Vec<u8>> {
     let mut encoded = Vec::new();
     for entry in entries {
@@ -4589,6 +4648,40 @@ mod tests {
             db: 0,
             key: b"mylist".to_vec(),
             value: RdbValue::List(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]),
+            expire_ms: None,
+        }];
+        let encoded = encode_rdb(&entries, &[]);
+        let (decoded, _) = decode_rdb(&encoded).expect("decode");
+        assert_eq!(strip_stream_metadata(decoded), entries);
+    }
+
+    #[test]
+    fn large_list_rdb_uses_multinode_quicklist2_not_legacy() {
+        use super::{
+            CompactRdbThresholds, encode_compact_list_quicklist2, rdb_decode_length,
+        };
+        let th = CompactRdbThresholds::default();
+        // > one 8 KiB listpack node, no single oversized element.
+        let items: Vec<Vec<u8>> = (0..10000).map(|i| format!("e{i}").into_bytes()).collect();
+        let payload = encode_compact_list_quicklist2(&items, &th)
+            .expect("large all-small-item list must encode as QUICKLIST_2 (not fall back to None)");
+        let (node_count, _) = rdb_decode_length(&payload).expect("node count");
+        assert!(
+            node_count > 1,
+            "expected multiple PACKED nodes, got {node_count}"
+        );
+        // Small list → exactly one node.
+        let small = encode_compact_list_quicklist2(
+            &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+            &th,
+        )
+        .expect("small list encodes");
+        assert_eq!(rdb_decode_length(&small).unwrap().0, 1);
+        // Full RDB round-trip through the canonical QUICKLIST_2 path is byte-faithful.
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"big".to_vec(),
+            value: RdbValue::List(items),
             expire_ms: None,
         }];
         let encoded = encode_rdb(&entries, &[]);
