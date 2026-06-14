@@ -138,6 +138,76 @@ else:  # restore
 PY
 }
 
+# Preflight (frankenredis-oracle-pollution guard): the per-gate baseline above is
+# captured PER-PORT from the running servers, so it faithfully restores whatever
+# each server had AT START. That is wrong when the oracle is a long-running shared
+# instance whose runtime config was mutated by an earlier agent's probe (e.g.
+# `CONFIG SET list-max-listpack-size 128`, while the compiled default is -2). Then
+# the snapshot bakes the MISMATCH in and every encoding/perf gate reports phantom
+# divergences (encoding_differ, large_data_perf_sweep LREM, meta_encoding_chain).
+# fr ships the correct redis-7.2.4 compiled defaults, so align the ORACLE to fr's
+# values BEFORE capturing the baseline. Also flag a DEBUG-availability asymmetry,
+# which silently fails the DEBUG-RELOAD gates (one server re-derives encoding on
+# reload, the other can't run DEBUG at all).
+preflight_align() {
+    python3 - "$OP" "$FP" <<'PY'
+import socket, sys
+op, fp = int(sys.argv[1]), int(sys.argv[2])
+PARAMS = ["list-max-listpack-size", "hash-max-listpack-entries", "hash-max-listpack-value",
+          "set-max-listpack-entries", "set-max-listpack-value", "set-max-intset-entries",
+          "zset-max-listpack-entries", "zset-max-listpack-value", "notify-keyspace-events",
+          "maxmemory", "maxmemory-policy"]
+def conn(p):
+    s = socket.create_connection(("127.0.0.1", p), timeout=3); s.settimeout(3)
+    buf = bytearray()
+    def line():
+        while b"\r\n" not in buf:
+            buf.extend(s.recv(4096))
+        i = buf.index(b"\r\n"); out = bytes(buf[:i]); del buf[:i+2]; return out
+    def reply():
+        h = line(); t = h[:1]
+        if t in (b"+", b"-", b":"): return h
+        if t == b"$":
+            n = int(h[1:])
+            if n < 0: return None
+            while len(buf) < n+2: buf.extend(s.recv(4096))
+            d = bytes(buf[:n]); del buf[:n+2]; return d
+        if t == b"*":
+            n = int(h[1:]); return [reply() for _ in range(n)] if n >= 0 else None
+        return h
+    def cmd(*a):
+        m = b"*%d\r\n" % len(a)
+        for x in a:
+            x = x if isinstance(x, bytes) else str(x).encode()
+            m += b"$%d\r\n%s\r\n" % (len(x), x)
+        s.sendall(m); return reply()
+    return cmd
+oc, fc = conn(op), conn(fp)
+def get(c, name):
+    r = c("CONFIG", "GET", name)
+    return r[1].decode("latin1") if isinstance(r, list) and len(r) == 2 and r[1] is not None else None
+realigned = 0
+for name in PARAMS:
+    ov, fv = get(oc, name), get(fc, name)
+    if ov is not None and fv is not None and ov != fv:
+        r = oc("CONFIG", "SET", name, fv)
+        ok = isinstance(r, bytes) and r.startswith(b"+")
+        print("  preflight: oracle %s %s->%s (match fr) %s" % (name, ov, fv, "" if ok else "[SET FAILED]"))
+        realigned += ok
+# DEBUG-availability symmetry: a denied DEBUG returns an -ERR mentioning the flag.
+def debug_ok(c):
+    r = c("DEBUG", "set-active-expire", "1")
+    return isinstance(r, bytes) and r.startswith(b"+")
+od, fd = debug_ok(oc), debug_ok(fc)
+if od != fd:
+    print("  preflight: WARNING DEBUG asymmetry oracle=%s fr=%s — DEBUG-RELOAD gates "
+          "(meta_encoding_chain_gate) will falsely diverge; launch BOTH with "
+          "--enable-debug-command yes" % (od, fd))
+if realigned:
+    print("  preflight: realigned %d oracle config(s) to fr's compiled defaults" % realigned)
+PY
+}
+preflight_align
 cfg_state capture
 
 for script in "$DIR"/*.py; do
