@@ -23266,11 +23266,12 @@ fn msetnx(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 3 || argv.len().is_multiple_of(2) {
         return Err(CommandError::WrongArity("MSETNX"));
     }
-    // Upstream t_string.c::msetGenericCommand uses lookupKeyWrite for this
-    // NX preflight, so existing-key checks keep normal write-lookup touch
-    // semantics. This differs from EXISTS, which explicitly uses LOOKUP_NOTOUCH.
+    // Upstream t_string.c::msetGenericCommand uses lookupKeyWrite for this NX
+    // preflight. lookupKeyWrite reaps a stale-expired key but does NOT bump
+    // keyspace_hits/misses (MSETNX is a write), so use exists_no_stat — the
+    // stat-counting store.exists over-counted one hit/miss per probed key.
     for i in (1..argv.len()).step_by(2) {
-        if store.exists(&argv[i], now_ms) {
+        if store.exists_no_stat(&argv[i], now_ms) {
             return Ok(RespFrame::Integer(0));
         }
     }

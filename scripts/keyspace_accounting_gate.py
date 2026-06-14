@@ -208,6 +208,10 @@ WRITES = [
     ["rpop", "lx"], ["lset", "lx", "0", "q"], ["zadd", "zx", "5", "m"],
     ["zrem", "zx", "a"], ["zincrby", "zx", "1", "a"], ["setbit", "k", "3", "1"],
     ["del", "k"], ["rename", "k", "kr"], ["copy", "k", "kk"],
+    # MSETNX is a write — its NX existence preflight uses lookupKeyWrite, which
+    # never bumps keyspace counters (was over-counting via store.exists).
+    ["msetnx", "c", "1", "d", "2"], ["msetnx", "k", "1", "z", "2"],
+    ["mset", "c", "1", "d", "2"], ["setnx", "no", "v"],
     # writes on a missing key still must not move the counters
     ["append", "no", "x"], ["incr", "no"], ["lpush", "no", "z"], ["sadd", "no", "9"],
     ["hset", "no", "g", "1"], ["zadd", "no", "1", "m"], ["expire", "no", "100"],
