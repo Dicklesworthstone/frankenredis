@@ -41,7 +41,8 @@ use fr_store::{
     AclKeyPattern, ClientReplyState, ClientTrackingState, CommandHistogram, CommandRecordKind,
     DispatchAclLogContext, DispatchAclPermissionReason, DispatchAclPermissions,
     EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus, EvictionSafetyGateState,
-    MaxmemoryPolicy, PendingAclLogEvent, Store, decode_db_key, encode_db_key, glob_match,
+    MaxmemoryPolicy, PendingAclLogEvent, SLOWLOG_ENTRY_MAX_STRING, Store, decode_db_key,
+    encode_db_key, glob_match,
 };
 use sha2::{Digest, Sha256};
 
@@ -252,6 +253,30 @@ fn set_command_keys(argv: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
 
 fn plain_set_owned_argv(key: &[u8], value: &[u8]) -> Vec<Vec<u8>> {
     vec![b"SET".to_vec(), key.to_vec(), value.to_vec()]
+}
+
+fn slowlog_arg_from_prefix(prefix: &[u8], full_len: usize) -> Vec<u8> {
+    if full_len > SLOWLOG_ENTRY_MAX_STRING {
+        let mut arg = prefix[..prefix.len().min(SLOWLOG_ENTRY_MAX_STRING)].to_vec();
+        arg.extend_from_slice(
+            format!("... ({} more bytes)", full_len - SLOWLOG_ENTRY_MAX_STRING).as_bytes(),
+        );
+        arg
+    } else {
+        prefix.to_vec()
+    }
+}
+
+fn plain_set_slowlog_argv_from_prefix(
+    key: &[u8],
+    value_prefix: &[u8],
+    value_len: usize,
+) -> Vec<Vec<u8>> {
+    vec![
+        b"SET".to_vec(),
+        slowlog_arg_from_prefix(key, key.len()),
+        slowlog_arg_from_prefix(value_prefix, value_len),
+    ]
 }
 
 /// (frankenredis-5gisf) Reconstruct the owned `MSET k v [k v ...]` argv for the
@@ -6742,6 +6767,66 @@ impl Runtime {
         Some(RespFrame::SimpleString("OK".to_string()))
     }
 
+    pub fn execute_plain_set_owned(
+        &mut self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        self.execute_plain_set_owned_or_return(key, value, now_ms)
+            .ok()
+    }
+
+    pub fn execute_plain_set_owned_or_return(
+        &mut self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<RespFrame, (Vec<u8>, Vec<u8>)> {
+        if self.policy.emit_evidence_ledger {
+            return Err((key, value));
+        }
+        if !self.can_execute_plain_set_borrowed(&key, &value, now_ms) {
+            return Err((key, value));
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("set");
+        self.session.last_argv_len_sum = b"SET".len() + key.len() + value.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let key_for_metrics = key.clone();
+        let value_len = value.len();
+        let value_prefix = value[..value.len().min(SLOWLOG_ENTRY_MAX_STRING)].to_vec();
+
+        let start = Instant::now();
+        self.server.store.set_plain_owned(key, value, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+
+        self.record_plain_set_owned_metrics(
+            &key_for_metrics,
+            &value_prefix,
+            value_len,
+            elapsed_us,
+            now_ms,
+            packet_id,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    }
+
     /// (frankenredis-5gisf) Borrowed MSET fast path: N independent plain SETs
     /// from borrowed read-buffer slices, avoiding the general parse path's 2N
     /// per-arg `.to_vec()` allocations (MSET was ~0.89x vs redis purely from that
@@ -13142,6 +13227,40 @@ impl Runtime {
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
                 output: &RespFrame::SimpleString("OK".to_string()),
             });
+        }
+    }
+
+    fn record_plain_set_owned_metrics(
+        &mut self,
+        key: &[u8],
+        value_prefix: &[u8],
+        value_len: usize,
+        elapsed_us: u64,
+        now_ms: u64,
+        _packet_id: u64,
+    ) {
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv = plain_set_slowlog_argv_from_prefix(key, value_prefix, value_len);
+            self.record_prebuilt_slowlog(argv, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            self.server
+                .record_latency_sample(&[b"SET".to_vec()], elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "set",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
         }
     }
 
@@ -20942,6 +21061,23 @@ impl Runtime {
         );
     }
 
+    fn record_prebuilt_slowlog(&mut self, argv: Vec<Vec<u8>>, duration_us: u64, now_ms: u64) {
+        let client_address = if self.session.peer_addr.is_some() {
+            self.refresh_dispatch_peer_addr_cache(self.session.peer_addr);
+            self.dispatch_peer_addr_cache.as_bytes().to_vec()
+        } else {
+            Vec::new()
+        };
+        let client_name = self.session.client_name.clone().unwrap_or_default();
+        self.server.store.record_prebuilt_slowlog_with_client(
+            argv,
+            duration_us,
+            now_ms,
+            client_address,
+            client_name,
+        );
+    }
+
     /// Gate the DEBUG command on the `enable-debug-command` config.
     /// Returns `Some(error_frame)` when the gate denies (the canonical
     /// upstream Redis 7.2 wording). Returns `None` when the gate
@@ -24697,6 +24833,36 @@ mod tests {
                 .expect("generic SET captures AOF")
                 .argv,
             argv(&[b"SET", b"aof-key", b"value"])
+        );
+    }
+
+    #[test]
+    fn plain_set_owned_fast_path_matches_borrowed_set_result() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_plain_set_owned(b"owned-key".to_vec(), b"owned-value".to_vec(), 1),
+            Some(RespFrame::SimpleString("OK".to_string()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"owned-key"]), 2),
+            RespFrame::BulkString(Some(b"owned-value".to_vec()))
+        );
+        assert_eq!(rt.server.store.stat_total_commands_processed, 2);
+    }
+
+    #[test]
+    fn plain_set_owned_fast_path_defers_when_evidence_ledger_needs_full_argv() {
+        let mut policy = RuntimePolicy::default();
+        policy.emit_evidence_ledger = true;
+        let mut rt = Runtime::new(policy);
+
+        assert_eq!(
+            rt.execute_plain_set_owned(b"ledger-key".to_vec(), b"value".to_vec(), 1),
+            None
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"ledger-key"]), 2),
+            RespFrame::BulkString(None)
         );
     }
 

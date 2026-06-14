@@ -58,6 +58,8 @@ const WRITER_QUEUE_BOUND: usize = 1024;
 const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
 const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
 const MAX_FRAMES_PER_CLIENT_TICK: usize = 4096;
+const DIRECT_OWNED_SET_MIN_VALUE: usize = 32 * 1024;
+const DIRECT_OWNED_SET_CHUNK: usize = 64 * 1024;
 
 /// Describes a blocked-on-list operation.
 #[derive(Debug, Clone)]
@@ -318,6 +320,8 @@ struct ClientConnection {
     write_failed: bool,
     session: ClientSession,
     read_buf: Vec<u8>,
+    large_set_read: Option<LargeSetReadState>,
+    owned_plain_sets: VecDeque<OwnedPlainSetCommand>,
     write_buf: Vec<u8>,
     main_writable_armed: bool,
     /// True if the client sent QUIT or must be disconnected.
@@ -326,6 +330,20 @@ struct ClientConnection {
     blocked: Option<BlockedState>,
     /// If set, this client is a replica and this is the last offset sent to it.
     replication_sent_offset: Option<ReplOffset>,
+}
+
+struct OwnedPlainSetCommand {
+    key: Vec<u8>,
+    value: Vec<u8>,
+}
+
+struct LargeSetReadState {
+    key: Vec<u8>,
+    value: Vec<u8>,
+    remaining_value: usize,
+    trailer: [u8; 2],
+    trailer_len: usize,
+    query_bytes_seen: usize,
 }
 
 struct ReplicaPrimaryConnection {
@@ -387,6 +405,8 @@ impl ClientConnection {
             write_failed: false,
             session,
             read_buf: Vec::with_capacity(4096),
+            large_set_read: None,
+            owned_plain_sets: VecDeque::new(),
             write_buf: Vec::new(),
             main_writable_armed: false,
             closing: false,
@@ -1808,6 +1828,278 @@ fn release_expired_client_pause(
     }
 }
 
+enum LargeSetReadProgress {
+    Complete { read_any: bool },
+    Pending { read_any: bool },
+    Closed,
+}
+
+fn parse_resp_len_at(input: &[u8], mut idx: usize) -> Option<(usize, usize)> {
+    let first = *input.get(idx)?;
+    if first == b'0' {
+        idx += 1;
+        if !matches!(input.get(idx), Some(b'\r')) {
+            return None;
+        }
+        return Some((0, idx));
+    }
+    if !first.is_ascii_digit() || first == b'0' {
+        return None;
+    }
+    let mut value = usize::from(first - b'0');
+    idx += 1;
+    while let Some(&byte) = input.get(idx) {
+        if byte == b'\r' {
+            return Some((value, idx));
+        }
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?;
+        value = value.checked_add(usize::from(byte - b'0'))?;
+        idx += 1;
+    }
+    None
+}
+
+fn parse_array_header_at(
+    input: &[u8],
+    cursor: usize,
+    max_array_len: usize,
+) -> Option<(usize, usize)> {
+    if *input.get(cursor)? != b'*' {
+        return None;
+    }
+    let (len, cr_idx) = parse_resp_len_at(input, cursor + 1)?;
+    if len > max_array_len || input.get(cr_idx..cr_idx + 2)? != b"\r\n" {
+        return None;
+    }
+    Some((len, cr_idx + 2))
+}
+
+fn parse_bulk_header_at(
+    input: &[u8],
+    cursor: usize,
+    max_bulk_len: usize,
+) -> Option<(usize, usize)> {
+    if *input.get(cursor)? != b'$' {
+        return None;
+    }
+    let (len, cr_idx) = parse_resp_len_at(input, cursor + 1)?;
+    if len > max_bulk_len || input.get(cr_idx..cr_idx + 2)? != b"\r\n" {
+        return None;
+    }
+    Some((len, cr_idx + 2))
+}
+
+fn parse_complete_bulk_at(
+    input: &[u8],
+    cursor: usize,
+    max_bulk_len: usize,
+) -> Option<(&[u8], usize)> {
+    let (len, payload_start) = parse_bulk_header_at(input, cursor, max_bulk_len)?;
+    let payload_end = payload_start.checked_add(len)?;
+    if input.get(payload_end..payload_end + 2)? != b"\r\n" {
+        return None;
+    }
+    Some((input.get(payload_start..payload_end)?, payload_end + 2))
+}
+
+fn parse_large_plain_set_read_start(
+    input: &[u8],
+    config: &ParserConfig,
+) -> Option<LargeSetReadState> {
+    let (argc, cursor) = parse_array_header_at(input, 0, config.max_array_len)?;
+    if argc != 3 {
+        return None;
+    }
+    let (command, cursor) = parse_complete_bulk_at(input, cursor, config.max_bulk_len)?;
+    if !command.eq_ignore_ascii_case(b"SET") {
+        return None;
+    }
+    let (key, cursor) = parse_complete_bulk_at(input, cursor, config.max_bulk_len)?;
+    let (value_len, value_start) = parse_bulk_header_at(input, cursor, config.max_bulk_len)?;
+    if value_len < DIRECT_OWNED_SET_MIN_VALUE {
+        return None;
+    }
+
+    let value_end = value_start.checked_add(value_len)?;
+    if input.len() >= value_end + 2 {
+        return None;
+    }
+
+    let payload_available = input.len().saturating_sub(value_start).min(value_len);
+    let mut value = Vec::with_capacity(value_len);
+    value.extend_from_slice(input.get(value_start..value_start + payload_available)?);
+    let mut trailer = [0u8; 2];
+    let trailer_len = input.len().saturating_sub(value_end).min(2);
+    if trailer_len > 0 {
+        let trailer_prefix = input.get(value_end..value_end + trailer_len)?;
+        if trailer_prefix != &b"\r\n"[..trailer_len] {
+            return None;
+        }
+        trailer[..trailer_len].copy_from_slice(trailer_prefix);
+    }
+
+    Some(LargeSetReadState {
+        key: key.to_vec(),
+        value,
+        remaining_value: value_len - payload_available,
+        trailer,
+        trailer_len,
+        query_bytes_seen: input.len(),
+    })
+}
+
+fn try_start_large_plain_set_read(conn: &mut ClientConnection, config: ParserConfig) -> bool {
+    let Some(state) = parse_large_plain_set_read_start(&conn.read_buf, &config) else {
+        return false;
+    };
+    conn.read_buf.clear();
+    conn.large_set_read = Some(state);
+    true
+}
+
+fn continue_large_plain_set_read(
+    conn: &mut ClientConnection,
+    runtime: &mut Runtime,
+    closing_tokens: &mut HashSet<Token>,
+    token: Token,
+) -> LargeSetReadProgress {
+    let mut read_any = false;
+    loop {
+        let step = {
+            let Some(state) = conn.large_set_read.as_mut() else {
+                return LargeSetReadProgress::Complete { read_any };
+            };
+            if state.remaining_value > 0 {
+                let old_len = state.value.len();
+                let want = state.remaining_value.min(DIRECT_OWNED_SET_CHUNK);
+                state.value.resize(old_len + want, 0);
+                match conn.stream.read(&mut state.value[old_len..]) {
+                    Ok(0) => {
+                        state.value.truncate(old_len);
+                        LargeSetReadProgress::Closed
+                    }
+                    Ok(n) => {
+                        state.value.truncate(old_len + n);
+                        match validate_read_path(
+                            state.query_bytes_seen,
+                            n,
+                            runtime.server.query_buffer_limit,
+                            false,
+                        ) {
+                            Ok(_) => {
+                                runtime.track_net_input_bytes(n as u64);
+                                read_any = true;
+                                state.query_bytes_seen = state.query_bytes_seen.saturating_add(n);
+                                state.remaining_value = state.remaining_value.saturating_sub(n);
+                                if n < want {
+                                    LargeSetReadProgress::Pending { read_any }
+                                } else {
+                                    continue;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("warn: client disconnected: {}", e.reason_code());
+                                LargeSetReadProgress::Closed
+                            }
+                        }
+                    }
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                        state.value.truncate(old_len);
+                        LargeSetReadProgress::Pending { read_any }
+                    }
+                    Err(ref e) if e.kind() == ErrorKind::Interrupted => {
+                        state.value.truncate(old_len);
+                        continue;
+                    }
+                    Err(e) => {
+                        state.value.truncate(old_len);
+                        if let Err(rpe) =
+                            validate_read_path(0, 0, runtime.server.query_buffer_limit, true)
+                        {
+                            eprintln!("warn: client read error ({}): {}", rpe.reason_code(), e);
+                        }
+                        LargeSetReadProgress::Closed
+                    }
+                }
+            } else if state.trailer_len < 2 {
+                let want = 2 - state.trailer_len;
+                match conn.stream.read(&mut state.trailer[state.trailer_len..]) {
+                    Ok(0) => LargeSetReadProgress::Closed,
+                    Ok(n) => match validate_read_path(
+                        state.query_bytes_seen,
+                        n,
+                        runtime.server.query_buffer_limit,
+                        false,
+                    ) {
+                        Ok(_) => {
+                            runtime.track_net_input_bytes(n as u64);
+                            read_any = true;
+                            state.query_bytes_seen = state.query_bytes_seen.saturating_add(n);
+                            state.trailer_len += n;
+                            if state.trailer_len == 2 {
+                                if state.trailer == *b"\r\n" {
+                                    LargeSetReadProgress::Complete { read_any }
+                                } else {
+                                    eprintln!("warn: client protocol error: invalid bulk trailer");
+                                    LargeSetReadProgress::Closed
+                                }
+                            } else if n < want {
+                                LargeSetReadProgress::Pending { read_any }
+                            } else {
+                                continue;
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("warn: client disconnected: {}", e.reason_code());
+                            LargeSetReadProgress::Closed
+                        }
+                    },
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                        LargeSetReadProgress::Pending { read_any }
+                    }
+                    Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        if let Err(rpe) =
+                            validate_read_path(0, 0, runtime.server.query_buffer_limit, true)
+                        {
+                            eprintln!("warn: client read error ({}): {}", rpe.reason_code(), e);
+                        }
+                        LargeSetReadProgress::Closed
+                    }
+                }
+            } else if state.trailer == *b"\r\n" {
+                LargeSetReadProgress::Complete { read_any }
+            } else {
+                eprintln!("warn: client protocol error: invalid bulk trailer");
+                LargeSetReadProgress::Closed
+            }
+        };
+
+        match step {
+            LargeSetReadProgress::Complete { read_any } => {
+                if let Some(state) = conn.large_set_read.take() {
+                    conn.owned_plain_sets.push_back(OwnedPlainSetCommand {
+                        key: state.key,
+                        value: state.value,
+                    });
+                }
+                return LargeSetReadProgress::Complete { read_any };
+            }
+            LargeSetReadProgress::Pending { read_any } => {
+                return LargeSetReadProgress::Pending { read_any };
+            }
+            LargeSetReadProgress::Closed => {
+                conn.closing = true;
+                closing_tokens.insert(token);
+                return LargeSetReadProgress::Closed;
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_readable(
     token: Token,
@@ -1838,6 +2130,19 @@ fn handle_readable(
     // the connection. (frankenredis-apg7r, reverts the read-side no-drain)
     let mut buf = [0u8; 8192];
     let mut read_any = false;
+    if conn.large_set_read.is_some() {
+        match continue_large_plain_set_read(conn, runtime, closing_tokens, token) {
+            LargeSetReadProgress::Complete {
+                read_any: state_read,
+            }
+            | LargeSetReadProgress::Pending {
+                read_any: state_read,
+            } => {
+                read_any |= state_read;
+            }
+            LargeSetReadProgress::Closed => return,
+        }
+    }
     // When the 8 KiB stack read fills, a larger payload (e.g. a big SET value or
     // a deep pipeline) is mid-flight. Switch to reading the continuation DIRECTLY
     // into read_buf's tail (resize + read into the new region) instead of via the
@@ -1850,7 +2155,7 @@ fn handle_readable(
     // zerocopy-qesp3 partial: read side.)
     const LARGE_CHUNK: usize = 64 * 1024;
     let mut switch_to_direct = false;
-    loop {
+    while conn.large_set_read.is_none() {
         match conn.stream.read(&mut buf) {
             Ok(0) => {
                 // Client disconnected.
@@ -1885,6 +2190,29 @@ fn handle_readable(
                         }
                         // Buffer filled: more data is queued — switch to the
                         // direct large-read loop below (still fully drains).
+                        let parser_config = runtime.parser_config();
+                        if try_start_large_plain_set_read(conn, parser_config) {
+                            match continue_large_plain_set_read(
+                                conn,
+                                runtime,
+                                closing_tokens,
+                                token,
+                            ) {
+                                LargeSetReadProgress::Complete {
+                                    read_any: state_read,
+                                } => {
+                                    read_any |= state_read;
+                                    continue;
+                                }
+                                LargeSetReadProgress::Pending {
+                                    read_any: state_read,
+                                } => {
+                                    read_any |= state_read;
+                                    break;
+                                }
+                                LargeSetReadProgress::Closed => return,
+                            }
+                        }
                         switch_to_direct = true;
                         break;
                     }
@@ -2061,7 +2389,11 @@ fn record_deferred_buffered_token(
     deferred_tokens: &mut HashSet<Token>,
     budget_exhausted: bool,
 ) {
-    if budget_exhausted && !conn.read_buf.is_empty() && !conn.closing && conn.blocked.is_none() {
+    if budget_exhausted
+        && (!conn.read_buf.is_empty() || !conn.owned_plain_sets.is_empty())
+        && !conn.closing
+        && conn.blocked.is_none()
+    {
         deferred_tokens.insert(token);
     } else {
         deferred_tokens.remove(&token);
@@ -2088,7 +2420,7 @@ fn process_buffered_frames(
     let mut plain_get_read_gate_cache: Option<bool> = None;
 
     loop {
-        if consumed_total >= conn.read_buf.len() || conn.closing {
+        if conn.closing {
             break;
         }
 
@@ -2103,6 +2435,63 @@ fn process_buffered_frames(
             eprintln!("warn: client write buffer exceeded limit, disconnecting");
             conn.closing = true;
             closing_tokens.insert(token);
+            break;
+        }
+
+        if let Some(cmd) = conn.owned_plain_sets.pop_front() {
+            processed_frames = processed_frames.saturating_add(1);
+            plain_get_read_gate_cache = None;
+            match runtime.execute_plain_set_owned_or_return(cmd.key, cmd.value, ts) {
+                Ok(response) => {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if !runtime.suppress_current_network_reply() {
+                        encode_client_reply(&response, client_resp3, &mut conn.write_buf);
+                    }
+                    drain_pending_pubsub_to_connection(runtime, conn);
+                    if disconnect_if_output_limit_exceeded(
+                        conn,
+                        runtime.effective_output_hard_limit(conn.session.client_id),
+                        closing_tokens,
+                        token,
+                    ) {
+                        break;
+                    }
+                    continue;
+                }
+                Err((key, value)) => {
+                    let argv = vec![b"SET".to_vec(), key, value];
+                    match process_argv_frame(
+                        token,
+                        &argv,
+                        conn,
+                        runtime,
+                        blocked_tokens,
+                        blocked_wake_index,
+                        closing_tokens,
+                        write_tokens,
+                        paused_tokens,
+                        ts,
+                        ts_us,
+                    ) {
+                        ProcessArgvAction::Continue => {
+                            if disconnect_if_output_limit_exceeded(
+                                conn,
+                                runtime.effective_output_hard_limit(conn.session.client_id),
+                                closing_tokens,
+                                token,
+                            ) {
+                                break;
+                            }
+                            continue;
+                        }
+                        ProcessArgvAction::BreakAfterConsume => break,
+                        ProcessArgvAction::BreakWithoutConsume => break,
+                    }
+                }
+            }
+        }
+
+        if consumed_total >= conn.read_buf.len() {
             break;
         }
 
@@ -6262,6 +6651,48 @@ mod tests {
             )
             .is_none(),
             "malformed bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn large_plain_set_read_start_accepts_incomplete_large_value() {
+        let mut input = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$40000\r\n".to_vec();
+        input.extend_from_slice(&[b'x'; 10]);
+        let state = crate::parse_large_plain_set_read_start(&input, &ParserConfig::default())
+            .expect("incomplete large SET should start direct read");
+
+        assert_eq!(state.key, b"key");
+        assert_eq!(state.value, vec![b'x'; 10]);
+        assert_eq!(state.remaining_value, 39_990);
+        assert_eq!(state.trailer_len, 0);
+        assert_eq!(state.query_bytes_seen, input.len());
+    }
+
+    #[test]
+    fn large_plain_set_read_start_defers_complete_small_or_non_set_frames() {
+        assert!(
+            crate::parse_large_plain_set_read_start(
+                b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n",
+                &ParserConfig::default(),
+            )
+            .is_none(),
+            "complete SET stays on the normal parser"
+        );
+        assert!(
+            crate::parse_large_plain_set_read_start(
+                b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nval",
+                &ParserConfig::default(),
+            )
+            .is_none(),
+            "small SET stays on the normal parser"
+        );
+        assert!(
+            crate::parse_large_plain_set_read_start(
+                b"*2\r\n$3\r\nGET\r\n$40000\r\nxxxxxxxxxx",
+                &ParserConfig::default(),
+            )
+            .is_none(),
+            "non-SET frames stay on the normal parser"
         );
     }
 

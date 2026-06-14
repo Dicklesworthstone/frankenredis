@@ -272,7 +272,7 @@ const SLOWLOG_ENTRY_MAX_ARGC: usize = 32;
 /// Max byte length of any single retained argument (slowlog.c
 /// `SLOWLOG_ENTRY_MAX_STRING`). Longer args are trimmed and suffixed with
 /// `... (M more bytes)`.
-const SLOWLOG_ENTRY_MAX_STRING: usize = 128;
+pub const SLOWLOG_ENTRY_MAX_STRING: usize = 128;
 
 /// Build the argv stored in a slowlog entry, mirroring slowlog.c
 /// `slowlogCreateEntry`: cap at `SLOWLOG_ENTRY_MAX_ARGC` arguments (the last
@@ -5432,6 +5432,35 @@ impl Store {
         }
     }
 
+    pub fn record_prebuilt_slowlog_with_client(
+        &mut self,
+        argv: Vec<Vec<u8>>,
+        duration_us: u64,
+        now_ms: u64,
+        client_address: Vec<u8>,
+        client_name: Vec<u8>,
+    ) {
+        if self.slowlog_log_slower_than_us < 0 {
+            return;
+        }
+        if (duration_us as i64) < self.slowlog_log_slower_than_us {
+            return;
+        }
+        let entry = SlowlogEntry {
+            id: self.slowlog_id_counter,
+            timestamp_sec: now_ms / 1000,
+            duration_us,
+            argv,
+            client_address,
+            client_name,
+        };
+        self.slowlog_id_counter = self.slowlog_id_counter.saturating_add(1);
+        self.slowlog.push_back(entry);
+        while self.slowlog.len() > self.slowlog_max_len {
+            self.slowlog.pop_front();
+        }
+    }
+
     #[must_use]
     pub fn get_slowlog(&self, count: usize) -> Vec<SlowlogEntry> {
         self.slowlog.iter().rev().take(count).cloned().collect()
@@ -5805,6 +5834,71 @@ impl Store {
             self.stream_last_ids.remove(key);
             self.stream_entries_added.remove(key);
             self.stream_max_deleted_ids.remove(key);
+        }
+        if old_expiry.is_some() {
+            self.expires_count = self.expires_count.saturating_sub(1);
+            if db < self.database_count {
+                self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
+            }
+        }
+        self.dirty = self.dirty.saturating_add(1);
+    }
+
+    pub fn set_plain_owned(&mut self, key: Vec<u8>, value: Vec<u8>, now_ms: u64) {
+        if !self.drop_if_expired(key.as_slice(), now_ms) {
+            let mut entry = Entry::new(canonical_string_value(value), None, now_ms);
+            entry.lfu_freq = if self.lfu_tracking_enabled() {
+                LFU_INIT_VAL
+            } else {
+                0
+            };
+            entry.lfu_last_touch_min = now_ms / 60_000;
+            self.internal_entries_insert(key, entry);
+            self.dirty = self.dirty.saturating_add(1);
+            return;
+        }
+
+        let db = decode_db_key(key.as_slice()).map(|(db, _)| db).unwrap_or(0);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay_time = self.lfu_decay_time;
+        let (old_expiry, old_was_stream) = {
+            let Some(entry) = self.entries.get_mut(key.as_slice()) else {
+                self.set(key, value, None, now_ms);
+                return;
+            };
+            let old_expiry = entry.expiry_ms();
+            let old_was_stream = matches!(&entry.value, Value::Stream(_));
+            let next_lfu_freq = if lfu_tracking_enabled {
+                entry
+                    .current_lfu_freq(now_ms, lfu_decay_time)
+                    .saturating_add(1)
+            } else {
+                0
+            };
+            entry.value = canonical_string_value(value);
+            entry.set_expiry_ms(None);
+            entry.last_access_ms = now_ms;
+            entry.lfu_freq = next_lfu_freq;
+            entry.lfu_last_touch_min = now_ms / 60_000;
+            entry.modification_count = entry.modification_count.wrapping_add(1);
+            entry.force_raw_encoding = false;
+            entry.force_string_encoding = false;
+            entry.force_set_listpack_encoding = false;
+            entry.force_set_hashtable_encoding = false;
+            entry.force_hash_hashtable_encoding = false;
+            entry.force_zset_skiplist_encoding = false;
+            entry.int_copy_not_shared = false;
+            (old_expiry, old_was_stream)
+        };
+
+        self.forget_volatile_key(key.as_slice());
+        self.update_expiry_deadline(old_expiry, None);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        if old_was_stream {
+            self.stream_groups.remove(key.as_slice());
+            self.stream_last_ids.remove(key.as_slice());
+            self.stream_entries_added.remove(key.as_slice());
+            self.stream_max_deleted_ids.remove(key.as_slice());
         }
         if old_expiry.is_some() {
             self.expires_count = self.expires_count.saturating_sub(1);
@@ -20488,21 +20582,42 @@ fn encode_dump_quicklist2(
         Packed(Vec<&'a [u8]>),
     }
 
+    // Build PACKED quicklist nodes while tracking the current node's listpack
+    // byte size INCREMENTALLY. The previous form called
+    // quicklist_packed_node_allows_append per item, which cloned the whole
+    // accumulator and RE-ENCODED the entire listpack on every append — O(n *
+    // node_size) (a 10000-element DUMP took ~62ms vs redis ~0.17ms). Each
+    // listpack entry's encoded length is computable in O(1)
+    // (listpack_entry_encoded_len), so we keep a running node byte count and
+    // reproduce the IDENTICAL node-boundary predicate without re-encoding —
+    // byte-exact output, O(n) total. (frankenredis-list-dump-quicklist-reencode-q5ody)
     let mut nodes = Vec::new();
-    let mut packed = Vec::new();
+    let mut packed: Vec<&[u8]> = Vec::new();
+    let mut packed_bytes = LISTPACK_FRAME_OVERHEAD;
     for item in list.iter() {
         if quicklist_plain_node_required(item, list_max_listpack_size) {
             if !packed.is_empty() {
                 nodes.push(Node::Packed(std::mem::take(&mut packed)));
+                packed_bytes = LISTPACK_FRAME_OVERHEAD;
             }
             nodes.push(Node::Plain(item));
             continue;
         }
 
-        if !quicklist_packed_node_allows_append(&packed, item, list_max_listpack_size) {
+        let entry_bytes = listpack_entry_encoded_len(item);
+        if !packed.is_empty()
+            && !quicklist_packed_node_accepts(
+                packed.len(),
+                packed_bytes,
+                entry_bytes,
+                list_max_listpack_size,
+            )
+        {
             nodes.push(Node::Packed(std::mem::take(&mut packed)));
+            packed_bytes = LISTPACK_FRAME_OVERHEAD;
         }
         packed.push(item);
+        packed_bytes += entry_bytes;
     }
     if !packed.is_empty() {
         nodes.push(Node::Packed(packed));
@@ -20525,24 +20640,91 @@ fn encode_dump_quicklist2(
     Some(())
 }
 
+/// Listpack frame overhead in bytes: 6-byte header (4 total-bytes + 2 element
+/// count) + 1-byte 0xFF terminator. Matches `encode_listpack_strings`.
+const LISTPACK_FRAME_OVERHEAD: usize = 7;
+
+/// O(1) encoded byte length of one listpack entry — must EXACTLY equal the bytes
+/// `encode_listpack_entry` appends for `entry` (header/payload + backlen), so a
+/// running sum reproduces `encode_listpack_strings(..).len()` without encoding.
+fn listpack_entry_encoded_len(entry: &[u8]) -> usize {
+    fn backlen_len(len: usize) -> usize {
+        if len <= 127 {
+            1
+        } else if len < 16_383 {
+            2
+        } else if len < 2_097_151 {
+            3
+        } else if len < 268_435_455 {
+            4
+        } else {
+            5
+        }
+    }
+    let data_len = if let Some(value) = parse_listpack_integer(entry) {
+        // Mirror encode_listpack_integer_entry's value-byte count.
+        if (0..=127).contains(&value) {
+            1
+        } else if (-4096..=4095).contains(&value) {
+            2
+        } else if i16::try_from(value).is_ok() {
+            3
+        } else if (-8_388_608..=8_388_607).contains(&value) {
+            4
+        } else if i32::try_from(value).is_ok() {
+            5
+        } else {
+            9
+        }
+    } else {
+        // String entry: header (1/2/5) + payload.
+        let header = if entry.len() < 64 {
+            1
+        } else if entry.len() < 4096 {
+            2
+        } else {
+            5
+        };
+        header + entry.len()
+    };
+    data_len + backlen_len(data_len)
+}
+
+/// Incremental form of `quicklist_packed_node_allows_append`: given the current
+/// packed node's entry count + accumulated listpack byte size and the next
+/// entry's encoded size, decide whether the next entry still fits. Reproduces
+/// the exact predicate of `quicklist_packed_node_fits` (positive fill = entry
+/// count + 8192 SIZE_SAFETY_LIMIT; negative fill = byte budget) using the
+/// running size instead of re-encoding. Caller guarantees the node is non-empty.
+fn quicklist_packed_node_accepts(
+    current_count: usize,
+    current_bytes: usize,
+    next_entry_bytes: usize,
+    list_max_listpack_size: i64,
+) -> bool {
+    let trial_bytes = current_bytes + next_entry_bytes;
+    if list_max_listpack_size >= 0 {
+        if current_count + 1 > list_max_listpack_size as usize {
+            return false;
+        }
+        const SIZE_SAFETY_LIMIT: usize = 8192;
+        return trial_bytes <= SIZE_SAFETY_LIMIT;
+    }
+    let max_bytes = match list_max_listpack_size {
+        -1 => 4096,
+        -2 => 8192,
+        -3 => 16384,
+        -4 => 32768,
+        _ => 65536,
+    };
+    trial_bytes <= max_bytes
+}
+
 fn quicklist_plain_node_required(item: &[u8], list_max_listpack_size: i64) -> bool {
     list_max_listpack_size < 0
         && !quicklist_packed_node_fits(&[item], list_max_listpack_size).unwrap_or(false)
 }
 
-fn quicklist_packed_node_allows_append(
-    current: &[&[u8]],
-    next: &[u8],
-    list_max_listpack_size: i64,
-) -> bool {
-    if current.is_empty() {
-        return true;
-    }
-
-    let mut trial = current.to_vec();
-    trial.push(next);
-    quicklist_packed_node_fits(&trial, list_max_listpack_size).unwrap_or(false)
-}
 
 fn quicklist_packed_node_fits(entries: &[&[u8]], list_max_listpack_size: i64) -> Option<bool> {
     if list_max_listpack_size >= 0 {
@@ -24513,6 +24695,45 @@ fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usi
 }
 
 #[cfg(test)]
+mod quicklist_dump_fix_tests {
+    use super::{encode_listpack_strings, listpack_entry_encoded_len};
+
+    fn lp_entry_len_via_encoder(entry: &[u8]) -> usize {
+        // encode_listpack_strings([e]) = 6 header + entry-bytes + 1 terminator,
+        // so the per-entry contribution = total - 7.
+        encode_listpack_strings(&[entry]).unwrap().len() - 7
+    }
+
+    #[test]
+    fn listpack_entry_encoded_len_matches_real_encoder() {
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        // integers across every encoding band + boundaries
+        for v in [
+            0i64, 1, 127, 128, -1, -4096, 4095, 4096, -4097, 32767, -32768, 32768, 8_388_607,
+            -8_388_608, 8_388_608, 2_147_483_647, -2_147_483_648, 2_147_483_648,
+            i64::MAX, i64::MIN,
+        ] {
+            cases.push(v.to_string().into_bytes());
+        }
+        // strings across header bands (1/2/5-byte) + backlen bands
+        for len in [0usize, 1, 2, 63, 64, 65, 4095, 4096, 4097, 200, 16500] {
+            cases.push(vec![b'q'; len]);
+        }
+        // non-canonical integer-looking strings (stay strings, e.g. leading zero / +)
+        for s in ["007", "+5", "1.0", "9e9", " 12", "12 ", ""] {
+            cases.push(s.as_bytes().to_vec());
+        }
+        for c in &cases {
+            assert_eq!(
+                listpack_entry_encoded_len(c),
+                lp_entry_len_via_encoder(c),
+                "mismatch for entry {c:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         BitRangeUnit, DUMP_CRC64_LEN, DUMP_TRAILER_LEN, DUMP_VERSION_LEN, Entry,
@@ -26608,6 +26829,37 @@ mod tests {
     }
 
     #[test]
+    fn set_plain_owned_matches_set_for_existing_volatile_lfu_string() {
+        let mut expected = Store::new();
+        let mut actual = Store::new();
+        for store in [&mut expected, &mut actual] {
+            store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+            store.set(b"k".to_vec(), b"v1".to_vec(), Some(5_000), 100);
+            assert_eq!(store.get(b"k", 200).unwrap(), Some(b"v1".to_vec()));
+        }
+
+        expected.set(b"k".to_vec(), b"42".to_vec(), None, 400);
+        actual.set_plain_owned(b"k".to_vec(), b"42".to_vec(), 400);
+
+        assert_eq!(
+            actual.get(b"k", 401).unwrap(),
+            expected.get(b"k", 401).unwrap()
+        );
+        assert_eq!(
+            actual.get_expires_at_ms(b"k", 401),
+            expected.get_expires_at_ms(b"k", 401)
+        );
+        assert_eq!(
+            actual.object_freq(b"k", 401),
+            expected.object_freq(b"k", 401)
+        );
+        assert_eq!(actual.expires_count, expected.expires_count);
+        assert_eq!(actual.db_expires_counts, expected.db_expires_counts);
+        assert_eq!(actual.dirty, expected.dirty);
+        assert_eq!(actual.state_digest(), expected.state_digest());
+    }
+
+    #[test]
     fn set_plain_borrowed_matches_set_for_new_integer_and_string_values() {
         for value in [
             b"123".as_slice(),
@@ -26622,6 +26874,42 @@ mod tests {
 
             expected.set(b"k".to_vec(), value.to_vec(), None, 100);
             actual.set_plain_borrowed(b"k", value, 100);
+
+            assert_eq!(actual.get(b"k", 101), expected.get(b"k", 101));
+            assert_eq!(
+                actual.object_encoding(b"k", 101),
+                expected.object_encoding(b"k", 101),
+                "encoding mismatch for {value:?}"
+            );
+            assert_eq!(
+                actual.memory_usage_for_key(b"k", 101),
+                expected.memory_usage_for_key(b"k", 101),
+                "memory usage mismatch for {value:?}"
+            );
+            assert_eq!(actual.dirty, expected.dirty, "dirty mismatch for {value:?}");
+            assert_eq!(
+                actual.state_digest(),
+                expected.state_digest(),
+                "digest mismatch for {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_plain_owned_matches_set_for_new_integer_and_string_values() {
+        for value in [
+            b"123".as_slice(),
+            b"abc".as_slice(),
+            b"".as_slice(),
+            b"007".as_slice(),
+            b"-42".as_slice(),
+            b"0123456789abcdef".as_slice(),
+        ] {
+            let mut expected = Store::new();
+            let mut actual = Store::new();
+
+            expected.set(b"k".to_vec(), value.to_vec(), None, 100);
+            actual.set_plain_owned(b"k".to_vec(), value.to_vec(), 100);
 
             assert_eq!(actual.get(b"k", 101), expected.get(b"k", 101));
             assert_eq!(
