@@ -26760,8 +26760,10 @@ fn restore_cmd(
     // `lookupKeyWrite` + busy-key check before `verifyDumpPayload`.
     // (br-frankenredis-ao1i)
     // Upstream cluster.c::restoreCommand uses lookupKeyWrite for the busy-key
-    // preflight, so the check keeps normal write-lookup touch semantics.
-    if !replace && store.exists(key, now_ms) {
+    // preflight — lookupKeyWrite reaps a stale-expired key but does NOT bump
+    // keyspace_hits/misses, so use exists_no_stat (the stat-counting store.exists
+    // over-counted a miss here, since RESTORE is a write).
+    if !replace && store.exists_no_stat(key, now_ms) {
         return Ok(RespFrame::Error(
             "BUSYKEY Target key name already exists.".to_string(),
         ));
