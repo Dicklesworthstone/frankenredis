@@ -1,0 +1,7 @@
+loadavg=30.45  (high load -> absolute rps noisy; ratio stays stable)
+  fr:26400 exe=/data/projects/frankenredis/target-coralox-pass199-current/release-perf/frankenredis sha=00000000 connected_slaves=0
+  redis:26399 exe=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server sha=d2c8a4b9 connected_slaves=0
+======================================================================
+ping_inline        median ratio=1.01x  (trials: 1.11, 1.01, 0.49, 1.00, 0.99, 1.08, 1.00, 1.10, 1.02)
+======================================================================
+fr at parity-or-faster on all tested commands (median ratio >= 0.9x) vs redis 7.2.4

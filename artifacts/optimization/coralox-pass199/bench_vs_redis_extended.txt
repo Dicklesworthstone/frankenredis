@@ -1,0 +1,18 @@
+loadavg=22.06  (high load -> absolute rps noisy; ratio stays stable)
+  fr:26400 exe=/data/projects/frankenredis/target-coralox-pass199-current/release-perf/frankenredis sha=00000000 connected_slaves=0
+  redis:26399 exe=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server sha=d2c8a4b9 connected_slaves=0
+======================================================================
+ping_inline        median ratio=0.90x  (trials: 1.43, 0.49, 0.90, 1.74, 0.82)  <-- below 0.9x
+ping_mbulk         median ratio=1.00x  (trials: 0.95, 1.47, 1.09, 0.56, 1.00)
+set                median ratio=1.07x  (trials: 1.04, 1.08, 1.07, 1.18, 0.91)
+get                median ratio=1.02x  (trials: 1.06, 0.97, 0.99, 1.02, 1.04)
+incr               median ratio=0.98x  (trials: 1.05, 0.96, 1.02, 0.88, 0.98)
+lpush              median ratio=1.04x  (trials: 0.99, 0.98, 1.04, 1.27, 1.23)
+rpush              median ratio=1.02x  (trials: 0.86, 1.06, 1.03, 1.02, 0.85)
+sadd               median ratio=1.02x  (trials: 0.98, 1.02, 0.79, 1.30, 1.20)
+hset               median ratio=1.03x  (trials: 1.08, 0.98, 1.04, 0.96, 1.03)
+zadd               median ratio=1.05x  (trials: 0.75, 1.05, 1.16, 0.93, 1.09)
+lrange_100         median ratio=1.11x  (trials: 1.11, 1.12, 1.10, 1.11, 1.24)
+mset               median ratio=1.35x  (trials: 1.35, 1.31, 1.31, 1.41, 1.48)
+======================================================================
+below-0.9x: [('ping_inline', 0.8996960509264438)]
