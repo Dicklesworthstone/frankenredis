@@ -99,7 +99,8 @@ SEQ = [
     ["lpos", "l", "b"], ["object", "encoding", "s"], ["object", "encoding", "l"],
     ["mget", "s", "s2"], ["llen", "l"], ["scard", "st"], ["zcard", "z"], ["hlen", "h"],
     ["sismember", "st", "1"], ["smismember", "st", "1", "2", "9"],
-    ["hexists", "h", "f"], ["zscore", "z", "a"], ["hget", "h", "f"],
+    ["hexists", "h", "f"], ["zscore", "z", "a"], ["zmscore", "z", "a", "zz"],
+    ["hget", "h", "f"],
     ["getrange", "s", "0", "2"], ["exists", "s"], ["echo", "hi"], ["ping"], ["dbsize"],
     # newer borrow fast paths (cold-cmd audit): MEMORY USAGE / COMMAND COUNT /
     # EXPIRETIME / PEXPIRETIME / XLEN / HSTRLEN
@@ -112,7 +113,7 @@ SEQ = [
     ["sismember", "nope", "x"], ["getrange", "nope", "0", "1"], ["exists", "nope"],
     ["expiretime", "nope"], ["pexpiretime", "nope"], ["xlen", "nope"],
     ["hstrlen", "nope", "f"], ["memory", "usage", "nope"], ["bitpos", "nope", "1"],
-    ["smismember", "nope", "a", "b"],
+    ["smismember", "nope", "a", "b"], ["zmscore", "nope", "a", "b"],
     # writes
     ["incr", "s"], ["expire", "s", "10000"], ["append", "s2", "!"],
     ["mset", "k1", "v1", "k2", "v2"], ["set", "k3", "v3"],
