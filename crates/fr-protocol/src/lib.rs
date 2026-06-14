@@ -1015,6 +1015,15 @@ pub enum RespParseError {
     /// "Protocol error: unbalanced quotes in request" and closes the connection
     /// via setProtocolError — like every other inline/multibulk protocol error.
     UnbalancedInlineQuotes,
+    /// A multibulk `*<count>` header line exceeded the line cap before its
+    /// terminator. Upstream networking.c::processMultibulkBuffer replies
+    /// "Protocol error: too big mbulk count string". This is the count-line
+    /// twin of the generic `LineTooLong`. (frankenredis-linetoolong-wording)
+    TooBigMbulkCount,
+    /// A bulk `$<len>` header line — or a multibulk element's header — exceeded
+    /// the line cap before its terminator. Upstream replies "Protocol error:
+    /// too big bulk count string". (frankenredis-linetoolong-wording)
+    TooBigBulkCount,
 }
 
 impl Display for RespParseError {
@@ -1040,7 +1049,20 @@ impl Display for RespParseError {
             Self::ExpectedBulk(got) => write!(f, "expected '$', got '{}'", char::from(*got)),
             Self::InlineRequestTooBig => write!(f, "too big inline request"),
             Self::UnbalancedInlineQuotes => write!(f, "unbalanced quotes in request"),
+            Self::TooBigMbulkCount => write!(f, "too big mbulk count string"),
+            Self::TooBigBulkCount => write!(f, "too big bulk count string"),
         }
+    }
+}
+
+/// Map a `LineTooLong` from a command-input header read to the context-specific
+/// upstream wording ("too big mbulk/bulk count string"); pass any other error
+/// through unchanged. (frankenredis-linetoolong-wording)
+fn line_too_long_as(e: RespParseError, mapped: RespParseError) -> RespParseError {
+    if matches!(e, RespParseError::LineTooLong) {
+        mapped
+    } else {
+        e
     }
 }
 
@@ -1074,7 +1096,8 @@ pub fn parse_command_frame(
     if input.first() != Some(&b'*') {
         return parse_frame_with_config(input, config);
     }
-    let (line, mut cursor) = read_line(input, 1)?;
+    let (line, mut cursor) =
+        read_line(input, 1).map_err(|e| line_too_long_as(e, RespParseError::TooBigMbulkCount))?;
     let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
     // (frankenredis-6dpyk) Upstream networking.c::processMultibulkBuffer consumes
     // ANY multibulk count <= 0 as a no-op (no command, no reply), not just the
@@ -1106,7 +1129,8 @@ pub fn parse_command_frame(
                 // LineTooLong (over cap == upstream "too big bulk count
                 // string"), or Ok (line complete -> the type byte is
                 // definitively wrong -> ExpectedBulk).
-                read_line(input, cursor)?;
+                read_line(input, cursor)
+                    .map_err(|e| line_too_long_as(e, RespParseError::TooBigBulkCount))?;
                 return Err(RespParseError::ExpectedBulk(other));
             }
         }
@@ -1185,7 +1209,8 @@ fn parse_command_args_borrowed_into_inner<'a>(
         Some(&other) => return Err(RespParseError::InvalidPrefix(other)),
         None => return Err(RespParseError::Incomplete),
     }
-    let (line, mut cursor) = read_line(input, 1)?;
+    let (line, mut cursor) =
+        read_line(input, 1).map_err(|e| line_too_long_as(e, RespParseError::TooBigMbulkCount))?;
     let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
     // (frankenredis-6dpyk) Any multibulk count <= 0 is a no-op upstream — `*-2`
     // must not error. Mirror parse_command_frame: every negative count becomes
@@ -1214,7 +1239,8 @@ fn parse_command_args_borrowed_into_inner<'a>(
                 // before checking the type byte, so a malformed element whose
                 // line hasn't fully arrived WAITS (Incomplete) instead of
                 // erroring early. See the owned-parser twin above.
-                read_line(input, cursor)?;
+                read_line(input, cursor)
+                    .map_err(|e| line_too_long_as(e, RespParseError::TooBigBulkCount))?;
                 return Err(RespParseError::ExpectedBulk(other));
             }
         }
@@ -1499,7 +1525,8 @@ fn parse_bulk_slice<'a>(
     start: usize,
     config: &ParserConfig,
 ) -> Result<(Option<&'a [u8]>, usize), RespParseError> {
-    let (line, consumed) = read_line(input, start)?;
+    let (line, consumed) =
+        read_line(input, start).map_err(|e| line_too_long_as(e, RespParseError::TooBigBulkCount))?;
     let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidBulkLength)?;
     if len == -1 {
         return Ok((None, consumed));
@@ -1872,6 +1899,41 @@ mod tests {
                 "owned input {input:?}"
             );
         }
+    }
+
+    #[test]
+    fn oversized_header_lines_use_context_specific_wording() {
+        // (frankenredis-linetoolong-wording) Upstream emits context-specific
+        // "too big mbulk/bulk count string" for an over-cap command header line,
+        // not the generic LineTooLong. Build a >MAX_LINE_LENGTH line with no
+        // terminator at each header position.
+        let cfg = ParserConfig::default();
+        let big = vec![b'9'; MAX_LINE_LENGTH + 16];
+        // *<count> line too long.
+        let mut count_line = vec![b'*'];
+        count_line.extend_from_slice(&big);
+        assert_eq!(
+            parse_command_args_borrowed_into(&count_line, &cfg, &mut Vec::new()).unwrap_err(),
+            RespParseError::TooBigMbulkCount
+        );
+        assert_eq!(
+            parse_command_frame(&count_line, &cfg).unwrap_err(),
+            RespParseError::TooBigMbulkCount
+        );
+        // $<len> element-header line too long.
+        let mut bulk_hdr = b"*1\r\n$".to_vec();
+        bulk_hdr.extend_from_slice(&big);
+        assert_eq!(
+            parse_command_args_borrowed_into(&bulk_hdr, &cfg, &mut Vec::new()).unwrap_err(),
+            RespParseError::TooBigBulkCount
+        );
+        // Non-`$` element line too long.
+        let mut bad_elem = b"*1\r\n".to_vec();
+        bad_elem.extend_from_slice(&vec![b'Z'; MAX_LINE_LENGTH + 16]);
+        assert_eq!(
+            parse_command_args_borrowed_into(&bad_elem, &cfg, &mut Vec::new()).unwrap_err(),
+            RespParseError::TooBigBulkCount
+        );
     }
 
     #[test]
