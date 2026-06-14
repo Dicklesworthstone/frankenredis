@@ -593,6 +593,10 @@ fn plain_getbit_owned_argv(key: &[u8], offset_arg: &[u8]) -> Vec<Vec<u8>> {
     vec![b"GETBIT".to_vec(), key.to_vec(), offset_arg.to_vec()]
 }
 
+fn plain_lpos_owned_argv(key: &[u8], element: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"LPOS".to_vec(), key.to_vec(), element.to_vec()]
+}
+
 fn plain_bitcount_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"BITCOUNT".to_vec(), key.to_vec()]
 }
@@ -10018,6 +10022,142 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'GETBIT' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    fn can_execute_plain_lpos_borrowed(&mut self, key: &[u8], element: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"LPOS".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || element.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Conservative borrowed fast path for the no-option `LPOS key element` form
+    /// (rank 1, no COUNT, no MAXLEN — the common shape). Optioned forms fall to
+    /// generic. Calls the SAME store.lpos the generic no-option path bottoms out
+    /// in (first head-to-tail match), so keyspace accounting is identical:
+    /// Integer index, nil for no match, WRONGTYPE for a non-list key. (cold-cmd audit)
+    pub fn execute_plain_lpos_borrowed(
+        &mut self,
+        key: &[u8],
+        element: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_lpos_borrowed(key, element, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("lpos");
+        self.session.last_argv_len_sum = b"LPOS".len() + key.len() + element.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        // Call the SAME store.lpos_full the generic no-option path uses (rank 1,
+        // no COUNT, no MAXLEN) so keyspace-stat accounting is byte-identical —
+        // store.lpos records a keyspace hit but lpos_full does not, so they must
+        // not be mixed. (cold-cmd audit)
+        let result = self.server.store.lpos_full(key, element, 1, None, 0, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match result {
+            Ok(positions) => match positions.first() {
+                Some(&pos) => RespFrame::Integer(i64::try_from(pos).unwrap_or(i64::MAX)),
+                None => RespFrame::BulkString(None),
+            },
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_lpos_borrowed_metrics(key, element, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_plain_lpos_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        element: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_lpos_owned_argv(key, element));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_lpos_owned_argv(key, element));
+            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("lpos", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_lpos_owned_argv(key, element));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'LPOS' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -23643,6 +23783,43 @@ mod tests {
                 .is_none()
         );
         // flagged form is rejected by the fr-server recognizer (argc 3 only).
+    }
+
+    #[test]
+    fn plain_lpos_borrowed_matches_generic() {
+        // (cold-cmd audit) LPOS key element (no-option) borrow == generic:
+        // found (index), not-found (nil), missing key (nil), wrong-type (WRONGTYPE).
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(command(&[b"RPUSH", b"l", b"a", b"b", b"c", b"b"]), 1);
+            rt.execute_frame(command(&[b"SET", b"s", b"v"]), 1);
+        }
+        let cases: [(&[u8], &[u8]); 5] = [
+            (b"l", b"a"),
+            (b"l", b"b"),
+            (b"l", b"zzz"),
+            (b"missing", b"a"),
+            (b"s", b"a"),
+        ];
+        let mut ts = 2;
+        for (key, el) in cases {
+            let f = direct
+                .execute_plain_lpos_borrowed(key, el, ts)
+                .expect("lpos fast path should engage");
+            let g = generic.execute_frame(command(&[b"LPOS", key, el]), ts);
+            assert_eq!(f, g, "key={key:?} el={el:?}");
+            ts += 1;
+        }
+        assert_eq!(
+            direct.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            direct.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+        // optioned form is rejected by the fr-server recognizer (argc 3 only).
     }
 
     #[test]
