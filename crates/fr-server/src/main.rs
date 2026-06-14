@@ -2707,6 +2707,15 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some((key, offset_arg)) = borrowed_plain_getbit_args(&borrowed_args)
+                    && let Some(response) =
+                        runtime.execute_plain_getbit_borrowed(key, offset_arg, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some((key, field)) = borrowed_plain_hexists_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_hexists_borrowed(key, field, ts)
                 {
@@ -3219,6 +3228,13 @@ fn borrowed_plain_lindex_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a 
 fn borrowed_plain_zscore_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
     match borrowed_args {
         [command, key, member] if command.eq_ignore_ascii_case(b"ZSCORE") => Some((*key, *member)),
+        _ => None,
+    }
+}
+
+fn borrowed_plain_getbit_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
+    match borrowed_args {
+        [command, key, offset] if command.eq_ignore_ascii_case(b"GETBIT") => Some((*key, *offset)),
         _ => None,
     }
 }
