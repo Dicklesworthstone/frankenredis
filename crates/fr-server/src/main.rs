@@ -1838,6 +1838,18 @@ fn handle_readable(
     // the connection. (frankenredis-apg7r, reverts the read-side no-drain)
     let mut buf = [0u8; 8192];
     let mut read_any = false;
+    // When the 8 KiB stack read fills, a larger payload (e.g. a big SET value or
+    // a deep pipeline) is mid-flight. Switch to reading the continuation DIRECTLY
+    // into read_buf's tail (resize + read into the new region) instead of via the
+    // stack buffer: that drops the stack->read_buf copy AND the per-chunk realloc
+    // churn for large values. Safe-Rust can't read into uninitialized memory
+    // without unsafe, so the grown region is zero-filled first — but that memset
+    // is cheaper than the byte copy it replaces, and Vec::resize grows capacity
+    // geometrically so total work stays O(n). The small/common path (sub-8 KiB,
+    // currently faster than redis) is untouched. (frankenredis-largeval-bigbulk-
+    // zerocopy-qesp3 partial: read side.)
+    const LARGE_CHUNK: usize = 64 * 1024;
+    let mut switch_to_direct = false;
     loop {
         match conn.stream.read(&mut buf) {
             Ok(0) => {
@@ -1871,6 +1883,10 @@ fn handle_readable(
                         if n < buf.len() {
                             break;
                         }
+                        // Buffer filled: more data is queued — switch to the
+                        // direct large-read loop below (still fully drains).
+                        switch_to_direct = true;
+                        break;
                     }
                     Err(e) => {
                         eprintln!("warn: client disconnected: {}", e.reason_code());
@@ -1891,6 +1907,61 @@ fn handle_readable(
                 conn.closing = true;
                 closing_tokens.insert(token);
                 return;
+            }
+        }
+    }
+    // Direct large-read continuation: read straight into read_buf's tail. Must
+    // preserve the SAME drain invariant as the stack loop — keep reading until a
+    // short read (socket drained now) or WouldBlock; a fresh EPOLLIN covers any
+    // later data. (apg7r)
+    if switch_to_direct {
+        loop {
+            let old = conn.read_buf.len();
+            conn.read_buf.resize(old + LARGE_CHUNK, 0);
+            match conn.stream.read(&mut conn.read_buf[old..]) {
+                Ok(0) => {
+                    conn.read_buf.truncate(old);
+                    conn.closing = true;
+                    closing_tokens.insert(token);
+                    return;
+                }
+                Ok(n) => {
+                    conn.read_buf.truncate(old + n);
+                    match validate_read_path(old, n, runtime.server.query_buffer_limit, false) {
+                        Ok(_) => {
+                            runtime.track_net_input_bytes(n as u64);
+                            read_any = true;
+                            if n < LARGE_CHUNK {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("warn: client disconnected: {}", e.reason_code());
+                            conn.closing = true;
+                            closing_tokens.insert(token);
+                            return;
+                        }
+                    }
+                }
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                    conn.read_buf.truncate(old);
+                    break;
+                }
+                Err(ref e) if e.kind() == ErrorKind::Interrupted => {
+                    conn.read_buf.truncate(old);
+                    continue;
+                }
+                Err(e) => {
+                    conn.read_buf.truncate(old);
+                    if let Err(rpe) =
+                        validate_read_path(0, 0, runtime.server.query_buffer_limit, true)
+                    {
+                        eprintln!("warn: client read error ({}): {}", rpe.reason_code(), e);
+                    }
+                    conn.closing = true;
+                    closing_tokens.insert(token);
+                    return;
+                }
             }
         }
     }
