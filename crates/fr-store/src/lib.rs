@@ -10130,7 +10130,12 @@ impl Store {
         index: i64,
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        // (frankenredis-9s4ls sibling) NO-STAT drop_if_expired: both production
+        // callers (the generic lindexCommand and the borrowed fast path) already
+        // record the single keyspace hit/miss via the store.key_type precheck
+        // run for the lidxorder WRONGTYPE-before-index-parse precedence, so a
+        // counting lookup here double-bumped keyspace_hits for a present list.
+        if !self.drop_if_expired(key, now_ms) {
             return Ok(None);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
