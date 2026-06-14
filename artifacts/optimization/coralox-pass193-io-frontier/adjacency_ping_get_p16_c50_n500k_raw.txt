@@ -1,0 +1,47 @@
+pass193 adjacency baseline
+head=ad4bb2d0cc8a582c14dd4eb3ee2f824c7cb534b2
+fr_bin=/data/projects/.scratch/frankenredis-pass193-target/release-perf/frankenredis
+redis_bin=/data/projects/frankenredis/legacy_redis_code/redis/src/redis-server
+bench=/data/projects/.scratch/frankenredis-pass193-coralox-20260614-0423/legacy_redis_code/redis/src/redis-benchmark
+P=16
+clients=50
+requests=500000
+reps=3
+ports fr=24930 redis=24931
+
+## redis rep 1
+ PING_INLINE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                  PING_INLINE: rps=762496.0 (overall: 759458.2) avg_msec=0.697 (overall: 0.697)                                                                              PING_INLINE: rps=925832.7 (overall: 842645.4) avg_msec=0.536 (overall: 0.608)                                                                              PING_INLINE: 863557.88 requests per second, p50=0.543 msec
+ PING_MBULK: rps=651729.1 (overall: 951069.8) avg_msec=0.458 (overall: 0.458)                                                                             PING_MBULK: rps=1056320.0 (overall: 1013421.8) avg_msec=0.424 (overall: 0.437)                                                                               PING_MBULK: 1022494.88 requests per second, p50=0.383 msec
+ GET: rps=751680.0 (overall: 1038232.1) avg_msec=0.426 (overall: 0.426)                                                                       GET: rps=1031649.4 (overall: 1034407.4) avg_msec=0.420 (overall: 0.422)                                                                        GET: 1041666.69 requests per second, p50=0.375 msec
+
+
+## redis rep 2
+ PING_INLINE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                  PING_INLINE: rps=900672.0 (overall: 897083.7) avg_msec=0.551 (overall: 0.551)                                                                              PING_INLINE: rps=932780.9 (overall: 914932.3) avg_msec=0.525 (overall: 0.538)                                                                              PING_INLINE: 927643.81 requests per second, p50=0.471 msec
+ PING_MBULK: rps=838080.0 (overall: 992985.8) avg_msec=0.466 (overall: 0.466)                                                                             PING_MBULK: rps=1024892.5 (overall: 1010320.3) avg_msec=0.430 (overall: 0.446)                                                                               PING_MBULK: 1010101.00 requests per second, p50=0.383 msec
+ GET: rps=856320.0 (overall: 995720.9) avg_msec=0.452 (overall: 0.452)                                                                      GET: rps=1024512.0 (overall: 1011200.0) avg_msec=0.443 (overall: 0.447)                                                                        GET: 1006036.19 requests per second, p50=0.383 msec
+
+
+## redis rep 3
+ PING_INLINE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                  PING_INLINE: rps=960701.2 (overall: 956888.9) avg_msec=0.470 (overall: 0.470)                                                                              PING_INLINE: rps=946624.0 (overall: 951776.9) avg_msec=0.532 (overall: 0.501)                                                                              PING_INLINE: 950570.31 requests per second, p50=0.455 msec
+ PING_MBULK: rps=953625.6 (overall: 1063822.2) avg_msec=0.424 (overall: 0.424)                                                                              PING_MBULK: rps=1030208.0 (overall: 1046130.6) avg_msec=0.435 (overall: 0.430)                                                                               PING_MBULK: 1043841.31 requests per second, p50=0.383 msec
+ GET: rps=1041600.0 (overall: 1067213.1) avg_msec=0.417 (overall: 0.417)                                                                        GET: 1043841.31 requests per second, p50=0.375 msec
+
+
+## fr rep 1
+ PING_INLINE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                  PING_INLINE: rps=789376.0 (overall: 786231.1) avg_msec=0.917 (overall: 0.917)                                                                              PING_INLINE: rps=922944.0 (overall: 854451.1) avg_msec=0.861 (overall: 0.887)                                                                              PING_INLINE: 862069.00 requests per second, p50=0.855 msec
+ PING_MBULK: rps=715027.9 (overall: 1055717.6) avg_msec=0.396 (overall: 0.396)                                                                              PING_MBULK: rps=1066560.0 (overall: 1062171.5) avg_msec=0.392 (overall: 0.393)                                                                               PING_MBULK: 1054852.25 requests per second, p50=0.367 msec
+ GET: rps=843920.4 (overall: 1091876.2) avg_msec=0.375 (overall: 0.375)                                                                       GET: rps=1102912.0 (overall: 1098090.1) avg_msec=0.373 (overall: 0.374)                                                                        GET: 1098901.12 requests per second, p50=0.367 msec
+
+
+## fr rep 2
+ PING_INLINE: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                                   PING_INLINE: rps=751617.6 (overall: 751617.6) avg_msec=0.949 (overall: 0.949)                                                                              PING_INLINE: rps=848704.0 (overall: 800063.9) avg_msec=0.873 (overall: 0.909)                                                                              PING_INLINE: 818330.62 requests per second, p50=0.863 msec
+ PING_MBULK: rps=603072.0 (overall: 1092521.8) avg_msec=0.392 (overall: 0.392)                                                                              PING_MBULK: rps=1080924.4 (overall: 1085038.6) avg_msec=0.403 (overall: 0.399)                                                                               PING_MBULK: 1082251.00 requests per second, p50=0.367 msec
+ GET: rps=723392.0 (overall: 1039356.4) avg_msec=0.431 (overall: 0.431)                                                                       GET: rps=1097561.8 (overall: 1073731.8) avg_msec=0.374 (overall: 0.397)                                                                        GET: 1075268.75 requests per second, p50=0.375 msec
+
+
+## fr rep 3
+ PING_INLINE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                  PING_INLINE: rps=854720.0 (overall: 851314.8) avg_msec=0.828 (overall: 0.828)                                                                              PING_INLINE: rps=844928.0 (overall: 848127.8) avg_msec=0.932 (overall: 0.880)                                                                              PING_INLINE: 850340.12 requests per second, p50=0.911 msec
+ PING_MBULK: rps=689848.6 (overall: 1068839.5) avg_msec=0.391 (overall: 0.391)                                                                              PING_MBULK: rps=1020032.0 (overall: 1039223.3) avg_msec=0.418 (overall: 0.407)                                                                               PING_MBULK: 1030927.81 requests per second, p50=0.375 msec
+ GET: rps=713944.2 (overall: 1024000.0) avg_msec=0.408 (overall: 0.408)                                                                       GET: rps=1070144.0 (overall: 1051143.5) avg_msec=0.392 (overall: 0.398)                                                                        GET: 1033057.88 requests per second, p50=0.383 msec
+
+
