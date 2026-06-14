@@ -1,0 +1,200 @@
+diff --git a/crates/fr-store/src/lib.rs b/crates/fr-store/src/lib.rs
+index 86e13c23c..e9c54541d 100644
+--- a/crates/fr-store/src/lib.rs
++++ b/crates/fr-store/src/lib.rs
+@@ -20488,21 +20488,42 @@ fn encode_dump_quicklist2(
+         Packed(Vec<&'a [u8]>),
+     }
+ 
++    // Build PACKED quicklist nodes while tracking the current node's listpack
++    // byte size INCREMENTALLY. The previous form called
++    // quicklist_packed_node_allows_append per item, which cloned the whole
++    // accumulator and RE-ENCODED the entire listpack on every append — O(n *
++    // node_size) (a 10000-element DUMP took ~62ms vs redis ~0.17ms). Each
++    // listpack entry's encoded length is computable in O(1)
++    // (listpack_entry_encoded_len), so we keep a running node byte count and
++    // reproduce the IDENTICAL node-boundary predicate without re-encoding —
++    // byte-exact output, O(n) total. (frankenredis-list-dump-quicklist-reencode-q5ody)
+     let mut nodes = Vec::new();
+-    let mut packed = Vec::new();
++    let mut packed: Vec<&[u8]> = Vec::new();
++    let mut packed_bytes = LISTPACK_FRAME_OVERHEAD;
+     for item in list.iter() {
+         if quicklist_plain_node_required(item, list_max_listpack_size) {
+             if !packed.is_empty() {
+                 nodes.push(Node::Packed(std::mem::take(&mut packed)));
++                packed_bytes = LISTPACK_FRAME_OVERHEAD;
+             }
+             nodes.push(Node::Plain(item));
+             continue;
+         }
+ 
+-        if !quicklist_packed_node_allows_append(&packed, item, list_max_listpack_size) {
++        let entry_bytes = listpack_entry_encoded_len(item);
++        if !packed.is_empty()
++            && !quicklist_packed_node_accepts(
++                packed.len(),
++                packed_bytes,
++                entry_bytes,
++                list_max_listpack_size,
++            )
++        {
+             nodes.push(Node::Packed(std::mem::take(&mut packed)));
++            packed_bytes = LISTPACK_FRAME_OVERHEAD;
+         }
+         packed.push(item);
++        packed_bytes += entry_bytes;
+     }
+     if !packed.is_empty() {
+         nodes.push(Node::Packed(packed));
+@@ -20525,25 +20546,92 @@ fn encode_dump_quicklist2(
+     Some(())
+ }
+ 
+-fn quicklist_plain_node_required(item: &[u8], list_max_listpack_size: i64) -> bool {
+-    list_max_listpack_size < 0
+-        && !quicklist_packed_node_fits(&[item], list_max_listpack_size).unwrap_or(false)
+-}
++/// Listpack frame overhead in bytes: 6-byte header (4 total-bytes + 2 element
++/// count) + 1-byte 0xFF terminator. Matches `encode_listpack_strings`.
++const LISTPACK_FRAME_OVERHEAD: usize = 7;
+ 
+-fn quicklist_packed_node_allows_append(
+-    current: &[&[u8]],
+-    next: &[u8],
++/// O(1) encoded byte length of one listpack entry — must EXACTLY equal the bytes
++/// `encode_listpack_entry` appends for `entry` (header/payload + backlen), so a
++/// running sum reproduces `encode_listpack_strings(..).len()` without encoding.
++fn listpack_entry_encoded_len(entry: &[u8]) -> usize {
++    fn backlen_len(len: usize) -> usize {
++        if len <= 127 {
++            1
++        } else if len < 16_383 {
++            2
++        } else if len < 2_097_151 {
++            3
++        } else if len < 268_435_455 {
++            4
++        } else {
++            5
++        }
++    }
++    let data_len = if let Some(value) = parse_listpack_integer(entry) {
++        // Mirror encode_listpack_integer_entry's value-byte count.
++        if (0..=127).contains(&value) {
++            1
++        } else if (-4096..=4095).contains(&value) {
++            2
++        } else if i16::try_from(value).is_ok() {
++            3
++        } else if (-8_388_608..=8_388_607).contains(&value) {
++            4
++        } else if i32::try_from(value).is_ok() {
++            5
++        } else {
++            9
++        }
++    } else {
++        // String entry: header (1/2/5) + payload.
++        let header = if entry.len() < 64 {
++            1
++        } else if entry.len() < 4096 {
++            2
++        } else {
++            5
++        };
++        header + entry.len()
++    };
++    data_len + backlen_len(data_len)
++}
++
++/// Incremental form of `quicklist_packed_node_allows_append`: given the current
++/// packed node's entry count + accumulated listpack byte size and the next
++/// entry's encoded size, decide whether the next entry still fits. Reproduces
++/// the exact predicate of `quicklist_packed_node_fits` (positive fill = entry
++/// count + 8192 SIZE_SAFETY_LIMIT; negative fill = byte budget) using the
++/// running size instead of re-encoding. Caller guarantees the node is non-empty.
++fn quicklist_packed_node_accepts(
++    current_count: usize,
++    current_bytes: usize,
++    next_entry_bytes: usize,
+     list_max_listpack_size: i64,
+ ) -> bool {
+-    if current.is_empty() {
+-        return true;
++    let trial_bytes = current_bytes + next_entry_bytes;
++    if list_max_listpack_size >= 0 {
++        if current_count + 1 > list_max_listpack_size as usize {
++            return false;
++        }
++        const SIZE_SAFETY_LIMIT: usize = 8192;
++        return trial_bytes <= SIZE_SAFETY_LIMIT;
+     }
++    let max_bytes = match list_max_listpack_size {
++        -1 => 4096,
++        -2 => 8192,
++        -3 => 16384,
++        -4 => 32768,
++        _ => 65536,
++    };
++    trial_bytes <= max_bytes
++}
+ 
+-    let mut trial = current.to_vec();
+-    trial.push(next);
+-    quicklist_packed_node_fits(&trial, list_max_listpack_size).unwrap_or(false)
++fn quicklist_plain_node_required(item: &[u8], list_max_listpack_size: i64) -> bool {
++    list_max_listpack_size < 0
++        && !quicklist_packed_node_fits(&[item], list_max_listpack_size).unwrap_or(false)
+ }
+ 
++
+ fn quicklist_packed_node_fits(entries: &[&[u8]], list_max_listpack_size: i64) -> Option<bool> {
+     if list_max_listpack_size >= 0 {
+         // Upstream quicklist.c::quicklistNodeExceedsLimit: with a positive
+@@ -24512,6 +24600,45 @@ fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usi
+     Some((result, (i + 1).min(pattern.len())))
+ }
+ 
++#[cfg(test)]
++mod quicklist_dump_fix_tests {
++    use super::{encode_listpack_strings, listpack_entry_encoded_len};
++
++    fn lp_entry_len_via_encoder(entry: &[u8]) -> usize {
++        // encode_listpack_strings([e]) = 6 header + entry-bytes + 1 terminator,
++        // so the per-entry contribution = total - 7.
++        encode_listpack_strings(&[entry]).unwrap().len() - 7
++    }
++
++    #[test]
++    fn listpack_entry_encoded_len_matches_real_encoder() {
++        let mut cases: Vec<Vec<u8>> = Vec::new();
++        // integers across every encoding band + boundaries
++        for v in [
++            0i64, 1, 127, 128, -1, -4096, 4095, 4096, -4097, 32767, -32768, 32768, 8_388_607,
++            -8_388_608, 8_388_608, 2_147_483_647, -2_147_483_648, 2_147_483_648,
++            i64::MAX, i64::MIN,
++        ] {
++            cases.push(v.to_string().into_bytes());
++        }
++        // strings across header bands (1/2/5-byte) + backlen bands
++        for len in [0usize, 1, 2, 63, 64, 65, 4095, 4096, 4097, 200, 16500] {
++            cases.push(vec![b'q'; len]);
++        }
++        // non-canonical integer-looking strings (stay strings, e.g. leading zero / +)
++        for s in ["007", "+5", "1.0", "9e9", " 12", "12 ", ""] {
++            cases.push(s.as_bytes().to_vec());
++        }
++        for c in &cases {
++            assert_eq!(
++                listpack_entry_encoded_len(c),
++                lp_entry_len_via_encoder(c),
++                "mismatch for entry {c:?}"
++            );
++        }
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::{
