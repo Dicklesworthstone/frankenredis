@@ -10249,7 +10249,16 @@ impl Store {
         maxlen: usize,
         now_ms: u64,
     ) -> Result<Vec<usize>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        // (frankenredis-lposmiss) LPOS is a keyspace read: upstream t_list.c::
+        // lposCommand uses lookupKeyReadOrReply, so a hit/miss must be recorded
+        // for INFO `keyspace_hits`/`keyspace_misses`. lpos_full previously only
+        // dropped expired keys without accounting (record_keyspace_lookup wraps
+        // drop_if_expired and adds the hit/miss bump), so LPOS — both the generic
+        // and the borrowed fast path, which share this backend — never moved the
+        // counters. A missing key returns the empty result, as before.
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
