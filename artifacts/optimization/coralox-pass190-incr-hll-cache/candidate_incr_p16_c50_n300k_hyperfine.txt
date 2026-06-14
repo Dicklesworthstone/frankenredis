@@ -1,0 +1,3 @@
+Benchmark 1: legacy_redis_code/redis/src/redis-benchmark -p 24293 -t incr -n 300000 -c 50 -P 16 -r 100000 -q
+  Time (mean ± σ):     601.3 ms ± 108.9 ms    [User: 102.3 ms, System: 322.0 ms]
+  Range (min … max):   512.2 ms … 796.6 ms    7 runs

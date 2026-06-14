@@ -1,0 +1,11 @@
+Benchmark 1: legacy_redis_code/redis/src/redis-benchmark -p 24294 -t incr -n 300000 -c 50 -P 16 -r 100000 -q
+  Time (mean ± σ):     609.1 ms ±  51.4 ms    [User: 98.2 ms, System: 336.7 ms]
+  Range (min … max):   538.9 ms … 678.0 ms    7 runs
+
+Benchmark 2: legacy_redis_code/redis/src/redis-benchmark -p 24295 -t incr -n 300000 -c 50 -P 16 -r 100000 -q
+  Time (mean ± σ):     621.3 ms ±  54.8 ms    [User: 99.4 ms, System: 322.3 ms]
+  Range (min … max):   540.2 ms … 706.6 ms    7 runs
+
+Summary
+  legacy_redis_code/redis/src/redis-benchmark -p 24294 -t incr -n 300000 -c 50 -P 16 -r 100000 -q ran
+    1.02 ± 0.12 times faster than legacy_redis_code/redis/src/redis-benchmark -p 24295 -t incr -n 300000 -c 50 -P 16 -r 100000 -q
