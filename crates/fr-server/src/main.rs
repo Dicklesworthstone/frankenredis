@@ -2724,6 +2724,14 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some((key, seconds)) = borrowed_plain_expire_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_expire_borrowed(key, seconds, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some((key, field)) = borrowed_plain_hexists_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_hexists_borrowed(key, field, ts)
                 {
@@ -3251,6 +3259,17 @@ fn borrowed_plain_getbit_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a 
 fn borrowed_plain_bitcount_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
     match borrowed_args {
         [command, key] if command.eq_ignore_ascii_case(b"BITCOUNT") => Some(*key),
+        _ => None,
+    }
+}
+
+/// Only the no-flag `EXPIRE key seconds` form (argc 3); flagged forms
+/// (NX/XX/GT/LT) fall to generic dispatch.
+fn borrowed_plain_expire_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
+    match borrowed_args {
+        [command, key, seconds] if command.eq_ignore_ascii_case(b"EXPIRE") => {
+            Some((*key, *seconds))
+        }
         _ => None,
     }
 }
