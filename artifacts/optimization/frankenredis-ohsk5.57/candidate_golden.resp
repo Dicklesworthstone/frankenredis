@@ -1,0 +1,11 @@
++OK
+:42
+:44
+:1
+:2
+:2
++OK
+:42
+-WRONGTYPE Key is not a valid HyperLogLog string value.
++OK
+-ERR value is not an integer or out of range

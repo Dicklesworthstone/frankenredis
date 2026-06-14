@@ -1,0 +1,392 @@
+  [2m2026-06-14T03:09:13.773317Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1156319 at root@178.18.254.243 (2 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:13.980554Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenredis-ohsk5.57-pass190-baseline-331491f35 (hash: 3cbf7b35f8268e60)[0m
+    [2;3mat[0m rch/src/hook.rs:5994 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:13.980587Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6016 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:17.526678Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker vmi1156319...[0m
+    [2;3mat[0m rch/src/hook.rs:6046 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:17.526740Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35 -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35 on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:25.687505Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 8160ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:25.687583Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-bench -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-bench on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:27.723202Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2035ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:27.723276Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-command -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-command on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:29.961088Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2237ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:29.961159Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-config -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-config on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:31.927263Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1966ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:31.927337Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-conformance -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-conformance on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:34.031146Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2103ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:34.031214Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-eventloop -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-eventloop on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:36.013826Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1982ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:36.013906Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-expire -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-expire on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:38.092958Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2079ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:38.093036Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-persist -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-persist on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:40.111668Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2018ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:40.111755Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-protocol -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-protocol on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:42.122181Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2010ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:42.122266Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-repl -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-repl on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:44.111368Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1989ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:44.111439Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-runtime -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-runtime on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:46.254037Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2142ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:46.254118Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-sentinel -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-sentinel on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:48.241433Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1987ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:48.241515Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-server -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-server on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:50.262027Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2020ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:50.262107Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-store -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-store on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:52.229381Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1967ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:52.229425Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 93675 files, 4754857 bytes in 34695ms[0m
+    [2;3mat[0m rch/src/hook.rs:6209 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:56.829917Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: env 'CARGO_BUILD_JOBS=1' cargo test -j 1 -p fr-store incrby_existing_key_matches_entry_replacement_side_effects -- --nocapture[0m
+    [2;3mat[0m rch/src/hook.rs:6252 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:09:56.829957Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/target-ohsk5-57-test -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded bit-vec v0.8.0
+  Downloaded autocfg v1.5.0
+  Downloaded fnv v1.0.7
+  Downloaded equivalent v1.0.2
+  Downloaded bitflags v2.11.1
+  Downloaded bit-set v0.8.0
+  Downloaded cfg-if v1.0.4
+  Downloaded rand_xorshift v0.4.0
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded quick-error v1.2.3
+  Downloaded unarray v0.1.4
+  Downloaded errno v0.3.14
+  Downloaded rand_chacha v0.9.0
+  Downloaded rand_core v0.9.5
+  Downloaded rusty-fork v0.3.1
+  Downloaded fastrand v2.4.1
+  Downloaded foldhash v0.1.5
+  Downloaded wait-timeout v0.2.1
+  Downloaded once_cell v1.21.4
+  Downloaded num-traits v0.2.19
+  Downloaded tempfile v3.27.0
+  Downloaded serde_core v1.0.228
+  Downloaded getrandom v0.3.4
+  Downloaded getrandom v0.4.2
+  Downloaded rand v0.9.4
+  Downloaded indexmap v2.14.0
+  Downloaded hashbrown v0.17.0
+  Downloaded proptest v1.11.0
+  Downloaded zerocopy v0.8.48
+  Downloaded regex-syntax v0.8.10
+  Downloaded rustix v1.1.4
+  Downloaded libc v0.2.185
+  Downloaded linux-raw-sys v0.12.1
+   Compiling libc v0.2.185
+   Compiling cfg-if v1.0.4
+   Compiling getrandom v0.3.4
+   Compiling rustix v1.1.4
+   Compiling getrandom v0.4.2
+   Compiling zerocopy v0.8.48
+   Compiling rand_core v0.9.5
+   Compiling linux-raw-sys v0.12.1
+   Compiling bitflags v2.11.1
+   Compiling autocfg v1.5.0
+   Compiling num-traits v0.2.19
+   Compiling fr-protocol v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-protocol)
+   Compiling fastrand v2.4.1
+   Compiling once_cell v1.21.4
+   Compiling tempfile v3.27.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling wait-timeout v0.2.1
+   Compiling quick-error v1.2.3
+   Compiling equivalent v1.0.2
+   Compiling hashbrown v0.17.0
+   Compiling bit-vec v0.8.0
+   Compiling fnv v1.0.7
+   Compiling rusty-fork v0.3.1
+   Compiling bit-set v0.8.0
+   Compiling indexmap v2.14.0
+   Compiling rand_chacha v0.9.0
+   Compiling fr-persist v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-persist)
+   Compiling fr-sentinel v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-sentinel)
+   Compiling rand_xorshift v0.4.0
+   Compiling rand v0.9.4
+   Compiling fr-expire v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-expire)
+   Compiling unarray v0.1.4
+   Compiling regex-syntax v0.8.10
+   Compiling foldhash v0.1.5
+   Compiling proptest v1.11.0
+   Compiling fr-store v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-store)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 00s
+     Running unittests src/lib.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/fr_store-eb6b7930eb97aea1)
+
+running 1 test
+test tests::incrby_existing_key_matches_entry_replacement_side_effects ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 610 filtered out; finished in 0.00s
+
+     Running tests/bulk_member_isomorphism.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/bulk_member_isomorphism-9f97c29410d1fcc5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/encoding_matrix.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/encoding_matrix-70ca390255aa24d3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+     Running tests/hash_field_ttl.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/hash_field_ttl-15ec6a993914cb86)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+
+     Running tests/metamorphic.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic-d5e5348853c1c724)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_bit.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_bit-a7c2e2073cf3365e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_bitop.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_bitop-9ad147198cf86941)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_hash.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_hash-e97bec51cb3964e6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_hash_advanced.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_hash_advanced-46abc4f00e723b6b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_hash_field_ttl.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_hash_field_ttl-caa3283260be8aba)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_hash_numeric.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_hash_numeric-928e6c47a109f7f1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_keys.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_keys-50400c6a75f19360)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_list.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_list-052186cf943dc332)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_list_advanced.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_list_advanced-63d2963784babc23)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_numeric.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_numeric-4ff71cb48da09041)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_set.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_set-f19692387d535739)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_set_advanced.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_set_advanced-fe8a25ea4f9e7a1b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_stream.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_stream-87834f14b54c0cab)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_string.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_string-8053205536d8a4d0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_string_advanced.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_string_advanced-a819a287ad56fcf1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_swapdb.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_swapdb-4108577375ed2009)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_zset.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_zset-bf632bffd337afa7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_zset_advanced.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_zset_advanced-20deed4cf8577965)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_zset_geo.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/metamorphic_zset_geo-e9cad543cf517d32)
+     Running tests/pfadd_empty.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/pfadd_empty-63c239c0cb4e5c65)
+     Running tests/randomkey_panic_test.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/randomkey_panic_test-239a3d539a735b10)
+     Running tests/sdiff_type.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/sdiff_type-833f0f765b9655cc)
+     Running tests/sinter_opt.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/sinter_opt-00c873e684e4b9ea)
+     Running tests/sunionstore_dirty.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/sunionstore_dirty-d629a23ee6f14a8b)
+     Running tests/zadd_bug.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/zadd_bug-adaa6e31428b7033)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/zadd_empty_leak.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/zadd_empty_leak-3a8c209fbe1af234)
+     Running tests/zincrby_nan_leak.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/zincrby_nan_leak-0cb6f8f23793aa16)
+     Running tests/zremrangebyrank_bug.rs (.rch-target-vmi1156319-job-29884606035530487-1781406557526670989-0/debug/deps/zremrangebyrank_bug-5d5c224448ed2728)
+  [2m2026-06-14T03:12:59.036757Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 182206ms[0m
+    [2;3mat[0m rch/src/hook.rs:6376 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:12:59.037115Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6425 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:12:59.037154Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35 on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:13:03.030902Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 3993ms (1 files, 1335 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:13:03.030957Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 1335 bytes in 3993ms[0m
+    [2;3mat[0m rch/src/hook.rs:6458 [2;3mon[0m ThreadId(1)
+
+[RCH] remote vmi1156319 (229.3s)

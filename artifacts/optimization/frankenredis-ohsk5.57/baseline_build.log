@@ -1,0 +1,239 @@
+  [2m2026-06-14T02:58:55.836791Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1156319 at root@178.18.254.243 (1 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:514 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:58:56.103331Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenredis-ohsk5.57-pass190-baseline-331491f35 (hash: 3cbf7b35f8268e60)[0m
+    [2;3mat[0m rch/src/hook.rs:5994 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:58:56.103385Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 14 roots[0m
+    [2;3mat[0m rch/src/hook.rs:6016 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:21.469154Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker vmi1156319...[0m
+    [2;3mat[0m rch/src/hook.rs:6046 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:21.469324Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35 -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35 on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:36.093365Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 14624ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:36.093443Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-bench -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-bench on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:38.049772Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1956ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:38.049864Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-command -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-command on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:40.075049Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2025ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:40.075142Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-config -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-config on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:42.111228Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2036ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:42.111303Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-conformance -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-conformance on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:44.146144Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2034ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:44.146241Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-eventloop -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-eventloop on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:46.157463Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2011ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:46.157545Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-expire -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-expire on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:48.195909Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2038ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:48.196039Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-persist -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-persist on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:50.232620Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2036ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:50.232730Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-protocol -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-protocol on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:52.176493Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1943ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:52.176599Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-repl -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-repl on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:54.318502Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2141ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:54.318591Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-runtime -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-runtime on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:56.395732Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2077ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:56.395812Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-sentinel -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-sentinel on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:58.371948Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1976ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T02:59:58.372032Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-server -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-server on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:00:00.509137Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2137ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:00:00.509220Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-store -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-store on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:1434 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:00:03.280012Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2770ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1503 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:00:03.280057Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 93675 files, 55961193 bytes in 41804ms[0m
+    [2;3mat[0m rch/src/hook.rs:6209 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:00:09.513311Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: env 'CARGO_BUILD_JOBS=1' cargo build -j 1 --profile release-perf -p fr-server -p fr-bench[0m
+    [2;3mat[0m rch/src/hook.rs:6252 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:00:09.513355Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/target-ohsk5-57-baseline -> /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/.rch-target-vmi1156319-job-29884606035530446-1781405961469145098-0[0m
+    [2;3mat[0m rch/src/transfer.rs:712 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded adler2 v2.0.1
+  Downloaded autocfg v1.5.0
+  Downloaded block-buffer v0.12.0
+  Downloaded cfg-if v1.0.4
+  Downloaded byteorder v1.5.0
+  Downloaded equivalent v1.0.2
+  Downloaded itoa v1.0.18
+  Downloaded base64 v0.21.7
+  Downloaded crypto-common v0.2.1
+  Downloaded hex v0.4.3
+  Downloaded cpufeatures v0.3.0
+  Downloaded mimalloc v0.1.49
+  Downloaded digest v0.11.2
+  Downloaded foldhash v0.1.5
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded crossbeam-utils v0.8.21
+  Downloaded simd-adler32 v0.3.9
+  Downloaded zmij v1.0.21
+  Downloaded quote v1.0.45
+  Downloaded crc32fast v1.5.0
+  Downloaded hybrid-array v0.4.10
+  Downloaded shlex v1.3.0
+  Downloaded sha2 v0.11.0
+  Downloaded const-oid v0.10.2
+  Downloaded log v0.4.29
+  Downloaded num-traits v0.2.19
+  Downloaded serde_derive v1.0.228
+  Downloaded unicode-ident v1.0.24
+  Downloaded proc-macro2 v1.0.106
+  Downloaded serde_core v1.0.228
+  Downloaded miniz_oxide v0.8.9
+  Downloaded cc v1.2.60
+  Downloaded flate2 v1.1.9
+  Downloaded serde v1.0.228
+  Downloaded crossbeam-channel v0.5.15
+  Downloaded indexmap v2.14.0
+  Downloaded minimal-lexical v0.2.1
+  Downloaded memchr v2.8.0
+  Downloaded typenum v1.20.0
+  Downloaded nom v7.1.3
+  Downloaded mio v1.2.0
+  Downloaded hashbrown v0.17.0
+  Downloaded serde_json v1.0.149
+  Downloaded hdrhistogram v7.5.4
+  Downloaded syn v2.0.117
+  Downloaded libmimalloc-sys v0.1.46
+  Downloaded libc v0.2.185
+   Compiling zmij v1.0.21
+   Compiling serde_json v1.0.149
+   Compiling serde_core v1.0.228
+   Compiling typenum v1.20.0
+   Compiling cfg-if v1.0.4
+   Compiling hybrid-array v0.4.10
+   Compiling memchr v2.8.0
+   Compiling fr-protocol v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-protocol)
+   Compiling libc v0.2.185
+   Compiling proc-macro2 v1.0.106
+   Compiling find-msvc-tools v0.1.9
+   Compiling itoa v1.0.18
+   Compiling shlex v1.3.0
+   Compiling cc v1.2.60
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.1
+   Compiling hashbrown v0.17.0
+   Compiling equivalent v1.0.2
+   Compiling unicode-ident v1.0.24
+   Compiling const-oid v0.10.2
+   Compiling quote v1.0.45
+   Compiling digest v0.11.2
+   Compiling indexmap v2.14.0
+   Compiling fr-command v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-command)
+   Compiling libmimalloc-sys v0.1.46
+   Compiling fr-persist v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-persist)
+   Compiling fr-sentinel v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-sentinel)
+   Compiling autocfg v1.5.0
+   Compiling foldhash v0.1.5
+   Compiling crossbeam-utils v0.8.21
+   Compiling crc32fast v1.5.0
+   Compiling fr-expire v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-expire)
+   Compiling cpufeatures v0.3.0
+   Compiling sha2 v0.11.0
+   Compiling fr-store v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-store)
+   Compiling num-traits v0.2.19
+   Compiling adler2 v2.0.1
+   Compiling simd-adler32 v0.3.9
+   Compiling miniz_oxide v0.8.9
+   Compiling syn v2.0.117
+   Compiling fr-repl v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-repl)
+   Compiling fr-config v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-config)
+   Compiling log v0.4.29
+   Compiling fr-eventloop v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-eventloop)
+   Compiling serde v1.0.228
+   Compiling hex v0.4.3
+   Compiling minimal-lexical v0.2.1
+   Compiling nom v7.1.3
+   Compiling fr-runtime v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-runtime)
+   Compiling mio v1.2.0
+   Compiling flate2 v1.1.9
+   Compiling crossbeam-channel v0.5.15
+   Compiling mimalloc v0.1.49
+   Compiling serde_derive v1.0.228
+   Compiling byteorder v1.5.0
+   Compiling base64 v0.21.7
+   Compiling hdrhistogram v7.5.4
+   Compiling fr-server v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-server)
+   Compiling fr-bench v0.1.0 (/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/crates/fr-bench)
+    Finished `release-perf` profile [optimized + debuginfo] target(s) in 4m 55s
+  [2m2026-06-14T03:05:07.556187Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 298042ms[0m
+    [2;3mat[0m rch/src/hook.rs:6376 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:05:07.556452Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:6425 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:05:07.556469Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35 on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:05:09.611069Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 2054ms (1 files, 1203 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:05:09.611090Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 1 files, 1203 bytes in 2054ms[0m
+    [2;3mat[0m rch/src/hook.rs:6458 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:05:09.611249Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/.rch-target-vmi1156319-job-29884606035530446-1781405961469145098-0 on vmi1156319[0m
+    [2;3mat[0m rch/src/transfer.rs:2106 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:05:17.680320Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 8069ms (795 files, 12930 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2145 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-14T03:05:17.680347Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 795 files, 12930 bytes in 8069ms[0m
+    [2;3mat[0m rch/src/hook.rs:6582 [2;3mon[0m ThreadId(1)
+
+[RCH] remote vmi1156319 (381.8s)

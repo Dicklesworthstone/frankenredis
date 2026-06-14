@@ -1,0 +1,2 @@
+ddd8e43f40c91caf9ffb8d58387f08e83da8f2af0d548f1c66a3d9f7b53e4a50  /data/projects/frankenredis/artifacts/optimization/frankenredis-ohsk5.57/baseline_golden.resp
+ddd8e43f40c91caf9ffb8d58387f08e83da8f2af0d548f1c66a3d9f7b53e4a50  /data/projects/frankenredis/artifacts/optimization/frankenredis-ohsk5.57/candidate_golden.resp

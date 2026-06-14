@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/target-ohsk5-57-baseline/release-perf/fr-bench --host 127.0.0.1 --port 24571 --workload incr --clients 50 --requests 300000 --pipeline 16 --keyspace 100000 --json-out /data/projects/frankenredis/artifacts/optimization/frankenredis-ohsk5.57/baseline_incr_last.json --key-prefix pass190b-$(date +%s%N)",
+      "mean": 0.5310940928600001,
+      "stddev": 0.093966618243434,
+      "median": 0.49992170386,
+      "user": 0.1951828,
+      "system": 0.40785163999999996,
+      "min": 0.43091246086000007,
+      "max": 0.6830010178600001,
+      "times": [
+        0.43091246086000007,
+        0.49819133586000003,
+        0.49992170386,
+        0.6830010178600001,
+        0.5434439458600001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

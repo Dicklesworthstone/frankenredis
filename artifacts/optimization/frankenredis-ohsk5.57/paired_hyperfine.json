@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "bash -lc 'set -euo pipefail; \"/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/target-ohsk5-57-baseline/release-perf/frankenredis\" --bind 127.0.0.1 --port 24601 & pid=$!; sleep 0.2; \"/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/target-ohsk5-57-baseline/release-perf/fr-bench\" --host 127.0.0.1 --port 24601 --workload incr --clients 50 --requests 300000 --pipeline 16 --keyspace 100000 --json-out /data/projects/frankenredis/artifacts/optimization/frankenredis-ohsk5.57/paired_baseline_last.json --key-prefix pairb-$(date +%s%N); status=$?; kill \"$pid\"; wait \"$pid\" || true; exit \"$status\"'",
+      "mean": 0.7311752753342857,
+      "stddev": 0.031855568464178946,
+      "median": 0.7236313526200001,
+      "user": 0.48527560571428563,
+      "system": 0.6285092171428571,
+      "min": 0.6887453216200001,
+      "max": 0.7732189956200001,
+      "times": [
+        0.7698511336200001,
+        0.7236313526200001,
+        0.7732189956200001,
+        0.70803662462,
+        0.71316568562,
+        0.6887453216200001,
+        0.7415778136200001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "bash -lc 'set -euo pipefail; \"/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/target-ohsk5-57-candidate/release-perf/frankenredis\" --bind 127.0.0.1 --port 24602 & pid=$!; sleep 0.2; \"/data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/target-ohsk5-57-baseline/release-perf/fr-bench\" --host 127.0.0.1 --port 24602 --workload incr --clients 50 --requests 300000 --pipeline 16 --keyspace 100000 --json-out /data/projects/frankenredis/artifacts/optimization/frankenredis-ohsk5.57/paired_candidate_last.json --key-prefix pairc-$(date +%s%N); status=$?; kill \"$pid\"; wait \"$pid\" || true; exit \"$status\"'",
+      "mean": 0.7038691837628573,
+      "stddev": 0.03033880373691055,
+      "median": 0.7046002696200001,
+      "user": 0.44244360571428576,
+      "system": 0.6189077885714286,
+      "min": 0.6659165616200001,
+      "max": 0.7604744956200001,
+      "times": [
+        0.7046002696200001,
+        0.69869339362,
+        0.6659165616200001,
+        0.6763778976200001,
+        0.7086699006200001,
+        0.7604744956200001,
+        0.7123517676200001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

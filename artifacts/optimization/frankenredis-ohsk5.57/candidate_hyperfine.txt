@@ -1,0 +1,3 @@
+Benchmark 1: /data/projects/.scratch/frankenredis-ohsk5.57-pass190-baseline-331491f35/target-ohsk5-57-candidate/release-perf/fr-bench --host 127.0.0.1 --port 24572 --workload incr --clients 50 --requests 300000 --pipeline 16 --keyspace 100000 --json-out /data/projects/frankenredis/artifacts/optimization/frankenredis-ohsk5.57/candidate_incr_last.json --key-prefix pass190c-$(date +%s%N)
+  Time (mean ± σ):     562.5 ms ±  75.9 ms    [User: 201.7 ms, System: 404.7 ms]
+  Range (min … max):   518.3 ms … 696.5 ms    5 runs
