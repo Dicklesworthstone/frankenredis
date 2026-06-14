@@ -2605,10 +2605,21 @@ pub fn dispatch_argv(
         None => {}
     }
 
-    let cmd = std::str::from_utf8(raw_cmd).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    // Upstream server.c formats the unknown-command name with `%s` on the raw
+    // argv[0] bytes: it does NOT require valid UTF-8 (a non-UTF-8 name is still
+    // just "unknown command", not a UTF-8 error) and it truncates at the first
+    // NUL (C-string semantics). Match both: cut at the first NUL, then render
+    // the bytes (lossy for non-UTF-8 — RespFrame::Error is a Rust String so a
+    // raw 0xFF can't be reproduced byte-for-byte, but the error TYPE and the
+    // \r\n->space + 128-byte cap match upstream). (frankenredis-unkcmdname)
+    let name_bytes = match raw_cmd.iter().position(|&b| b == 0) {
+        Some(nul) => &raw_cmd[..nul],
+        None => raw_cmd,
+    };
+    let cmd = String::from_utf8_lossy(name_bytes);
     let args_preview = build_unknown_args_preview(argv);
     Err(CommandError::UnknownCommand {
-        command: trim_and_cap_string(cmd, 128),
+        command: trim_and_cap_string(&cmd, 128),
         args_preview,
     })
 }
@@ -29396,11 +29407,18 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_invalid_utf8_command_name_errors_invalid_utf8_argument() {
+    fn dispatch_invalid_utf8_command_name_errors_unknown_command() {
+        // (frankenredis-unkcmdname) Upstream does NOT require a command name to
+        // be valid UTF-8: a non-UTF-8 name is reported as "unknown command",
+        // not a UTF-8 error. The name is rendered lossily (RespFrame::Error is a
+        // Rust String) but the error variant matches redis.
         let mut store = Store::new();
         let argv = vec![vec![0xFF], b"k".to_vec()];
         let err = dispatch_argv(&argv, &mut store, 0).expect_err("must fail");
-        assert!(matches!(err, super::CommandError::InvalidUtf8Argument));
+        assert!(
+            matches!(err, super::CommandError::UnknownCommand { .. }),
+            "expected UnknownCommand for a non-UTF-8 command name, got {err:?}"
+        );
     }
 
     #[test]
