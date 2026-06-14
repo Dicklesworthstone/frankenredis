@@ -1,0 +1,3 @@
+== vs-redis pipelined throughput (P16, -c50, -n500000, best-of-5) ==
+cmd          redis         fr   redis/fr
+incr        905797     925925      0.98x  fr-faster

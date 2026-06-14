@@ -1,0 +1,3 @@
+== vs-redis pipelined throughput (P16, -c50, -n500000, best-of-5) ==
+cmd          redis         fr   redis/fr
+ping_inline    1018329     854700      1.19x  FR-SLOWER

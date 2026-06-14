@@ -1,0 +1,71 @@
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/frankenredis-ohsk5-59-current-target/release-perf/frankenredis.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7ffff79bf6c0 (LWP 4050759)]
+[New Thread 0x7ffff77be6c0 (LWP 4050760)]
+FrankenRedis v0.1.0 ready (mode=strict, port=23973)
+
+Thread 1 "frankenredis" received signal SIGINT, Interrupt.
+__syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
+warning: 56	../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S: No such file or directory
+
+Thread 3 (Thread 0x7ffff77be6c0 (LWP 4050760) "fr-writer-1"):
+#0  syscall () at ../sysdeps/unix/sysv/linux/x86_64/syscall.S:38
+#1  0x0000555555a3c116 in std::sys::pal::unix::futex::futex_wait () at library/std/src/sys/pal/unix/futex.rs:73
+#2  std::sys::sync::mutex::futex::Mutex::lock_contended () at library/std/src/sys/sync/mutex/futex.rs:61
+#3  0x00005555559e1952 in lock () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/sync/mutex/futex.rs:33
+#4  lock<std::sync::mpsc::Receiver<frankenredis::WriterJob>> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/poison/mutex.rs:492
+#5  {closure#0} () at crates/fr-server/src/main.rs:488
+#6  __rust_begin_short_backtrace<frankenredis::{impl#6}::new::{closure_env#0}, ()> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#7  0x00005555559e4b9a in {closure#0}<frankenredis::{impl#6}::new::{closure_env#0}, ()> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/thread/lifecycle.rs:70
+#8  call_once<(), std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<frankenredis::{impl#6}::new::{closure_env#0}, ()>> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/panic/unwind_safe.rs:275
+#9  do_call<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<frankenredis::{impl#6}::new::{closure_env#0}, ()>>, ()> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:575
+#10 catch_unwind<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<frankenredis::{impl#6}::new::{closure_env#0}, ()>>> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:543
+#11 catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<frankenredis::{impl#6}::new::{closure_env#0}, ()>>, ()> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panic.rs:359
+#12 {closure#1}<frankenredis::{impl#6}::new::{closure_env#0}, ()> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/thread/lifecycle.rs:68
+#13 call_once<std::thread::lifecycle::spawn_unchecked::{closure_env#1}<frankenredis::{impl#6}::new::{closure_env#0}, ()>, ()> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#14 0x0000555555a512c4 in alloc::boxed::{impl#31}::call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::alloc::Global> () at library/alloc/src/boxed.rs:2277
+#15 std::sys::thread::unix::{impl#2}::new::thread_start () at library/std/src/sys/thread/unix.rs:118
+
+Thread 2 (Thread 0x7ffff79bf6c0 (LWP 4050759) "fr-writer-0"):
+#0  syscall () at ../sysdeps/unix/sysv/linux/x86_64/syscall.S:38
+#1  0x00005555559e4a87 in std::sys::pal::unix::futex::futex_wait () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sys/pal/unix/futex.rs:73
+#2  std::sys::sync::thread_parking::futex::Parker::park () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/sys/sync/thread_parking/futex.rs:55
+#3  std::thread::thread::Thread::park () at /rustc/beae781308e9ddef13074a03faf57ca2fac59a5b/library/std/src/thread/thread.rs:121
+#4  wait_until () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/mpmc/context.rs:143
+#5  {closure#1}<frankenredis::WriterJob> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/mpmc/array.rs:402
+#6  0x00005555559e00bc in {closure#0}<std::sync::mpmc::array::{impl#1}::recv::{closure_env#1}<frankenredis::WriterJob>, ()> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/mpmc/context.rs:49
+#7  {closure#1}<std::sync::mpmc::array::{impl#1}::recv::{closure_env#1}<frankenredis::WriterJob>, ()> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/mpmc/context.rs:57
+#8  try_with<core::cell::Cell<core::option::Option<std::sync::mpmc::context::Context>>, std::sync::mpmc::context::{impl#0}::with::{closure_env#1}<std::sync::mpmc::array::{impl#1}::recv::{closure_env#1}<frankenredis::WriterJob>, ()>, ()> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/thread/local.rs:463
+#9  with<std::sync::mpmc::array::{impl#1}::recv::{closure_env#1}<frankenredis::WriterJob>, ()> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/mpmc/context.rs:53
+#10 recv<frankenredis::WriterJob> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/mpmc/array.rs:390
+#11 recv<frankenredis::WriterJob> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/mpmc/mod.rs:1013
+#12 recv<frankenredis::WriterJob> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/mpsc.rs:881
+#13 {closure#0} () at crates/fr-server/src/main.rs:491
+#14 __rust_begin_short_backtrace<frankenredis::{impl#6}::new::{closure_env#0}, ()> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#15 0x00005555559e4b9a in {closure#0}<frankenredis::{impl#6}::new::{closure_env#0}, ()> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/thread/lifecycle.rs:70
+
+Thread 1 (Thread 0x7ffff7e68d40 (LWP 4050579) "frankenredis"):
+#0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
+#1  0x00007ffff7ca013c in __internal_syscall_cancel (a1=<optimized out>, a2=<optimized out>, a3=<optimized out>, a4=<optimized out>, a5=0, a6=0, nr=232) at ./nptl/cancellation.c:49
+#2  __syscall_cancel (a1=<optimized out>, a2=<optimized out>, a3=<optimized out>, a4=<optimized out>, a5=a5@entry=0, a6=a6@entry=0, nr=232) at ./nptl/cancellation.c:75
+#3  0x00007ffff7d376d5 in epoll_wait (epfd=<optimized out>, events=<optimized out>, maxevents=<optimized out>, timeout=<optimized out>) at ../sysdeps/unix/sysv/linux/epoll_wait.c:30
+#4  0x00005555559fabfb in select () at /data/tmp/rch-cargo-home-vmi1152480-3831794-1781409175217608419/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/sys/unix/mod.rs:8
+#5  poll () at /data/tmp/rch-cargo-home-vmi1152480-3831794-1781409175217608419/registry/src/index.crates.io-1949cf8c6b5b557f/mio-1.2.0/src/poll.rs:440
+#6  main () at crates/fr-server/src/main.rs:1230
+#7  0x00005555559df973 in call_once<fn() -> std::process::ExitCode, ()> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#8  __rust_begin_short_backtrace<fn() -> std::process::ExitCode, std::process::ExitCode> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#9  0x00005555559e2db9 in {closure#0}<std::process::ExitCode> () at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#10 0x0000555555a4b66e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#11 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:575
+#12 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:543
+#13 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#14 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#15 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:575
