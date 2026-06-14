@@ -24838,7 +24838,11 @@ mod tests {
 
     #[test]
     fn plain_set_owned_fast_path_matches_borrowed_set_result() {
-        let mut rt = Runtime::default_strict();
+        let policy = RuntimePolicy {
+            emit_evidence_ledger: false,
+            ..RuntimePolicy::default()
+        };
+        let mut rt = Runtime::new(policy);
         assert_eq!(
             rt.execute_plain_set_owned(b"owned-key".to_vec(), b"owned-value".to_vec(), 1),
             Some(RespFrame::SimpleString("OK".to_string()))
@@ -24852,9 +24856,7 @@ mod tests {
 
     #[test]
     fn plain_set_owned_fast_path_defers_when_evidence_ledger_needs_full_argv() {
-        let mut policy = RuntimePolicy::default();
-        policy.emit_evidence_ledger = true;
-        let mut rt = Runtime::new(policy);
+        let mut rt = Runtime::new(RuntimePolicy::default());
 
         assert_eq!(
             rt.execute_plain_set_owned(b"ledger-key".to_vec(), b"value".to_vec(), 1),
