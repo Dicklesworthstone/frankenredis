@@ -195,6 +195,14 @@ GENERATORS = [
     lambda: ["LMPOP", random.choice(["1", "2", "0", "-1"]), _rk(), _rk(),
              random.choice(["LEFT", "RIGHT"]), "COUNT", _rint()],
     lambda: ["ZMPOP", random.choice(["1", "2", "0"]), _rk(), _rk(), random.choice(["MIN", "MAX"])],
+    # BITOP: deterministic across processes — writes a computed-length string into
+    # the shared key pool, so the existing string ops (APPEND/SETRANGE/GETRANGE/
+    # STRLEN/SETBIT/GET) then exercise it cross-type. NOT takes exactly one src;
+    # AND/OR/XOR take one-or-more. A bad op name checks error parity.
+    lambda: ["BITOP", random.choice(["AND", "OR", "XOR"]), _rk(), _rk(), _rk()],
+    lambda: ["BITOP", "NOT", _rk(), _rk()],
+    lambda: ["BITOP", "NOT", _rk(), _rk(), _rk()],  # NOT with >1 src -> error parity
+    lambda: ["BITOP", random.choice(["AND", "OR", "XOR", "NAND"]), _rk(), _rk()],
     # membership / scores
     lambda: ["SMISMEMBER", _rk(), _rval(), _rval()], lambda: ["ZMSCORE", _rk(), _rval(), _rval()],
     lambda: ["SISMEMBER", _rk(), _rval()], lambda: ["ZSCORE", _rk(), _rval()], lambda: ["ZRANK", _rk(), _rval()],
