@@ -1,0 +1,15 @@
+Script started on 2026-06-13 20:12:50-04:00 [COMMAND="scripts/perf_gap_dashboard.sh --bin target-coralox-pass187-baseline/release-perf/frankenredis --no-build -n 300000 -P 16 -c 50 -r 100000 --reps 3 --cmds 'set get incr lpush rpush sadd hset zadd spop mget'" <not executed on terminal>]
+== vs-redis pipelined throughput (P16, -c50, -n300000, best-of-3) ==
+cmd          redis         fr   redis/fr
+set         854700     925925      0.92x  fr-faster
+get         874635     937500      0.93x  fr-faster
+incr        872093     882352      0.99x  fr-faster
+lpush       958466     964630      0.99x  fr-faster
+rpush       983606    1003344      0.98x  fr-faster
+sadd        949367     906344      1.05x  FR-SLOWER
+hset        804289     785340      1.02x  FR-SLOWER
+zadd        414937     514579      0.81x  fr-faster
+spop       1038062    1010101      1.03x  FR-SLOWER
+mget             0          0      0.00x  fr-faster
+
+Script done on 2026-06-13 20:13:16-04:00 [COMMAND_EXIT_CODE="0"]
