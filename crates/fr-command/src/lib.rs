@@ -5530,7 +5530,10 @@ fn zrank_generic(
         Some(rank) => {
             let rank_i = i64::try_from(rank).unwrap_or(i64::MAX);
             if withscore {
-                let score = store.zscore(&argv[1], &argv[2], now_ms)?.unwrap_or(0.0);
+                // store.zrank already recorded the keyspace lookup; use the
+                // no-stat zmscore for the score read so WITHSCORE does not
+                // double-count keyspace_hits (upstream looks the key up once).
+                let score = store.zmscore(&argv[1], &[argv[2].as_slice()], now_ms)?[0].unwrap_or(0.0);
                 Ok(RespFrame::Array(Some(vec![
                     RespFrame::Integer(rank_i),
                     RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
@@ -6605,11 +6608,17 @@ fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // ahead of any 'need numeric radius' / 'unsupported unit' / 'radius cannot
     // be negative' option error. A missing key still falls through to option
     // parsing (upstream proceeds with a NULL zobj and replies empty at the end);
-    // the no-stat peek leaves the valid-path keyspace hit to geo_search_core.
+    // the no-stat peek preserves WRONGTYPE-before-parse ordering.
     match store.peek_value_type(&argv[1], now_ms) {
         None | Some(fr_store::ValueType::ZSet) => {}
         Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
     }
+    // geo_search_core scans the zset by reference (no-stat), so record the
+    // keyspace lookup here at the point upstream's lookupKeyRead runs (after
+    // the type check, before coord/radius/unit option parsing). Records a miss
+    // for a missing key, a hit otherwise — matching georadiusbymember, whose
+    // member zscore already records, and GEOSEARCH.
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
     let center_lon = match parse_geo_f64(&argv[2]) {
         Ok(v) => v,
         Err(e) => return Ok(e),
@@ -12916,7 +12925,9 @@ fn zrandmember(
         return Err(CommandError::SyntaxError);
     }
     if argv.len() == 2 {
-        // No count: return single element or nil
+        // No count: return single element or nil. store.zrandmember is no-stat,
+        // so record the keyspace lookup here (upstream lookupKeyReadOrReply).
+        record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
         return match store.zrandmember(&argv[1], now_ms)? {
             Some(m) => Ok(RespFrame::BulkString(Some(m))),
             None => Ok(RespFrame::BulkString(None)),
@@ -12936,6 +12947,9 @@ fn zrandmember(
     if argv.len() == 4 && !withscores {
         return Err(CommandError::SyntaxError);
     }
+    // store.zrandmember_count is no-stat; record the single keyspace lookup
+    // (placed after all syntax/count validation, matching upstream order).
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
     let pairs = store.zrandmember_count(&argv[1], count, now_ms)?;
     // (frankenredis-jnf53) Mirror ZRANGE WITHSCORES wire shape: under
     // RESP3 wrap each (member, score) in a 2-element Array; under RESP2
@@ -13311,7 +13325,9 @@ fn hrandfield(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         return Err(CommandError::SyntaxError);
     }
     if argv.len() == 2 {
-        // No count: return single field or nil
+        // No count: return single field or nil. store.hrandfield is no-stat,
+        // so record the keyspace lookup here (upstream lookupKeyReadOrReply).
+        record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
         return match store.hrandfield(&argv[1], now_ms)? {
             Some(field) => Ok(RespFrame::BulkString(Some(field))),
             None => Ok(RespFrame::BulkString(None)),
@@ -13330,6 +13346,9 @@ fn hrandfield(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() == 4 && !withvalues {
         return Err(CommandError::SyntaxError);
     }
+    // store.hrandfield_count is no-stat; record the single keyspace lookup
+    // (placed after all syntax/count validation, matching upstream order).
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
     let pairs = store.hrandfield_count(&argv[1], count, now_ms)?;
     if withvalues {
         // Upstream t_hash.c::hrandfieldWithCountCommand uses

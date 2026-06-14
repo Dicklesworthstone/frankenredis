@@ -122,6 +122,11 @@ READS_HIT = [
     ["xrevrange", "xs", "+", "-"], ["substr", "k", "0", "2"],
     ["bitfield_ro", "bx", "get", "u8", "0"], ["geosearch", "g", "frommember", "p1", "byradius", "500", "km", "asc"],
     ["sort", "lx", "ALPHA"],
+    # keyspace delta is deterministic even where the reply is random
+    ["touch", "k"], ["touch", "k", "n", "no"], ["hrandfield", "hx"],
+    ["srandmember", "sx"], ["zrandmember", "zx"], ["dump", "k"],
+    ["georadius_ro", "g", "13.36", "38.11", "1000", "km"],
+    ["georadiusbymember_ro", "g", "p1", "1000", "km"], ["zrank", "zx", "a", "withscore"],
 ]
 READS_MISS = [
     ["get", "no"], ["strlen", "no"], ["getrange", "no", "0", "1"], ["ttl", "no"],
