@@ -14478,7 +14478,15 @@ pub fn build_unknown_args_preview(argv: &[Vec<u8>]) -> Option<String> {
             break;
         }
 
-        let text = String::from_utf8_lossy(arg);
+        // Upstream formats each arg with printf %.*s, which stops at the first
+        // NUL (C-string semantics) even within the length bound — so truncate
+        // each arg at its first NUL, mirroring the command-name handling.
+        // (frankenredis-unkcmdname)
+        let nul_truncated = match arg.iter().position(|&b| b == 0) {
+            Some(nul) => &arg[..nul],
+            None => arg.as_slice(),
+        };
+        let text = String::from_utf8_lossy(nul_truncated);
         let sanitized = text.replace(['\r', '\n'], " ");
         let capped = trim_and_cap_string(&sanitized, remaining.saturating_sub(3));
         out.push('\'');
