@@ -15509,6 +15509,16 @@ impl Store {
         self.stream_max_deleted_ids.get(key).copied()
     }
 
+    /// Number of consumer groups on a stream key, WITHOUT recording a keyspace
+    /// lookup. XINFO STREAM's non-FULL reply needs the group count, but it has
+    /// already looked the key up once via `xinfo_stream`; using the stat-counting
+    /// `xinfo_groups` here would double-count keyspace_hits (upstream
+    /// xinfoCommand does a single lookupKeyReadOrReply).
+    #[must_use]
+    pub fn stream_group_count(&self, key: &[u8]) -> usize {
+        self.stream_groups.get(key).map_or(0, BTreeMap::len)
+    }
+
     #[must_use]
     pub fn stream_entries_added(&self, key: &[u8], live_len: usize) -> u64 {
         self.stream_entries_added_value(key, live_len)

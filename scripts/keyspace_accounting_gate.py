@@ -127,6 +127,22 @@ READS_HIT = [
     ["srandmember", "sx"], ["zrandmember", "zx"], ["dump", "k"],
     ["georadius_ro", "g", "13.36", "38.11", "1000", "km"],
     ["georadiusbymember_ro", "g", "p1", "1000", "km"], ["zrank", "zx", "a", "withscore"],
+    ["getex", "k"], ["lcs", "k", "e"], ["object", "refcount", "k"],
+    ["object", "idletime", "k"], ["xinfo", "stream", "xs"],
+]
+# STORE / move variants: the source keys are reads (record hit/miss), the dest is
+# a write (no counter). Placed here purely for the printed label — the gate asserts
+# fr-delta == redis-delta empirically regardless of list.
+STORE_AND_MOVE = [
+    ["sinterstore", "d", "sx", "sy"], ["sunionstore", "d", "sx", "sy"],
+    ["sdiffstore", "d", "sx", "sy"], ["zrangestore", "d", "zx", "0", "-1"],
+    ["zdiffstore", "d", "2", "zx", "zy"], ["zinterstore", "d", "2", "zx", "zy"],
+    ["zunionstore", "d", "2", "zx", "zy"], ["bitop", "and", "d", "bx", "k"],
+    ["smove", "sx", "sy", "2"], ["lmove", "lx", "ld", "left", "right"],
+    ["rpoplpush", "lx", "ld"], ["copy", "k", "kd"],
+    # source-miss forms
+    ["sinterstore", "d", "no", "sy"], ["zrangestore", "d", "no", "0", "-1"],
+    ["bitop", "and", "d", "no", "k"], ["copy", "no", "kd"],
 ]
 READS_MISS = [
     ["get", "no"], ["strlen", "no"], ["getrange", "no", "0", "1"], ["ttl", "no"],
@@ -173,12 +189,12 @@ def delta(port, args):
 
 def main():
     fails = []
-    for args in READS_HIT + READS_MISS + WRITES:
+    for args in READS_HIT + READS_MISS + WRITES + STORE_AND_MOVE:
         rd = delta(OR, args)
         fr = delta(FRp, args)
         if rd != fr:
             fails.append((args, rd, fr))
-    total = len(READS_HIT) + len(READS_MISS) + len(WRITES)
+    total = len(READS_HIT) + len(READS_MISS) + len(WRITES) + len(STORE_AND_MOVE)
     print("=" * 64)
     if fails:
         for a, rd, fr in fails:

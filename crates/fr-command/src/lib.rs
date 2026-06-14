@@ -9867,10 +9867,10 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         return Ok(RespFrame::Array(Some(flat)));
     }
 
-    let group_count = store
-        .xinfo_groups(&argv[2], now_ms)?
-        .map(|groups| i64::try_from(groups.len()).unwrap_or(i64::MAX))
-        .unwrap_or(0);
+    // Use the no-stat group count: xinfo_stream above already recorded the
+    // single keyspace lookup upstream's xinfoCommand performs; calling the
+    // stat-counting store.xinfo_groups here would double-count keyspace_hits.
+    let group_count = i64::try_from(store.stream_group_count(&argv[2])).unwrap_or(i64::MAX);
 
     let first_entry = first
         .map(|(id, fields)| stream_record_to_frame(id, fields))
@@ -11395,6 +11395,10 @@ fn zrangestore_cmd(
         ));
     }
 
+    // The source range reads below are no-stat; upstream zrangestoreCommand
+    // (zrangeGenericCommand) does a lookupKeyRead on src, so record one keyspace
+    // hit/miss here (after option validation, before the range walk / wrongtype).
+    record_source_key_lookups(store, &[src.as_slice()], now_ms);
     let pairs: Vec<(Vec<u8>, f64)> = if byscore {
         let min = parse_score_bound(&argv[3])?;
         let max = parse_score_bound(&argv[4])?;
@@ -15238,6 +15242,10 @@ fn bitop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         ));
     }
 
+    // store.bitop reads the source keys no-stat; upstream bitopCommand does a
+    // lookupKeyRead per source key, so record one keyspace hit/miss per source
+    // (after op/arity validation, matching upstream order).
+    record_source_key_lookups(store, &keys, now_ms);
     let len = store
         .bitop(op, dest, &keys, now_ms)
         .map_err(CommandError::Store)?;
