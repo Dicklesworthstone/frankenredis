@@ -6372,42 +6372,96 @@ impl Store {
                 let Some(v) = entry.value.string_bytes() else {
                     return Err(StoreError::WrongType);
                 };
-                // (frankenredis-getrangewt) Upstream t_string.c::getrangeCommand
-                // applies this both-negative-inverted short-circuit AFTER the
-                // type check but BEFORE resolving negatives against strlen — it
-                // returns empty even when the resolved range would be non-empty
-                // (e.g. GETRANGE "a" -1 -2 -> ""). The command-layer previously
-                // ran this short-circuit BEFORE the type check, so a wrong-type
-                // key with an inverted range wrongly returned "" instead of
-                // WRONGTYPE; keeping it here preserves both behaviours.
-                if start < 0 && end < 0 && start > end {
-                    return Ok(Vec::new());
-                }
-                let len = v.len() as i64;
-                // Upstream t_string.c::getrangeCommand normalizes
-                // negative offsets relative to length and clamps
-                // BOTH start and end at 0 — fr previously only
-                // clamped start, so a fully-negative range like
-                // (-100, -90) on a length-6 string left end=-84
-                // and the 's > e' guard wrongly returned empty
-                // instead of the clamped slice [0..=0].
-                // (br-frankenredis-grangneg)
-                let mut s = if start < 0 { len + start } else { start };
-                let mut e = if end < 0 { len + end } else { end };
-                if s < 0 {
-                    s = 0;
-                }
-                if e < 0 {
-                    e = 0;
-                }
-                if s > e || len == 0 || s >= len {
-                    Ok(Vec::new())
-                } else {
-                    let e_idx = e.min(len - 1) as usize;
-                    Ok(v[s as usize..e_idx + 1].to_vec())
+                match Self::resolve_getrange_bounds(v.len(), start, end) {
+                    Some((s, e_idx)) => Ok(v[s..=e_idx].to_vec()),
+                    None => Ok(Vec::new()),
                 }
             }
             None => Ok(Vec::new()),
+        }
+    }
+
+    /// Resolve a GETRANGE (`start`, `end`) pair against a string of length
+    /// `len` to an inclusive byte range `[s, e_idx]`, or `None` for the empty
+    /// reply. Shared by [`Store::getrange`] (which copies the slice) and
+    /// [`Store::getrange_with`] (which borrows it) so both stay byte-exact with
+    /// upstream `t_string.c::getrangeCommand`.
+    ///
+    /// The caller MUST apply the wrong-type check before this — upstream runs
+    /// the both-negative-inverted short-circuit AFTER the type check but BEFORE
+    /// resolving negatives against strlen (e.g. `GETRANGE "a" -1 -2` -> ""),
+    /// and a wrong-type key with an inverted range must still report WRONGTYPE
+    /// rather than empty. (frankenredis-getrangewt)
+    fn resolve_getrange_bounds(len: usize, start: i64, end: i64) -> Option<(usize, usize)> {
+        // (frankenredis-getrangewt) both-negative inverted range -> empty.
+        if start < 0 && end < 0 && start > end {
+            return None;
+        }
+        let len_i = len as i64;
+        // Upstream normalizes negative offsets relative to length and clamps
+        // BOTH start and end at 0 — clamping only start left a fully-negative
+        // range like (-100, -90) on a length-6 string with end=-84 and the
+        // 's > e' guard wrongly returned empty instead of the clamped slice
+        // [0..=0]. (br-frankenredis-grangneg)
+        let mut s = if start < 0 { len_i + start } else { start };
+        let mut e = if end < 0 { len_i + end } else { end };
+        if s < 0 {
+            s = 0;
+        }
+        if e < 0 {
+            e = 0;
+        }
+        if s > e || len == 0 || s >= len_i {
+            None
+        } else {
+            let e_idx = e.min(len_i - 1) as usize;
+            Some((s as usize, e_idx))
+        }
+    }
+
+    /// Borrowing GETRANGE: performs the same keyspace-lookup / LFU-bump / touch
+    /// bookkeeping and bound resolution as [`Store::getrange`], then hands the
+    /// resolved slice (an empty slice for every empty-reply case: keyspace
+    /// miss, missing key, or out-of-range) to `f` WITHOUT allocating a
+    /// substring copy. Returns `Err(StoreError::WrongType)` for a non-string
+    /// value (in which case `f` is not called). The runtime's borrow-encode
+    /// fast path uses this to write the GETRANGE bulk reply straight into the
+    /// client output buffer, eliminating the intermediate `Vec` (a full 1 MB
+    /// malloc + memcpy on `GETRANGE bigstr 0 -1`).
+    pub fn getrange_with<R>(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        end: i64,
+        now_ms: u64,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> Result<R, StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(f(&[]));
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+            self.next_rand()
+        } else {
+            0
+        };
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                if lfu_tracking_enabled {
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                entry.touch(now_ms);
+                let Some(v) = entry.value.string_bytes() else {
+                    return Err(StoreError::WrongType);
+                };
+                match Self::resolve_getrange_bounds(v.len(), start, end) {
+                    Some((s, e_idx)) => Ok(f(&v[s..=e_idx])),
+                    None => Ok(f(&[])),
+                }
+            }
+            None => Ok(f(&[])),
         }
     }
 

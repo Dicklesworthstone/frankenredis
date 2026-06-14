@@ -2648,13 +2648,21 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
-                if let Some((key, start, end)) = borrowed_plain_getrange_args(&borrowed_args)
-                    && let Some(response) =
-                        runtime.execute_plain_getrange_borrowed(key, start, end, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
+                if let Some((key, start, end)) = borrowed_plain_getrange_args(&borrowed_args) {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_getrange_borrowed_into(key, start, end, ts, client_resp3, out)
+                        .is_some()
+                    {
+                        return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: parsed.consumed,
+                        });
+                    }
+                    copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                    return Ok(BorrowedMultibulkAction::Parsed {
+                        kind: parsed.kind,
                         consumed: parsed.consumed,
-                        response,
+                        argv_len,
                     });
                 }
                 if let Some((key, fields)) = borrowed_plain_hmget_args(&borrowed_args)

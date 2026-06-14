@@ -8860,9 +8860,9 @@ impl Runtime {
     /// `RespFrame`s) — that owned-reply churn left MGET ~0.90x vs redis while the
     /// already-`_into` GET/SMEMBERS/LRANGE paths lead. Byte-identical on the fast
     /// path: `get_string_bytes` per key reproduces `Store::mget`'s keyspace-lookup
-    /// + touch-only-on-string semantics (the read gate forces maxmemory==0, so
-    /// LFU is off and can't differ), and a non-string key maps to a nil element
-    /// (NOT a WRONGTYPE error, matching MGET). Records ONE `mget` command.
+    /// and touch-only-on-string semantics. The read gate forces maxmemory==0 so
+    /// LFU is off and cannot differ, and a non-string key maps to a nil element
+    /// rather than a WRONGTYPE error, matching MGET. Records ONE `mget` command.
     pub fn execute_plain_mget_borrowed_into(
         &mut self,
         keys: &[&[u8]],
@@ -9290,6 +9290,93 @@ impl Runtime {
         }
 
         Some(reply)
+    }
+
+    /// Borrow-encoded GETRANGE fast path: resolves the range inside the store
+    /// and writes the bulk-string reply straight into `out` via
+    /// [`Store::getrange_with`], borrowing the live value slice instead of
+    /// allocating a substring `Vec` (the previous `execute_plain_getrange_borrowed`
+    /// built `RespFrame::BulkString(Some(store.getrange(...)))`, a full 1 MB
+    /// malloc + memcpy on `GETRANGE bigstr 0 -1`). Mirrors the borrow path's
+    /// bookkeeping exactly. Returns `None` to fall back to generic dispatch.
+    pub fn execute_plain_getrange_borrowed_into(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        end_arg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_getrange_borrowed(key, start_arg, end_arg, now_ms) {
+            return None;
+        }
+        // Only fast-path well-formed integer ranges; defer the
+        // not-an-integer error (and its stats) to the generic path.
+        let start = parse_i64_arg(start_arg).ok()?;
+        let end = parse_i64_arg(end_arg).ok()?;
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("getrange");
+        self.session.last_argv_len_sum =
+            b"GETRANGE".len() + key.len() + start_arg.len() + end_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let started = Instant::now();
+        let result = self.server.store.getrange_with(key, start, end, now_ms, |slice| {
+            if !suppress_reply {
+                encode_bulk_string_slice(Some(slice), resp3, out);
+            }
+        });
+        let elapsed_us = started.elapsed().as_micros() as u64;
+        let mut error_reply = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            error_reply = Some(reply);
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_getrange_borrowed_metrics(
+            key, start_arg, end_arg, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -23640,6 +23727,97 @@ mod tests {
         assert!(
             rt.execute_plain_getrange_borrowed(b"s", b"0", b"-1", 4)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn plain_getrange_borrowed_into_matches_generic_bytes() {
+        // (frankenredis-5gisf) The borrow-encode GETRANGE _into path must write
+        // EXACTLY the bytes generic dispatch produces, across every range case
+        // (in-range / full / negative / inverted-empty / out-of-range), for a
+        // missing key (empty bulk, not nil), and for a wrong-type key (WRONGTYPE
+        // error). Bulk strings are protocol-invariant, so RESP2 and RESP3 must
+        // also be byte-identical.
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"s", b"Hello World"]), 1);
+            rt.execute_frame(command(&[b"LPUSH", b"l", b"x"]), 1);
+        }
+
+        let cases: [(&[u8], &[u8]); 7] = [
+            (b"0", b"4"),
+            (b"0", b"-1"),
+            (b"-5", b"-1"),
+            (b"-1", b"-5"),   // inverted -> empty bulk
+            (b"-100", b"-90"), // fully-negative clamp -> [0..=0]
+            (b"100", b"200"),  // out of range -> empty bulk
+            (b"6", b"6"),
+        ];
+        for (start, end) in cases {
+            for resp3 in [false, true] {
+                let mut out = Vec::new();
+                assert_eq!(
+                    fast.execute_plain_getrange_borrowed_into(b"s", start, end, 2, resp3, &mut out),
+                    Some(()),
+                    "well-formed GETRANGE should take _into fast path (start={start:?} end={end:?})"
+                );
+                let generic_bytes = generic
+                    .execute_frame(command(&[b"GETRANGE", b"s", start, end]), 2)
+                    .to_bytes();
+                assert_eq!(
+                    out, generic_bytes,
+                    "start={start:?} end={end:?} resp3={resp3}"
+                );
+            }
+        }
+
+        // missing key -> empty bulk string (NOT nil)
+        let mut miss = Vec::new();
+        assert_eq!(
+            fast.execute_plain_getrange_borrowed_into(b"nope", b"0", b"-1", 2, false, &mut miss),
+            Some(())
+        );
+        assert_eq!(
+            miss,
+            generic
+                .execute_frame(command(&[b"GETRANGE", b"nope", b"0", b"-1"]), 2)
+                .to_bytes()
+        );
+        assert_eq!(miss, b"$0\r\n\r\n");
+
+        // wrong-type key -> WRONGTYPE error written into out
+        let mut wt = Vec::new();
+        assert_eq!(
+            fast.execute_plain_getrange_borrowed_into(b"l", b"0", b"-1", 3, false, &mut wt),
+            Some(())
+        );
+        assert_eq!(
+            wt,
+            generic
+                .execute_frame(command(&[b"GETRANGE", b"l", b"0", b"-1"]), 3)
+                .to_bytes()
+        );
+
+        // non-integer arg -> defers to generic (None)
+        let mut bad = Vec::new();
+        assert!(
+            fast.execute_plain_getrange_borrowed_into(b"s", b"x", b"4", 4, false, &mut bad)
+                .is_none()
+        );
+        assert!(bad.is_empty());
+
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            fast.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
         );
     }
 
