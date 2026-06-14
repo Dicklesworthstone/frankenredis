@@ -1,0 +1,4 @@
+ 
+GETRANGE bench:string 0 63: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)
+                                                                                 
+GETRANGE bench:string 0 63: 875912.44 requests per second, p50=0.559 msec

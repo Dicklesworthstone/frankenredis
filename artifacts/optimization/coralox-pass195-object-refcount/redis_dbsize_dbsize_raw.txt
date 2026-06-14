@@ -1,0 +1,4 @@
+ 
+DBSIZE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)
+                                                             
+DBSIZE: 1043478.25 requests per second, p50=0.367 msec

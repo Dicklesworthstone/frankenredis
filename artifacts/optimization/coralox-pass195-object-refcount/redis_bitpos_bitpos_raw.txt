@@ -1,0 +1,4 @@
+ 
+BITPOS bench:bits 1: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)
+                                                                           
+BITPOS bench:bits 1: 888888.88 requests per second, p50=0.495 msec

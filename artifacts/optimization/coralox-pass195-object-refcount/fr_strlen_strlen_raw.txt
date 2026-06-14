@@ -1,0 +1,4 @@
+ 
+STRLEN bench:string: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)
+                                                                          
+STRLEN bench:string: 888888.88 requests per second, p50=0.495 msec

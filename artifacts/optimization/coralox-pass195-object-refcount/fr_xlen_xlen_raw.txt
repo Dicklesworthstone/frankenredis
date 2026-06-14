@@ -1,0 +1,4 @@
+ 
+XLEN bench:stream: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)
+                                                                        
+XLEN bench:stream: 1034482.81 requests per second, p50=0.423 msec

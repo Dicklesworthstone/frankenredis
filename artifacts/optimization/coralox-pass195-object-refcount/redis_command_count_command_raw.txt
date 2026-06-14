@@ -1,0 +1,4 @@
+ 
+COMMAND COUNT: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)
+                                                                    
+COMMAND COUNT: 916030.56 requests per second, p50=0.463 msec

@@ -1,0 +1,5 @@
+command order baseline_rps candidate_rps candidate/base
+OBJECT_ENCODING baseline-first 890207.69 898203.62 1.009x
+OBJECT_ENCODING candidate-first 911854.12 923076.94 1.012x
+MEMORY_USAGE baseline-first 1006711.38 1003344.50 0.997x
+MEMORY_USAGE candidate-first 958466.50 1016949.19 1.061x

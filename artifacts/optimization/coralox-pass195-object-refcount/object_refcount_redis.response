@@ -1,0 +1,13 @@
+$-1
++OK
+:2147483647
++OK
+:1
++OK
+:1
+:1
+:1
+:1
+:1
+-ERR wrong number of arguments for 'object|refcount' command
++OK

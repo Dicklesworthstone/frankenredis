@@ -1,0 +1,4 @@
+ 
+ZCARD bench:zset: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)
+                                                                       
+ZCARD bench:zset: 1025641.06 requests per second, p50=0.383 msec

@@ -1,0 +1,4 @@
+ 
+OBJECT REFCOUNT bench:string: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)
+                                                                                   
+OBJECT REFCOUNT bench:string: 530973.44 requests per second, p50=1.351 msec

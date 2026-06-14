@@ -1,0 +1,4 @@
+ 
+HSTRLEN bench:hash field: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)
+                                                                                
+HSTRLEN bench:hash field: 863309.38 requests per second, p50=0.631 msec

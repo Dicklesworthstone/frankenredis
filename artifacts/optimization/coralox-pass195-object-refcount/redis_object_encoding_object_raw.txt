@@ -1,0 +1,4 @@
+ 
+OBJECT ENCODING bench:string: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)
+                                                                                   
+OBJECT ENCODING bench:string: 960000.00 requests per second, p50=0.399 msec

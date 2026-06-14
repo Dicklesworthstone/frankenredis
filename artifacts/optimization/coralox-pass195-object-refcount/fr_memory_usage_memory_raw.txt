@@ -1,0 +1,4 @@
+ 
+MEMORY USAGE bench:string: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)
+                                                                                 
+MEMORY USAGE bench:string: 839160.81 requests per second, p50=0.583 msec

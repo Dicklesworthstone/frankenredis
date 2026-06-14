@@ -1,0 +1,4 @@
+ 
+BITCOUNT bench:bits: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)
+                                                                          
+BITCOUNT bench:bits: 869565.25 requests per second, p50=0.543 msec

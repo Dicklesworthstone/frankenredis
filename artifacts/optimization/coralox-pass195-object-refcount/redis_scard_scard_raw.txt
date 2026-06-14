@@ -1,0 +1,4 @@
+ 
+SCARD bench:set: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)
+                                                                      
+SCARD bench:set: 1034482.81 requests per second, p50=0.375 msec

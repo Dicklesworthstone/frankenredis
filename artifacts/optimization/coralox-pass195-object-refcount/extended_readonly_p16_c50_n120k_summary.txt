@@ -1,0 +1,14 @@
+cmd redis fr redis/fr verdict requests=120000 clients=50 pipeline=16
+MEMORY_USAGE 895522.38 839160.81 1.067x FR-SLOWER redis_rc=0 fr_rc=0
+OBJECT_ENCODING 960000.00 869565.25 1.104x FR-SLOWER redis_rc=0 fr_rc=0
+OBJECT_REFCOUNT 902255.62 530973.44 1.699x FR-SLOWER redis_rc=0 fr_rc=0
+BITCOUNT 937499.94 869565.25 1.078x FR-SLOWER redis_rc=0 fr_rc=0
+BITPOS 888888.88 1008403.31 0.881x fr-faster redis_rc=0 fr_rc=0
+DBSIZE 1043478.25 1081081.12 0.965x fr-faster redis_rc=0 fr_rc=0
+COMMAND_COUNT 916030.56 923076.94 0.992x fr-faster redis_rc=0 fr_rc=0
+HSTRLEN 967741.94 863309.38 1.121x FR-SLOWER redis_rc=0 fr_rc=0
+XLEN 1016949.12 1034482.81 0.983x fr-faster redis_rc=0 fr_rc=0
+STRLEN 923076.94 888888.88 1.038x FR-SLOWER redis_rc=0 fr_rc=0
+GETRANGE_64 875912.44 1071428.50 0.818x fr-faster redis_rc=0 fr_rc=0
+SCARD 1034482.81 909090.94 1.138x FR-SLOWER redis_rc=0 fr_rc=0
+ZCARD 1025641.06 1043478.25 0.983x fr-faster redis_rc=0 fr_rc=0
