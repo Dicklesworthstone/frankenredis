@@ -1,0 +1,20 @@
+== custom RESP sweep (P16, -c50, -n120000, best-of-2) ==
+cmd                     redis           fr   redis/fr
+ping                   410262       419226      0.98x  fr-faster
+dbsize                 408390       411837      0.99x  fr-faster
+command_count          406998       408869      1.00x  fr-faster
+memory_usage           416826       420446      0.99x  fr-faster
+object_encoding        334040       350752      0.95x  fr-faster
+object_refcount        416311       562418      0.74x  fr-faster
+bitcount               425629       424278      1.00x  FR-SLOWER
+bitpos                 414484       415277      1.00x  fr-faster
+strlen                 423311       426070      0.99x  fr-faster
+getrange_64            333233       327060      1.02x  FR-SLOWER
+hstrlen                397003       411682      0.96x  fr-faster
+hget                   335358       330225      1.02x  FR-SLOWER
+llen                   402635       411061      0.98x  fr-faster
+scard                  413780       409761      1.01x  FR-SLOWER
+zcard                  415450       410853      1.01x  FR-SLOWER
+xlen                   416620       412264      1.01x  FR-SLOWER
+expiretime             401283       432653      0.93x  fr-faster
+pexpiretime            406076       407377      1.00x  fr-faster

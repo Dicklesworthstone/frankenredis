@@ -1,0 +1,42 @@
+pass194 focused PING_INLINE P16/C50 n800k reps5
+## redis rep 1
+ PING_INLINE: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                                   PING_INLINE: rps=1039745.1 (overall: 1039745.1) avg_msec=0.443 (overall: 0.443)                                                                                PING_INLINE: rps=981312.0 (overall: 1010586.9) avg_msec=0.435 (overall: 0.439)                                                                               PING_INLINE: rps=1045354.6 (overall: 1022191.5) avg_msec=0.428 (overall: 0.435)                                                                                PING_INLINE: 1026957.69 requests per second, p50=0.375 msec
+
+
+## redis rep 2
+ PING_INLINE: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                                   PING_INLINE: rps=935330.8 (overall: 935330.8) avg_msec=0.518 (overall: 0.518)                                                                              PING_INLINE: rps=943168.0 (overall: 939241.6) avg_msec=0.471 (overall: 0.495)                                                                              PING_INLINE: rps=898741.1 (overall: 925723.4) avg_msec=0.542 (overall: 0.510)                                                                              PING_INLINE: 937866.38 requests per second, p50=0.463 msec
+
+
+## redis rep 3
+ PING_INLINE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                  PING_INLINE: rps=961147.4 (overall: 957333.3) avg_msec=0.471 (overall: 0.471)                                                                              PING_INLINE: rps=1024448.0 (overall: 990757.0) avg_msec=0.451 (overall: 0.461)                                                                               PING_INLINE: rps=964717.2 (overall: 982077.0) avg_msec=0.484 (overall: 0.468)                                                                              PING_INLINE: 988875.12 requests per second, p50=0.415 msec
+
+
+## redis rep 4
+ PING_INLINE: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                                   PING_INLINE: rps=968796.9 (overall: 968796.9) avg_msec=0.498 (overall: 0.498)                                                                              PING_INLINE: rps=980992.0 (overall: 974882.2) avg_msec=0.496 (overall: 0.497)                                                                              PING_INLINE: rps=1004032.0 (overall: 984585.9) avg_msec=0.489 (overall: 0.494)                                                                               PING_INLINE: 988875.12 requests per second, p50=0.431 msec
+
+
+## redis rep 5
+ PING_INLINE: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                                   PING_INLINE: rps=962231.1 (overall: 962231.1) avg_msec=0.516 (overall: 0.516)                                                                              PING_INLINE: rps=997696.0 (overall: 979928.2) avg_msec=0.494 (overall: 0.505)                                                                              PING_INLINE: rps=991808.8 (overall: 983893.6) avg_msec=0.475 (overall: 0.495)                                                                              PING_INLINE: 995024.88 requests per second, p50=0.447 msec
+
+
+## fr rep 1
+ PING_INLINE: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                                   PING_INLINE: rps=758055.8 (overall: 758055.8) avg_msec=0.902 (overall: 0.902)                                                                              PING_INLINE: rps=833024.0 (overall: 795465.1) avg_msec=0.829 (overall: 0.864)                                                                              PING_INLINE: rps=812544.0 (overall: 801150.5) avg_msec=0.905 (overall: 0.878)                                                                              PING_INLINE: 805639.50 requests per second, p50=0.855 msec
+
+
+## fr rep 2
+ PING_INLINE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                  PING_INLINE: rps=753984.0 (overall: 750980.1) avg_msec=0.904 (overall: 0.904)                                                                              PING_INLINE: rps=842008.0 (overall: 796494.1) avg_msec=0.873 (overall: 0.887)                                                                              PING_INLINE: rps=842048.0 (overall: 811638.3) avg_msec=0.821 (overall: 0.865)                                                                              PING_INLINE: 819672.12 requests per second, p50=0.847 msec
+
+
+## fr rep 3
+ PING_INLINE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                  PING_INLINE: rps=781952.0 (overall: 778836.7) avg_msec=0.900 (overall: 0.900)                                                                              PING_INLINE: rps=762368.0 (overall: 770618.8) avg_msec=0.946 (overall: 0.923)                                                                              PING_INLINE: rps=757568.0 (overall: 766274.3) avg_msec=0.935 (overall: 0.927)                                                                              PING_INLINE: rps=747346.6 (overall: 761532.9) avg_msec=0.995 (overall: 0.944)                                                                              PING_INLINE: 761179.81 requests per second, p50=0.919 msec
+
+
+## fr rep 4
+ PING_INLINE: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                                   PING_INLINE: rps=808159.4 (overall: 808159.4) avg_msec=0.926 (overall: 0.926)                                                                              PING_INLINE: rps=872320.0 (overall: 840175.7) avg_msec=0.835 (overall: 0.879)                                                                              PING_INLINE: rps=789760.0 (overall: 823392.8) avg_msec=0.941 (overall: 0.899)                                                                              PING_INLINE: 829015.56 requests per second, p50=0.887 msec
+
+
+## fr rep 5
+ PING_INLINE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                  PING_INLINE: rps=865211.2 (overall: 861777.8) avg_msec=0.838 (overall: 0.838)                                                                              PING_INLINE: rps=866304.0 (overall: 864031.9) avg_msec=0.780 (overall: 0.809)                                                                              PING_INLINE: rps=820544.0 (overall: 849574.5) avg_msec=0.845 (overall: 0.821)                                                                              PING_INLINE: 852878.44 requests per second, p50=0.855 msec
+
+
+PING_INLINE redis 1026957.69 fr 852878.44 redis/fr 1.204x FR-SLOWER

@@ -1,0 +1,4 @@
+cmd baseline candidate cand/base verdict
+PING_INLINE 850159.44 1037613.44 1.220x candidate-faster
+PING_MBULK 1112656.50 1049868.75 0.944x REGRESSION
+GET 997506.25 1037613.44 1.040x candidate-faster

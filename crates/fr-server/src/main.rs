@@ -2043,10 +2043,20 @@ fn process_buffered_frames(
         // multiple leading prefixes; treating every non-array prefix as inline
         // can misclassify protocol frames and break parsing.
         if should_try_inline_parsing(first_byte) {
-            let inline_parse_result = {
-                let unparsed = &conn.read_buf[consumed_total..];
-                try_parse_inline(unparsed)
-            };
+            let unparsed = &conn.read_buf[consumed_total..];
+            if let Some(consumed) = inline_plain_ping_noarg_consumed(unparsed) {
+                let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                if runtime
+                    .execute_plain_ping_borrowed_into(None, ts, client_resp3, &mut conn.write_buf)
+                    .is_some()
+                {
+                    plain_get_read_gate_cache = None;
+                    processed_frames = processed_frames.saturating_add(1);
+                    consumed_total += consumed;
+                    continue;
+                }
+            }
+            let inline_parse_result = { try_parse_inline(unparsed) };
             match inline_parse_result {
                 Ok(InlineParseResult::EmptyLine(consumed)) => {
                     // Silently consume empty lines (Redis behavior).
@@ -2693,7 +2703,14 @@ fn parse_borrowed_multibulk_action(
                 if let Some((key, start, end)) = borrowed_plain_getrange_args(&borrowed_args) {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if runtime
-                        .execute_plain_getrange_borrowed_into(key, start, end, ts, client_resp3, out)
+                        .execute_plain_getrange_borrowed_into(
+                            key,
+                            start,
+                            end,
+                            ts,
+                            client_resp3,
+                            out,
+                        )
                         .is_some()
                     {
                         return Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -2850,6 +2867,16 @@ fn parse_borrowed_multibulk_action(
         }
         Err(err) => Err(err),
     }
+}
+
+fn inline_plain_ping_noarg_consumed(buf: &[u8]) -> Option<usize> {
+    if buf.starts_with(b"PING\r\n") {
+        return Some(6);
+    }
+    if buf.starts_with(b"PING\n") {
+        return Some(5);
+    }
+    None
 }
 
 enum BorrowedMultibulkAction {
@@ -3300,9 +3327,7 @@ fn borrowed_plain_zmscore_args<'a>(
 // `tail` = [numkeys, key...]; the runtime validates numkeys + the no-LIMIT shape.
 fn borrowed_plain_sintercard_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [&'a [u8]]> {
     match borrowed_args {
-        [command, tail @ ..]
-            if tail.len() >= 2 && command.eq_ignore_ascii_case(b"SINTERCARD") =>
-        {
+        [command, tail @ ..] if tail.len() >= 2 && command.eq_ignore_ascii_case(b"SINTERCARD") => {
             Some(tail)
         }
         _ => None,
@@ -8046,6 +8071,27 @@ mod tests {
         assert_eq!(
             args,
             vec![b"SET".to_vec(), b"qk".to_vec(), b"a\rb".to_vec()]
+        );
+    }
+
+    #[test]
+    fn inline_plain_ping_noarg_fast_path_recognizes_exact_wire_shape_only() {
+        assert_eq!(
+            super::inline_plain_ping_noarg_consumed(b"PING\r\n"),
+            Some(6)
+        );
+        assert_eq!(super::inline_plain_ping_noarg_consumed(b"PING\n"), Some(5));
+        assert_eq!(super::inline_plain_ping_noarg_consumed(b"ping\n"), None);
+        assert_eq!(super::inline_plain_ping_noarg_consumed(b"PING \r\n"), None);
+        assert_eq!(
+            super::inline_plain_ping_noarg_consumed(b"PING hi\r\n"),
+            None
+        );
+        assert_eq!(super::inline_plain_ping_noarg_consumed(b"PING"), None);
+        assert_eq!(super::inline_plain_ping_noarg_consumed(b"PING\rX\n"), None);
+        assert_eq!(
+            super::inline_plain_ping_noarg_consumed(b"*1\r\n$4\r\nPING\r\n"),
+            None
         );
     }
 
