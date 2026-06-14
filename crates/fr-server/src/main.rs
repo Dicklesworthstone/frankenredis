@@ -2791,6 +2791,14 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some(key) = borrowed_plain_object_refcount_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_object_refcount_borrowed(key, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some(key) = borrowed_plain_memory_usage_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_memory_usage_borrowed(key, ts)
                 {
@@ -3446,6 +3454,18 @@ fn borrowed_plain_object_encoding_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Opt
     match borrowed_args {
         [command, sub, key]
             if command.eq_ignore_ascii_case(b"OBJECT") && sub.eq_ignore_ascii_case(b"ENCODING") =>
+        {
+            Some(*key)
+        }
+        _ => None,
+    }
+}
+
+/// Only `OBJECT REFCOUNT key` (argc 3); other OBJECT subcommands fall to generic.
+fn borrowed_plain_object_refcount_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
+    match borrowed_args {
+        [command, sub, key]
+            if command.eq_ignore_ascii_case(b"OBJECT") && sub.eq_ignore_ascii_case(b"REFCOUNT") =>
         {
             Some(*key)
         }
@@ -8093,6 +8113,44 @@ mod tests {
             super::inline_plain_ping_noarg_consumed(b"*1\r\n$4\r\nPING\r\n"),
             None
         );
+    }
+
+    #[test]
+    fn borrowed_plain_object_refcount_args_match_exact_shape_only() {
+        let args = [
+            b"OBJECT".as_slice(),
+            b"REFCOUNT".as_slice(),
+            b"k".as_slice(),
+        ];
+        assert_eq!(
+            super::borrowed_plain_object_refcount_args(&args),
+            Some(b"k".as_slice())
+        );
+
+        let lower = [
+            b"object".as_slice(),
+            b"refcount".as_slice(),
+            b"k".as_slice(),
+        ];
+        assert_eq!(
+            super::borrowed_plain_object_refcount_args(&lower),
+            Some(b"k".as_slice())
+        );
+
+        let encoding = [
+            b"OBJECT".as_slice(),
+            b"ENCODING".as_slice(),
+            b"k".as_slice(),
+        ];
+        assert_eq!(super::borrowed_plain_object_refcount_args(&encoding), None);
+
+        let trailing = [
+            b"OBJECT".as_slice(),
+            b"REFCOUNT".as_slice(),
+            b"k".as_slice(),
+            b"extra".as_slice(),
+        ];
+        assert_eq!(super::borrowed_plain_object_refcount_args(&trailing), None);
     }
 
     #[test]

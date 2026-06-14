@@ -10923,7 +10923,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_object_refcount_owned_argv(key));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -25329,9 +25330,14 @@ mod tests {
             rt.execute_frame(command(&[b"RPUSH", b"l", b"a"]), 1);
             rt.execute_frame(command(&[b"COPY", b"shared", b"copied"]), 1);
         }
-        for (ts, key) in
-            (2..).zip([b"shared".as_slice(), b"big", b"s", b"l", b"copied", b"missing"])
-        {
+        for (ts, key) in (2..).zip([
+            b"shared".as_slice(),
+            b"big",
+            b"s",
+            b"l",
+            b"copied",
+            b"missing",
+        ]) {
             let f = direct
                 .execute_plain_object_refcount_borrowed(key, ts)
                 .expect("object refcount fast path should engage");
@@ -25339,8 +25345,7 @@ mod tests {
             assert_eq!(f, g, "key={key:?}");
         }
         assert_eq!(
-            direct.session.last_command_name,
-            generic.session.last_command_name,
+            direct.session.last_command_name, generic.session.last_command_name,
             "container command name must be object|refcount"
         );
         assert_eq!(
