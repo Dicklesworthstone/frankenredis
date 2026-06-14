@@ -91,6 +91,7 @@ SEQ = [
     ["set", "s", "12345"], ["set", "s2", "hello world not an int"],
     ["rpush", "l", "a", "b", "c", "b"], ["sadd", "st", "1", "2", "3"],
     ["hset", "h", "f", "v"], ["zadd", "z", "1", "a"], ["setbit", "bm", "100", "1"],
+    ["xadd", "x", "1-1", "f", "v"], ["set", "e", "v"], ["expire", "e", "100000"],
     # reads: hits
     ["get", "s"], ["get", "s2"], ["strlen", "s"], ["ttl", "s"], ["pttl", "s"],
     ["type", "s"], ["type", "l"], ["getbit", "bm", "100"], ["bitcount", "bm"],
@@ -98,11 +99,17 @@ SEQ = [
     ["mget", "s", "s2"], ["llen", "l"], ["scard", "st"], ["zcard", "z"], ["hlen", "h"],
     ["sismember", "st", "1"], ["hexists", "h", "f"], ["zscore", "z", "a"], ["hget", "h", "f"],
     ["getrange", "s", "0", "2"], ["exists", "s"], ["echo", "hi"], ["ping"], ["dbsize"],
+    # newer borrow fast paths (cold-cmd audit): MEMORY USAGE / COMMAND COUNT /
+    # EXPIRETIME / PEXPIRETIME / XLEN / HSTRLEN
+    ["memory", "usage", "s"], ["command", "count"], ["expiretime", "e"],
+    ["pexpiretime", "e"], ["expiretime", "s"], ["xlen", "x"], ["hstrlen", "h", "f"],
     # reads: misses
     ["get", "nope"], ["ttl", "nope"], ["pttl", "nope"], ["type", "nope"],
     ["getbit", "nope", "0"], ["bitcount", "nope"], ["lpos", "nope", "x"],
     ["object", "encoding", "nope"], ["strlen", "nope"], ["llen", "nope"],
     ["sismember", "nope", "x"], ["getrange", "nope", "0", "1"], ["exists", "nope"],
+    ["expiretime", "nope"], ["pexpiretime", "nope"], ["xlen", "nope"],
+    ["hstrlen", "nope", "f"], ["memory", "usage", "nope"],
     # writes
     ["incr", "s"], ["expire", "s", "10000"], ["append", "s2", "!"],
     ["mset", "k1", "v1", "k2", "v2"], ["set", "k3", "v3"],
