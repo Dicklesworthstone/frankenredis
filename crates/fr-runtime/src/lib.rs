@@ -459,6 +459,8 @@ pub enum PlainKeyMetaCmd {
     Ttl,
     Pttl,
     Type,
+    Expiretime,
+    Pexpiretime,
 }
 
 impl PlainKeyMetaCmd {
@@ -467,6 +469,8 @@ impl PlainKeyMetaCmd {
             PlainKeyMetaCmd::Ttl => "TTL",
             PlainKeyMetaCmd::Pttl => "PTTL",
             PlainKeyMetaCmd::Type => "TYPE",
+            PlainKeyMetaCmd::Expiretime => "EXPIRETIME",
+            PlainKeyMetaCmd::Pexpiretime => "PEXPIRETIME",
         }
     }
 
@@ -475,6 +479,8 @@ impl PlainKeyMetaCmd {
             PlainKeyMetaCmd::Ttl => "ttl",
             PlainKeyMetaCmd::Pttl => "pttl",
             PlainKeyMetaCmd::Type => "type",
+            PlainKeyMetaCmd::Expiretime => "expiretime",
+            PlainKeyMetaCmd::Pexpiretime => "pexpiretime",
         }
     }
 }
@@ -11277,6 +11283,22 @@ impl Runtime {
                     .unwrap_or("none")
                     .to_string(),
             ),
+            PlainKeyMetaCmd::Expiretime => {
+                RespFrame::Integer(match self.server.store.expiretime_value(key, now_ms) {
+                    fr_store::ExpireTimeValue::KeyMissing => -2,
+                    fr_store::ExpireTimeValue::NoExpiry => -1,
+                    fr_store::ExpireTimeValue::ExpiresAt(abs_ms) => {
+                        (abs_ms.saturating_add(500) / 1000) as i64
+                    }
+                })
+            }
+            PlainKeyMetaCmd::Pexpiretime => {
+                RespFrame::Integer(match self.server.store.expiretime_value(key, now_ms) {
+                    fr_store::ExpireTimeValue::KeyMissing => -2,
+                    fr_store::ExpireTimeValue::NoExpiry => -1,
+                    fr_store::ExpireTimeValue::ExpiresAt(abs_ms) => abs_ms as i64,
+                })
+            }
         };
         let elapsed_us = start.elapsed().as_micros() as u64;
 
@@ -24107,7 +24129,11 @@ mod tests {
             rt.execute_frame(command(&[b"ZADD", b"z", b"1", b"a"]), 1);
         }
 
-        let cases: [(PlainKeyMetaCmd, &[u8], &[u8]); 18] = [
+        let cases: [(PlainKeyMetaCmd, &[u8], &[u8]); 22] = [
+            (PlainKeyMetaCmd::Expiretime, b"e", b"EXPIRETIME"),
+            (PlainKeyMetaCmd::Expiretime, b"s", b"EXPIRETIME"),
+            (PlainKeyMetaCmd::Pexpiretime, b"e", b"PEXPIRETIME"),
+            (PlainKeyMetaCmd::Expiretime, b"missing", b"EXPIRETIME"),
             (PlainKeyMetaCmd::Ttl, b"s", b"TTL"),
             (PlainKeyMetaCmd::Ttl, b"e", b"TTL"),
             (PlainKeyMetaCmd::Ttl, b"missing", b"TTL"),

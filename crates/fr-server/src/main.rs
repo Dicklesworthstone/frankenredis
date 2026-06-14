@@ -3261,6 +3261,10 @@ fn borrowed_plain_keymeta_args<'a>(
         PlainKeyMetaCmd::Pttl
     } else if command.eq_ignore_ascii_case(b"TYPE") {
         PlainKeyMetaCmd::Type
+    } else if command.eq_ignore_ascii_case(b"EXPIRETIME") {
+        PlainKeyMetaCmd::Expiretime
+    } else if command.eq_ignore_ascii_case(b"PEXPIRETIME") {
+        PlainKeyMetaCmd::Pexpiretime
     } else {
         return None;
     };
