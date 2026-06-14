@@ -8,13 +8,14 @@ legitimately host/runtime specific (paths, bind/port, cpulists, run-id, …).
 
 This gate launches its own clean fr instance (so prior CONFIG SETs from other
 probes can't pollute it) and diffs it against a config-less redis oracle. It
-allowlists the parameters that are currently known-divergent (each tracked by a
+allowlists any parameters that are currently known-divergent (each tracked by a
 bead) so the gate stays green today and goes fully green the moment those land,
 while failing on any NEW default drift or missing/extra parameter.
 
-KNOWN ISSUES (allowlisted):
-  - always-show-logo            frankenredis-zbpg6 (fr 'yes' vs redis 'no')
-  - client-output-buffer-limit  frankenredis-8sb0l (fr bare number vs per-class)
+KNOWN ISSUES (allowlisted): none — the two former entries both landed and are
+re-verified byte-exact, so EVERY parameter is now checked directly:
+  - always-show-logo            frankenredis-zbpg6 (fixed: fr now 'no') CLOSED
+  - client-output-buffer-limit  frankenredis-8sb0l (fixed: per-class spec) CLOSED
 
 Both servers are launched fresh by the gate (config-less) so a stray CONFIG SET
 from another probe can never pollute the comparison.
@@ -100,11 +101,12 @@ HOST_SPECIFIC = {
 }
 
 # Currently-known divergences, each tracked by a bead; allowlisted so the gate
-# stays green until the bead lands, then this entry can be removed.
-KNOWN_ISSUES = {
-    "always-show-logo": "frankenredis-zbpg6",
-    "client-output-buffer-limit": "frankenredis-8sb0l",
-}
+# stays green until the bead lands, then the entry is removed to restore full
+# coverage of that parameter. (Empty now: always-show-logo (zbpg6) and
+# client-output-buffer-limit (8sb0l) both landed and are verified byte-exact vs
+# config-less redis 7.2.4, so they are once again checked directly — a regression
+# of either default now fails the gate.)
+KNOWN_ISSUES = {}
 
 # fr-specific knobs with no upstream equivalent.
 FR_ONLY = {"active-expire-enabled"}
