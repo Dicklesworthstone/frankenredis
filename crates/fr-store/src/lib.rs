@@ -10015,6 +10015,24 @@ impl Store {
         }
     }
 
+    /// List length WITHOUT recording a keyspace hit/miss. LMPOP iterates its
+    /// candidate keys to find the first non-empty list; upstream lmpopCommand
+    /// reaches each via lookupKeyWrite, which does not touch keyspace stats, so
+    /// the stat-counting `llen` would over-count. Returns WRONGTYPE for a
+    /// non-list key (same as llen), 0 for missing/expired.
+    pub fn llen_no_stat(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+        if !self.drop_if_expired(key, now_ms) {
+            return Ok(0);
+        }
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::List(l) => Ok(l.len()),
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(0),
+        }
+    }
+
     pub fn lrange(
         &mut self,
         key: &[u8],
@@ -12730,6 +12748,23 @@ impl Store {
                     _ => Err(StoreError::WrongType),
                 }
             }
+            None => Ok(0),
+        }
+    }
+
+    /// Sorted-set cardinality WITHOUT recording a keyspace hit/miss — the ZMPOP
+    /// analogue of [`llen_no_stat`]. Upstream zmpopCommand reaches its candidate
+    /// keys via lookupKeyWrite (no keyspace stats), so the stat-counting `zcard`
+    /// would over-count. WRONGTYPE for a non-zset key, 0 for missing/expired.
+    pub fn zcard_no_stat(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+        if !self.drop_if_expired(key, now_ms) {
+            return Ok(0);
+        }
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::SortedSet(zs) => Ok(zs.len()),
+                _ => Err(StoreError::WrongType),
+            },
             None => Ok(0),
         }
     }

@@ -143,6 +143,13 @@ STORE_AND_MOVE = [
     # source-miss forms
     ["sinterstore", "d", "no", "sy"], ["zrangestore", "d", "no", "0", "-1"],
     ["bitop", "and", "d", "no", "k"], ["copy", "no", "kd"],
+    ["geosearchstore", "gd", "g", "frommember", "p1", "byradius", "500", "km", "asc"],
+    ["lmpop", "1", "lx", "left"], ["zmpop", "1", "zx", "min"],
+    ["lpop", "lx", "1"], ["rpop", "lx", "1"], ["zpopmin", "zx"], ["zpopmax", "zx", "1"],
+    ["sort", "lx", "by", "w_*", "get", "#", "get", "d_*"],
+    ["lcs", "k", "e", "idx"],
+    # write-family pop / miss forms
+    ["lmpop", "1", "no", "left"], ["zmpop", "1", "no", "min"], ["zpopmin", "no"],
 ]
 READS_MISS = [
     ["get", "no"], ["strlen", "no"], ["getrange", "no", "0", "1"], ["ttl", "no"],

@@ -15098,7 +15098,9 @@ fn lmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         }
     }
     for key in &argv[2..keys_end] {
-        let len = store.llen(key, now_ms);
+        // LMPOP is a write (upstream lookupKeyWrite); use the no-stat length
+        // probe so the candidate scan does not bump keyspace_hits/misses.
+        let len = store.llen_no_stat(key, now_ms);
         match len {
             Ok(n) if n > 0 => {
                 let mut popped = Vec::new();
@@ -15181,7 +15183,9 @@ fn zmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         }
     }
     for key in &argv[2..keys_end] {
-        let card = store.zcard(key, now_ms);
+        // ZMPOP is a write (upstream lookupKeyWrite); use the no-stat card
+        // probe so the candidate scan does not bump keyspace_hits/misses.
+        let card = store.zcard_no_stat(key, now_ms);
         match card {
             Ok(n) if n > 0 => {
                 let mut popped = Vec::new();
