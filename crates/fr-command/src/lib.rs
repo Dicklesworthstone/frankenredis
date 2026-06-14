@@ -13491,6 +13491,10 @@ fn zlexcount(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     }
     validate_lex_bound(&argv[2])?;
     validate_lex_bound(&argv[3])?;
+    // (frankenredis keyspace-acct) Record the keyspace hit/miss like upstream's
+    // lookupKeyReadOrReply; store.zlexcount is no-stat (same lex-range class as
+    // the ZRANGEBYLEX fix).
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
     let count = store.zlexcount(&argv[1], &argv[2], &argv[3], now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }

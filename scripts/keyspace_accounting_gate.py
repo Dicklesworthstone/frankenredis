@@ -116,6 +116,12 @@ READS_HIT = [
     ["pfcount", "hll"], ["geodist", "g", "p1", "p2"], ["geopos", "g", "p1"],
     ["geohash", "g", "p1"], ["sort_ro", "lx", "ALPHA"], ["zrange", "zx", "0", "-1"],
     ["zrangebyscore", "zx", "0", "10"], ["zrangebylex", "zx", "-", "+"],
+    ["zrevrange", "zx", "0", "-1"], ["zrevrangebyscore", "zx", "10", "0"],
+    ["zrevrangebylex", "zx", "+", "-"], ["zcount", "zx", "0", "10"],
+    ["zlexcount", "zx", "-", "+"], ["xrange", "xs", "-", "+"],
+    ["xrevrange", "xs", "+", "-"], ["substr", "k", "0", "2"],
+    ["bitfield_ro", "bx", "get", "u8", "0"], ["geosearch", "g", "frommember", "p1", "byradius", "500", "km", "asc"],
+    ["sort", "lx", "ALPHA"],
 ]
 READS_MISS = [
     ["get", "no"], ["strlen", "no"], ["getrange", "no", "0", "1"], ["ttl", "no"],
