@@ -80,6 +80,22 @@ CASES = [
     ("bulk len<content $2 PING", b"*1\r\n$2\r\nPING\r\n"),
     ("two-elem len mismatch", b"*2\r\n$3\r\nGET\r\n$2\r\nkey\r\n"),
     ("wrong terminator bytes", b"*2\r\n$3\r\nGETXX$1\r\nk\r\n"),
+    # ── parser boundary cases (added BlackThrush) ────────────────────────
+    # PROTO_INLINE_MAX_SIZE: an inline line > 64KB must be rejected with
+    # "Protocol error: too big inline request" and the connection closed.
+    ("inline >64KB overflow", b"A" * 70000 + b"\r\n"),
+    # LF-only line terminators (no CR): redis's inline/multibulk parsers split
+    # on "\n" and strip a trailing "\r" if present, so a bare-LF frame parses.
+    ("inline LF-only", b"PING\n"),
+    ("multibulk LF-only", b"*1\n$4\nPING\n"),
+    # Lenient integer parse after the type sigil: redis's string2ll tolerates
+    # no leading space, so "* 1" / "$ 4" are protocol errors, not arg counts.
+    ("space after star", b"* 1\r\n$4\r\nPING\r\n"),
+    ("space after dollar", b"*1\r\n$ 4\r\nPING\r\n"),
+    # Zero-length bulk as the sole arg = an empty-string command name.
+    ("empty-string command", b"*1\r\n$0\r\n\r\n"),
+    # 512MB+1 bulk length: exceeds proto-max-bulk-len -> "invalid bulk length".
+    ("bulk len >512MB", b"*1\r\n$536870913\r\n"),
 ]
 
 
