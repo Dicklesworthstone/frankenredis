@@ -638,6 +638,10 @@ fn plain_object_encoding_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"OBJECT".to_vec(), b"ENCODING".to_vec(), key.to_vec()]
 }
 
+fn plain_object_refcount_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"OBJECT".to_vec(), b"REFCOUNT".to_vec(), key.to_vec()]
+}
+
 fn plain_memory_usage_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"MEMORY".to_vec(), b"USAGE".to_vec(), key.to_vec()]
 }
@@ -10637,6 +10641,16 @@ impl Runtime {
         self.plain_borrowed_default_key_read_allows(now_ms)
     }
 
+    fn can_execute_plain_object_refcount_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"REFCOUNT".len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
     fn can_execute_plain_memory_usage_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"MEMORY".len()
@@ -10839,6 +10853,101 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'OBJECT|ENCODING' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    /// Conservative borrowed fast path for `OBJECT REFCOUNT key`. Calls the SAME
+    /// store.object_refcount implementation as generic dispatch, preserving the
+    /// upstream shared-integer rule, keyspace hit/miss accounting, and nil reply
+    /// for missing keys. Other OBJECT subcommands and wrong-arity REFCOUNT forms
+    /// fall to generic dispatch.
+    pub fn execute_plain_object_refcount_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_object_refcount_borrowed(key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("object|refcount");
+        self.session.last_argv_len_sum = b"OBJECT".len() + b"REFCOUNT".len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let refcount = self.server.store.object_refcount(key, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match refcount {
+            Some(n) => RespFrame::Integer(n),
+            None => RespFrame::BulkString(None),
+        };
+
+        self.record_plain_object_refcount_borrowed_metrics(key, elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(reply)
+    }
+
+    fn record_plain_object_refcount_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_object_refcount_owned_argv(key));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_object_refcount_owned_argv(key));
+            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "object|refcount",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_object_refcount_owned_argv(key));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'OBJECT|REFCOUNT' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -21853,15 +21962,20 @@ impl Runtime {
         }
         let source = encode_db_key(self.session.selected_db, &argv[1]);
         let destination = encode_db_key(target_db, &argv[1]);
-        if !self.server.store.exists(&source, now_ms)
-            || self.server.store.exists(&destination, now_ms)
+        // Upstream db.c::moveCommand reaches source/destination via
+        // lookupKeyWrite (and transfers the object likewise) — lookupKeyWrite
+        // does NOT touch keyspace_hits/misses, so use the no-stat probes/copy.
+        // Plain store.exists / store.copy record a keyspace lookup and would
+        // over-count MOVE as a read.
+        if !self.server.store.exists_no_stat(&source, now_ms)
+            || self.server.store.exists_no_stat(&destination, now_ms)
         {
             return Ok(RespFrame::Integer(0));
         }
         let dirty_before = self.server.store.dirty;
         self.server
             .store
-            .copy(&source, &destination, false, now_ms)
+            .copy_no_stat(&source, &destination, false, now_ms)
             .map_err(CommandError::Store)?;
         self.server.store.del(&[source], now_ms);
         // (frankenredis-movedirty) Upstream db.c::moveCommand does
@@ -24429,7 +24543,7 @@ mod tests {
             st
         };
         let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut fnv = |g: &mut u64, b: &[u8]| {
+        let fnv = |g: &mut u64, b: &[u8]| {
             for &byte in b {
                 *g ^= u64::from(byte);
                 *g = g.wrapping_mul(0x0000_0100_0000_01b3);
@@ -24905,14 +25019,12 @@ mod tests {
             (PlainKeyMetaCmd::Pttl, b"st", b"PTTL"),
             (PlainKeyMetaCmd::Type, b"s", b"TYPE"),
         ];
-        let mut ts = 2;
-        for (cmd, key, name) in cases {
+        for (ts, (cmd, key, name)) in (2..).zip(cases) {
             let f = direct
                 .execute_plain_keymeta_borrowed(cmd, key, ts)
                 .expect("keymeta fast path should engage");
             let g = generic.execute_frame(command(&[name, key]), ts);
             assert_eq!(f, g, "cmd={name:?} key={key:?}");
-            ts += 1;
         }
         assert_eq!(
             direct.server.store.stat_total_commands_processed,
@@ -25047,14 +25159,12 @@ mod tests {
             rt.execute_frame(command(&[b"SET", b"empty", b""]), 1);
             rt.execute_frame(command(&[b"RPUSH", b"l", b"x"]), 1);
         }
-        let mut ts = 2;
-        for key in [b"s".as_slice(), b"empty", b"missing", b"l"] {
+        for (ts, key) in (2..).zip([b"s".as_slice(), b"empty", b"missing", b"l"]) {
             let f = direct
                 .execute_plain_bitcount_borrowed(key, ts)
                 .expect("bitcount fast path should engage");
             let g = generic.execute_frame(command(&[b"BITCOUNT", key]), ts);
             assert_eq!(f, g, "key={key:?}");
-            ts += 1;
         }
         assert_eq!(
             direct.server.store.stat_keyspace_hits,
@@ -25141,14 +25251,12 @@ mod tests {
             (b"missing", b"a"),
             (b"s", b"a"),
         ];
-        let mut ts = 2;
-        for (key, el) in cases {
+        for (ts, (key, el)) in (2..).zip(cases) {
             let f = direct
                 .execute_plain_lpos_borrowed(key, el, ts)
                 .expect("lpos fast path should engage");
             let g = generic.execute_frame(command(&[b"LPOS", key, el]), ts);
             assert_eq!(f, g, "key={key:?} el={el:?}");
-            ts += 1;
         }
         assert_eq!(
             direct.server.store.stat_keyspace_hits,
@@ -25176,14 +25284,14 @@ mod tests {
             rt.execute_frame(command(&[b"HSET", b"h", b"f", b"v"]), 1);
             rt.execute_frame(command(&[b"ZADD", b"z", b"1", b"a"]), 1);
         }
-        let mut ts = 2;
-        for key in [b"i".as_slice(), b"s", b"l", b"is", b"h", b"z", b"missing"] {
+        for (ts, key) in
+            (2..).zip([b"i".as_slice(), b"s", b"l", b"is", b"h", b"z", b"missing"])
+        {
             let f = direct
                 .execute_plain_object_encoding_borrowed(key, ts)
                 .expect("object encoding fast path should engage");
             let g = generic.execute_frame(command(&[b"OBJECT", b"ENCODING", key]), ts);
             assert_eq!(f, g, "key={key:?}");
-            ts += 1;
         }
         assert_eq!(
             direct.session.last_command_name,
@@ -25208,6 +25316,44 @@ mod tests {
     }
 
     #[test]
+    fn plain_object_refcount_borrowed_matches_generic() {
+        // OBJECT REFCOUNT has upstream-visible shared-integer special cases. The
+        // borrowed route must reuse Store::object_refcount so those cases and
+        // keyspace accounting stay identical to generic dispatch.
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"shared", b"1234"]), 1);
+            rt.execute_frame(command(&[b"SET", b"big", b"10000"]), 1);
+            rt.execute_frame(command(&[b"SET", b"s", b"hello world"]), 1);
+            rt.execute_frame(command(&[b"RPUSH", b"l", b"a"]), 1);
+            rt.execute_frame(command(&[b"COPY", b"shared", b"copied"]), 1);
+        }
+        for (ts, key) in
+            (2..).zip([b"shared".as_slice(), b"big", b"s", b"l", b"copied", b"missing"])
+        {
+            let f = direct
+                .execute_plain_object_refcount_borrowed(key, ts)
+                .expect("object refcount fast path should engage");
+            let g = generic.execute_frame(command(&[b"OBJECT", b"REFCOUNT", key]), ts);
+            assert_eq!(f, g, "key={key:?}");
+        }
+        assert_eq!(
+            direct.session.last_command_name,
+            generic.session.last_command_name,
+            "container command name must be object|refcount"
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+    }
+
+    #[test]
     fn plain_memory_usage_borrowed_matches_generic() {
         // (cold-cmd audit) MEMORY USAGE key borrow == generic: present (Integer
         // byte estimate) + missing (nil), container `memory|usage` command name,
@@ -25218,14 +25364,12 @@ mod tests {
             rt.execute_frame(command(&[b"SET", b"s", b"hello world"]), 1);
             rt.execute_frame(command(&[b"RPUSH", b"l", b"a", b"b", b"c"]), 1);
         }
-        let mut ts = 2;
-        for key in [b"s".as_slice(), b"l", b"missing"] {
+        for (ts, key) in (2..).zip([b"s".as_slice(), b"l", b"missing"]) {
             let f = direct
                 .execute_plain_memory_usage_borrowed(key, ts)
                 .expect("memory usage fast path should engage");
             let g = generic.execute_frame(command(&[b"MEMORY", b"USAGE", key]), ts);
             assert_eq!(f, g, "key={key:?}");
-            ts += 1;
         }
         assert_eq!(direct.session.last_command_name, "memory|usage");
         assert_eq!(
@@ -26744,14 +26888,13 @@ mod tests {
                 rt.execute_frame(command(&[b"ZADD", b"z", b"1.5", b"a", b"2", b"b"]), 1);
                 rt.execute_frame(command(&[b"SET", b"s", b"v"]), 1);
             }
-            let mut ts = 2;
             let cases: [(&[u8], &[&[u8]]); 4] = [
                 (b"z", &[b"a", b"x", b"b"]),
                 (b"z", &[b"a"]),
                 (b"missing", &[b"a", b"b"]),
                 (b"s", &[b"a"]),
             ];
-            for (key, members) in cases {
+            for (ts, (key, members)) in (2..).zip(cases) {
                 let f = direct
                     .execute_plain_zmscore_borrowed(key, members, ts)
                     .expect("zmscore fast path");
@@ -26761,7 +26904,6 @@ mod tests {
                     .collect();
                 let g = generic.execute_frame(command(&g_argv), ts);
                 assert_eq!(f, g, "resp3={resp3} key={key:?} members={members:?}");
-                ts += 1;
             }
             assert_eq!(
                 direct.server.store.stat_keyspace_hits,
@@ -26784,14 +26926,13 @@ mod tests {
             rt.execute_frame(command(&[b"SADD", b"st", b"a", b"b", b"c"]), 1);
             rt.execute_frame(command(&[b"SET", b"s", b"v"]), 1);
         }
-        let mut ts = 2;
         let cases: [(&[u8], &[&[u8]]); 4] = [
             (b"st", &[b"a", b"x", b"c"]),
             (b"st", &[b"a"]),
             (b"missing", &[b"a", b"b"]),
             (b"s", &[b"a"]),
         ];
-        for (key, members) in cases {
+        for (ts, (key, members)) in (2..).zip(cases) {
             let f = direct
                 .execute_plain_smismember_borrowed(key, members, ts)
                 .expect("smismember fast path");
@@ -26801,7 +26942,6 @@ mod tests {
                 .collect();
             let g = generic.execute_frame(command(&g_argv), ts);
             assert_eq!(f, g, "key={key:?} members={members:?}");
-            ts += 1;
         }
         assert_eq!(
             direct.server.store.stat_keyspace_hits,

@@ -9611,7 +9611,9 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         let Some(groups) = store.xinfo_groups(&argv[2], now_ms)? else {
             return Err(CommandError::NoSuchKey);
         };
-        let Some((len, first, last)) = store.xinfo_stream(&argv[2], now_ms)? else {
+        // xinfo_groups above already recorded the single command keyspace lookup;
+        // read the stream bounds no-stat so XINFO GROUPS doesn't double-count.
+        let Some((len, first, last)) = store.xinfo_stream_no_stat(&argv[2], now_ms)? else {
             return Err(CommandError::NoSuchKey);
         };
         let entries_added = store.stream_entries_added(&argv[2], len);
@@ -25310,14 +25312,16 @@ fn move_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     let source = fr_store::encode_db_key(source_db, &argv[1]);
     let destination = fr_store::encode_db_key(target_db as usize, &argv[1]);
     // Upstream db.c::moveCommand uses lookupKeyWrite for both source and
-    // destination existence checks, so these keep normal write-lookup touch
-    // semantics.
-    if !store.exists(&source, now_ms) || store.exists(&destination, now_ms) {
+    // destination existence checks AND for the transfer — lookupKeyWrite does
+    // NOT touch keyspace_hits/misses, so use the no-stat probes/copy here.
+    // (Plain store.exists / store.copy record a keyspace lookup and would
+    // over-count MOVE as if it were a read.)
+    if !store.exists_no_stat(&source, now_ms) || store.exists_no_stat(&destination, now_ms) {
         return Ok(RespFrame::Integer(0));
     }
     let dirty_before = store.dirty;
     store
-        .copy(&source, &destination, false, now_ms)
+        .copy_no_stat(&source, &destination, false, now_ms)
         .map_err(CommandError::Store)?;
     store.del(&[source], now_ms);
     // (frankenredis-movedirty) Upstream db.c::moveCommand does `server.dirty++`

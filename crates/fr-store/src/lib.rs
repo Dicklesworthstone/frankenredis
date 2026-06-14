@@ -5923,6 +5923,16 @@ impl Store {
         self.record_keyspace_lookup(key, now_ms)
     }
 
+    /// Expiry-aware presence check that does NOT record a keyspace hit/miss.
+    /// Reaps a stale-expired entry first (so it reads as absent), then reports
+    /// presence. Used by write commands that probe existence via lookupKeyWrite
+    /// upstream (e.g. MOVE source/destination), which must not move the keyspace
+    /// counters. Unlike [`key_is_present`], this honors expiry.
+    pub fn exists_no_stat(&mut self, key: &[u8], now_ms: u64) -> bool {
+        self.drop_if_expired(key, now_ms);
+        self.entries.contains_key(key)
+    }
+
     /// Pure presence check against the keyspace map — no lazy expiry, no
     /// hit/miss stat bump, no events. Intended for post-command bookkeeping
     /// (e.g. detecting that an element-removal command just deleted a key
@@ -15565,6 +15575,37 @@ impl Store {
         }
     }
 
+    /// Stream length + first/last entry bounds WITHOUT recording a keyspace
+    /// hit/miss. XINFO GROUPS records the single command lookup via `xinfo_groups`
+    /// and then needs the stream bounds for lag computation; using the
+    /// stat-counting `xinfo_stream` there would double-count keyspace_hits
+    /// (upstream xinfoCommand does one lookupKeyReadOrReply per command).
+    pub fn xinfo_stream_no_stat(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<StreamInfoBounds>, StoreError> {
+        if !self.drop_if_expired(key, now_ms) {
+            return Ok(None);
+        }
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(entries) => {
+                    let len = entries.len();
+                    let first = entries
+                        .first_key_value()
+                        .map(|(id, fields)| (*id, fields.clone()));
+                    let last = entries
+                        .last_key_value()
+                        .map(|(id, fields)| (*id, fields.clone()));
+                    Ok(Some((len, first, last)))
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
     #[must_use]
     pub fn stream_max_deleted_id(&self, key: &[u8]) -> Option<StreamId> {
         self.stream_max_deleted_ids.get(key).copied()
@@ -18068,7 +18109,34 @@ impl Store {
         if !self.record_keyspace_lookup(source, now_ms) {
             return Ok(false);
         }
+        self.copy_inner(source, destination, replace, now_ms)
+    }
 
+    /// COPY transfer WITHOUT recording a keyspace hit/miss — used by MOVE, whose
+    /// upstream moveCommand reaches source/destination via lookupKeyWrite (which
+    /// does not touch keyspace_hits/misses). Drops expired entries first.
+    pub fn copy_no_stat(
+        &mut self,
+        source: &[u8],
+        destination: &[u8],
+        replace: bool,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.drop_if_expired(source, now_ms);
+        self.drop_if_expired(destination, now_ms);
+        if !self.entries.contains_key(source) {
+            return Ok(false);
+        }
+        self.copy_inner(source, destination, replace, now_ms)
+    }
+
+    fn copy_inner(
+        &mut self,
+        source: &[u8],
+        destination: &[u8],
+        replace: bool,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;

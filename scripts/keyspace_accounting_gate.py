@@ -161,6 +161,12 @@ STORE_AND_MOVE = [
     ["hincrbyfloat", "hx", "f", "1.5"], ["hincrby", "hx", "cnt", "1"],
     ["setrange", "k", "0", "Z"], ["hsetnx", "hx", "nf", "1"],
     ["zadd", "zx", "gt", "ch", "9", "a"],
+    # stream reads / writes + db-wide ops
+    ["xread", "count", "10", "streams", "xs", "0"], ["xread", "count", "10", "streams", "no", "0"],
+    ["xinfo", "groups", "xs"], ["xdel", "xs", "9-9"], ["xtrim", "xs", "maxlen", "0"],
+    ["xsetid", "xs", "100-0"], ["xadd", "xs", "*", "f", "v"], ["xack", "xs", "g0", "1-1"],
+    ["keys", "*"], ["randomkey"], ["dump", "no"], ["move", "k", "1"],
+    ["object", "help"], ["xlen", "xs"],
 ]
 READS_MISS = [
     ["get", "no"], ["strlen", "no"], ["getrange", "no", "0", "1"], ["ttl", "no"],
