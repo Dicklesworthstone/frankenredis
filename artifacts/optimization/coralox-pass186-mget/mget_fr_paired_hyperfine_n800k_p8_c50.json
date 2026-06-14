@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/coralox-pass186-mget/run_mget_bench_once.py --kind fr --bin target-coralox-pass186-baseline/release/frankenredis --port 24967 --requests 800000 --clients 50 --pipeline 8",
+      "mean": 3.4464890763142857,
+      "stddev": 0.12042629764542065,
+      "median": 3.4286316646,
+      "user": 2.195267422857143,
+      "system": 2.3565120399999997,
+      "min": 3.2826895596,
+      "max": 3.6342494486,
+      "times": [
+        3.4286316646,
+        3.4300877276,
+        3.2826895596,
+        3.3854066786,
+        3.6342494486,
+        3.5772165765999997,
+        3.3871418786
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/coralox-pass186-mget/run_mget_bench_once.py --kind fr --bin target-coralox-pass186-candidate/release/frankenredis --port 24968 --requests 800000 --clients 50 --pipeline 8",
+      "mean": 3.3709218148857145,
+      "stddev": 0.09065016216838226,
+      "median": 3.3359635925999997,
+      "user": 2.027236851428571,
+      "system": 2.3792418971428573,
+      "min": 3.2860653915999998,
+      "max": 3.5397820406,
+      "times": [
+        3.3331708266,
+        3.5397820406,
+        3.3842502675999997,
+        3.2862835556,
+        3.3359635925999997,
+        3.4309370296,
+        3.2860653915999998
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
