@@ -617,6 +617,10 @@ fn plain_dbsize_owned_argv() -> Vec<Vec<u8>> {
     vec![b"DBSIZE".to_vec()]
 }
 
+fn plain_command_count_owned_argv() -> Vec<Vec<u8>> {
+    vec![b"COMMAND".to_vec(), b"COUNT".to_vec()]
+}
+
 fn plain_expire_owned_argv(key: &[u8], seconds_arg: &[u8]) -> Vec<Vec<u8>> {
     vec![b"EXPIRE".to_vec(), key.to_vec(), seconds_arg.to_vec()]
 }
@@ -10487,6 +10491,96 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'LPOS' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    fn can_execute_plain_command_count_borrowed(&mut self, now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 2 || self.policy.gate.max_bulk_len < b"COMMAND".len() {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Conservative borrowed fast path for keyless `COMMAND COUNT`. Pure
+    /// command-table introspection (no keyspace touch — so, like PING, it skips
+    /// the active-expire cycle), returning fr_command::visible_command_count,
+    /// the SAME value the generic command|count handler computes. COMMAND is a
+    /// container command -> cmdstat / CLIENT INFO name is `command|count`.
+    /// Never errors. (cold-cmd audit)
+    pub fn execute_plain_command_count_borrowed(&mut self, now_ms: u64) -> Option<RespFrame> {
+        if !self.can_execute_plain_command_count_borrowed(now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("command|count");
+        self.session.last_argv_len_sum = b"COMMAND".len() + b"COUNT".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+
+        let start = Instant::now();
+        let reply = RespFrame::Integer(fr_command::visible_command_count(&self.server.store));
+        let elapsed_us = start.elapsed().as_micros() as u64;
+
+        self.record_plain_command_count_borrowed_metrics(elapsed_us, now_ms, packet_id);
+
+        Some(reply)
+    }
+
+    fn record_plain_command_count_borrowed_metrics(
+        &mut self,
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(plain_command_count_owned_argv);
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(plain_command_count_owned_argv);
+            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "command|count",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(plain_command_count_owned_argv);
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'COMMAND|COUNT' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -24349,6 +24443,27 @@ mod tests {
         assert_eq!(
             direct.server.store.stat_total_commands_processed,
             generic.server.store.stat_total_commands_processed
+        );
+    }
+
+    #[test]
+    fn plain_command_count_borrowed_matches_generic() {
+        // (cold-cmd audit) COMMAND COUNT borrow == generic dispatch, container
+        // command name command|count, and the value is the shared visible count.
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        let f = direct
+            .execute_plain_command_count_borrowed(2)
+            .expect("command count fast path should engage");
+        let g = generic.execute_frame(command(&[b"COMMAND", b"COUNT"]), 2);
+        assert_eq!(f, g);
+        assert!(matches!(f, RespFrame::Integer(n) if n > 0));
+        assert_eq!(direct.session.last_command_name, "command|count");
+        // case-insensitive
+        assert!(
+            direct
+                .execute_plain_command_count_borrowed(3)
+                .is_some()
         );
     }
 

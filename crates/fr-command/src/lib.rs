@@ -17681,6 +17681,18 @@ fn command_table_row_is_visible(name: &str, store: &Store) -> bool {
     true
 }
 
+/// Number of top-level commands visible in the current mode — the `COMMAND COUNT`
+/// reply. Shared by the generic command handler and the borrowed fast path so
+/// both report the identical count (the visibility filter only hides `sentinel`
+/// outside sentinel mode). (frankenredis cold-cmd audit)
+#[must_use]
+pub fn visible_command_count(store: &Store) -> i64 {
+    COMMAND_TABLE
+        .iter()
+        .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
+        .count() as i64
+}
+
 fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
     if argv.len() == 1 {
         // COMMAND with no sub-command: full command info for the top-level
@@ -17718,11 +17730,7 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 subcommand: sub.to_string(),
             });
         }
-        let visible = COMMAND_TABLE
-            .iter()
-            .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
-            .count();
-        Ok(RespFrame::Integer(visible as i64))
+        Ok(RespFrame::Integer(visible_command_count(store)))
     } else if sub.eq_ignore_ascii_case("LIST") {
         // COMMAND LIST [FILTERBY MODULE modname | ACLCAT category | PATTERN pattern]
         // Upstream server.c::commandListCommand requires either

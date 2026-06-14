@@ -2765,6 +2765,14 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if borrowed_plain_command_count_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_command_count_borrowed(ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if borrowed_plain_dbsize_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_dbsize_borrowed(ts)
                 {
@@ -3354,6 +3362,12 @@ fn borrowed_plain_bitcount_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a
 }
 
 /// Keyless `DBSIZE` (argc 1); any args fall to generic (arity error).
+/// Keyless `COMMAND COUNT` (argc 2); other COMMAND subcommands / arity fall to generic.
+fn borrowed_plain_command_count_args(borrowed_args: &[&[u8]]) -> bool {
+    matches!(borrowed_args, [c, sub]
+        if c.eq_ignore_ascii_case(b"COMMAND") && sub.eq_ignore_ascii_case(b"COUNT"))
+}
+
 fn borrowed_plain_dbsize_args(borrowed_args: &[&[u8]]) -> bool {
     matches!(borrowed_args, [command] if command.eq_ignore_ascii_case(b"DBSIZE"))
 }
