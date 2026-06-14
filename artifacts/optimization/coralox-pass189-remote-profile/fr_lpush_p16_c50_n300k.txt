@@ -1,0 +1,1 @@
+ LPUSH: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                             LPUSH: rps=871521.9 (overall: 871521.9) avg_msec=0.606 (overall: 0.606)                                                                        LPUSH: 892857.12 requests per second, p50=0.535 msec

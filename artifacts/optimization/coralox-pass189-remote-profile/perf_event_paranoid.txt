@@ -1,0 +1,1 @@
+local_perf_event_paranoid=4

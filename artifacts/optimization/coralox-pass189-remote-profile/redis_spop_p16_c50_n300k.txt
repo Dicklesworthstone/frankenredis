@@ -1,0 +1,1 @@
+ SPOP: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           SPOP: rps=814272.0 (overall: 811027.9) avg_msec=0.729 (overall: 0.729)                                                                       SPOP: 874635.56 requests per second, p50=0.471 msec

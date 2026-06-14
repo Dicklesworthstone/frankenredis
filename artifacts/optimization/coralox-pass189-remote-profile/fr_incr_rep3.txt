@@ -1,0 +1,1 @@
+ INCR: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           INCR: rps=979968.0 (overall: 976063.8) avg_msec=0.725 (overall: 0.725)                                                                       INCR: 983606.56 requests per second, p50=0.759 msec

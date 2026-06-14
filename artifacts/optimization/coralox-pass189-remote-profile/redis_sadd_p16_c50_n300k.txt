@@ -1,0 +1,1 @@
+ SADD: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           SADD: rps=817657.4 (overall: 814412.7) avg_msec=0.769 (overall: 0.769)                                                                       SADD: 826446.25 requests per second, p50=0.719 msec
