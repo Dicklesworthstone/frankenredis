@@ -2732,6 +2732,14 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some(tail) = borrowed_plain_sintercard_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_sintercard_borrowed(tail, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some((key, member)) = borrowed_plain_sismember_args(&borrowed_args)
                     && let Some(response) =
                         runtime.execute_plain_sismember_borrowed(key, member, ts)
@@ -3284,6 +3292,18 @@ fn borrowed_plain_zmscore_args<'a>(
             if !members.is_empty() && command.eq_ignore_ascii_case(b"ZMSCORE") =>
         {
             Some((*key, members))
+        }
+        _ => None,
+    }
+}
+
+// `tail` = [numkeys, key...]; the runtime validates numkeys + the no-LIMIT shape.
+fn borrowed_plain_sintercard_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [&'a [u8]]> {
+    match borrowed_args {
+        [command, tail @ ..]
+            if tail.len() >= 2 && command.eq_ignore_ascii_case(b"SINTERCARD") =>
+        {
+            Some(tail)
         }
         _ => None,
     }

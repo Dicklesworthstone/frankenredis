@@ -614,6 +614,14 @@ fn plain_zmscore_owned_argv(key: &[u8], members: &[&[u8]]) -> Vec<Vec<u8>> {
     argv
 }
 
+// `tail` is [numkeys, key...]; reconstruct the full SINTERCARD argv for slowlog.
+fn plain_sintercard_owned_argv(tail: &[&[u8]]) -> Vec<Vec<u8>> {
+    let mut argv = Vec::with_capacity(tail.len() + 1);
+    argv.push(b"SINTERCARD".to_vec());
+    argv.extend(tail.iter().map(|a| a.to_vec()));
+    argv
+}
+
 fn plain_sismember_owned_argv(key: &[u8], member: &[u8]) -> Vec<Vec<u8>> {
     vec![b"SISMEMBER".to_vec(), key.to_vec(), member.to_vec()]
 }
@@ -9753,6 +9761,150 @@ impl Runtime {
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
                 output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    /// Borrowed fast path for the no-LIMIT exact `SINTERCARD numkeys key [key ...]`
+    /// form. `tail` is borrowed_args[1..] = [numkeys, key...]. Defers (returns
+    /// None) on a bad numkeys, a numkeys that does not exactly match the key count
+    /// (a LIMIT clause or arg mismatch), or any disabling state — the generic path
+    /// then emits the canonical error / handles LIMIT. Mirrors the generic:
+    /// record_source_key_lookups (one exists_no_touch per key, the keyspace
+    /// hit/miss accounting) then the no-stat store.sintercard(keys, 0). Integer
+    /// cardinality or WRONGTYPE for a non-set key. (cold-cmd audit)
+    pub fn execute_plain_sintercard_borrowed(
+        &mut self,
+        tail: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        // tail = [numkeys, key...]
+        let numkeys = parse_i64_arg(tail.first()?).ok()?;
+        if numkeys < 1 {
+            return None;
+        }
+        let numkeys = usize::try_from(numkeys).ok()?;
+        // Exact no-LIMIT form only: numkeys keys and nothing after them.
+        if tail.len() != numkeys.saturating_add(1) {
+            return None;
+        }
+        let keys = &tail[1..];
+        if numkeys.saturating_add(2) > MAX_COMMAND_ARITY
+            || self.policy.gate.max_array_len < numkeys.saturating_add(2)
+            || self.policy.gate.max_bulk_len < b"SINTERCARD".len()
+            || keys
+                .iter()
+                .any(|k| k.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("sintercard");
+        self.session.last_argv_len_sum =
+            b"SINTERCARD".len() + tail.iter().map(|a| a.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        // Mirror record_source_key_lookups(store, keys): one exists_no_touch per key.
+        for key in keys {
+            let _ = self.server.store.exists_no_touch(key, now_ms);
+        }
+        let result = self.server.store.sintercard(keys, 0, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match result {
+            Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_sintercard_borrowed_metrics(tail, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_plain_sintercard_borrowed_metrics(
+        &mut self,
+        tail: &[&[u8]],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_sintercard_owned_argv(tail));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_sintercard_owned_argv(tail));
+            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("sintercard", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_sintercard_owned_argv(tail));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'SINTERCARD' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
             });
         }
     }
@@ -26532,6 +26684,50 @@ mod tests {
         assert!(rt.execute_plain_sismember_borrowed(b"s", b"a", 2).is_some());
         rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
         assert!(rt.execute_plain_sismember_borrowed(b"s", b"a", 4).is_none());
+    }
+
+    #[test]
+    fn plain_sintercard_borrowed_matches_generic_and_defers() {
+        // (cold-cmd audit) SINTERCARD no-LIMIT exact form borrow == generic;
+        // LIMIT / numkeys-mismatch / bad-numkeys forms DEFER to generic.
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(command(&[b"SADD", b"a", b"1", b"2", b"3", b"4"]), 1);
+            rt.execute_frame(command(&[b"SADD", b"b", b"2", b"3", b"5"]), 1);
+            rt.execute_frame(command(&[b"SET", b"s", b"v"]), 1);
+        }
+        let mut ts = 2;
+        // exact no-LIMIT forms (tail = [numkeys, keys...])
+        let ok_tails: [&[&[u8]]; 4] = [
+            &[b"2", b"a", b"b"],
+            &[b"1", b"a"],
+            &[b"2", b"a", b"missing"],
+            &[b"1", b"s"], // wrong type
+        ];
+        for tail in ok_tails {
+            let f = direct
+                .execute_plain_sintercard_borrowed(tail, ts)
+                .expect("sintercard fast path");
+            let g_argv: Vec<&[u8]> = std::iter::once(b"SINTERCARD".as_slice())
+                .chain(tail.iter().copied())
+                .collect();
+            let g = generic.execute_frame(command(&g_argv), ts);
+            assert_eq!(f, g, "tail={tail:?}");
+            ts += 1;
+        }
+        // defer cases: LIMIT clause, numkeys mismatch, bad numkeys
+        assert!(direct.execute_plain_sintercard_borrowed(&[b"2", b"a", b"b", b"LIMIT", b"1"], ts).is_none());
+        assert!(direct.execute_plain_sintercard_borrowed(&[b"3", b"a", b"b"], ts).is_none());
+        assert!(direct.execute_plain_sintercard_borrowed(&[b"0", b"a"], ts).is_none());
+        assert_eq!(
+            direct.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
     }
 
     #[test]

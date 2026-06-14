@@ -92,6 +92,7 @@ SEQ = [
     ["rpush", "l", "a", "b", "c", "b"], ["sadd", "st", "1", "2", "3"],
     ["hset", "h", "f", "v"], ["zadd", "z", "1", "a"], ["setbit", "bm", "100", "1"],
     ["xadd", "x", "1-1", "f", "v"], ["set", "e", "v"], ["expire", "e", "100000"],
+    ["sadd", "st2", "2", "3", "9"],
     # reads: hits
     ["get", "s"], ["get", "s2"], ["strlen", "s"], ["ttl", "s"], ["pttl", "s"],
     ["type", "s"], ["type", "l"], ["getbit", "bm", "100"], ["bitcount", "bm"],
@@ -99,6 +100,7 @@ SEQ = [
     ["lpos", "l", "b"], ["object", "encoding", "s"], ["object", "encoding", "l"],
     ["mget", "s", "s2"], ["llen", "l"], ["scard", "st"], ["zcard", "z"], ["hlen", "h"],
     ["sismember", "st", "1"], ["smismember", "st", "1", "2", "9"],
+    ["sintercard", "2", "st", "st2"],
     ["hexists", "h", "f"], ["zscore", "z", "a"], ["zmscore", "z", "a", "zz"],
     ["hget", "h", "f"],
     ["getrange", "s", "0", "2"], ["exists", "s"], ["echo", "hi"], ["ping"], ["dbsize"],
