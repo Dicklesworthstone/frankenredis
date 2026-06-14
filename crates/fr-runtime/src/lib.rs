@@ -427,6 +427,7 @@ fn plain_keyed_pop_owned_argv(cmd: PlainKeyedPopCmd, key: &[u8]) -> Vec<Vec<u8>>
 pub enum PlainCardinalityCmd {
     Zcard,
     Hlen,
+    Xlen,
 }
 
 impl PlainCardinalityCmd {
@@ -434,6 +435,7 @@ impl PlainCardinalityCmd {
         match self {
             PlainCardinalityCmd::Zcard => "ZCARD",
             PlainCardinalityCmd::Hlen => "HLEN",
+            PlainCardinalityCmd::Xlen => "XLEN",
         }
     }
 
@@ -441,6 +443,7 @@ impl PlainCardinalityCmd {
         match self {
             PlainCardinalityCmd::Zcard => "zcard",
             PlainCardinalityCmd::Hlen => "hlen",
+            PlainCardinalityCmd::Xlen => "xlen",
         }
     }
 }
@@ -644,6 +647,10 @@ fn clamp_i128_to_i64_runtime(value: i128) -> i64 {
 
 fn plain_hexists_owned_argv(key: &[u8], field: &[u8]) -> Vec<Vec<u8>> {
     vec![b"HEXISTS".to_vec(), key.to_vec(), field.to_vec()]
+}
+
+fn plain_hstrlen_owned_argv(key: &[u8], field: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"HSTRLEN".to_vec(), key.to_vec(), field.to_vec()]
 }
 
 fn wrong_arity_error(command: &'static str) -> RespFrame {
@@ -10961,6 +10968,133 @@ impl Runtime {
         }
     }
 
+    fn can_execute_plain_hstrlen_borrowed(&mut self, key: &[u8], field: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"HSTRLEN".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || field.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Borrowed fast path for `HSTRLEN key field`: calls the SAME store.hstrlen
+    /// the generic handler does (identical keyspace accounting), Integer length
+    /// (0 for missing key/field) or WRONGTYPE for a non-hash key. (cold-cmd audit)
+    pub fn execute_plain_hstrlen_borrowed(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_hstrlen_borrowed(key, field, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("hstrlen");
+        self.session.last_argv_len_sum = b"HSTRLEN".len() + key.len() + field.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let result = self.server.store.hstrlen(key, field, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match result {
+            Ok(len) => RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_hstrlen_borrowed_metrics(key, field, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_plain_hstrlen_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_hstrlen_owned_argv(key, field));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_hstrlen_owned_argv(key, field));
+            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("hstrlen", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_hstrlen_owned_argv(key, field));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'HSTRLEN' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
     fn can_execute_plain_hexists_borrowed(
         &mut self,
         key: &[u8],
@@ -11412,6 +11546,7 @@ impl Runtime {
         let result = match cmd {
             PlainCardinalityCmd::Zcard => self.server.store.zcard(key, now_ms),
             PlainCardinalityCmd::Hlen => self.server.store.hlen(key, now_ms),
+            PlainCardinalityCmd::Xlen => self.server.store.xlen(key, now_ms),
         };
         let elapsed_us = start.elapsed().as_micros() as u64;
         let reply = match result {
@@ -23754,7 +23889,8 @@ mod tests {
     use super::{
         ACL_FILE_NOT_CONFIGURED_ERR, AOF_DISK_ERROR_WRITE_DENIED, AclPubsubDefault, ClientSession,
         ClientUnblockMode, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER,
-        OutputBufferClassLimit, PlainKeyMetaCmd, RDB_DISK_ERROR_WRITE_DENIED, Runtime, ServerState,
+        OutputBufferClassLimit, PlainCardinalityCmd, PlainKeyMetaCmd, RDB_DISK_ERROR_WRITE_DENIED,
+        Runtime, ServerState,
         acl_list_entries_from_rules, build_hello_response, canonical_static_config_param,
         canonicalize_acl_rules, classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
@@ -25967,6 +26103,56 @@ mod tests {
         assert_eq!(
             fast.session.last_argv_len_sum,
             generic.session.last_argv_len_sum
+        );
+    }
+
+    #[test]
+    fn plain_xlen_and_hstrlen_borrowed_match_generic() {
+        // (cold-cmd audit) XLEN (via PlainCardinalityCmd) + HSTRLEN borrow ==
+        // generic across present/missing/wrong-type, with keyspace-stat parity.
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(command(&[b"XADD", b"x", b"1-1", b"f", b"v"]), 1);
+            rt.execute_frame(command(&[b"XADD", b"x", b"2-1", b"f", b"v"]), 1);
+            rt.execute_frame(command(&[b"HSET", b"h", b"f", b"hello"]), 1);
+            rt.execute_frame(command(&[b"SET", b"s", b"v"]), 1); // wrong type for XLEN/HSTRLEN
+        }
+        let mut ts = 2;
+        // XLEN
+        for key in [b"x".as_slice(), b"missing", b"s"] {
+            let f = direct
+                .execute_plain_cardinality_borrowed(PlainCardinalityCmd::Xlen, key, ts)
+                .expect("xlen fast path");
+            let g = generic.execute_frame(command(&[b"XLEN", key]), ts);
+            assert_eq!(f, g, "XLEN key={key:?}");
+            ts += 1;
+        }
+        // HSTRLEN
+        for (key, field) in [
+            (b"h".as_slice(), b"f".as_slice()),
+            (b"h", b"nofield"),
+            (b"missing", b"f"),
+            (b"s", b"f"),
+        ] {
+            let f = direct
+                .execute_plain_hstrlen_borrowed(key, field, ts)
+                .expect("hstrlen fast path");
+            let g = generic.execute_frame(command(&[b"HSTRLEN", key, field]), ts);
+            assert_eq!(f, g, "HSTRLEN key={key:?} field={field:?}");
+            ts += 1;
+        }
+        assert_eq!(
+            direct.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            direct.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
         );
     }
 

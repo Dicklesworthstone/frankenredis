@@ -2789,6 +2789,14 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some((key, field)) = borrowed_plain_hstrlen_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_hstrlen_borrowed(key, field, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some((key, field)) = borrowed_plain_hexists_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_hexists_borrowed(key, field, ts)
                 {
@@ -3281,6 +3289,8 @@ fn borrowed_plain_cardinality_args<'a>(
         PlainCardinalityCmd::Zcard
     } else if command.eq_ignore_ascii_case(b"HLEN") {
         PlainCardinalityCmd::Hlen
+    } else if command.eq_ignore_ascii_case(b"XLEN") {
+        PlainCardinalityCmd::Xlen
     } else {
         return None;
     };
@@ -3401,6 +3411,13 @@ fn borrowed_plain_sismember_args<'a>(
 fn borrowed_plain_hexists_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
     match borrowed_args {
         [command, key, field] if command.eq_ignore_ascii_case(b"HEXISTS") => Some((*key, *field)),
+        _ => None,
+    }
+}
+
+fn borrowed_plain_hstrlen_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
+    match borrowed_args {
+        [command, key, field] if command.eq_ignore_ascii_case(b"HSTRLEN") => Some((*key, *field)),
         _ => None,
     }
 }
