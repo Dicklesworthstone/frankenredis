@@ -2757,6 +2757,14 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if borrowed_plain_dbsize_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_dbsize_borrowed(ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some((key, seconds)) = borrowed_plain_expire_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_expire_borrowed(key, seconds, ts)
                 {
@@ -3323,6 +3331,11 @@ fn borrowed_plain_bitcount_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a
         [command, key] if command.eq_ignore_ascii_case(b"BITCOUNT") => Some(*key),
         _ => None,
     }
+}
+
+/// Keyless `DBSIZE` (argc 1); any args fall to generic (arity error).
+fn borrowed_plain_dbsize_args(borrowed_args: &[&[u8]]) -> bool {
+    matches!(borrowed_args, [command] if command.eq_ignore_ascii_case(b"DBSIZE"))
 }
 
 /// Only the no-flag `EXPIRE key seconds` form (argc 3); flagged forms
