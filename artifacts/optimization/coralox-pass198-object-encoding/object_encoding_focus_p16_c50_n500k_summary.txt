@@ -1,0 +1,3 @@
+order redis_rps fr_rps redis/fr redis_rc fr_rc
+redis-first 950570.31 941619.56 1.010x 0 0
+fr-first 1039501.00 932835.81 1.114x 0 0

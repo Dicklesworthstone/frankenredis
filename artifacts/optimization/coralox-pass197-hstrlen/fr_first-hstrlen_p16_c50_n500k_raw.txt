@@ -1,0 +1,49 @@
+ HSTRLEN bench:hash field: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                               HSTRLEN bench:hash field: rps=951255.9 (overall: 947583.0) avg_msec=0.636 (overall: 0.636)                                                                                           HSTRLEN bench:hash field: rps=1018112.0 (overall: 982223.9) avg_msec=0.527 (overall: 0.581)                                                                                            ====== HSTRLEN bench:hash field ======
+  500000 requests completed in 0.51 seconds
+  50 parallel clients
+  45 bytes payload
+  keep alive: 1
+  host configuration "save": 3600 1 300 100 60 10000
+  host configuration "appendonly": no
+  multi-thread: no
+
+Latency by percentile distribution:
+0.000% <= 0.343 milliseconds (cumulative count 128)
+50.000% <= 0.455 milliseconds (cumulative count 256960)
+75.000% <= 0.695 milliseconds (cumulative count 377520)
+87.500% <= 0.815 milliseconds (cumulative count 438864)
+93.750% <= 0.975 milliseconds (cumulative count 468832)
+96.875% <= 1.111 milliseconds (cumulative count 484832)
+98.438% <= 1.175 milliseconds (cumulative count 492880)
+99.219% <= 1.271 milliseconds (cumulative count 496272)
+99.609% <= 1.367 milliseconds (cumulative count 498048)
+99.805% <= 1.535 milliseconds (cumulative count 499024)
+99.902% <= 20.495 milliseconds (cumulative count 499520)
+99.951% <= 20.607 milliseconds (cumulative count 499792)
+99.976% <= 20.655 milliseconds (cumulative count 499904)
+99.988% <= 20.671 milliseconds (cumulative count 499968)
+99.994% <= 20.687 milliseconds (cumulative count 500000)
+100.000% <= 20.687 milliseconds (cumulative count 500000)
+
+Cumulative distribution of latencies:
+0.000% <= 0.103 milliseconds (cumulative count 0)
+40.003% <= 0.407 milliseconds (cumulative count 200016)
+58.189% <= 0.503 milliseconds (cumulative count 290944)
+67.898% <= 0.607 milliseconds (cumulative count 339488)
+76.038% <= 0.703 milliseconds (cumulative count 380192)
+87.139% <= 0.807 milliseconds (cumulative count 435696)
+92.022% <= 0.903 milliseconds (cumulative count 460112)
+94.480% <= 1.007 milliseconds (cumulative count 472400)
+96.704% <= 1.103 milliseconds (cumulative count 483520)
+98.829% <= 1.207 milliseconds (cumulative count 494144)
+99.414% <= 1.303 milliseconds (cumulative count 497072)
+99.731% <= 1.407 milliseconds (cumulative count 498656)
+99.795% <= 1.503 milliseconds (cumulative count 498976)
+99.840% <= 1.607 milliseconds (cumulative count 499200)
+100.000% <= 21.103 milliseconds (cumulative count 500000)
+
+Summary:
+  throughput summary: 980392.19 requests per second
+  latency summary (msec):
+          avg       min       p50       p95       p99       max
+        0.581     0.336     0.455     1.039     1.239    20.687
