@@ -1,0 +1,21 @@
+== vs-redis pipelined throughput (P16, -c50, -n300000, best-of-5) ==
+cmd          redis         fr   redis/fr
+ping_inline    1023890    1052631      0.97x  fr-faster
+ping_mbulk    1132075    1067615      1.06x  FR-SLOWER
+set         781250     970873      0.80x  fr-faster
+get         849858     996677      0.85x  fr-faster
+incr        852272     849858      1.00x  FR-SLOWER
+lpush       999999    1034482      0.97x  fr-faster
+rpush      1045296    1006711      1.04x  FR-SLOWER
+lpop        911854    1034482      0.88x  fr-faster
+rpop        903614    1034482      0.87x  fr-faster
+sadd        928792     946372      0.98x  fr-faster
+hset        847457     928792      0.91x  fr-faster
+spop       1067615    1060070      1.01x  FR-SLOWER
+zadd        427350     465838      0.92x  fr-faster
+zpopmin    1020408    1034482      0.99x  fr-faster
+lrange_100     993377     980392      1.01x  FR-SLOWER
+lrange_300    1052631    1063829      0.99x  fr-faster
+lrange_500    1041666     977198      1.07x  FR-SLOWER
+lrange_600     999999    1038062      0.96x  fr-faster
+mset        237341     326441      0.73x  fr-faster
