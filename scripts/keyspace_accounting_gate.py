@@ -92,6 +92,26 @@ SEED = [
     ["xadd", "xs", "1-1", "f", "v"], ["set", "e", "v"],
     ["pfadd", "hll", "x", "y", "z"], ["geoadd", "g", "13.36", "38.11", "p1"],
     ["geoadd", "g", "15.08", "37.5", "p2"],
+    # stream with a consumer group + a consumer holding a PEL, for the
+    # consumer-group command coverage below.
+    ["xadd", "cg", "1-1", "f", "v"], ["xadd", "cg", "2-2", "f", "v"],
+    ["xgroup", "create", "cg", "gA", "0"],
+    ["xreadgroup", "group", "gA", "cc", "count", "10", "streams", "cg", ">"],
+]
+
+# Stream consumer-group commands (need the seeded group/PEL above). XACK/XCLAIM/
+# XAUTOCLAIM/XPENDING/XINFO are reads (lookupKeyRead -> record); XGROUP * and
+# XSETID are writes (lookupKeyWrite -> 0). These caught XCLAIM double-count +
+# XGROUP CREATECONSUMER/DELCONSUMER/DESTROY over-count (stat-counting key_type
+# precheck on a write -> use value_type_no_stat).
+STREAM_CG = [
+    ["xack", "cg", "gA", "1-1"], ["xack", "nostream", "gA", "1-1"],
+    ["xclaim", "cg", "gA", "c2", "0", "1-1"], ["xautoclaim", "cg", "gA", "c2", "0", "0"],
+    ["xpending", "cg", "gA"], ["xpending", "cg", "gA", "-", "+", "10"],
+    ["xinfo", "consumers", "cg", "gA"], ["xinfo", "groups", "cg"],
+    ["xgroup", "createconsumer", "cg", "gA", "c9"],
+    ["xgroup", "delconsumer", "cg", "gA", "cc"], ["xgroup", "destroy", "cg", "gA"],
+    ["xgroup", "setid", "cg", "gA", "0"], ["xsetid", "cg", "100-0"],
 ]
 
 # (args, expected_hit_delta, expected_miss_delta) — expectations are asserted
@@ -213,12 +233,12 @@ def delta(port, args):
 
 def main():
     fails = []
-    for args in READS_HIT + READS_MISS + WRITES + STORE_AND_MOVE:
+    for args in READS_HIT + READS_MISS + WRITES + STORE_AND_MOVE + STREAM_CG:
         rd = delta(OR, args)
         fr = delta(FRp, args)
         if rd != fr:
             fails.append((args, rd, fr))
-    total = len(READS_HIT) + len(READS_MISS) + len(WRITES) + len(STORE_AND_MOVE)
+    total = len(READS_HIT) + len(READS_MISS) + len(WRITES) + len(STORE_AND_MOVE) + len(STREAM_CG)
     print("=" * 64)
     if fails:
         for a, rd, fr in fails:

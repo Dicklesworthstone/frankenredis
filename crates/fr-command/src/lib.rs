@@ -8766,9 +8766,12 @@ fn xclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     // of how mangled the rest of the argv is. The other XCLAIM-family
     // commands (XPENDING, XAUTOCLAIM) parse args first per upstream;
     // only XCLAIM short-circuits early. (frankenredis-3qrt)
-    match store.key_type(&argv[1], now_ms) {
+    // No-stat type peek: XCLAIM does ONE lookupKeyRead upstream and the store
+    // xclaim call below records that single keyspace hit. A stat-counting
+    // key_type precheck here would double-count keyspace_hits.
+    match store.value_type_no_stat(&argv[1], now_ms) {
         None => return Ok(xclaim_nogroup_error(&argv[1], &argv[2])),
-        Some("stream") => {
+        Some(fr_store::ValueType::Stream) => {
             let group_exists = store
                 .stream_consumer_groups(&argv[1])
                 .is_some_and(|groups| groups.contains_key(argv[2].as_slice()));
@@ -9304,9 +9307,11 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         // key (same as the user-facing XLEN contract), so it can't be
         // used to distinguish absent-vs-empty here — Store::key_type
         // is the right probe. (frankenredis-n4qd, supersedes qcmh)
-        match store.key_type(&argv[2], now_ms) {
+        // No-stat type peek — XGROUP is a write (lookupKeyWrite, no keyspace
+        // stats); a stat-counting key_type precheck would over-count.
+        match store.value_type_no_stat(&argv[2], now_ms) {
             None => return Ok(xgroup_key_required_error()),
-            Some("stream") => {}
+            Some(fr_store::ValueType::Stream) => {}
             Some(_) => return Err(CommandError::Store(StoreError::WrongType)),
         }
         return match store.xgroup_destroy(&argv[2], &argv[3], now_ms) {
@@ -9416,9 +9421,11 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         // xlen probe wrongly emitted "key required" against an empty
         // stream that vendored accepts. Use Store::key_type instead.
         // (frankenredis-3vfpi)
-        match store.key_type(&argv[2], now_ms) {
+        // No-stat type peek — XGROUP is a write (lookupKeyWrite, no keyspace
+        // stats); a stat-counting key_type precheck would over-count.
+        match store.value_type_no_stat(&argv[2], now_ms) {
             None => return Ok(xgroup_key_required_error()),
-            Some("stream") => {}
+            Some(fr_store::ValueType::Stream) => {}
             Some(_) => return Err(CommandError::Store(StoreError::WrongType)),
         }
         return match store.xgroup_createconsumer(&argv[2], &argv[3], &argv[4], now_ms) {
@@ -9442,9 +9449,11 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         // fell through to xgroup_delconsumer → NOGROUP error wording
         // instead of upstream's key-required ERR. Replace the probe
         // with Store::key_type. (frankenredis-n4g5, supersedes qcmh)
-        match store.key_type(&argv[2], now_ms) {
+        // No-stat type peek — XGROUP is a write (lookupKeyWrite, no keyspace
+        // stats); a stat-counting key_type precheck would over-count.
+        match store.value_type_no_stat(&argv[2], now_ms) {
             None => return Ok(xgroup_key_required_error()),
-            Some("stream") => {}
+            Some(fr_store::ValueType::Stream) => {}
             Some(_) => return Err(CommandError::Store(StoreError::WrongType)),
         }
         return match store.xgroup_delconsumer(&argv[2], &argv[3], &argv[4], now_ms) {

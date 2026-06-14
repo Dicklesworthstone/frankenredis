@@ -7181,6 +7181,29 @@ impl Store {
         self.value_type(key, now_ms).map(ValueType::as_str)
     }
 
+    /// Logical type of `key`, lazily reaping an expired key first (so it reads as
+    /// absent and the eviction is propagated + bumps dirty, exactly like an
+    /// upstream lookupKeyWrite/Read), but WITHOUT recording a keyspace hit/miss.
+    /// For WRITE commands that need a type precheck (XGROUP/XCLAIM): upstream
+    /// reaches the key via lookupKeyWrite — which never touches keyspace_hits/
+    /// misses yet still evicts a stale key — so the stat-counting `value_type`
+    /// over-counts (it records a hit) while the read-only `peek_value_type`
+    /// under-reaps (it never evicts). This is the correct middle ground.
+    pub fn value_type_no_stat(&mut self, key: &[u8], now_ms: u64) -> Option<ValueType> {
+        if !self.drop_if_expired(key, now_ms) {
+            return None;
+        }
+        let entry = self.entries.get(key)?;
+        Some(match &entry.value {
+            Value::String(_) | Value::Integer(_) => ValueType::String,
+            Value::Hash(_) => ValueType::Hash,
+            Value::List(_) => ValueType::List,
+            Value::Set(_) => ValueType::Set,
+            Value::SortedSet(_) => ValueType::ZSet,
+            Value::Stream(_) => ValueType::Stream,
+        })
+    }
+
     /// Read-only, no-stat type peek: returns the logical type of `key` (treating
     /// an already-expired key as absent) WITHOUT recording a keyspace hit/miss or
     /// lazily evicting. Mirrors upstream's `LOOKUP_NOSTATS` read used by the
@@ -24648,6 +24671,11 @@ mod tests {
             store.hget(b"h", b"field", 0).expect("existing hash field"),
             Some(b"value".to_vec())
         );
+        // NOTE: store.lindex is NO-STAT by design — the LINDEX double-count fix
+        // (frankenredis 4a431ccc8) moved keyspace recording to the command
+        // handler's precheck so the command counts exactly one hit. The direct
+        // store method therefore does NOT bump the counters; it is exercised
+        // here to confirm that (it must not contribute to the hit tally below).
         assert_eq!(
             store.lindex(b"list", 0, 0).expect("list lookup"),
             Some(b"item".to_vec())
@@ -24666,7 +24694,11 @@ mod tests {
         );
         assert_eq!(store.xlen(b"missing-stream", 0).expect("missing stream"), 0);
 
-        assert_eq!(store.stat_keyspace_hits, 7);
+        // 6 hits: get(s), exists(s), hget(h), sismember(set), zscore(zset),
+        // xlen(stream). lindex(list) is no-stat (see note above), so it does
+        // NOT count. 3 misses: get(missing), smembers(missing-set),
+        // xlen(missing-stream).
+        assert_eq!(store.stat_keyspace_hits, 6);
         assert_eq!(store.stat_keyspace_misses, 3);
     }
 
