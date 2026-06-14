@@ -2715,6 +2715,15 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some((key, members)) = borrowed_plain_smismember_args(&borrowed_args)
+                    && let Some(response) =
+                        runtime.execute_plain_smismember_borrowed(key, members, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some((key, member)) = borrowed_plain_sismember_args(&borrowed_args)
                     && let Some(response) =
                         runtime.execute_plain_sismember_borrowed(key, member, ts)
@@ -3239,6 +3248,20 @@ fn borrowed_plain_hmget_args<'a>(
             if !fields.is_empty() && command.eq_ignore_ascii_case(b"HMGET") =>
         {
             Some((*key, fields))
+        }
+        _ => None,
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn borrowed_plain_smismember_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(&'a [u8], &'a [&'a [u8]])> {
+    match borrowed_args {
+        [command, key, members @ ..]
+            if !members.is_empty() && command.eq_ignore_ascii_case(b"SMISMEMBER") =>
+        {
+            Some((*key, members))
         }
         _ => None,
     }
