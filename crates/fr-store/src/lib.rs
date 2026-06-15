@@ -10709,8 +10709,10 @@ impl Store {
                             });
                         } else {
                             let old_len = l.len();
-                            l.retain(|v| v != value);
-                            removed = (old_len - l.len()) as u64;
+                            if l.iter().any(|v| v == value) {
+                                l.retain(|v| v != value);
+                                removed = (old_len - l.len()) as u64;
+                            }
                         }
                         if removed > 0 {
                             self.dirty = self.dirty.saturating_add(removed);
@@ -38333,6 +38335,22 @@ mod tests {
         let removed = store.lrem(b"l", 0, b"a", 0).unwrap();
         assert_eq!(removed, 2);
         assert_eq!(store.llen(b"l", 0).unwrap(), 1);
+    }
+
+    #[test]
+    fn lrem_count_zero_nomatch_preserves_list_and_dirty() {
+        let mut store = Store::new();
+        store
+            .rpush(b"l", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 0)
+            .unwrap();
+        let before_dirty = store.dirty;
+        let before = store.lrange(b"l", 0, -1, 0).unwrap();
+
+        let removed = store.lrem(b"l", 0, b"x", 0).unwrap();
+
+        assert_eq!(removed, 0);
+        assert_eq!(store.dirty, before_dirty);
+        assert_eq!(store.lrange(b"l", 0, -1, 0).unwrap(), before);
     }
 
     // (frankenredis-387i6) The bounded-count early-stop / index-remove path must
