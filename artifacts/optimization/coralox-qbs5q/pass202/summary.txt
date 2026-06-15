@@ -39,7 +39,9 @@ isomorphism:
 validation:
 - rch exec -- cargo test -j 1 -p fr-persist decode_string_ranges -- --nocapture
 - rch exec -- cargo test -j 1 -p fr-store restore_quicklist2_string_node_keeps_order_and_dump_bytes -- --nocapture
-- rch exec -- cargo check -j 1 -p fr-store --all-targets
-- rch exec -- cargo clippy -j 1 -p fr-store --all-targets -- -D warnings
-- cargo fmt -p fr-persist -p fr-store -- --check: nonzero from pre-existing unrelated drift in crates/fr-persist/src/lib.rs and older quicklist test formatting in crates/fr-store/src/lib.rs
-- UBS changed-file run: nonzero on broad existing findings; embedded fmt/clippy/check/test-build sections clean
+- rch exec -- cargo test -j 1 -p fr-store dump_restore -- --nocapture
+- rch exec -- cargo check -j 1 -p fr-persist -p fr-store --all-targets
+- rch exec -- cargo clippy -j 1 -p fr-persist -p fr-store --all-targets -- -D warnings
+- rustfmt --edition 2024 --check crates/fr-persist/src/listpack.rs crates/fr-store/src/packed_set.rs: clean
+- rustfmt --edition 2024 --check crates/fr-store/src/lib.rs: nonzero from pre-existing unrelated drift in older quicklist helper/test formatting
+- UBS changed-file run: nonzero on broad existing file-wide inventory; embedded fmt/clippy/check/test-build sections clean
