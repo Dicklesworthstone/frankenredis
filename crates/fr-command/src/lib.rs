@@ -12428,7 +12428,23 @@ fn parse_score_bound(arg: &[u8]) -> Result<ScoreBound, CommandError> {
         if after_ws.is_empty() {
             return Err(bad());
         }
-        after_ws.parse::<f64>().map_err(|_| bad())?
+        // strtod accepts C99 hex-float notation (`0x10`, `0X1A`,
+        // `0x1.8p3`), but Rust's `f64::from_str` only parses decimal —
+        // so a hex bound that upstream's zslParseRange accepts was
+        // rejected here as "min or max is not a float" (and, for a
+        // wrong-type key, masked the WRONGTYPE error redis returns
+        // after a successful range parse). Mirror the score path
+        // (`parse_f64_arg`) by trying the hex-float form first.
+        // try_parse_hex_float rejects trailing junk (from_str_radix
+        // fails), matching strtod's `eptr[0] != '\0'` check. nan/inf
+        // are handled by the shared `is_nan` gate below (zslParseRange
+        // rejects only nan, accepting overflow-to-inf like strtod).
+        // (frankenredis-hexfloat range bounds)
+        if let Some(hex) = try_parse_hex_float(after_ws) {
+            hex
+        } else {
+            after_ws.parse::<f64>().map_err(|_| bad())?
+        }
     };
     if val.is_nan() {
         return Err(bad());
@@ -33817,6 +33833,99 @@ mod tests {
                 3,
             )
             .expect_err("invalid score bound");
+            assert_eq!(err, bad, "input={:?}", String::from_utf8_lossy(arg));
+        }
+    }
+
+    #[test]
+    fn zrangebyscore_score_bound_accepts_c99_hex_float() {
+        // (frankenredis-hexfloat range bounds) Upstream zslParseRange uses
+        // strtod, which accepts C99 hex-float notation; fr's parser used
+        // Rust f64::from_str (decimal-only) and rejected `0x10`, `0X1A`,
+        // `0x1.8p3`, and the exclusive `(0x10`. Mirror the score path.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zh".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"16".to_vec(),
+                b"p".to_vec(),
+                b"100".to_vec(),
+                b"z".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zadd seed");
+
+        // 0x10 == 16.0 inclusive → {p(16), z(100)}.
+        let hex_incl = dispatch_argv(
+            &[
+                b"ZRANGEBYSCORE".to_vec(),
+                b"zh".to_vec(),
+                b"0x10".to_vec(),
+                b"+inf".to_vec(),
+            ],
+            &mut store,
+            1,
+        )
+        .expect("0x10 hex bound must parse");
+        assert_eq!(
+            hex_incl,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"p".to_vec())),
+                RespFrame::BulkString(Some(b"z".to_vec())),
+            ]))
+        );
+
+        // Exclusive `(0x10` == exclusive 16 → only z(100).
+        let hex_excl = dispatch_argv(
+            &[
+                b"ZRANGEBYSCORE".to_vec(),
+                b"zh".to_vec(),
+                b"(0x10".to_vec(),
+                b"+inf".to_vec(),
+            ],
+            &mut store,
+            2,
+        )
+        .expect("(0x10 exclusive hex bound must parse");
+        assert_eq!(
+            hex_excl,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"z".to_vec()))]))
+        );
+
+        // 0x1.8p3 == 12.0 inclusive → {p(16), z(100)}.
+        let hex_p = dispatch_argv(
+            &[
+                b"ZCOUNT".to_vec(),
+                b"zh".to_vec(),
+                b"0x1.8p3".to_vec(),
+                b"+inf".to_vec(),
+            ],
+            &mut store,
+            3,
+        )
+        .expect("0x1.8p3 hex bound must parse");
+        assert_eq!(hex_p, RespFrame::Integer(2));
+
+        // Trailing junk after a hex prefix is still rejected (strtod's
+        // eptr[0] != '\0' check), as is a bare bad-hex.
+        let bad = CommandError::Custom("ERR min or max is not a float".to_string());
+        for arg in [b"0x10z".as_slice(), b"0xg"] {
+            let err = dispatch_argv(
+                &[
+                    b"ZRANGEBYSCORE".to_vec(),
+                    b"zh".to_vec(),
+                    arg.to_vec(),
+                    b"+inf".to_vec(),
+                ],
+                &mut store,
+                4,
+            )
+            .expect_err("invalid hex bound");
             assert_eq!(err, bad, "input={:?}", String::from_utf8_lossy(arg));
         }
     }
