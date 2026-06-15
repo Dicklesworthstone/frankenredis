@@ -711,8 +711,13 @@ fn plain_getbit_owned_argv(key: &[u8], offset_arg: &[u8]) -> Vec<Vec<u8>> {
     vec![b"GETBIT".to_vec(), key.to_vec(), offset_arg.to_vec()]
 }
 
-fn plain_lpos_owned_argv(key: &[u8], element: &[u8]) -> Vec<Vec<u8>> {
-    vec![b"LPOS".to_vec(), key.to_vec(), element.to_vec()]
+fn plain_lpos_owned_argv(key: &[u8], element: &[u8], rank: Option<&[u8]>) -> Vec<Vec<u8>> {
+    let mut argv = vec![b"LPOS".to_vec(), key.to_vec(), element.to_vec()];
+    if let Some(rank) = rank {
+        argv.push(b"RANK".to_vec());
+        argv.push(rank.to_vec());
+    }
+    argv
 }
 
 fn plain_object_encoding_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
@@ -11183,7 +11188,101 @@ impl Runtime {
         };
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_lpos_borrowed_metrics(key, element, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_lpos_borrowed_metrics(
+            key, element, None, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    /// Conservative borrowed fast path for the RANK-only `LPOS key element RANK
+    /// rank` form (argc 5, no COUNT/MAXLEN — the cold shape; COUNT forms already
+    /// hit a fast array path). Parses `rank` via the long-range rule and declines
+    /// (returns None) on a malformed integer, i64::MIN, or rank == 0 so the
+    /// generic path owns the exact "not an integer" / "RANK can't be zero" error
+    /// with no observable store work. On a valid rank it calls the SAME
+    /// store.lpos_full(key, element, rank, None, 0) the generic RANK path bottoms
+    /// out in (keyspace hit recorded inside lpos_full), returning the matched
+    /// Integer index, nil for no match, or WRONGTYPE for a non-list key.
+    /// (frankenredis-eriwa)
+    pub fn execute_plain_lpos_rank_borrowed(
+        &mut self,
+        key: &[u8],
+        element: &[u8],
+        rank_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        // parse_i64_arg_long_range + the rank==0 guard, but as a decline: any of
+        // bad-int / i64::MIN / zero falls to generic for the exact error reply.
+        let rank = parse_i64_arg(rank_arg).ok()?;
+        if rank == i64::MIN || rank == 0 {
+            return None;
+        }
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"LPOS".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || element.len() > self.policy.gate.max_bulk_len
+            || rank_arg.len() > self.policy.gate.max_bulk_len
+            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("lpos");
+        self.session.last_argv_len_sum =
+            b"LPOS".len() + key.len() + element.len() + b"RANK".len() + rank_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let result = self.server.store.lpos_full(key, element, rank, None, 0, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match result {
+            Ok(positions) => match positions.first() {
+                Some(&pos) => RespFrame::Integer(i64::try_from(pos).unwrap_or(i64::MAX)),
+                None => RespFrame::BulkString(None),
+            },
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_lpos_borrowed_metrics(
+            key,
+            element,
+            Some(rank_arg),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -11213,6 +11312,7 @@ impl Runtime {
         &mut self,
         key: &[u8],
         element: &[u8],
+        rank: Option<&[u8]>,
         elapsed_us: u64,
         now_ms: u64,
         packet_id: u64,
@@ -11222,14 +11322,14 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| plain_lpos_owned_argv(key, element));
+            let argv_ref = argv.get_or_insert_with(|| plain_lpos_owned_argv(key, element, rank));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| plain_lpos_owned_argv(key, element));
+            let argv_ref = argv.get_or_insert_with(|| plain_lpos_owned_argv(key, element, rank));
             self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
@@ -11245,7 +11345,7 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| plain_lpos_owned_argv(key, element));
+            let argv_ref = argv.get_or_insert_with(|| plain_lpos_owned_argv(key, element, rank));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -26222,6 +26322,71 @@ mod tests {
             generic.server.store.stat_total_error_replies
         );
         // optioned form is rejected by the fr-server recognizer (argc 3 only).
+    }
+
+    #[test]
+    fn plain_lpos_rank_borrowed_matches_generic_and_defers() {
+        // (frankenredis-eriwa) LPOS key element RANK rank (argc 5) borrow ==
+        // generic: positive rank (nth match head->tail), negative rank
+        // (tail->head), rank past the last match (nil), missing key (nil),
+        // wrong-type (WRONGTYPE); and DEFER (None) on rank 0 / i64::MIN / a
+        // non-integer so the generic path emits the exact "RANK can't be zero" /
+        // "not an integer" / out-of-range error with no double-counted keyspace
+        // stat.
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(
+                command(&[b"RPUSH", b"l", b"a", b"b", b"c", b"b", b"a", b"b"]),
+                1,
+            );
+            rt.execute_frame(command(&[b"SET", b"s", b"v"]), 1);
+        }
+        let cases: [(&[u8], &[u8], &[u8]); 8] = [
+            (b"l", b"b", b"1"),
+            (b"l", b"b", b"2"),
+            (b"l", b"b", b"3"),
+            (b"l", b"b", b"-1"),
+            (b"l", b"b", b"-2"),
+            (b"l", b"b", b"5"),
+            (b"missing", b"a", b"1"),
+            (b"s", b"a", b"1"),
+        ];
+        for (ts, (key, el, rank)) in (2..).zip(cases) {
+            let f = direct
+                .execute_plain_lpos_rank_borrowed(key, el, rank, ts)
+                .expect("lpos RANK fast path should engage");
+            let g = generic.execute_frame(command(&[b"LPOS", key, el, b"RANK", rank]), ts);
+            assert_eq!(f, g, "key={key:?} el={el:?} rank={rank:?}");
+        }
+        // Deferral cases: rank 0 / i64::MIN / non-integer -> None (no side effect);
+        // drive both through generic to keep stats in lockstep, then assert decline.
+        let defer: [&[u8]; 3] = [b"0", b"-9223372036854775808", b"notint"];
+        let mut ts = 100u64;
+        for rank in defer {
+            assert!(
+                direct
+                    .execute_plain_lpos_rank_borrowed(b"l", b"b", rank, ts)
+                    .is_none(),
+                "lpos RANK must defer rank={rank:?}"
+            );
+            let f = direct.execute_frame(command(&[b"LPOS", b"l", b"b", b"RANK", rank]), ts);
+            let g = generic.execute_frame(command(&[b"LPOS", b"l", b"b", b"RANK", rank]), ts);
+            assert_eq!(f, g, "defer rank={rank:?}");
+            ts += 1;
+        }
+        assert_eq!(
+            direct.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            direct.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
     }
 
     #[test]

@@ -3275,6 +3275,15 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some((key, element, rank)) = borrowed_plain_lpos_rank_args(&borrowed_args)
+                    && let Some(response) =
+                        runtime.execute_plain_lpos_rank_borrowed(key, element, rank, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some(key) = borrowed_plain_object_encoding_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_object_encoding_borrowed(key, ts)
                 {
@@ -3990,6 +3999,21 @@ fn borrowed_plain_getbit_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a 
 fn borrowed_plain_lpos_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
     match borrowed_args {
         [command, key, element] if command.eq_ignore_ascii_case(b"LPOS") => Some((*key, *element)),
+        _ => None,
+    }
+}
+
+/// Recognizes the RANK-only `LPOS key element RANK rank` form (argc 5). COUNT /
+/// MAXLEN forms (already fast) and any other option fall to generic dispatch.
+fn borrowed_plain_lpos_rank_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(&'a [u8], &'a [u8], &'a [u8])> {
+    match borrowed_args {
+        [command, key, element, rank_kw, rank]
+            if command.eq_ignore_ascii_case(b"LPOS") && rank_kw.eq_ignore_ascii_case(b"RANK") =>
+        {
+            Some((*key, *element, *rank))
+        }
         _ => None,
     }
 }
