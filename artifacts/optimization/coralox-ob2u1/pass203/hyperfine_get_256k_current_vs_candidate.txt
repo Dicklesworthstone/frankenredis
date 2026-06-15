@@ -1,0 +1,11 @@
+Benchmark 1: current-256k
+  Time (mean ± σ):      1.140 s ±  0.079 s    [User: 0.022 s, System: 0.141 s]
+  Range (min … max):    1.061 s …  1.253 s    7 runs
+ 
+Benchmark 2: candidate-256k
+  Time (mean ± σ):     692.0 ms ± 138.8 ms    [User: 21.4 ms, System: 153.8 ms]
+  Range (min … max):   498.5 ms … 854.3 ms    7 runs
+ 
+Summary
+  candidate-256k ran
+    1.65 ± 0.35 times faster than current-256k

@@ -1,0 +1,11 @@
+Benchmark 1: candidate-1m
+  Time (mean ± σ):      1.418 s ±  0.233 s    [User: 0.026 s, System: 0.200 s]
+  Range (min … max):    1.139 s …  1.764 s    7 runs
+ 
+Benchmark 2: current-1m
+  Time (mean ± σ):      2.142 s ±  0.337 s    [User: 0.026 s, System: 0.192 s]
+  Range (min … max):    1.815 s …  2.808 s    7 runs
+ 
+Summary
+  candidate-1m ran
+    1.51 ± 0.34 times faster than current-1m

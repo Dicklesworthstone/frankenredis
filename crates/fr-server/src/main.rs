@@ -58,6 +58,7 @@ const WRITER_QUEUE_BOUND: usize = 1024;
 const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
 const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
 const MAX_FRAMES_PER_CLIENT_TICK: usize = 4096;
+const MAX_REPLY_BYTES_PER_CLIENT_TICK: usize = 16 * 1024 * 1024;
 const DIRECT_OWNED_SET_MIN_VALUE: usize = 32 * 1024;
 const DIRECT_OWNED_SET_CHUNK: usize = 64 * 1024;
 
@@ -2425,6 +2426,11 @@ fn process_buffered_frames(
         }
 
         if processed_frames >= MAX_FRAMES_PER_CLIENT_TICK {
+            budget_exhausted = true;
+            break;
+        }
+
+        if processed_frames > 0 && conn.write_buf.len() >= MAX_REPLY_BYTES_PER_CLIENT_TICK {
             budget_exhausted = true;
             break;
         }

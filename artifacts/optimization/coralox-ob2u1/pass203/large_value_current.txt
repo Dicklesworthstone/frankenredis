@@ -1,0 +1,18 @@
+==============================================================================
+SET val=      64B  fr=  4167200 op/s (   267 MB/s)  redis=  2760242 (   177 MB/s)  ratio=1.51x
+SET val=    1024B  fr=  2783192 op/s (  2850 MB/s)  redis=   800527 (   820 MB/s)  ratio=3.48x
+SET val=    4096B  fr=   707136 op/s (  2896 MB/s)  redis=   377114 (  1545 MB/s)  ratio=1.88x
+SET val=   16384B  fr=   191838 op/s (  3143 MB/s)  redis=   126125 (  2066 MB/s)  ratio=1.52x
+SET val=   65536B  fr=    62527 op/s (  4098 MB/s)  redis=    31567 (  2069 MB/s)  ratio=1.98x
+SET val=  262144B  fr=    18075 op/s (  4738 MB/s)  redis=    17743 (  4651 MB/s)  ratio=1.02x
+SET val= 1048576B  fr=     3520 op/s (  3691 MB/s)  redis=     4628 (  4853 MB/s)  ratio=0.76x  <-- below min
+==============================================================================
+GET val=      64B  fr=  6592910 op/s (   422 MB/s)  redis=  3571801 (   229 MB/s)  ratio=1.85x
+GET val=    1024B  fr=  3132398 op/s (  3208 MB/s)  redis=   931154 (   954 MB/s)  ratio=3.36x
+GET val=    4096B  fr=   664879 op/s (  2723 MB/s)  redis=   268868 (  1101 MB/s)  ratio=2.47x
+GET val=   16384B  fr=   100386 op/s (  1645 MB/s)  redis=    69846 (  1144 MB/s)  ratio=1.44x
+GET val=   65536B  fr=    23495 op/s (  1540 MB/s)  redis=    22473 (  1473 MB/s)  ratio=1.05x
+GET val=  262144B  fr=     3809 op/s (   999 MB/s)  redis=     6121 (  1604 MB/s)  ratio=0.62x  <-- below min
+GET val= 1048576B  fr=      678 op/s (   711 MB/s)  redis=     1444 (  1514 MB/s)  ratio=0.47x  <-- below min
+==============================================================================
+3 (op,size) below 0.9x (large-value framing gap, bead largeval-bigbulk-zerocopy-qesp3): SET 1048576B=0.76x, GET 262144B=0.62x, GET 1048576B=0.47x
