@@ -24264,9 +24264,32 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // not appear when the parity baseline is 7.2.4. Earlier code
         // (br-frankenredis-25re) appended it unconditionally, breaking
         // alignment with `redis-cli DEBUG OBJECT` against vendored.
-        let debug_info = format!(
+        let mut debug_info = format!(
             "Value at:0x0 refcount:{refcount} encoding:{encoding} serializedlength:{serialized_len} lru:{lru_clock} lru_seconds_idle:{idle_secs}"
         );
+        // (frankenredis debugobj-quicklist) Upstream debug.c::debugCommand
+        // appends quicklist-specific fields for OBJ_ENCODING_QUICKLIST lists:
+        //   ql_nodes:%d ql_avg_node:%.2f ql_listpack_max:%d ql_compressed:%d
+        //   ql_uncompressed_size:%zu
+        // ql_nodes / ql_uncompressed_size come from the synthesized quicklist
+        // node layout (byte-identical to DUMP); ql_avg_node = count / nodes;
+        // ql_listpack_max = the list-max-listpack-size config; ql_compressed is
+        // 0 (fr does not LZF-compress interior nodes, matching the default
+        // list-compress-depth 0). Listpack-encoded (small) lists get no suffix.
+        if encoding == "quicklist"
+            && let Some((ql_nodes, count, ql_uncompressed_size)) =
+                store.list_quicklist_debug_stats(key)
+        {
+            let ql_avg_node = if ql_nodes > 0 {
+                count as f64 / ql_nodes as f64
+            } else {
+                0.0
+            };
+            let ql_listpack_max = store.list_max_listpack_size;
+            debug_info.push_str(&format!(
+                " ql_nodes:{ql_nodes} ql_avg_node:{ql_avg_node:.2} ql_listpack_max:{ql_listpack_max} ql_compressed:0 ql_uncompressed_size:{ql_uncompressed_size}"
+            ));
+        }
         // (frankenredis-gmqk1) Upstream debug.c::debugCommand uses
         // addReplyStatusFormat which emits a SimpleString frame
         // ("+...\r\n"), not a BulkString. Same wire-shape rule as the
@@ -53313,6 +53336,61 @@ mod tests {
         assert!(info.contains("serializedlength:"), "{info}");
         assert!(info.contains("lru:"), "{info}");
         assert!(info.contains("lru_seconds_idle:"), "{info}");
+        // A string value carries no quicklist suffix.
+        assert!(!info.contains("ql_nodes:"), "{info}");
+    }
+
+    #[test]
+    fn debug_object_quicklist_emits_ql_fields() {
+        // (frankenredis-debugobj-quicklist) Upstream debug.c appends
+        // `ql_nodes:%d ql_avg_node:%.2f ql_listpack_max:%d ql_compressed:%d
+        // ql_uncompressed_size:%zu` for quicklist-encoded lists. fr previously
+        // ended at lru_seconds_idle for all encodings.
+        let mut store = Store::new();
+        // 200 x 100-byte elements -> quicklist (3 nodes under -2/8KiB cap),
+        // byte-matched to vendored redis 7.2.4 DEBUG OBJECT.
+        let mut argv = vec![b"RPUSH".to_vec(), b"ql".to_vec()];
+        argv.extend((0..200).map(|_| vec![b'x'; 100]));
+        dispatch_argv(&argv, &mut store, 0).expect("rpush");
+
+        let out = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"ql".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug object ql");
+        let RespFrame::SimpleString(info) = out else {
+            panic!("expected SimpleString"); // ubs:ignore — AI triage
+        };
+        assert!(info.contains("encoding:quicklist"), "{info}");
+        assert!(info.contains("ql_nodes:3"), "{info}");
+        assert!(info.contains("ql_avg_node:66.67"), "{info}");
+        assert!(info.contains("ql_listpack_max:-2"), "{info}");
+        assert!(info.contains("ql_compressed:0"), "{info}");
+        assert!(info.contains("ql_uncompressed_size:20621"), "{info}");
+        // Field order matches upstream: suffix follows lru_seconds_idle.
+        let idle = info.find("lru_seconds_idle:").expect("idle field");
+        let qln = info.find("ql_nodes:").expect("ql_nodes field");
+        assert!(qln > idle, "ql_ suffix must follow lru_seconds_idle: {info}");
+
+        // A small listpack-encoded list carries no quicklist suffix.
+        dispatch_argv(
+            &[b"RPUSH".to_vec(), b"sl".to_vec(), b"a".to_vec(), b"b".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("rpush small");
+        let small = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"sl".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug object small");
+        let RespFrame::SimpleString(small_info) = small else {
+            panic!("expected SimpleString"); // ubs:ignore — AI triage
+        };
+        assert!(small_info.contains("encoding:listpack"), "{small_info}");
+        assert!(!small_info.contains("ql_nodes:"), "{small_info}");
     }
 
     /// (frankenredis-debugobjlru) `lru` and `lru_seconds_idle` are

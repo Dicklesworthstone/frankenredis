@@ -19682,6 +19682,21 @@ impl Store {
         self.dump_key(key, now_ms).map(|bytes| bytes.len() - 11)
     }
 
+    /// (frankenredis DEBUG OBJECT quicklist fields) For a list value, return
+    /// `(ql_nodes, element_count, ql_uncompressed_size)` from the same
+    /// synthesized quicklist node layout DUMP emits. Read-only (no keyspace
+    /// stat bump — DEBUG OBJECT already recorded its lookup). Returns None when
+    /// the key is absent or not a list.
+    pub fn list_quicklist_debug_stats(&self, key: &[u8]) -> Option<(usize, usize, usize)> {
+        let entry = self.entries.get(key)?;
+        let Value::List(list) = &entry.value else {
+            return None;
+        };
+        let (nodes, uncompressed_size) =
+            quicklist_node_stats(list, self.list_max_listpack_size);
+        Some((nodes, list.len(), uncompressed_size))
+    }
+
     /// Serialize a key's value for DUMP. Returns None if key doesn't exist.
     /// Format: [type_byte][payload][2-byte RDB version][8-byte CRC64].
     pub fn dump_key(&mut self, key: &[u8], now_ms: u64) -> Option<Vec<u8>> {
@@ -20661,6 +20676,63 @@ fn encode_dump_quicklist2(
         }
     }
     Some(())
+}
+
+/// (frankenredis DEBUG OBJECT quicklist fields) Count the synthesized
+/// quicklist nodes and the total uncompressed listpack byte size for a list,
+/// mirroring `encode_dump_quicklist2`'s node splitting EXACTLY so DEBUG
+/// OBJECT's `ql_nodes` / `ql_uncompressed_size` match upstream
+/// debug.c::debugCommand byte-for-byte (each packed node contributes its
+/// `lpBytes` listpack size; a plain node contributes its raw element size).
+fn quicklist_node_stats(list: &ListValue, list_max_listpack_size: i64) -> (usize, usize) {
+    if list.is_empty() {
+        return (0, 0);
+    }
+    if let Some(chunks) = list.retained_listpack_chunks()
+        && retained_quicklist2_chunks_match_dump_rules(&chunks, list_max_listpack_size)
+    {
+        let total: usize = chunks.iter().map(|chunk| chunk.bytes.len()).sum();
+        return (chunks.len(), total);
+    }
+
+    let mut nodes: usize = 0;
+    let mut total: usize = 0;
+    let mut packed_len: usize = 0;
+    let mut packed_bytes = LISTPACK_FRAME_OVERHEAD;
+    for item in list.iter() {
+        if quicklist_plain_node_required(item, list_max_listpack_size) {
+            if packed_len > 0 {
+                nodes += 1;
+                total += packed_bytes;
+                packed_len = 0;
+                packed_bytes = LISTPACK_FRAME_OVERHEAD;
+            }
+            nodes += 1;
+            total += item.len();
+            continue;
+        }
+        let entry_bytes = listpack_entry_encoded_len(item);
+        if packed_len > 0
+            && !quicklist_packed_node_accepts(
+                packed_len,
+                packed_bytes,
+                item.len(),
+                list_max_listpack_size,
+            )
+        {
+            nodes += 1;
+            total += packed_bytes;
+            packed_len = 0;
+            packed_bytes = LISTPACK_FRAME_OVERHEAD;
+        }
+        packed_len += 1;
+        packed_bytes += entry_bytes;
+    }
+    if packed_len > 0 {
+        nodes += 1;
+        total += packed_bytes;
+    }
+    (nodes, total)
 }
 
 fn retained_quicklist2_chunks_match_dump_rules(
