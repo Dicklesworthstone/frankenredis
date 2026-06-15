@@ -121,6 +121,13 @@ def main():
             ok, (dm, dr) = digests_converge(BASE, BASE + 1)
             if not ok:
                 failures.append(("fr-master<-redis-replica online", dm, dr))
+            # WAIT durability-ack: fr master must report the 1 connected replica
+            # acknowledging the latest write offset (clients gate write durability
+            # on this). WAIT 1 <timeout> -> :1 once the redis replica ACKs.
+            q(BASE, ["SET", "wait_probe", "v"])
+            w = q(BASE, ["WAIT", "1", "2000"]).strip()
+            if w != b":1":
+                failures.append(("fr-master WAIT 1 (replica ack)", b":1", w))
 
         # ---- phase 2: redis master, fr replica ----
         procs.append(subprocess.Popen(
@@ -163,7 +170,8 @@ def main():
             print(f"  [{phase}]\n    master={m}\n    replica={r}")
         sys.exit(1)
     print("PASS - replication wire-compatible fr <-> redis 7.2.4 both roles"
-          " (full PSYNC resync + online propagation, DEBUG DIGEST identical)")
+          " (full PSYNC resync + online propagation + WAIT replica-ack,"
+          " DEBUG DIGEST identical)")
 
 
 main()
