@@ -1,0 +1,4 @@
+68a56baf97a6f37f1c81e3c7f7ce6bd86228246906ed38254fbf6a9010ccb7e7  artifacts/optimization/coralox-pass208-value-reuse/golden-clean-summary.txt
+353be5f5f8508695c177600f99d21d83d05275d0e46d502c8bdcdca83d9cd071  artifacts/optimization/coralox-pass208-value-reuse/golden-baseline.sha256
+353be5f5f8508695c177600f99d21d83d05275d0e46d502c8bdcdca83d9cd071  artifacts/optimization/coralox-pass208-value-reuse/golden-candidate.sha256
+353be5f5f8508695c177600f99d21d83d05275d0e46d502c8bdcdca83d9cd071  artifacts/optimization/coralox-pass208-value-reuse/golden-redis.sha256
