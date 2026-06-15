@@ -615,7 +615,11 @@ impl PlainRankCmd {
 }
 
 fn plain_rank_owned_argv(cmd: PlainRankCmd, key: &[u8], member: &[u8]) -> Vec<Vec<u8>> {
-    vec![cmd.name_upper().as_bytes().to_vec(), key.to_vec(), member.to_vec()]
+    vec![
+        cmd.name_upper().as_bytes().to_vec(),
+        key.to_vec(),
+        member.to_vec(),
+    ]
 }
 
 /// Build the RESP reply for a no-count ZPOPMIN/ZPOPMAX from the store result,
@@ -774,10 +778,7 @@ fn plain_memory_usage_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"MEMORY".to_vec(), b"USAGE".to_vec(), key.to_vec()]
 }
 
-fn plain_bitcount_owned_argv(
-    key: &[u8],
-    range: PlainBitcountRange<'_>,
-) -> Vec<Vec<u8>> {
+fn plain_bitcount_owned_argv(key: &[u8], range: PlainBitcountRange<'_>) -> Vec<Vec<u8>> {
     let mut argv = vec![b"BITCOUNT".to_vec(), key.to_vec()];
     if let Some((start, end, unit)) = range {
         argv.push(start.to_vec());
@@ -6182,7 +6183,10 @@ impl Runtime {
         // (frankenredis-b8z6y) Push unconditionally; the caller dedups once
         // (O(K)) at flush time. The old per-add `iter().any(== key)` rescan made
         // building a K-key invalidation list O(K^2).
-        invalidations.entry(target_id).or_default().push(key.to_vec());
+        invalidations
+            .entry(target_id)
+            .or_default()
+            .push(key.to_vec());
     }
 
     fn refresh_client_tracking_bcast_membership(
@@ -6717,14 +6721,13 @@ impl Runtime {
                 // as SIG_IGN — so clear the pid (treating it as a failed save) to
                 // avoid a permanently stuck "Background save already in progress".
                 // (frankenredis-bgreap) EINTR/other -1 is left to retry next tick.
-                let child_gone = res < 0
-                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
+                let child_gone =
+                    res < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
                 if res == pid || child_gone {
                     self.server.rdb_bgsave_pid = None;
                     self.server.rdb_bgsave_start_time_sec = None;
-                    let success = res == pid
-                        && libc::WIFEXITED(status)
-                        && libc::WEXITSTATUS(status) == 0;
+                    let success =
+                        res == pid && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
                     self.server.store.record_bgsave_status(success);
                 }
             }
@@ -6733,14 +6736,13 @@ impl Runtime {
                 let res = libc::waitpid(pid, &mut status, libc::WNOHANG);
                 // (frankenredis-bgreap) Same ECHILD-clears-stuck-state handling as
                 // the bgsave branch above.
-                let child_gone = res < 0
-                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
+                let child_gone =
+                    res < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
                 if res == pid || child_gone {
                     self.server.aof_rewrite_pid = None;
                     self.server.aof_rewrite_start_time_sec = None;
-                    let success = res == pid
-                        && libc::WIFEXITED(status)
-                        && libc::WEXITSTATUS(status) == 0;
+                    let success =
+                        res == pid && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
                     self.server.store.record_aof_bgrewrite_status(success);
                 }
             }
@@ -7040,14 +7042,17 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_mset_owned_argv(pairs));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
         if self.server.latency_tracking {
-            self.server.store.record_command_histogram_canonical_with_kind(
-                "mset",
-                elapsed_us,
-                CommandRecordKind::Success,
-            );
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "mset",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
         }
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
             let argv_ref = argv.get_or_insert_with(|| plain_mset_owned_argv(pairs));
@@ -7344,7 +7349,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_getdel_owned_argv(key));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -8093,11 +8099,9 @@ impl Runtime {
             // (frankenredis-par0e) cmd.name_lower() is a static lowercase canonical
             // name — record directly, skipping the per-command re-lowercase +
             // UTF-8 validation, and hitting the lpush/rpush/sadd direct fields.
-            self.server.store.record_command_histogram_canonical_with_kind(
-                cmd.name_lower(),
-                elapsed_us,
-                kind,
-            );
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(cmd.name_lower(), elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -8480,7 +8484,11 @@ impl Runtime {
 
         let resp3 = self.session.resp_protocol_version == 3;
         let start = Instant::now();
-        let reply = match self.server.store.zincrby(key, member.to_vec(), delta, now_ms) {
+        let reply = match self
+            .server
+            .store
+            .zincrby(key, member.to_vec(), delta, now_ms)
+        {
             Ok(score) => {
                 if resp3 {
                     RespFrame::double_from_f64(score)
@@ -8725,11 +8733,9 @@ impl Runtime {
             // (frankenredis-par0e) cmd.name_lower() is a static lowercase canonical
             // name — record directly, skipping the per-command re-lowercase +
             // UTF-8 validation, and hitting the lpush/rpush/sadd direct fields.
-            self.server.store.record_command_histogram_canonical_with_kind(
-                cmd.name_lower(),
-                elapsed_us,
-                kind,
-            );
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(cmd.name_lower(), elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -8919,7 +8925,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_ping_owned_argv(msg));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -9012,7 +9019,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_echo_owned_argv(msg));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -9203,7 +9211,9 @@ impl Runtime {
         }
         let failed = error_reply.is_some();
 
-        self.record_plain_hcoll_borrowed_metrics(key, values, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_hcoll_borrowed_metrics(
+            key, values, elapsed_us, now_ms, packet_id, failed,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -9770,11 +9780,13 @@ impl Runtime {
 
         if self.server.latency_tracking {
             // MGET never returns an error reply.
-            self.server.store.record_command_histogram_canonical_with_kind(
-                "mget",
-                elapsed_us,
-                CommandRecordKind::Success,
-            );
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "mget",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -9882,11 +9894,13 @@ impl Runtime {
 
         if self.server.latency_tracking {
             // EXISTS never returns an error reply.
-            self.server.store.record_command_histogram_canonical_with_kind(
-                "exists",
-                elapsed_us,
-                CommandRecordKind::Success,
-            );
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "exists",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -10164,11 +10178,14 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let started = Instant::now();
-        let result = self.server.store.getrange_with(key, start, end, now_ms, |slice| {
-            if !suppress_reply {
-                encode_bulk_string_slice(Some(slice), resp3, out);
-            }
-        });
+        let result = self
+            .server
+            .store
+            .getrange_with(key, start, end, now_ms, |slice| {
+                if !suppress_reply {
+                    encode_bulk_string_slice(Some(slice), resp3, out);
+                }
+            });
         let elapsed_us = started.elapsed().as_micros() as u64;
         let mut error_reply = None;
         if let Err(err) = result {
@@ -10296,9 +10313,7 @@ impl Runtime {
         if numkeys.saturating_add(2) > MAX_COMMAND_ARITY
             || self.policy.gate.max_array_len < numkeys.saturating_add(2)
             || self.policy.gate.max_bulk_len < b"SINTERCARD".len()
-            || keys
-                .iter()
-                .any(|k| k.len() > self.policy.gate.max_bulk_len)
+            || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
         {
             return None;
         }
@@ -10379,7 +10394,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_sintercard_owned_argv(tail));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -10491,7 +10507,9 @@ impl Runtime {
         };
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_zmscore_borrowed_metrics(key, members, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_zmscore_borrowed_metrics(
+            key, members, elapsed_us, now_ms, packet_id, failed,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -10538,7 +10556,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_zmscore_owned_argv(key, members));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -10625,13 +10644,18 @@ impl Runtime {
         let elapsed_us = start.elapsed().as_micros() as u64;
         let reply = match result {
             Ok(flags) => RespFrame::Array(Some(
-                flags.into_iter().map(|b| RespFrame::Integer(i64::from(b))).collect(),
+                flags
+                    .into_iter()
+                    .map(|b| RespFrame::Integer(i64::from(b)))
+                    .collect(),
             )),
             Err(err) => CommandError::Store(err).to_resp(),
         };
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_smismember_borrowed_metrics(key, members, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_smismember_borrowed_metrics(
+            key, members, elapsed_us, now_ms, packet_id, failed,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -10678,7 +10702,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_smismember_owned_argv(key, members));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -11097,7 +11122,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_getbit_owned_argv(key, offset_arg));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -11226,7 +11252,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_memory_usage_owned_argv(key));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -11328,7 +11355,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_object_encoding_owned_argv(key));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -11583,7 +11611,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_object_stat_owned_argv(cmd, key));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -11663,7 +11692,10 @@ impl Runtime {
         // no COUNT, no MAXLEN) so keyspace-stat accounting is byte-identical —
         // store.lpos records a keyspace hit but lpos_full does not, so they must
         // not be mixed. (cold-cmd audit)
-        let result = self.server.store.lpos_full(key, element, 1, None, 0, now_ms);
+        let result = self
+            .server
+            .store
+            .lpos_full(key, element, 1, None, 0, now_ms);
         let elapsed_us = start.elapsed().as_micros() as u64;
         let reply = match result {
             Ok(positions) => match positions.first() {
@@ -11749,7 +11781,10 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = Instant::now();
-        let result = self.server.store.lpos_full(key, element, rank, None, 0, now_ms);
+        let result = self
+            .server
+            .store
+            .lpos_full(key, element, rank, None, 0, now_ms);
         let elapsed_us = start.elapsed().as_micros() as u64;
         let reply = match result {
             Ok(positions) => match positions.first() {
@@ -11816,7 +11851,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_lpos_owned_argv(key, element, rank));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -11907,7 +11943,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(plain_command_count_owned_argv);
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -12003,7 +12040,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(plain_dbsize_owned_argv);
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -12184,7 +12222,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_bitpos_owned_argv(key, bit_arg, range));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -12259,7 +12298,13 @@ impl Runtime {
                 let start = parse_i64_arg(start_bytes).ok()?;
                 let end = parse_i64_arg(end_bytes).ok()?;
                 match unit_opt {
-                    None => (Some(start), Some(end), fr_store::BitRangeUnit::Byte, false, 4),
+                    None => (
+                        Some(start),
+                        Some(end),
+                        fr_store::BitRangeUnit::Byte,
+                        false,
+                        4,
+                    ),
                     Some(unit_bytes) => {
                         let unit = if unit_bytes.eq_ignore_ascii_case(b"bit") {
                             fr_store::BitRangeUnit::Bit
@@ -12316,7 +12361,9 @@ impl Runtime {
         let elapsed_us = start.elapsed().as_micros() as u64;
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_bitcount_borrowed_metrics(key, range, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_bitcount_borrowed_metrics(
+            key, range, elapsed_us, now_ms, packet_id, failed,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -12362,7 +12409,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_bitcount_owned_argv(key, range));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -12496,7 +12544,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_expire_owned_argv(key, seconds_arg));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -12529,7 +12578,12 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_hstrlen_borrowed(&mut self, key: &[u8], field: &[u8], now_ms: u64) -> bool {
+    fn can_execute_plain_hstrlen_borrowed(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        now_ms: u64,
+    ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"HSTRLEN".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -12575,7 +12629,9 @@ impl Runtime {
         };
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_hstrlen_borrowed_metrics(key, field, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_hstrlen_borrowed_metrics(
+            key, field, elapsed_us, now_ms, packet_id, failed,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -12622,7 +12678,8 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_hstrlen_owned_argv(key, field));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -12966,11 +13023,13 @@ impl Runtime {
                 fr_store::PttlValue::NoExpiry => -1,
                 fr_store::PttlValue::Remaining(ms) => ms.saturating_add(500) / 1000,
             }),
-            PlainKeyMetaCmd::Pttl => RespFrame::Integer(match self.server.store.pttl(key, now_ms) {
-                fr_store::PttlValue::KeyMissing => -2,
-                fr_store::PttlValue::NoExpiry => -1,
-                fr_store::PttlValue::Remaining(ms) => ms,
-            }),
+            PlainKeyMetaCmd::Pttl => {
+                RespFrame::Integer(match self.server.store.pttl(key, now_ms) {
+                    fr_store::PttlValue::KeyMissing => -2,
+                    fr_store::PttlValue::NoExpiry => -1,
+                    fr_store::PttlValue::Remaining(ms) => ms,
+                })
+            }
             PlainKeyMetaCmd::Type => RespFrame::SimpleString(
                 self.server
                     .store
@@ -13025,15 +13084,18 @@ impl Runtime {
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
             let argv_ref = argv.get_or_insert_with(|| plain_keymeta_owned_argv(cmd, key));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
-            self.server.store.record_command_histogram_canonical_with_kind(
-                cmd.name_lower(),
-                elapsed_us,
-                CommandRecordKind::Success,
-            );
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    cmd.name_lower(),
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -13177,11 +13239,9 @@ impl Runtime {
             // (frankenredis-par0e) cmd.name_lower() is a static lowercase canonical
             // name — record directly, skipping the per-command re-lowercase +
             // UTF-8 validation, and hitting the lpush/rpush/sadd direct fields.
-            self.server.store.record_command_histogram_canonical_with_kind(
-                cmd.name_lower(),
-                elapsed_us,
-                kind,
-            );
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(cmd.name_lower(), elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -13437,15 +13497,18 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| plain_rand_member_owned_argv(cmd, key, count));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_rand_member_owned_argv(cmd, key, count));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| plain_rand_member_owned_argv(cmd, key, count));
-            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_rand_member_owned_argv(cmd, key, count));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
         if self.server.latency_tracking {
@@ -13460,7 +13523,8 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| plain_rand_member_owned_argv(cmd, key, count));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_rand_member_owned_argv(cmd, key, count));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -14375,11 +14439,13 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server.store.record_command_histogram_canonical_with_kind(
-                "set",
-                elapsed_us,
-                CommandRecordKind::Success,
-            );
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "set",
+                    elapsed_us,
+                    CommandRecordKind::Success,
+                );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -22457,12 +22523,9 @@ impl Runtime {
             // owned encoder for an all-string keyspace; any non-string value
             // falls back to the full encoder. Mirrors the AOF-base + in-memory
             // snapshot sites that already use this path.
-            let encoded = if let Some(bytes) = try_encode_string_only_rdb_snapshot(
-                &mut self.server.store,
-                now_ms,
-                &aux,
-                &fn_refs,
-            ) {
+            let encoded = if let Some(bytes) =
+                try_encode_string_only_rdb_snapshot(&mut self.server.store, now_ms, &aux, &fn_refs)
+            {
                 bytes
             } else {
                 let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
@@ -23398,9 +23461,7 @@ impl Runtime {
         // when any of those sections is requested, instead of on every command.
         // Other commands leave these store fields untouched, exactly as the
         // borrowed fast paths already do.
-        if section_requested("clients")
-            || section_requested("memory")
-            || section_requested("stats")
+        if section_requested("clients") || section_requested("memory") || section_requested("stats")
         {
             self.refresh_store_info_aggregates();
         }
@@ -25336,7 +25397,9 @@ fn dedup_keys_preserve_order(keys: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
         keys.len(),
         foldhash::quality::RandomState::default(),
     );
-    keys.into_iter().filter(|k| seen.insert(k.clone())).collect()
+    keys.into_iter()
+        .filter(|k| seen.insert(k.clone()))
+        .collect()
 }
 
 fn build_hello_response(protocol_version: i64, client_id: u64) -> RespFrame {
@@ -25650,8 +25713,10 @@ fn apply_rdb_entries_to_store(
                 // Seed the hash with every field, then reinstate per-field
                 // deadlines via hash_field_expires directly so the persist
                 // state round-trips. (br-frankenredis-th7q)
-                let pairs: Vec<(Vec<u8>, Vec<u8>)> =
-                    fields.iter().map(|(f, v, _)| (f.clone(), v.clone())).collect();
+                let pairs: Vec<(Vec<u8>, Vec<u8>)> = fields
+                    .iter()
+                    .map(|(f, v, _)| (f.clone(), v.clone()))
+                    .collect();
                 store
                     .hset_many(&key, pairs, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
@@ -25873,18 +25938,31 @@ mod tests {
         }
         // Edge cases.
         assert_eq!(dedup_keys_preserve_order(vec![]), Vec::<Vec<u8>>::new());
-        assert_eq!(dedup_keys_preserve_order(vec![b"a".to_vec()]), vec![b"a".to_vec()]);
         assert_eq!(
-            dedup_keys_preserve_order(vec![b"a".to_vec(), b"a".to_vec(), b"b".to_vec(), b"a".to_vec()]),
+            dedup_keys_preserve_order(vec![b"a".to_vec()]),
+            vec![b"a".to_vec()]
+        );
+        assert_eq!(
+            dedup_keys_preserve_order(vec![
+                b"a".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"a".to_vec()
+            ]),
             vec![b"a".to_vec(), b"b".to_vec()]
         );
-        assert_eq!(golden, 0x11f7_6ac9_0a1f_4b31, "dedup output fingerprint changed: {golden:#018x}");
+        assert_eq!(
+            golden, 0x11f7_6ac9_0a1f_4b31,
+            "dedup output fingerprint changed: {golden:#018x}"
+        );
 
         if cfg!(debug_assertions) {
             return;
         }
         // Score: all-distinct K-key list — old O(K^2) linear dedup vs new O(K).
-        let big: Vec<Vec<u8>> = (0..20_000u32).map(|i| format!("key:{i:06}").into_bytes()).collect();
+        let big: Vec<Vec<u8>> = (0..20_000u32)
+            .map(|i| format!("key:{i:06}").into_bytes())
+            .collect();
         let reps = 20;
         let t0 = Instant::now();
         let mut acc = 0usize;
@@ -25903,7 +25981,10 @@ mod tests {
         assert_eq!(acc, acc2, "old/new disagree on deduped count");
         let score = old_ns as f64 / new_ns as f64;
         eprintln!("B8Z6Y dedup 20k distinct keys: old={old_ns}ns new={new_ns}ns score={score:.2}x");
-        assert!(score >= 2.0, "O(K) dedup must be >=2.0x vs O(K^2); got {score:.2}x");
+        assert!(
+            score >= 2.0,
+            "O(K) dedup must be >=2.0x vs O(K^2); got {score:.2}x"
+        );
     }
 
     use fr_command::{
@@ -26438,8 +26519,16 @@ mod tests {
             ts += 1;
         }
         // malformed / out-of-range offsets -> defer (None)
-        assert!(direct.execute_plain_getbit_borrowed(b"b", b"notnum", ts).is_none());
-        assert!(direct.execute_plain_getbit_borrowed(b"b", b"-1", ts).is_none());
+        assert!(
+            direct
+                .execute_plain_getbit_borrowed(b"b", b"notnum", ts)
+                .is_none()
+        );
+        assert!(
+            direct
+                .execute_plain_getbit_borrowed(b"b", b"-1", ts)
+                .is_none()
+        );
         assert!(
             direct
                 .execute_plain_getbit_borrowed(b"b", b"4294967296", ts)
@@ -26495,8 +26584,7 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            direct.server.store.stat_keyspace_hits,
-            generic.server.store.stat_keyspace_hits,
+            direct.server.store.stat_keyspace_hits, generic.server.store.stat_keyspace_hits,
             "BITPOS must record a single keyspace hit (no double-count)"
         );
         assert_eq!(
@@ -26557,11 +26645,11 @@ mod tests {
         // Deferral cases: fast path returns None (no side effect); drive both
         // through generic to keep stats in lockstep, then assert the decline.
         let defer: &[BitposBorrowedCase<'_>] = &[
-            (b"s", b"2", &[b"0"]),               // bad bit
-            (b"s", b"1", &[b"nan", b"0"]),       // bad start integer
+            (b"s", b"2", &[b"0"]),                 // bad bit
+            (b"s", b"1", &[b"nan", b"0"]),         // bad start integer
             (b"s", b"1", &[b"0", b"nan", b"BIT"]), // bad end integer
-            (b"s", b"1", &[b"0", b"0", b"NOPE"]), // bad unit
-            (b"missing", b"1", &[b"nan"]),       // missing key short-circuits to -1
+            (b"s", b"1", &[b"0", b"0", b"NOPE"]),  // bad unit
+            (b"missing", b"1", &[b"nan"]),         // missing key short-circuits to -1
         ];
         for (key, bit, tail) in defer {
             let range = match tail {
@@ -26686,10 +26774,10 @@ mod tests {
         // BOTH paths' deferral through generic on each runtime to keep stats in
         // lockstep, then assert the recognizer declines.
         let defer: &[(&[u8], &[&[u8]])] = &[
-            (b"s", &[b"nan", b"0", b"BYTE"]),    // bad start integer
-            (b"s", &[b"0", b"nan", b"BIT"]),     // bad end integer
-            (b"s", &[b"0", b"0", b"NEITHER"]),   // bad unit -> SyntaxError
-            (b"missing", &[b"nan", b"0"]),       // missing key short-circuits to 0
+            (b"s", &[b"nan", b"0", b"BYTE"]),  // bad start integer
+            (b"s", &[b"0", b"nan", b"BIT"]),   // bad end integer
+            (b"s", &[b"0", b"0", b"NEITHER"]), // bad unit -> SyntaxError
+            (b"missing", &[b"nan", b"0"]),     // missing key short-circuits to 0
         ];
         for (key, tail) in defer {
             let range = match tail {
@@ -26766,7 +26854,11 @@ mod tests {
             RespFrame::Integer(0)
         );
         // defer: malformed seconds, and overflow
-        assert!(direct.execute_plain_expire_borrowed(b"a", b"notnum", 1000).is_none());
+        assert!(
+            direct
+                .execute_plain_expire_borrowed(b"a", b"notnum", 1000)
+                .is_none()
+        );
         assert!(
             direct
                 .execute_plain_expire_borrowed(b"a", b"9999999999999999999", 1000)
@@ -26929,15 +27021,16 @@ mod tests {
         let mut generic = Runtime::default_strict();
         for rt in [&mut direct, &mut generic] {
             rt.execute_frame(command(&[b"SET", b"i", b"12345"]), 1);
-            rt.execute_frame(command(&[b"SET", b"s", b"hello world this is not an int"]), 1);
+            rt.execute_frame(
+                command(&[b"SET", b"s", b"hello world this is not an int"]),
+                1,
+            );
             rt.execute_frame(command(&[b"RPUSH", b"l", b"a"]), 1);
             rt.execute_frame(command(&[b"SADD", b"is", b"1", b"2", b"3"]), 1);
             rt.execute_frame(command(&[b"HSET", b"h", b"f", b"v"]), 1);
             rt.execute_frame(command(&[b"ZADD", b"z", b"1", b"a"]), 1);
         }
-        for (ts, key) in
-            (2..).zip([b"i".as_slice(), b"s", b"l", b"is", b"h", b"z", b"missing"])
-        {
+        for (ts, key) in (2..).zip([b"i".as_slice(), b"s", b"l", b"is", b"h", b"z", b"missing"]) {
             let f = direct
                 .execute_plain_object_encoding_borrowed(key, ts)
                 .expect("object encoding fast path should engage");
@@ -26945,8 +27038,7 @@ mod tests {
             assert_eq!(f, g, "key={key:?}");
         }
         assert_eq!(
-            direct.session.last_command_name,
-            generic.session.last_command_name,
+            direct.session.last_command_name, generic.session.last_command_name,
             "container command name must be object|encoding"
         );
         assert_eq!(
@@ -26960,9 +27052,7 @@ mod tests {
         // case-insensitive subcommand still recognized + canonical name
         let mut lc = Runtime::default_strict();
         lc.execute_frame(command(&[b"SET", b"i", b"1"]), 1);
-        assert!(
-            lc.execute_plain_object_encoding_borrowed(b"i", 2).is_some()
-        );
+        assert!(lc.execute_plain_object_encoding_borrowed(b"i", 2).is_some());
         assert_eq!(lc.session.last_command_name, "object|encoding");
     }
 
@@ -27128,11 +27218,7 @@ mod tests {
         assert!(matches!(f, RespFrame::Integer(n) if n > 0));
         assert_eq!(direct.session.last_command_name, "command|count");
         // case-insensitive
-        assert!(
-            direct
-                .execute_plain_command_count_borrowed(3)
-                .is_some()
-        );
+        assert!(direct.execute_plain_command_count_borrowed(3).is_some());
     }
 
     #[test]
@@ -27347,7 +27433,9 @@ mod tests {
         );
         assert_eq!(
             one_out,
-            generic.execute_frame(command(&[b"MGET", b"a"]), 3).to_bytes()
+            generic
+                .execute_frame(command(&[b"MGET", b"a"]), 3)
+                .to_bytes()
         );
 
         assert_eq!(
@@ -27688,7 +27776,10 @@ mod tests {
                 command(&[b"HSET", b"h", b"f1", b"v1", b"f2", b"v2", b"f3", b"v3"]),
                 1,
             );
-            rt.execute_frame(command(&[b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3", b"c"]), 1);
+            rt.execute_frame(
+                command(&[b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3", b"c"]),
+                1,
+            );
             rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1); // wrong type for all three
         }
 
@@ -27766,7 +27857,10 @@ mod tests {
                 command(&[b"HSET", b"h", b"f1", b"v1", b"f2", b"v2", b"f3", b"v3"]),
                 1,
             );
-            rt.execute_frame(command(&[b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3", b"c"]), 1);
+            rt.execute_frame(
+                command(&[b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3", b"c"]),
+                1,
+            );
             rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1); // wrong type
         }
 
@@ -27775,18 +27869,48 @@ mod tests {
         let cases: &[RandMemberCountCase<'_>] = &[
             (PlainRandMemberCmd::Srandmember, b"SRANDMEMBER", b"s", b"3"),
             (PlainRandMemberCmd::Srandmember, b"SRANDMEMBER", b"s", b"-4"),
-            (PlainRandMemberCmd::Srandmember, b"SRANDMEMBER", b"s", b"100"),
+            (
+                PlainRandMemberCmd::Srandmember,
+                b"SRANDMEMBER",
+                b"s",
+                b"100",
+            ),
             (PlainRandMemberCmd::Srandmember, b"SRANDMEMBER", b"s", b"0"),
-            (PlainRandMemberCmd::Srandmember, b"SRANDMEMBER", b"nokey", b"3"),
-            (PlainRandMemberCmd::Srandmember, b"SRANDMEMBER", b"str", b"3"),
+            (
+                PlainRandMemberCmd::Srandmember,
+                b"SRANDMEMBER",
+                b"nokey",
+                b"3",
+            ),
+            (
+                PlainRandMemberCmd::Srandmember,
+                b"SRANDMEMBER",
+                b"str",
+                b"3",
+            ),
             (PlainRandMemberCmd::Hrandfield, b"HRANDFIELD", b"h", b"2"),
             (PlainRandMemberCmd::Hrandfield, b"HRANDFIELD", b"h", b"-5"),
-            (PlainRandMemberCmd::Hrandfield, b"HRANDFIELD", b"nokey", b"2"),
+            (
+                PlainRandMemberCmd::Hrandfield,
+                b"HRANDFIELD",
+                b"nokey",
+                b"2",
+            ),
             (PlainRandMemberCmd::Hrandfield, b"HRANDFIELD", b"str", b"2"),
             (PlainRandMemberCmd::Zrandmember, b"ZRANDMEMBER", b"z", b"2"),
             (PlainRandMemberCmd::Zrandmember, b"ZRANDMEMBER", b"z", b"-6"),
-            (PlainRandMemberCmd::Zrandmember, b"ZRANDMEMBER", b"nokey", b"2"),
-            (PlainRandMemberCmd::Zrandmember, b"ZRANDMEMBER", b"str", b"2"),
+            (
+                PlainRandMemberCmd::Zrandmember,
+                b"ZRANDMEMBER",
+                b"nokey",
+                b"2",
+            ),
+            (
+                PlainRandMemberCmd::Zrandmember,
+                b"ZRANDMEMBER",
+                b"str",
+                b"2",
+            ),
         ];
 
         let mut golden = DefaultHasher::new();
@@ -28640,7 +28764,7 @@ mod tests {
             (b"0", b"4"),
             (b"0", b"-1"),
             (b"-5", b"-1"),
-            (b"-1", b"-5"),   // inverted -> empty bulk
+            (b"-1", b"-5"),    // inverted -> empty bulk
             (b"-100", b"-90"), // fully-negative clamp -> [0..=0]
             (b"100", b"200"),  // out of range -> empty bulk
             (b"6", b"6"),
@@ -28934,9 +29058,21 @@ mod tests {
             ts += 1;
         }
         // defer cases: LIMIT clause, numkeys mismatch, bad numkeys
-        assert!(direct.execute_plain_sintercard_borrowed(&[b"2", b"a", b"b", b"LIMIT", b"1"], ts).is_none());
-        assert!(direct.execute_plain_sintercard_borrowed(&[b"3", b"a", b"b"], ts).is_none());
-        assert!(direct.execute_plain_sintercard_borrowed(&[b"0", b"a"], ts).is_none());
+        assert!(
+            direct
+                .execute_plain_sintercard_borrowed(&[b"2", b"a", b"b", b"LIMIT", b"1"], ts)
+                .is_none()
+        );
+        assert!(
+            direct
+                .execute_plain_sintercard_borrowed(&[b"3", b"a", b"b"], ts)
+                .is_none()
+        );
+        assert!(
+            direct
+                .execute_plain_sintercard_borrowed(&[b"0", b"a"], ts)
+                .is_none()
+        );
         assert_eq!(
             direct.server.store.stat_keyspace_hits,
             generic.server.store.stat_keyspace_hits
@@ -32014,7 +32150,10 @@ mod tests {
             "client must be in subscriber mode after EXEC[SUBSCRIBE]"
         );
         assert!(
-            rt.server.store.subscribed_channels.contains(b"chan".as_slice()),
+            rt.server
+                .store
+                .subscribed_channels
+                .contains(b"chan".as_slice()),
             "EXEC[SUBSCRIBE] must register the channel in the pubsub store"
         );
         match rt.execute_frame(command(&[b"GET", b"k"]), 3) {
@@ -32038,9 +32177,15 @@ mod tests {
             panic!("EXEC reply must be an array, got {exec2:?}");
         };
         let RespFrame::Array(Some(inner)) = &outer[0] else {
-            panic!("queued UNSUBSCRIBE reply must be an array, got {:?}", outer[0]);
+            panic!(
+                "queued UNSUBSCRIBE reply must be an array, got {:?}",
+                outer[0]
+            );
         };
-        assert_eq!(inner[0], RespFrame::BulkString(Some(b"unsubscribe".to_vec())));
+        assert_eq!(
+            inner[0],
+            RespFrame::BulkString(Some(b"unsubscribe".to_vec()))
+        );
         assert_eq!(inner[1], RespFrame::BulkString(None), "channel must be nil");
         assert_eq!(inner[2], RespFrame::Integer(0));
         let _ = rt.swap_session(prev2);
