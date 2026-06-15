@@ -24281,7 +24281,10 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             return Err(debug_subcommand_envelope_error(sub));
         }
         let digest = compute_debug_digest(store, now_ms, None);
-        Ok(RespFrame::BulkString(Some(digest.into_bytes())))
+        // Upstream debug.c::debugCommand emits `addReplyStatus(c, ...)` for
+        // DIGEST — a RESP simple string (`+<hex>\r\n`), not a bulk string.
+        // (frankenredis DEBUG DIGEST reply-type parity)
+        Ok(RespFrame::SimpleString(digest))
     } else if sub.eq_ignore_ascii_case("DIGEST-VALUE") {
         // DEBUG DIGEST-VALUE [key ...] - return an Array of
         // per-key digests. Upstream debug.c::debugCommand:754
@@ -24298,7 +24301,10 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             .map(|key| {
                 let single = [key.as_slice()];
                 let digest = compute_debug_digest(store, now_ms, Some(&single));
-                RespFrame::BulkString(Some(digest.into_bytes()))
+                // Upstream emits `addReplyStatus` per key — an array of RESP
+                // simple strings, not bulk strings. (frankenredis DEBUG
+                // DIGEST-VALUE reply-type parity)
+                RespFrame::SimpleString(digest)
             })
             .collect();
         Ok(RespFrame::Array(Some(frames)))
@@ -45074,10 +45080,10 @@ mod tests {
 
         let digest = dispatch_argv(&[b"DEBUG".to_vec(), b"DIGEST".to_vec()], &mut store, 0)
             .expect("debug digest");
-        let RespFrame::BulkString(Some(digest_bytes)) = digest else {
-            panic!("expected bulk string");
+        // Upstream emits `addReplyStatus` — a RESP simple string.
+        let RespFrame::SimpleString(digest_str) = digest else {
+            panic!("expected simple string");
         };
-        let digest_str = String::from_utf8(digest_bytes).expect("valid utf8");
         // (frankenredis-dbgdiglen) Upstream debug.c::computeDatasetDigest
         // emits a 20-byte SHA1 XOR digest hex-encoded to 40 chars. fr
         // mirrors the frame width via Sha256 truncated to 20 bytes.
@@ -45124,8 +45130,8 @@ mod tests {
 
         // (frankenredis-dbgdigval) DEBUG DIGEST-VALUE returns an
         // Array of per-key digests (one entry per requested key),
-        // matching upstream debug.c. Each entry is a BulkString of
-        // hex digits.
+        // matching upstream debug.c. Each entry is a SimpleString of
+        // hex digits (upstream `addReplyStatus` per key).
         let digest = dispatch_argv(
             &[b"DEBUG".to_vec(), b"DIGEST-VALUE".to_vec(), b"foo".to_vec()],
             &mut store,
@@ -45136,10 +45142,9 @@ mod tests {
             panic!("expected array of digests"); // ubs:ignore — AI triage
         };
         assert_eq!(entries.len(), 1);
-        let RespFrame::BulkString(Some(digest_bytes)) = &entries[0] else {
-            panic!("expected bulk string per-key digest"); // ubs:ignore — AI triage
+        let RespFrame::SimpleString(digest_str) = &entries[0] else {
+            panic!("expected simple string per-key digest"); // ubs:ignore — AI triage
         };
-        let digest_str = std::str::from_utf8(digest_bytes).expect("valid utf8");
         assert_eq!(digest_str.len(), 40);
 
         // DIGEST-VALUE with multiple keys returns one entry per key.
@@ -45159,10 +45164,10 @@ mod tests {
         };
         assert_eq!(multi_entries.len(), 2);
         for entry in &multi_entries {
-            assert!(matches!(entry, RespFrame::BulkString(Some(b)) if b.len() == 40));
+            assert!(matches!(entry, RespFrame::SimpleString(s) if s.len() == 40));
         }
 
-        // Digest of nonexistent key should still emit a BulkString
+        // Digest of nonexistent key should still emit a SimpleString
         // entry so the array shape stays predictable.
         let digest_nokey = dispatch_argv(
             &[
@@ -45178,7 +45183,7 @@ mod tests {
             panic!("expected array"); // ubs:ignore — AI triage
         };
         assert_eq!(missing.len(), 1);
-        assert!(matches!(&missing[0], RespFrame::BulkString(Some(_))));
+        assert!(matches!(&missing[0], RespFrame::SimpleString(_)));
 
         // (frankenredis-dbgdigvempty) DEBUG DIGEST-VALUE with no keys
         // is gated by `c->argc >= 2` upstream and emits
@@ -45212,7 +45217,7 @@ mod tests {
             .expect("debug digest");
         assert_eq!(
             one_key_digest,
-            RespFrame::BulkString(Some(b"f501b7e652f1e4874b8a6890245c152b5b89fe96".to_vec()))
+            RespFrame::SimpleString("f501b7e652f1e4874b8a6890245c152b5b89fe96".to_string())
         );
 
         let k1_value = dispatch_argv(
@@ -45223,9 +45228,9 @@ mod tests {
         .expect("debug digest-value k1");
         assert_eq!(
             k1_value,
-            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(
-                b"1b39f6ecf00cfce8fa56c4c62c40126162d878fe".to_vec()
-            ))]))
+            RespFrame::Array(Some(vec![RespFrame::SimpleString(
+                "1b39f6ecf00cfce8fa56c4c62c40126162d878fe".to_string()
+            )]))
         );
 
         dispatch_argv(
@@ -45238,7 +45243,7 @@ mod tests {
             .expect("debug digest after k2");
         assert_eq!(
             two_key_digest,
-            RespFrame::BulkString(Some(b"91720c7142b6dfec5df4d6409a6f52e2da2a829f".to_vec()))
+            RespFrame::SimpleString("91720c7142b6dfec5df4d6409a6f52e2da2a829f".to_string())
         );
         let k2_value = dispatch_argv(
             &[b"DEBUG".to_vec(), b"DIGEST-VALUE".to_vec(), b"k2".to_vec()],
@@ -45248,9 +45253,9 @@ mod tests {
         .expect("debug digest-value k2");
         assert_eq!(
             k2_value,
-            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(
-                b"becefaf9bf124b8996f547b6b4876ef6a6b60c37".to_vec()
-            ))]))
+            RespFrame::Array(Some(vec![RespFrame::SimpleString(
+                "becefaf9bf124b8996f547b6b4876ef6a6b60c37".to_string()
+            )]))
         );
     }
 
@@ -45320,10 +45325,9 @@ mod tests {
         let mut store = Store::new();
         let digest = dispatch_argv(&[b"DEBUG".to_vec(), b"DIGEST".to_vec()], &mut store, 0)
             .expect("debug digest empty");
-        let RespFrame::BulkString(Some(digest_bytes)) = digest else {
-            panic!("expected bulk string");
+        let RespFrame::SimpleString(digest_str) = digest else {
+            panic!("expected simple string");
         };
-        let digest_str = String::from_utf8(digest_bytes).expect("valid utf8");
         assert_eq!(digest_str.len(), 40);
     }
 

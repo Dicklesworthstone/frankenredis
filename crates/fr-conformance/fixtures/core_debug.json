@@ -261,7 +261,7 @@
         "DIGEST"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_simple"
       }
     },
     {
