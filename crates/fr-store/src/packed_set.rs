@@ -1102,8 +1102,9 @@ impl<'a> Iterator for PackedListIter<'a> {
 }
 
 use std::collections::VecDeque;
-use std::ops::Range;
 use std::sync::Arc;
+
+use fr_persist::listpack::ListpackValueSpan;
 
 /// Storage for a list: a packed buffer while small, promoting to a chunked COW
 /// deque (which keeps O(1) ends for large lists, redis's quicklist regime) past
@@ -1139,9 +1140,9 @@ enum ListChunk {
     Owned {
         elems: Arc<Vec<Vec<u8>>>,
     },
-    ListpackStrings {
+    Listpack {
         bytes: Arc<Vec<u8>>,
-        ranges: Arc<Vec<Range<usize>>>,
+        entries: Arc<Vec<ListpackValueSpan>>,
     },
 }
 
@@ -1152,17 +1153,17 @@ impl ListChunk {
         }
     }
 
-    fn from_listpack_strings(bytes: Vec<u8>, ranges: Vec<Range<usize>>) -> Self {
-        Self::ListpackStrings {
+    fn from_listpack(bytes: Vec<u8>, entries: Vec<ListpackValueSpan>) -> Self {
+        Self::Listpack {
             bytes: Arc::new(bytes),
-            ranges: Arc::new(ranges),
+            entries: Arc::new(entries),
         }
     }
 
     fn len(&self) -> usize {
         match self {
             Self::Owned { elems } => elems.len(),
-            Self::ListpackStrings { ranges, .. } => ranges.len(),
+            Self::Listpack { entries, .. } => entries.len(),
         }
     }
 
@@ -1173,32 +1174,32 @@ impl ListChunk {
     fn get(&self, idx: usize) -> Option<&[u8]> {
         match self {
             Self::Owned { elems } => elems.get(idx).map(Vec::as_slice),
-            Self::ListpackStrings { bytes, ranges } => {
-                ranges.get(idx).map(|range| &bytes[range.clone()])
+            Self::Listpack { bytes, entries } => {
+                entries.get(idx).map(|entry| entry.as_bytes(bytes))
             }
         }
     }
 
     fn make_mut(&mut self) -> &mut Vec<Vec<u8>> {
-        if let Self::ListpackStrings { bytes, ranges } = self {
-            let elems = ranges
+        if let Self::Listpack { bytes, entries } = self {
+            let elems = entries
                 .iter()
-                .map(|range| bytes[range.clone()].to_vec())
+                .map(|entry| entry.as_bytes(bytes).to_vec())
                 .collect();
             *self = Self::from_vec(elems);
         }
         match self {
             Self::Owned { elems } => Arc::make_mut(elems),
-            Self::ListpackStrings { .. } => unreachable!("packed listpack node was materialized"),
+            Self::Listpack { .. } => unreachable!("packed listpack node was materialized"),
         }
     }
 
     fn iter(&self) -> ListChunkIter<'_> {
         match self {
             Self::Owned { elems } => ListChunkIter::Owned(elems.iter()),
-            Self::ListpackStrings { bytes, ranges } => ListChunkIter::ListpackStrings {
+            Self::Listpack { bytes, entries } => ListChunkIter::Listpack {
                 bytes,
-                ranges: ranges.iter(),
+                entries: entries.iter(),
             },
         }
     }
@@ -1209,11 +1210,11 @@ impl ListChunk {
                 let start = start.min(elems.len());
                 ListChunkIter::Owned(elems[start..].iter())
             }
-            Self::ListpackStrings { bytes, ranges } => {
-                let start = start.min(ranges.len());
-                ListChunkIter::ListpackStrings {
+            Self::Listpack { bytes, entries } => {
+                let start = start.min(entries.len());
+                ListChunkIter::Listpack {
                     bytes,
-                    ranges: ranges[start..].iter(),
+                    entries: entries[start..].iter(),
                 }
             }
         }
@@ -1222,9 +1223,9 @@ impl ListChunk {
     fn iter_rev(&self) -> ListChunkRevIter<'_> {
         match self {
             Self::Owned { elems } => ListChunkRevIter::Owned(elems.iter().rev()),
-            Self::ListpackStrings { bytes, ranges } => ListChunkRevIter::ListpackStrings {
+            Self::Listpack { bytes, entries } => ListChunkRevIter::Listpack {
                 bytes,
-                ranges: ranges.iter().rev(),
+                entries: entries.iter().rev(),
             },
         }
     }
@@ -1238,7 +1239,7 @@ struct ChunkedList {
 
 pub(crate) struct RetainedListpackChunk<'a> {
     pub(crate) bytes: &'a [u8],
-    pub(crate) ranges: &'a [Range<usize>],
+    pub(crate) entries: &'a [ListpackValueSpan],
 }
 
 impl ChunkedList {
@@ -1442,10 +1443,9 @@ impl ChunkedList {
 
 pub(crate) enum RestoredListNode {
     Plain(Vec<u8>),
-    Elements(Vec<Vec<u8>>),
-    ListpackStrings {
+    Listpack {
         bytes: Vec<u8>,
-        ranges: Vec<Range<usize>>,
+        entries: Vec<ListpackValueSpan>,
     },
 }
 
@@ -1471,20 +1471,11 @@ impl ChunkedList {
                         plain_chunk = Vec::with_capacity(LIST_CHUNK_TARGET);
                     }
                 }
-                RestoredListNode::Elements(elems) => {
-                    for elem in elems {
-                        plain_chunk.push(elem);
-                        if plain_chunk.len() == LIST_CHUNK_TARGET {
-                            flush_restore_plain_chunk(&mut out, &mut plain_chunk);
-                            plain_chunk = Vec::with_capacity(LIST_CHUNK_TARGET);
-                        }
-                    }
-                }
-                RestoredListNode::ListpackStrings { bytes, ranges } => {
+                RestoredListNode::Listpack { bytes, entries } => {
                     flush_restore_plain_chunk(&mut out, &mut plain_chunk);
-                    out.len += ranges.len();
+                    out.len += entries.len();
                     out.chunks
-                        .push_back(ListChunk::from_listpack_strings(bytes, ranges));
+                        .push_back(ListChunk::from_listpack(bytes, entries));
                 }
             }
         }
@@ -1536,9 +1527,9 @@ impl<'a> Iterator for ChunkedListIter<'a> {
 
 enum ListChunkIter<'a> {
     Owned(std::slice::Iter<'a, Vec<u8>>),
-    ListpackStrings {
+    Listpack {
         bytes: &'a [u8],
-        ranges: std::slice::Iter<'a, Range<usize>>,
+        entries: std::slice::Iter<'a, ListpackValueSpan>,
     },
 }
 
@@ -1548,9 +1539,7 @@ impl<'a> Iterator for ListChunkIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Owned(iter) => iter.next().map(Vec::as_slice),
-            Self::ListpackStrings { bytes, ranges } => {
-                ranges.next().map(|range| &bytes[range.clone()])
-            }
+            Self::Listpack { bytes, entries } => entries.next().map(|entry| entry.as_bytes(bytes)),
         }
     }
 }
@@ -1580,9 +1569,9 @@ impl<'a> Iterator for ChunkedListRevIter<'a> {
 
 enum ListChunkRevIter<'a> {
     Owned(std::iter::Rev<std::slice::Iter<'a, Vec<u8>>>),
-    ListpackStrings {
+    Listpack {
         bytes: &'a [u8],
-        ranges: std::iter::Rev<std::slice::Iter<'a, Range<usize>>>,
+        entries: std::iter::Rev<std::slice::Iter<'a, ListpackValueSpan>>,
     },
 }
 
@@ -1592,9 +1581,7 @@ impl<'a> Iterator for ListChunkRevIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Owned(iter) => iter.next().map(Vec::as_slice),
-            Self::ListpackStrings { bytes, ranges } => {
-                ranges.next().map(|range| &bytes[range.clone()])
-            }
+            Self::Listpack { bytes, entries } => entries.next().map(|entry| entry.as_bytes(bytes)),
         }
     }
 }
@@ -2056,10 +2043,10 @@ impl ListValue {
         let mut chunks = Vec::with_capacity(list.chunks.len());
         for chunk in &list.chunks {
             match chunk {
-                ListChunk::ListpackStrings { bytes, ranges } if !ranges.is_empty() => {
+                ListChunk::Listpack { bytes, entries } if !entries.is_empty() => {
                     chunks.push(RetainedListpackChunk {
                         bytes: bytes.as_slice(),
-                        ranges: ranges.as_slice(),
+                        entries: entries.as_slice(),
                     });
                 }
                 _ => return None,

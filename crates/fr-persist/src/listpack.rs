@@ -49,6 +49,71 @@ impl ListpackEntry {
     }
 }
 
+/// Redis-observable listpack value without copying string payload bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListpackValueSpan {
+    /// Byte-string entry borrowed from the original listpack payload.
+    String(Range<usize>),
+    /// Integer entry rendered as Redis's decimal byte-string value.
+    Integer(ListpackIntegerBytes),
+}
+
+/// Inline decimal representation for any i64 (`i64::MIN` is 20 bytes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListpackIntegerBytes {
+    bytes: [u8; 20],
+    len: u8,
+}
+
+impl ListpackIntegerBytes {
+    fn new(value: i64) -> Self {
+        let mut scratch = [0u8; 20];
+        let mut magnitude = value.unsigned_abs();
+        let mut start = scratch.len();
+        if magnitude == 0 {
+            start -= 1;
+            scratch[start] = b'0';
+        } else {
+            while magnitude != 0 {
+                start -= 1;
+                scratch[start] = b'0' + (magnitude % 10) as u8;
+                magnitude /= 10;
+            }
+        }
+        if value < 0 {
+            start -= 1;
+            scratch[start] = b'-';
+        }
+
+        let len = scratch.len() - start;
+        let mut bytes = [0u8; 20];
+        bytes[..len].copy_from_slice(&scratch[start..]);
+        Self {
+            bytes,
+            len: len as u8,
+        }
+    }
+
+    #[must_use]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+}
+
+impl ListpackValueSpan {
+    fn integer(value: i64) -> Self {
+        Self::Integer(ListpackIntegerBytes::new(value))
+    }
+
+    #[must_use]
+    pub fn as_bytes<'a>(&'a self, listpack: &'a [u8]) -> &'a [u8] {
+        match self {
+            Self::String(range) => &listpack[range.clone()],
+            Self::Integer(bytes) => bytes.as_slice(),
+        }
+    }
+}
+
 /// Decoder failure modes. Narrow set — callers either succeed or reject.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListpackError {
@@ -423,6 +488,139 @@ fn decode_string_entry_range(
     }
 }
 
+fn decode_entry_value_span(
+    data: &[u8],
+    cursor: usize,
+) -> Result<(ListpackValueSpan, usize), ListpackError> {
+    let first = *data.get(cursor).ok_or(ListpackError::TruncatedEntry)?;
+
+    if first & 0x80 == 0 {
+        let value = i64::from(first & 0x7F);
+        let data_len = 1;
+        let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+        return Ok((ListpackValueSpan::integer(value), entry_len));
+    }
+    if first & 0xC0 == 0x80 {
+        let slen = (first & 0x3F) as usize;
+        let start = cursor + 1;
+        let end = start
+            .checked_add(slen)
+            .ok_or(ListpackError::StringLengthOverflow)?;
+        if end > data.len() {
+            return Err(ListpackError::TruncatedEntry);
+        }
+        let data_len = 1 + slen;
+        let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+        return Ok((ListpackValueSpan::String(start..end), entry_len));
+    }
+    if first & 0xE0 == 0xC0 {
+        let second = *data.get(cursor + 1).ok_or(ListpackError::TruncatedEntry)?;
+        let raw = (u16::from(first & 0x1F) << 8) | u16::from(second);
+        let signed = if raw & 0x1000 != 0 {
+            (raw as i64) - 0x2000
+        } else {
+            raw as i64
+        };
+        let data_len = 2;
+        let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+        return Ok((ListpackValueSpan::integer(signed), entry_len));
+    }
+    if first & 0xF0 == 0xE0 {
+        let second = *data.get(cursor + 1).ok_or(ListpackError::TruncatedEntry)?;
+        let slen = ((u32::from(first & 0x0F) << 8) | u32::from(second)) as usize;
+        let start = cursor + 2;
+        let end = start
+            .checked_add(slen)
+            .ok_or(ListpackError::StringLengthOverflow)?;
+        if end > data.len() {
+            return Err(ListpackError::TruncatedEntry);
+        }
+        let data_len = 2 + slen;
+        let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+        return Ok((ListpackValueSpan::String(start..end), entry_len));
+    }
+    match first {
+        0xF0 => {
+            if cursor + 5 > data.len() {
+                return Err(ListpackError::TruncatedEntry);
+            }
+            let slen = u32::from_le_bytes([
+                data[cursor + 1],
+                data[cursor + 2],
+                data[cursor + 3],
+                data[cursor + 4],
+            ]) as usize;
+            let start = cursor + 5;
+            let end = start
+                .checked_add(slen)
+                .ok_or(ListpackError::StringLengthOverflow)?;
+            if end > data.len() {
+                return Err(ListpackError::TruncatedEntry);
+            }
+            let data_len = 5 + slen;
+            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            Ok((ListpackValueSpan::String(start..end), entry_len))
+        }
+        0xF1 => {
+            if cursor + 3 > data.len() {
+                return Err(ListpackError::TruncatedEntry);
+            }
+            let raw = i16::from_le_bytes([data[cursor + 1], data[cursor + 2]]);
+            let data_len = 3;
+            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            Ok((ListpackValueSpan::integer(i64::from(raw)), entry_len))
+        }
+        0xF2 => {
+            if cursor + 4 > data.len() {
+                return Err(ListpackError::TruncatedEntry);
+            }
+            let bytes = [data[cursor + 1], data[cursor + 2], data[cursor + 3], 0];
+            let raw_u32 = u32::from_le_bytes(bytes);
+            let signed = if raw_u32 & 0x00_80_00_00 != 0 {
+                (raw_u32 as i64) - 0x0100_0000
+            } else {
+                raw_u32 as i64
+            };
+            let data_len = 4;
+            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            Ok((ListpackValueSpan::integer(signed), entry_len))
+        }
+        0xF3 => {
+            if cursor + 5 > data.len() {
+                return Err(ListpackError::TruncatedEntry);
+            }
+            let raw = i32::from_le_bytes([
+                data[cursor + 1],
+                data[cursor + 2],
+                data[cursor + 3],
+                data[cursor + 4],
+            ]);
+            let data_len = 5;
+            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            Ok((ListpackValueSpan::integer(i64::from(raw)), entry_len))
+        }
+        0xF4 => {
+            if cursor + 9 > data.len() {
+                return Err(ListpackError::TruncatedEntry);
+            }
+            let raw = i64::from_le_bytes([
+                data[cursor + 1],
+                data[cursor + 2],
+                data[cursor + 3],
+                data[cursor + 4],
+                data[cursor + 5],
+                data[cursor + 6],
+                data[cursor + 7],
+                data[cursor + 8],
+            ]);
+            let data_len = 9;
+            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            Ok((ListpackValueSpan::integer(raw), entry_len))
+        }
+        _ => Err(ListpackError::InvalidEncoding(first)),
+    }
+}
+
 /// Return byte ranges for a listpack whose entries are all string encodings.
 ///
 /// Integer encodings are not lossy, but their Redis-observable value is the
@@ -454,6 +652,36 @@ pub fn decode_string_ranges_if_all_strings(
         return Err(ListpackError::ElementCountMismatch);
     }
     Ok(Some(ranges))
+}
+
+/// Return Redis-observable values while retaining string payload ranges.
+///
+/// String entries borrow from `data`; integer entries store their canonical
+/// decimal byte-string form inline. This lets callers retain a listpack node
+/// without allocating one `Vec<u8>` per element while preserving normal list
+/// iteration semantics.
+pub fn decode_value_spans(data: &[u8]) -> Result<Vec<ListpackValueSpan>, ListpackError> {
+    let (total_bytes, num_elements) = parse_header(data)?;
+    let end = (total_bytes as usize) - 1;
+    let mut cursor = LISTPACK_HEADER_SIZE;
+    let mut values = Vec::new();
+    while cursor < end {
+        let (value, consumed) = decode_entry_value_span(data, cursor)?;
+        values.push(value);
+        cursor = cursor
+            .checked_add(consumed)
+            .ok_or(ListpackError::TruncatedEntry)?;
+        if cursor > end {
+            return Err(ListpackError::TruncatedEntry);
+        }
+    }
+    if cursor != end {
+        return Err(ListpackError::MissingTerminator);
+    }
+    if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN && values.len() != usize::from(num_elements) {
+        return Err(ListpackError::ElementCountMismatch);
+    }
+    Ok(values)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -739,6 +967,25 @@ mod tests {
     fn decode_string_ranges_returns_none_for_integer_node() {
         let lp = assemble(&[&entry_6bit_str(b"alpha"), &entry_7bit_uint(42)]);
         assert_eq!(decode_string_ranges_if_all_strings(&lp).unwrap(), None);
+    }
+
+    #[test]
+    fn decode_value_spans_borrows_strings_and_formats_ints() {
+        let lp = assemble(&[
+            &entry_6bit_str(b"alpha"),
+            &entry_7bit_uint(42),
+            &entry_13bit_int(-17),
+            &entry_32bit_int(100_000),
+            &entry_6bit_str(b"omega"),
+        ]);
+        let spans = decode_value_spans(&lp).unwrap();
+        let values: Vec<&[u8]> = spans.iter().map(|span| span.as_bytes(&lp)).collect();
+        assert_eq!(
+            values,
+            vec![b"alpha".as_slice(), b"42", b"-17", b"100000", b"omega",]
+        );
+        assert!(matches!(spans[0], ListpackValueSpan::String(_)));
+        assert!(matches!(spans[1], ListpackValueSpan::Integer(_)));
     }
 
     #[test]

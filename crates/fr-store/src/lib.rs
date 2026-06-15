@@ -20052,25 +20052,13 @@ impl Store {
                             let (listpack, consumed) =
                                 decode_rdb_string(payload, cursor, data_end)?;
                             cursor += consumed;
-                            match fr_persist::listpack::decode_string_ranges_if_all_strings(
-                                &listpack,
-                            )
-                            .map_err(|_| StoreError::InvalidDumpPayload)?
-                            {
-                                Some(ranges) => {
-                                    if !ranges.is_empty() {
-                                        nodes.push(RestoredListNode::ListpackStrings {
-                                            bytes: listpack,
-                                            ranges,
-                                        });
-                                    }
-                                }
-                                None => {
-                                    let elems = decode_listpack_strings(&listpack)?;
-                                    if !elems.is_empty() {
-                                        nodes.push(RestoredListNode::Elements(elems));
-                                    }
-                                }
+                            let entries = fr_persist::listpack::decode_value_spans(&listpack)
+                                .map_err(|_| StoreError::InvalidDumpPayload)?;
+                            if !entries.is_empty() {
+                                nodes.push(RestoredListNode::Listpack {
+                                    bytes: listpack,
+                                    entries,
+                                });
                             }
                         }
                         _ => return Err(StoreError::InvalidDumpPayload),
@@ -20679,10 +20667,8 @@ fn retained_quicklist2_chunks_match_dump_rules(
     for chunk in chunks {
         let mut packed_bytes = LISTPACK_FRAME_OVERHEAD;
         let mut first_entry_bytes = None;
-        for (index, range) in chunk.ranges.iter().enumerate() {
-            let Some(item) = chunk.bytes.get(range.clone()) else {
-                return false;
-            };
+        for (index, entry) in chunk.entries.iter().enumerate() {
+            let item = entry.as_bytes(chunk.bytes);
             if quicklist_plain_node_required(item, list_max_listpack_size) {
                 return false;
             }
@@ -20712,7 +20698,7 @@ fn retained_quicklist2_chunks_match_dump_rules(
         if first_entry_bytes.is_none() || packed_bytes != chunk.bytes.len() {
             return false;
         }
-        previous = Some((chunk.ranges.len(), packed_bytes));
+        previous = Some((chunk.entries.len(), packed_bytes));
     }
     true
 }
@@ -39993,6 +39979,112 @@ mod tests {
                 .lrange(b"ql", 0, -1, 100)
                 .map_err(|_| "lrange failed")?,
             vec![b"alpha".to_vec(), b"B".to_vec(), b"charlie".to_vec()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restore_quicklist2_small_mixed_node_materializes_on_lset() -> Result<(), &'static str> {
+        let listpack = encode_listpack_strings(&[
+            b"alpha".as_slice(),
+            b"42".as_slice(),
+            b"-17".as_slice(),
+            b"omega".as_slice(),
+        ])
+        .ok_or("encode mixed listpack")?;
+        let mut body = vec![RDB_TYPE_LIST_QUICKLIST_2];
+        encode_length(&mut body, 1);
+        encode_length(&mut body, 2);
+        append_raw_dump_bulk(&mut body, &listpack);
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        store
+            .restore_key(b"ql", 0, &payload, false, 100)
+            .map_err(|_| "quicklist2 mixed node restore failed")?;
+        assert_eq!(
+            store
+                .lrange(b"ql", 0, -1, 100)
+                .map_err(|_| "lrange failed")?,
+            vec![
+                b"alpha".to_vec(),
+                b"42".to_vec(),
+                b"-17".to_vec(),
+                b"omega".to_vec(),
+            ]
+        );
+        assert_eq!(
+            store.dump_key(b"ql", 100).ok_or("dump missing")?,
+            payload,
+            "restored mixed quicklist2 node must dump byte-identically"
+        );
+
+        store
+            .lset(b"ql", 2, b"-18".to_vec(), 100)
+            .map_err(|_| "lset failed")?;
+        assert_eq!(
+            store
+                .lrange(b"ql", 0, -1, 100)
+                .map_err(|_| "lrange failed")?,
+            vec![
+                b"alpha".to_vec(),
+                b"42".to_vec(),
+                b"-18".to_vec(),
+                b"omega".to_vec(),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restore_quicklist2_mixed_node_keeps_order_and_dump_bytes() -> Result<(), &'static str> {
+        let listpack = encode_listpack_strings(&[
+            b"a".as_slice(),
+            b"42".as_slice(),
+            b"b".as_slice(),
+            b"-17".as_slice(),
+        ])
+        .ok_or("encode listpack")?;
+        let mut body = vec![RDB_TYPE_LIST_QUICKLIST_2];
+        encode_length(&mut body, 1);
+        encode_length(&mut body, 2);
+        append_raw_dump_bulk(&mut body, &listpack);
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        store
+            .restore_key(b"ql", 0, &payload, false, 100)
+            .map_err(|_| "quicklist2 mixed node restore failed")?;
+        assert_eq!(
+            store
+                .lrange(b"ql", 0, -1, 100)
+                .map_err(|_| "lrange failed")?,
+            vec![
+                b"a".to_vec(),
+                b"42".to_vec(),
+                b"b".to_vec(),
+                b"-17".to_vec(),
+            ]
+        );
+        assert_eq!(
+            store.dump_key(b"ql", 100).ok_or("dump missing")?,
+            payload,
+            "restored mixed quicklist2 node must dump byte-identically"
+        );
+
+        store
+            .lset(b"ql", 1, b"forty-two".to_vec(), 100)
+            .map_err(|_| "lset failed")?;
+        assert_eq!(
+            store
+                .lrange(b"ql", 0, -1, 100)
+                .map_err(|_| "lrange failed")?,
+            vec![
+                b"a".to_vec(),
+                b"forty-two".to_vec(),
+                b"b".to_vec(),
+                b"-17".to_vec(),
+            ]
         );
         Ok(())
     }
