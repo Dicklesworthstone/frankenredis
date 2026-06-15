@@ -1,0 +1,4 @@
+>> building symbol-bearing release binary via rch ...
+>> fr pid=3437435, load: -t incr -P 16 -c 50 -n 3000000 -r 100000
+== throughput ==
+== fr-code self-time hotspots (DSO=frankenredis) ==

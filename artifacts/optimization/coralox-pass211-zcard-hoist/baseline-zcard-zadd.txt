@@ -1,0 +1,4 @@
+== baseline focused ZCARD/ZADD (P16 c50 n300k best-of-5) ==
+cmd               redis         fr   redis/fr
+zcard           1006711    1102941     0.913x  fr-faster
+zadd                  0          0     0.000x  fr-faster

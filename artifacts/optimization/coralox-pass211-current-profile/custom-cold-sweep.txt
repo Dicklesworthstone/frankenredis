@@ -1,0 +1,23 @@
+== current custom cold/read sweep (P16 c50 n200k best-of-3) ==
+cmd                         redis         fr   redis/fr
+ping_inline               1000000    1015228      0.99x  fr-faster
+ping_mbulk                1041666     975609      1.07x  FR-SLOWER
+dbsize                     975609    1005025      0.97x  fr-faster
+command_count             1020408     966183      1.06x  FR-SLOWER
+memory_usage              1025641    1136363      0.90x  fr-faster
+object_encoding           1010101    1052631      0.96x  fr-faster
+object_refcount           1010101    1020408      0.99x  fr-faster
+object_idletime           1005025    1092896      0.92x  fr-faster
+strlen                    1142857    1063829      1.07x  FR-SLOWER
+getrange_64                947867    1030927      0.92x  fr-faster
+bitcount                  1047120    1005025      1.04x  FR-SLOWER
+bitpos                    1036269     985221      1.05x  FR-SLOWER
+hget                      1010101    1081081      0.93x  fr-faster
+hstrlen                   1075268     995024      1.08x  FR-SLOWER
+hlen                      1025641    1058201      0.97x  fr-faster
+llen                      1092896    1063829      1.03x  FR-SLOWER
+scard                     1081081    1020408      1.06x  FR-SLOWER
+zcard                     1086956     970873      1.12x  FR-SLOWER
+xlen                       966183     975609      0.99x  fr-faster
+expiretime                 995024    1005025      0.99x  fr-faster
+pexpiretime               1025641    1052631      0.97x  fr-faster

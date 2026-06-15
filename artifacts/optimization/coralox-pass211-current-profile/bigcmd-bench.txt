@@ -1,0 +1,16 @@
+SINTERSTORE bigset bigset2 (25k result)    redis=   6.761ms  fr=   6.005ms  fr/redis=0.89x
+SUNIONSTORE bigset bigset2 (75k)           redis=  15.291ms  fr=  10.932ms  fr/redis=0.71x (fr faster)
+SDIFFSTORE bigset bigset2 (25k)            redis=   7.149ms  fr=   5.915ms  fr/redis=0.83x (fr faster)
+SINTERCARD bigset bigset2                  redis=   2.834ms  fr=   2.476ms  fr/redis=0.87x
+SMEMBERS bigset (50k)                      redis= 454.015ms  fr= 443.109ms  fr/redis=0.98x
+ZUNIONSTORE bigzset (50k)                  redis=  29.721ms  fr=  12.146ms  fr/redis=0.41x (fr faster)
+ZRANGEBYSCORE bigzset 0 50000              redis= 501.718ms  fr= 500.405ms  fr/redis=1.00x
+ZRANGE bigzset 0 -1 (50k)                  redis= 505.594ms  fr= 516.451ms  fr/redis=1.02x
+LRANGE biglist 0 -1 (50k)                  redis= 503.353ms  fr= 505.444ms  fr/redis=1.00x
+SORT biglist ALPHA LIMIT 0 100             redis=   8.468ms  fr=   2.588ms  fr/redis=0.31x (fr faster)
+SORT bigzset_as_list... HGETALL bighash (50k) redis=2034.559ms  fr=2015.994ms  fr/redis=0.99x
+LPOS biglist e49999 (tail scan)            redis=   0.961ms  fr=   0.326ms  fr/redis=0.34x (fr faster)
+GETRANGE bigstr 0 -1 (1MB)                 redis=   1.457ms  fr=   1.522ms  fr/redis=1.04x
+SRANDMEMBER bigset 100                     redis=   0.189ms  fr=   0.149ms  fr/redis=0.79x (fr faster)
+SRANDMEMBER bigset -100 (with dup)         redis=   0.135ms  fr=   0.130ms  fr/redis=0.97x
+COPY bigset -> c                           redis=   4.913ms  fr=   0.517ms  fr/redis=0.11x (fr faster)
