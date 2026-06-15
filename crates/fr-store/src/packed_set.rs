@@ -504,8 +504,83 @@ impl<'a> Iterator for GenericSetIter<'a> {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum HashFieldBytes {
+    Inline {
+        len: u8,
+        bytes: [u8; Self::INLINE_CAPACITY],
+    },
+    Heap(Vec<u8>),
+}
+
+impl HashFieldBytes {
+    const INLINE_CAPACITY: usize = 15;
+
+    fn from_slice(bytes: &[u8]) -> Self {
+        if bytes.len() <= Self::INLINE_CAPACITY {
+            let len = match u8::try_from(bytes.len()) {
+                Ok(len) => len,
+                Err(_) => return Self::Heap(bytes.to_vec()),
+            };
+            let mut inline = [0u8; Self::INLINE_CAPACITY];
+            inline[..bytes.len()].copy_from_slice(bytes);
+            Self::Inline { len, bytes: inline }
+        } else {
+            Self::Heap(bytes.to_vec())
+        }
+    }
+
+    fn from_vec(bytes: Vec<u8>) -> Self {
+        if bytes.len() <= Self::INLINE_CAPACITY {
+            Self::from_slice(&bytes)
+        } else {
+            Self::Heap(bytes)
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
+            Self::Heap(bytes) => bytes,
+        }
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        match self {
+            Self::Inline { len, bytes } => bytes[..usize::from(len)].to_vec(),
+            Self::Heap(bytes) => bytes,
+        }
+    }
+}
+
+impl Borrow<[u8]> for HashFieldBytes {
+    fn borrow(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl AsRef<[u8]> for HashFieldBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl PartialEq for HashFieldBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for HashFieldBytes {}
+
+impl Hash for HashFieldBytes {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state);
+    }
+}
+
 /// Hashtable storage for a large hash (the former `HashFieldMap` alias).
-pub type FieldHashTable = IndexMap<Vec<u8>, Vec<u8>, foldhash::quality::RandomState>;
+pub type FieldHashTable = IndexMap<HashFieldBytes, HashFieldBytes, foldhash::quality::RandomState>;
 
 /// Storage for a hash's field→value map: a packed listpack-style buffer while
 /// small, promoting to an `IndexMap` hashtable past the threshold. Drop-in for
@@ -569,7 +644,7 @@ impl HashFieldMap {
                 foldhash::quality::RandomState::default(),
             );
             for (k, v) in p.iter() {
-                h.insert(k.to_vec(), v.to_vec());
+                h.insert(HashFieldBytes::from_slice(k), HashFieldBytes::from_slice(v));
             }
             *self = HashFieldMap::Hash(h);
         }
@@ -587,7 +662,12 @@ impl HashFieldMap {
         }
         match self {
             HashFieldMap::Packed(p) => p.insert(field, value),
-            HashFieldMap::Hash(h) => h.insert(field, value),
+            HashFieldMap::Hash(h) => h
+                .insert(
+                    HashFieldBytes::from_vec(field),
+                    HashFieldBytes::from_vec(value),
+                )
+                .map(HashFieldBytes::into_vec),
         }
     }
 
@@ -615,10 +695,13 @@ impl HashFieldMap {
             HashFieldMap::Packed(p) => p.insert_borrowed(field, value),
             HashFieldMap::Hash(h) => {
                 if let Some(slot) = h.get_mut(field) {
-                    *slot = value;
+                    *slot = HashFieldBytes::from_vec(value);
                     false
                 } else {
-                    h.insert(field.to_vec(), value);
+                    h.insert(
+                        HashFieldBytes::from_slice(field),
+                        HashFieldBytes::from_vec(value),
+                    );
                     true
                 }
             }
@@ -628,7 +711,7 @@ impl HashFieldMap {
     pub fn shift_remove(&mut self, field: &[u8]) -> Option<Vec<u8>> {
         match self {
             HashFieldMap::Packed(p) => p.shift_remove(field),
-            HashFieldMap::Hash(h) => h.shift_remove(field),
+            HashFieldMap::Hash(h) => h.shift_remove(field).map(HashFieldBytes::into_vec),
         }
     }
 
@@ -642,7 +725,7 @@ impl HashFieldMap {
     pub fn swap_remove(&mut self, field: &[u8]) -> Option<Vec<u8>> {
         match self {
             HashFieldMap::Packed(p) => p.shift_remove(field),
-            HashFieldMap::Hash(h) => h.swap_remove(field),
+            HashFieldMap::Hash(h) => h.swap_remove(field).map(HashFieldBytes::into_vec),
         }
     }
 
@@ -686,7 +769,7 @@ impl FromIterator<(Vec<u8>, Vec<u8>)> for HashFieldMap {
 /// Borrowing iterator over a `HashFieldMap`'s (field, value) pairs.
 pub enum HashFieldMapIter<'a> {
     Packed(PackedStrMapIter<'a>),
-    Hash(indexmap::map::Iter<'a, Vec<u8>, Vec<u8>>),
+    Hash(indexmap::map::Iter<'a, HashFieldBytes, HashFieldBytes>),
 }
 
 impl<'a> Iterator for HashFieldMapIter<'a> {
@@ -2528,6 +2611,66 @@ mod tests {
         );
         assert_eq!(s.pop_index(0), Some(b"alpha".to_vec()));
         assert_eq!(s.into_iter().collect::<Vec<_>>(), vec![long]);
+    }
+
+    #[test]
+    fn hash_field_map_inline_hash_bytes_preserve_indexmap_semantics() {
+        let mut map = super::HashFieldMap::Hash(super::FieldHashTable::with_capacity_and_hasher(
+            PACKED_MAX_ENTRIES + 1,
+            foldhash::quality::RandomState::default(),
+        ));
+        let mut oracle: IndexMap<Vec<u8>, Vec<u8>> = IndexMap::new();
+        let long_field = b"abcdefghijklmnopqrstuvwxyz0123456789".to_vec();
+        let long_value = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".to_vec();
+
+        for (field, value) in [
+            (b"alpha".to_vec(), b"one".to_vec()),
+            (b"beta".to_vec(), b"two".to_vec()),
+            (long_field.clone(), long_value.clone()),
+        ] {
+            assert_eq!(
+                map.insert(field.clone(), value.clone()),
+                oracle.insert(field, value)
+            );
+        }
+
+        assert!(!map.insert_borrowed(b"alpha", b"uno".to_vec()));
+        oracle.insert(b"alpha".to_vec(), b"uno".to_vec());
+        assert!(map.insert_borrowed(b"gamma", b"three".to_vec()));
+        oracle.insert(b"gamma".to_vec(), b"three".to_vec());
+
+        for (field, value) in &oracle {
+            assert_eq!(map.get(field), Some(value.as_slice()));
+            assert!(map.contains_key(field));
+        }
+        assert_eq!(map.get(b"missing"), None);
+        assert!(!map.contains_key(b"missing"));
+        assert_eq!(map.get_index(1), Some((&b"beta"[..], &b"two"[..])));
+
+        let map_items: Vec<(Vec<u8>, Vec<u8>)> = map
+            .iter()
+            .map(|(field, value)| (field.to_vec(), value.to_vec()))
+            .collect();
+        let oracle_items: Vec<(Vec<u8>, Vec<u8>)> = oracle
+            .iter()
+            .map(|(field, value)| (field.clone(), value.clone()))
+            .collect();
+        assert_eq!(map_items, oracle_items);
+
+        assert_eq!(map.shift_remove(b"beta"), oracle.shift_remove(&b"beta"[..]));
+        assert_eq!(
+            map.swap_remove(&long_field),
+            oracle.swap_remove(&long_field)
+        );
+        let map_items: Vec<(Vec<u8>, Vec<u8>)> = map
+            .iter()
+            .map(|(field, value)| (field.to_vec(), value.to_vec()))
+            .collect();
+        let oracle_items: Vec<(Vec<u8>, Vec<u8>)> = oracle
+            .iter()
+            .map(|(field, value)| (field.clone(), value.clone()))
+            .collect();
+        assert_eq!(map_items, oracle_items);
     }
 
     proptest! {
