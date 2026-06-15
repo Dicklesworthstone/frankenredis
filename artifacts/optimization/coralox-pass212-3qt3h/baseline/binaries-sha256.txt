@@ -1,0 +1,2 @@
+fd9e8242d6bb461d40e3a4ec6810cdb529e1615a62e9a6d9fa8d11382b845ff5  /data/projects/.scratch/frankenredis-coralox-pass212-3qt3h-baseline-target/release-perf/frankenredis
+c355bc50f0dfe9d86b2717764590ec167b0a8c6863416a842486b0f94c9ff55c  /data/projects/.scratch/frankenredis-coralox-pass212-3qt3h-baseline-target/release-perf/fr-bench

@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781563221670,
+  "host": "127.0.0.1",
+  "port": 26323,
+  "workload": "set",
+  "clients": 50,
+  "requests": 2500,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 1048576,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "pass212-cand-1048576",
+  "total_time_ms": 3429,
+  "ops_per_sec": 728.9640419687775,
+  "bytes_sent": 2621599725,
+  "bytes_received": 12500,
+  "latency_us": {
+    "min": 1028,
+    "p50": 388863,
+    "p95": 1733631,
+    "p99": 2820095,
+    "p999": 3061759,
+    "max": 3071999,
+    "mean": 598313.7660000008,
+    "samples": 2500
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "OUT=artifacts/optimization/coralox-pass212-3qt3h/paired SERVER=/data/projects/.scratch/frankenredis-coralox-pass212-3qt3h-baseline-target/release-perf/frankenredis BENCH=/data/projects/.scratch/frankenredis-coralox-pass212-3qt3h-baseline-target/release-perf/fr-bench PORT=26320 LABEL=baseline DATASIZE=262144 REQUESTS=6000 JSON_OUT=artifacts/optimization/coralox-pass212-3qt3h/paired/baseline-set262144-last.json KEY_PREFIX=pass212-base-262144 artifacts/optimization/coralox-pass212-3qt3h/run_frbench_large_once.sh",
+      "mean": 1.8852790772885715,
+      "stddev": 0.034993512870778655,
+      "median": 1.8702320768599998,
+      "user": 1.4573404285714286,
+      "system": 2.1382050628571427,
+      "min": 1.84607213186,
+      "max": 1.9531753698599998,
+      "times": [
+        1.8644108398600001,
+        1.8702320768599998,
+        1.89674441286,
+        1.86905530186,
+        1.9531753698599998,
+        1.8972634078600001,
+        1.84607213186
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "OUT=artifacts/optimization/coralox-pass212-3qt3h/paired SERVER=/data/projects/.scratch/frankenredis-coralox-pass212-3qt3h-candidate-target/release-perf/frankenredis BENCH=/data/projects/.scratch/frankenredis-coralox-pass212-3qt3h-candidate-target/release-perf/fr-bench PORT=26321 LABEL=candidate DATASIZE=262144 REQUESTS=6000 JSON_OUT=artifacts/optimization/coralox-pass212-3qt3h/paired/candidate-set262144-last.json KEY_PREFIX=pass212-cand-262144 artifacts/optimization/coralox-pass212-3qt3h/run_frbench_large_once.sh",
+      "mean": 1.9685270125742858,
+      "stddev": 0.09624132563996932,
+      "median": 1.93021640586,
+      "user": 1.5260822857142855,
+      "system": 2.1275524914285713,
+      "min": 1.86957893886,
+      "max": 2.1163526188599997,
+      "times": [
+        1.86957893886,
+        1.91232749086,
+        1.93021640586,
+        2.09509109386,
+        2.1163526188599997,
+        1.93048172786,
+        1.9256408118600001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
