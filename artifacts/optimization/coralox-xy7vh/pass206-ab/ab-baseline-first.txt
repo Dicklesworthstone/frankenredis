@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark -p 28620 -n 50 -c 1 -P 1 -q sunionstore dst s1 s2
+  Time (mean ± σ):      1.506 s ±  0.123 s    [User: 0.003 s, System: 0.005 s]
+  Range (min … max):    1.369 s …  1.706 s    7 runs
+
+Benchmark 2: /data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark -p 28621 -n 50 -c 1 -P 1 -q sunionstore dst s1 s2
+  Time (mean ± σ):      1.713 s ±  0.152 s    [User: 0.003 s, System: 0.005 s]
+  Range (min … max):    1.582 s …  2.029 s    7 runs
+
+Summary
+  /data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark -p 28620 -n 50 -c 1 -P 1 -q sunionstore dst s1 s2 ran
+    1.14 ± 0.14 times faster than /data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark -p 28621 -n 50 -c 1 -P 1 -q sunionstore dst s1 s2

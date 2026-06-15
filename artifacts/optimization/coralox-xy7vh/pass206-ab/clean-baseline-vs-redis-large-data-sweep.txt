@@ -1,0 +1,17 @@
+op                                redis_ms     fr_ms fr/redis
+SORT biglist ALPHA LIMIT 0 50        45.88      8.02     0.17
+SORT biglist LIMIT 0 50              38.27      5.77     0.15
+LPOS biglist e500 COUNT 0             4.57      1.18     0.26
+LREM biglist 0 nomatch                3.19      0.52     0.16
+ZRANGEBYSCORE bigz 100 200            2.29      2.23     0.97
+ZUNIONSTORE 2 z1 z2                 321.15    123.07     0.38
+ZINTERSTORE 2 z1 z2                  14.06      5.45     0.39
+ZDIFFSTORE 2 z1 z2                   79.45     19.92     0.25
+SINTERSTORE s1 s2                    27.32     20.56     0.75
+SUNIONSTORE s1 s2                    41.30     29.82     0.72
+SDIFFSTORE s1 s2                     16.00     15.49     0.97
+SMEMBERS s1                         267.04    227.44     0.85
+GETRANGE bigstr 0 -1                  0.26      0.30     1.14
+ZRANGE bigz 0 -1                    364.49    352.57     0.97
+------------------------------------------------------------
+PASS — fr faster-or-within-1.3x redis on all 14 heavy ops (worst 1.14x on 'GETRANGE bigstr 0 -1')
