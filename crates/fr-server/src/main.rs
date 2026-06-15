@@ -3273,8 +3273,8 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
-                if let Some(key) = borrowed_plain_bitcount_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_bitcount_borrowed(key, ts)
+                if let Some((key, range)) = borrowed_plain_bitcount_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_bitcount_borrowed(key, range, ts)
                 {
                     return Ok(BorrowedMultibulkAction::FastReply {
                         consumed: parsed.consumed,
@@ -3960,9 +3960,21 @@ fn borrowed_plain_bitpos_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a 
     }
 }
 
-fn borrowed_plain_bitcount_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
+/// Recognizes `BITCOUNT key [start end [BYTE|BIT]]` (argc 2/4/5). Returns the
+/// borrowed key plus the raw range args; the runtime parses them (and defers on
+/// any malformed integer / bad unit) so generic dispatch owns every error reply.
+#[allow(clippy::type_complexity)]
+fn borrowed_plain_bitcount_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(&'a [u8], Option<(&'a [u8], &'a [u8], Option<&'a [u8]>)>)> {
     match borrowed_args {
-        [command, key] if command.eq_ignore_ascii_case(b"BITCOUNT") => Some(*key),
+        [command, key] if command.eq_ignore_ascii_case(b"BITCOUNT") => Some((*key, None)),
+        [command, key, start, end] if command.eq_ignore_ascii_case(b"BITCOUNT") => {
+            Some((*key, Some((*start, *end, None))))
+        }
+        [command, key, start, end, unit] if command.eq_ignore_ascii_case(b"BITCOUNT") => {
+            Some((*key, Some((*start, *end, Some(*unit)))))
+        }
         _ => None,
     }
 }

@@ -64,6 +64,10 @@ const ACL_UNKNOWN_SUBCOMMAND_ERROR: &str =
 const ACL_FILE_NOT_CONFIGURED_ERR: &str = "ERR This Redis instance is not configured to use an ACL file. You may want to specify users via the ACL SETUSER command and then issue a CONFIG REWRITE (assuming you have a Redis configuration file set) in order to store users in the Redis configuration.";
 const DEFAULT_ACLLOG_MAX_LEN: i64 = 128;
 
+type PlainBitcountUnitArg<'a> = Option<&'a [u8]>;
+type PlainBitcountRangeArgs<'a> = (&'a [u8], &'a [u8], PlainBitcountUnitArg<'a>);
+type PlainBitcountRange<'a> = Option<PlainBitcountRangeArgs<'a>>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppendFsyncMode {
     No,
@@ -671,8 +675,19 @@ fn plain_memory_usage_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"MEMORY".to_vec(), b"USAGE".to_vec(), key.to_vec()]
 }
 
-fn plain_bitcount_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
-    vec![b"BITCOUNT".to_vec(), key.to_vec()]
+fn plain_bitcount_owned_argv(
+    key: &[u8],
+    range: PlainBitcountRange<'_>,
+) -> Vec<Vec<u8>> {
+    let mut argv = vec![b"BITCOUNT".to_vec(), key.to_vec()];
+    if let Some((start, end, unit)) = range {
+        argv.push(start.to_vec());
+        argv.push(end.to_vec());
+        if let Some(unit) = unit {
+            argv.push(unit.to_vec());
+        }
+    }
+    argv
 }
 
 fn plain_bitpos_owned_argv(key: &[u8], bit_arg: &[u8]) -> Vec<Vec<u8>> {
@@ -11509,8 +11524,13 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_bitcount_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
-        if self.policy.gate.max_array_len < 2
+    fn can_execute_plain_bitcount_borrowed(
+        &mut self,
+        key: &[u8],
+        argc: usize,
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < argc
             || self.policy.gate.max_bulk_len < b"BITCOUNT".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
@@ -11519,18 +11539,52 @@ impl Runtime {
         self.plain_borrowed_default_key_read_allows(now_ms)
     }
 
-    /// Conservative borrowed fast path for the no-range `BITCOUNT key` form
-    /// (the common pipelined shape). Ranged forms (argc 4/5) are not recognized
-    /// and fall to generic dispatch. Mirrors the generic argc==2 path EXACTLY —
-    /// `store.key_type` (missing -> 0, non-string -> WRONGTYPE) then
-    /// `store.bitcount` for a string — so the two keyspace lookups + touch + the
-    /// SWAR popcount are byte-identical. (cold-cmd audit)
+    /// Conservative borrowed fast path for `BITCOUNT key [start end [BYTE|BIT]]`
+    /// (the common pipelined shapes, argc 2/4/5). Mirrors the generic
+    /// `bitcount` path EXACTLY: range args are parsed *before* any observable
+    /// store work, so a malformed integer, a bad BYTE|BIT unit, or any disabling
+    /// client state declines (returns `None`) to the generic path — which
+    /// re-derives the identical reply (incl. the lookup-before-parse precedence:
+    /// missing key -> 0, non-string -> WRONGTYPE) with no double-counted
+    /// keyspace stat, since we touched the store only on the clean success path.
+    /// On engage: `store.key_type` (missing -> 0, non-string -> WRONGTYPE) then,
+    /// for a string, upstream's argc==5 fully-negative reversed-range early
+    /// return (`bitcountnegunit`, before `store.bitcount`) or `store.bitcount`.
+    /// (cold-cmd audit / frankenredis-bitcountrange)
     pub fn execute_plain_bitcount_borrowed(
         &mut self,
         key: &[u8],
+        range: PlainBitcountRange<'_>,
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_bitcount_borrowed(key, now_ms) {
+        // Parse the range BEFORE any side effect so a parse error / bad unit
+        // declines cleanly (the generic path owns those error replies).
+        let (start_idx, end_idx, unit, early_zero, argc) = match range {
+            None => (None, None, fr_store::BitRangeUnit::Byte, false, 2usize),
+            Some((start_bytes, end_bytes, unit_opt)) => {
+                let start = parse_i64_arg(start_bytes).ok()?;
+                let end = parse_i64_arg(end_bytes).ok()?;
+                match unit_opt {
+                    None => (Some(start), Some(end), fr_store::BitRangeUnit::Byte, false, 4),
+                    Some(unit_bytes) => {
+                        let unit = if unit_bytes.eq_ignore_ascii_case(b"bit") {
+                            fr_store::BitRangeUnit::Bit
+                        } else if unit_bytes.eq_ignore_ascii_case(b"byte") {
+                            fr_store::BitRangeUnit::Byte
+                        } else {
+                            // Bad unit: generic returns SyntaxError, or 0 when the
+                            // range is fully-negative reversed (early return before
+                            // the unit check) — defer both to generic.
+                            return None;
+                        };
+                        let early_zero = start < 0 && end < 0 && start > end;
+                        (Some(start), Some(end), unit, early_zero, 5)
+                    }
+                }
+            }
+        };
+
+        if !self.can_execute_plain_bitcount_borrowed(key, argc, now_ms) {
             return None;
         }
 
@@ -11541,7 +11595,9 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("bitcount");
-        self.session.last_argv_len_sum = b"BITCOUNT".len() + key.len();
+        self.session.last_argv_len_sum = b"BITCOUNT".len()
+            + key.len()
+            + range.map_or(0, |(s, e, u)| s.len() + e.len() + u.map_or(0, <[u8]>::len));
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -11550,14 +11606,13 @@ impl Runtime {
         let start = Instant::now();
         let reply = match self.server.store.key_type(key, now_ms) {
             None => RespFrame::Integer(0),
+            Some("string") if early_zero => RespFrame::Integer(0),
             Some("string") => {
-                match self.server.store.bitcount(
-                    key,
-                    None,
-                    None,
-                    fr_store::BitRangeUnit::Byte,
-                    now_ms,
-                ) {
+                match self
+                    .server
+                    .store
+                    .bitcount(key, start_idx, end_idx, unit, now_ms)
+                {
                     Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
                     Err(err) => CommandError::Store(err).to_resp(),
                 }
@@ -11567,7 +11622,7 @@ impl Runtime {
         let elapsed_us = start.elapsed().as_micros() as u64;
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_bitcount_borrowed_metrics(key, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_bitcount_borrowed_metrics(key, range, elapsed_us, now_ms, packet_id, failed);
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -11595,6 +11650,7 @@ impl Runtime {
     fn record_plain_bitcount_borrowed_metrics(
         &mut self,
         key: &[u8],
+        range: PlainBitcountRange<'_>,
         elapsed_us: u64,
         now_ms: u64,
         packet_id: u64,
@@ -11604,14 +11660,14 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| plain_bitcount_owned_argv(key));
+            let argv_ref = argv.get_or_insert_with(|| plain_bitcount_owned_argv(key, range));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| plain_bitcount_owned_argv(key));
+            let argv_ref = argv.get_or_insert_with(|| plain_bitcount_owned_argv(key, range));
             self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
@@ -11627,7 +11683,7 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| plain_bitcount_owned_argv(key));
+            let argv_ref = argv.get_or_insert_with(|| plain_bitcount_owned_argv(key, range));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -24774,6 +24830,15 @@ mod tests {
         ))
     }
 
+    fn command_owned(parts: Vec<Vec<u8>>) -> RespFrame {
+        RespFrame::Array(Some(
+            parts
+                .into_iter()
+                .map(|part| RespFrame::BulkString(Some(part)))
+                .collect(),
+        ))
+    }
+
     /// Remove every appendonlydir artifact for `basename` in `dir` (the single
     /// file, the manifest, and all `<basename>.<seq>.base.rdb`/`.incr.aof`), so a
     /// fixed-dir AOF test never inherits a prior run's files. The appendonlydir
@@ -25330,7 +25395,7 @@ mod tests {
         }
         for (ts, key) in (2..).zip([b"s".as_slice(), b"empty", b"missing", b"l"]) {
             let f = direct
-                .execute_plain_bitcount_borrowed(key, ts)
+                .execute_plain_bitcount_borrowed(key, None, ts)
                 .expect("bitcount fast path should engage");
             let g = generic.execute_frame(command(&[b"BITCOUNT", key]), ts);
             assert_eq!(f, g, "key={key:?}");
@@ -25347,9 +25412,100 @@ mod tests {
             direct.server.store.stat_total_error_replies,
             generic.server.store.stat_total_error_replies
         );
-        // ranged form is NOT recognized by the borrow recognizer (defers); the
-        // runtime method itself only handles the no-range form, so the fr-server
-        // recognizer gates argc — verified in the differential harness.
+    }
+
+    #[test]
+    fn plain_bitcount_ranged_borrowed_matches_generic() {
+        // (frankenredis-bitcountrange) BITCOUNT key start end [BYTE|BIT] borrow ==
+        // generic dispatch across every shape: argc 4 (BYTE-default) and argc 5
+        // (explicit BYTE/BIT), positive/negative/reversed indices, missing key,
+        // wrong-type, empty string, and the deferral cases (bad integer, bad unit,
+        // upstream's fully-negative reversed-range early-return-0). The fast path
+        // and generic path are driven on twin runtimes and compared reply + the
+        // keyspace/error stat trio after every op.
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"s", b"foobar"]), 1);
+            rt.execute_frame(command(&[b"SET", b"empty", b""]), 1);
+            rt.execute_frame(command(&[b"RPUSH", b"l", b"x"]), 1);
+        }
+        // (key, range-as-trailing-args) tuples that exercise the recognized argc
+        // 4/5 forms; each engages and must equal generic byte-for-byte.
+        let engage: &[(&[u8], &[&[u8]])] = &[
+            (b"s", &[b"0", b"0"]),
+            (b"s", &[b"1", b"1"]),
+            (b"s", &[b"0", b"-1"]),
+            (b"s", &[b"0", b"0", b"BYTE"]),
+            (b"s", &[b"5", b"30", b"BIT"]),
+            (b"s", &[b"0", b"-1", b"BIT"]),
+            (b"s", &[b"-100", b"-1", b"byte"]),
+            (b"empty", &[b"0", b"-1"]),
+            (b"empty", &[b"0", b"0", b"BIT"]),
+            (b"missing", &[b"0", b"-1", b"BYTE"]),
+            (b"l", &[b"0", b"-1"]),
+            (b"l", &[b"0", b"0", b"BIT"]),
+            // fully-negative reversed range: upstream early-returns 0 (argc 5)
+            (b"s", &[b"-1", b"-2", b"BYTE"]),
+            (b"s", &[b"-1", b"-2", b"BIT"]),
+        ];
+        let mut ts = 2u64;
+        for (key, tail) in engage {
+            let range = match tail {
+                [s, e] => Some((*s, *e, None)),
+                [s, e, u] => Some((*s, *e, Some(*u))),
+                _ => unreachable!(),
+            };
+            let f = direct
+                .execute_plain_bitcount_borrowed(key, range, ts)
+                .expect("ranged bitcount fast path should engage");
+            let mut argv = vec![b"BITCOUNT".to_vec(), key.to_vec()];
+            argv.extend(tail.iter().map(|a| a.to_vec()));
+            let g = generic.execute_frame(command_owned(argv), ts);
+            assert_eq!(f, g, "engage key={key:?} tail={tail:?}");
+            ts += 1;
+        }
+        // Deferral cases: the fast path must return None (no side effects) so the
+        // generic path produces the canonical error / early-return reply. Drive
+        // BOTH paths' deferral through generic on each runtime to keep stats in
+        // lockstep, then assert the recognizer declines.
+        let defer: &[(&[u8], &[&[u8]])] = &[
+            (b"s", &[b"nan", b"0", b"BYTE"]),    // bad start integer
+            (b"s", &[b"0", b"nan", b"BIT"]),     // bad end integer
+            (b"s", &[b"0", b"0", b"NEITHER"]),   // bad unit -> SyntaxError
+            (b"missing", &[b"nan", b"0"]),       // missing key short-circuits to 0
+        ];
+        for (key, tail) in defer {
+            let range = match tail {
+                [s, e] => Some((*s, *e, None)),
+                [s, e, u] => Some((*s, *e, Some(*u))),
+                _ => unreachable!(),
+            };
+            assert!(
+                direct
+                    .execute_plain_bitcount_borrowed(key, range, ts)
+                    .is_none(),
+                "ranged bitcount fast path must defer key={key:?} tail={tail:?}"
+            );
+            let mut argv = vec![b"BITCOUNT".to_vec(), key.to_vec()];
+            argv.extend(tail.iter().map(|a| a.to_vec()));
+            let f = direct.execute_frame(command_owned(argv.clone()), ts);
+            let g = generic.execute_frame(command_owned(argv), ts);
+            assert_eq!(f, g, "defer key={key:?} tail={tail:?}");
+            ts += 1;
+        }
+        assert_eq!(
+            direct.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            direct.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
     }
 
     #[test]
