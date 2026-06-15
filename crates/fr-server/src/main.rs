@@ -2850,545 +2850,748 @@ fn parse_borrowed_multibulk_action(
         Ok(parsed) => {
             let argv_len = borrowed_args.len();
             if matches!(parsed.kind, BorrowedCommandArgsKind::Arguments) && argv_len > 0 {
-                if let Some(msg) = borrowed_plain_ping_args(&borrowed_args) {
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_ping_borrowed_into(msg, ts, client_resp3, out)
-                        .is_some()
-                    {
-                        return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: parsed.consumed,
-                        });
+                let cmd0 = borrowed_args[0]
+                    .first()
+                    .map(u8::to_ascii_uppercase)
+                    .unwrap_or(0);
+                match cmd0 {
+                    b'A' => {
+                        if let Some((key, value)) = borrowed_plain_append_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_append_borrowed(key, value, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
                     }
-                    copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
-                    return Ok(BorrowedMultibulkAction::Parsed {
-                        kind: parsed.kind,
-                        consumed: parsed.consumed,
-                        argv_len,
-                    });
-                }
-                if let Some(msg) = borrowed_plain_echo_args(&borrowed_args) {
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_echo_borrowed_into(msg, ts, client_resp3, out)
-                        .is_some()
-                    {
-                        return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: parsed.consumed,
-                        });
+                    b'B' => {
+                        if let Some((key, range)) = borrowed_plain_bitcount_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_bitcount_borrowed(key, range, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, bit_arg, range)) =
+                            borrowed_plain_bitpos_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_bitpos_borrowed(key, bit_arg, range, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
                     }
-                    copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
-                    return Ok(BorrowedMultibulkAction::Parsed {
-                        kind: parsed.kind,
-                        consumed: parsed.consumed,
-                        argv_len,
-                    });
-                }
-                if let Some(key) = borrowed_plain_get_args(&borrowed_args) {
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_get_borrowed_into(key, ts, client_resp3, out)
-                        .is_some()
-                    {
-                        return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: parsed.consumed,
-                        });
+                    b'C' => {
+                        if borrowed_plain_command_count_args(&borrowed_args)
+                            && let Some(response) = runtime.execute_plain_command_count_borrowed(ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
                     }
-                    copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
-                    return Ok(BorrowedMultibulkAction::Parsed {
-                        kind: parsed.kind,
-                        consumed: parsed.consumed,
-                        argv_len,
-                    });
-                }
-                if let Some(key) = borrowed_plain_smembers_args(&borrowed_args) {
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_smembers_borrowed_into(key, ts, client_resp3, out)
-                        .is_some()
-                    {
-                        return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: parsed.consumed,
-                        });
+                    b'D' => {
+                        if let Some(key) = borrowed_plain_decr_args(&borrowed_args)
+                            && let Some(response) = runtime.execute_plain_decr_borrowed(key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, delta)) = borrowed_plain_decrby_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_decrby_borrowed(key, delta, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if borrowed_plain_dbsize_args(&borrowed_args)
+                            && let Some(response) = runtime.execute_plain_dbsize_borrowed(ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
                     }
-                    copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
-                    return Ok(BorrowedMultibulkAction::Parsed {
-                        kind: parsed.kind,
-                        consumed: parsed.consumed,
-                        argv_len,
-                    });
-                }
-                if let Some((key, start, stop)) = borrowed_plain_lrange_args(&borrowed_args) {
-                    if runtime
-                        .execute_plain_lrange_borrowed_into(key, start, stop, ts, out)
-                        .is_some()
-                    {
-                        return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: parsed.consumed,
-                        });
+                    b'E' => {
+                        if let Some(msg) = borrowed_plain_echo_args(&borrowed_args) {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if runtime
+                                .execute_plain_echo_borrowed_into(msg, ts, client_resp3, out)
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
+                            copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                            return Ok(BorrowedMultibulkAction::Parsed {
+                                kind: parsed.kind,
+                                consumed: parsed.consumed,
+                                argv_len,
+                            });
+                        }
+                        if let Some(keys) = borrowed_plain_exists_args(&borrowed_args)
+                            && let Some(response) = runtime.execute_plain_exists_borrowed(keys, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((cmd, key)) = borrowed_plain_keymeta_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_keymeta_borrowed(cmd, key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, seconds)) = borrowed_plain_expire_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_expire_borrowed(key, seconds, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
                     }
-                    copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
-                    return Ok(BorrowedMultibulkAction::Parsed {
-                        kind: parsed.kind,
-                        consumed: parsed.consumed,
-                        argv_len,
-                    });
-                }
-                if let Some(key) = borrowed_plain_hgetall_args(&borrowed_args) {
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_hgetall_borrowed_into(key, ts, client_resp3, out)
-                        .is_some()
-                    {
-                        return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: parsed.consumed,
-                        });
+                    b'G' => {
+                        if let Some(key) = borrowed_plain_get_args(&borrowed_args) {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if runtime
+                                .execute_plain_get_borrowed_into(key, ts, client_resp3, out)
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
+                            copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                            return Ok(BorrowedMultibulkAction::Parsed {
+                                kind: parsed.kind,
+                                consumed: parsed.consumed,
+                                argv_len,
+                            });
+                        }
+                        if let Some(key) = borrowed_plain_getdel_args(&borrowed_args)
+                            && let Some(response) = runtime.execute_plain_getdel_borrowed(key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, start, end)) =
+                            borrowed_plain_getrange_args(&borrowed_args)
+                        {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if runtime
+                                .execute_plain_getrange_borrowed_into(
+                                    key,
+                                    start,
+                                    end,
+                                    ts,
+                                    client_resp3,
+                                    out,
+                                )
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
+                            copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                            return Ok(BorrowedMultibulkAction::Parsed {
+                                kind: parsed.kind,
+                                consumed: parsed.consumed,
+                                argv_len,
+                            });
+                        }
+                        if let Some((key, offset_arg)) = borrowed_plain_getbit_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_getbit_borrowed(key, offset_arg, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
                     }
-                    copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
-                    return Ok(BorrowedMultibulkAction::Parsed {
-                        kind: parsed.kind,
-                        consumed: parsed.consumed,
-                        argv_len,
-                    });
-                }
-                if let Some((key, values)) = borrowed_plain_hcoll_args(&borrowed_args) {
-                    if runtime
-                        .execute_plain_hcoll_borrowed_into(key, ts, values, out)
-                        .is_some()
-                    {
-                        return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: parsed.consumed,
-                        });
+                    b'H' => {
+                        if let Some(key) = borrowed_plain_hgetall_args(&borrowed_args) {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if runtime
+                                .execute_plain_hgetall_borrowed_into(key, ts, client_resp3, out)
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
+                            copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                            return Ok(BorrowedMultibulkAction::Parsed {
+                                kind: parsed.kind,
+                                consumed: parsed.consumed,
+                                argv_len,
+                            });
+                        }
+                        if let Some((key, values)) = borrowed_plain_hcoll_args(&borrowed_args) {
+                            if runtime
+                                .execute_plain_hcoll_borrowed_into(key, ts, values, out)
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
+                            copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                            return Ok(BorrowedMultibulkAction::Parsed {
+                                kind: parsed.kind,
+                                consumed: parsed.consumed,
+                                argv_len,
+                            });
+                        }
+                        if let Some((key, pairs)) = borrowed_plain_hset_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_hset_borrowed(key, pairs, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, field)) = borrowed_plain_hget_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_hget_borrowed(key, field, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_cardinality_borrowed(cmd, key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_rand_member_borrowed(cmd, key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((cmd, key, count)) =
+                            borrowed_plain_rand_member_count_args(&borrowed_args)
+                            && let Some(response) = runtime
+                                .execute_plain_rand_member_count_borrowed(cmd, key, count, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, fields)) = borrowed_plain_hmget_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_hmget_borrowed(key, fields, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, field)) = borrowed_plain_hstrlen_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_hstrlen_borrowed(key, field, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, field)) = borrowed_plain_hexists_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_hexists_borrowed(key, field, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
                     }
-                    copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
-                    return Ok(BorrowedMultibulkAction::Parsed {
-                        kind: parsed.kind,
-                        consumed: parsed.consumed,
-                        argv_len,
-                    });
-                }
-                if let Some((key, value)) = borrowed_plain_set_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_set_borrowed(key, value, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, offset, value)) = borrowed_plain_setrange_args(&borrowed_args)
-                    && let Some(response) =
-                        runtime.execute_plain_setrange_borrowed(key, offset, value, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some(key) = borrowed_plain_incr_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_incr_borrowed(key, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, delta)) = borrowed_plain_incrby_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_incrby_borrowed(key, delta, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some(key) = borrowed_plain_decr_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_decr_borrowed(key, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, delta)) = borrowed_plain_decrby_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_decrby_borrowed(key, delta, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, value)) = borrowed_plain_append_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_append_borrowed(key, value, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((cmd, key, values)) = borrowed_plain_keyed_values_args(&borrowed_args)
-                    && let Some(response) =
-                        runtime.execute_plain_keyed_values_write_borrowed(cmd, key, values, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, pairs)) = borrowed_plain_hset_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_hset_borrowed(key, pairs, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some(pairs) = borrowed_plain_mset_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_mset_borrowed(&pairs, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, pairs)) = borrowed_plain_zadd_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_zadd_borrowed(key, pairs, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, delta, member)) = borrowed_plain_zincrby_args(&borrowed_args)
-                    && let Some(response) =
-                        runtime.execute_plain_zincrby_borrowed(key, delta, member, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_keyed_pop_borrowed(cmd, key, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, field)) = borrowed_plain_hget_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_hget_borrowed(key, field, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some(keys) = borrowed_plain_mget_args(&borrowed_args) {
-                    // (frankenredis-5gisf) MGET encodes its `*N` reply directly
-                    // into `out` (zero value clones) — FastEncodedReply, not the
-                    // owned-RespFrame FastReply path.
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_mget_borrowed_into(keys, ts, client_resp3, out)
-                        .is_some()
-                    {
-                        return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: parsed.consumed,
-                        });
+                    b'I' => {
+                        if let Some(key) = borrowed_plain_incr_args(&borrowed_args)
+                            && let Some(response) = runtime.execute_plain_incr_borrowed(key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, delta)) = borrowed_plain_incrby_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_incrby_borrowed(key, delta, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
                     }
-                    copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
-                    return Ok(BorrowedMultibulkAction::Parsed {
-                        kind: parsed.kind,
-                        consumed: parsed.consumed,
-                        argv_len,
-                    });
-                }
-                if let Some(keys) = borrowed_plain_exists_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_exists_borrowed(keys, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some(key) = borrowed_plain_strlen_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_strlen_borrowed(key, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some(key) = borrowed_plain_getdel_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_getdel_borrowed(key, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some(key) = borrowed_plain_llen_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_llen_borrowed(key, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some(key) = borrowed_plain_scard_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_scard_borrowed(key, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((cmd, key)) = borrowed_plain_keymeta_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_keymeta_borrowed(cmd, key, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_cardinality_borrowed(cmd, key, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_rand_member_borrowed(cmd, key, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((cmd, key, count)) = borrowed_plain_rand_member_count_args(&borrowed_args)
-                    && let Some(response) =
-                        runtime.execute_plain_rand_member_count_borrowed(cmd, key, count, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((cmd, key, member)) = borrowed_plain_rank_args(&borrowed_args)
-                    && let Some(response) =
-                        runtime.execute_plain_rank_borrowed(cmd, key, member, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, index)) = borrowed_plain_lindex_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_lindex_borrowed(key, index, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, member)) = borrowed_plain_zscore_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_zscore_borrowed(key, member, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, start, stop)) = borrowed_plain_zrange_args(&borrowed_args)
-                    && let Some(response) =
-                        runtime.execute_plain_zrange_borrowed(key, start, stop, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, start, end)) = borrowed_plain_getrange_args(&borrowed_args) {
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_getrange_borrowed_into(
-                            key,
-                            start,
-                            end,
-                            ts,
-                            client_resp3,
-                            out,
-                        )
-                        .is_some()
-                    {
-                        return Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: parsed.consumed,
-                        });
+                    b'L' => {
+                        if let Some((key, start, stop)) = borrowed_plain_lrange_args(&borrowed_args)
+                        {
+                            if runtime
+                                .execute_plain_lrange_borrowed_into(key, start, stop, ts, out)
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
+                            copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                            return Ok(BorrowedMultibulkAction::Parsed {
+                                kind: parsed.kind,
+                                consumed: parsed.consumed,
+                                argv_len,
+                            });
+                        }
+                        if let Some((cmd, key, values)) =
+                            borrowed_plain_keyed_values_args(&borrowed_args)
+                            && let Some(response) = runtime
+                                .execute_plain_keyed_values_write_borrowed(cmd, key, values, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_keyed_pop_borrowed(cmd, key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some(key) = borrowed_plain_llen_args(&borrowed_args)
+                            && let Some(response) = runtime.execute_plain_llen_borrowed(key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, index)) = borrowed_plain_lindex_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_lindex_borrowed(key, index, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, element)) = borrowed_plain_lpos_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_lpos_borrowed(key, element, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, element, rank)) =
+                            borrowed_plain_lpos_rank_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_lpos_rank_borrowed(key, element, rank, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
                     }
-                    copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
-                    return Ok(BorrowedMultibulkAction::Parsed {
-                        kind: parsed.kind,
-                        consumed: parsed.consumed,
-                        argv_len,
-                    });
-                }
-                if let Some((key, fields)) = borrowed_plain_hmget_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_hmget_borrowed(key, fields, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, members)) = borrowed_plain_smismember_args(&borrowed_args)
-                    && let Some(response) =
-                        runtime.execute_plain_smismember_borrowed(key, members, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, members)) = borrowed_plain_zmscore_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_zmscore_borrowed(key, members, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some(tail) = borrowed_plain_sintercard_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_sintercard_borrowed(tail, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, member)) = borrowed_plain_sismember_args(&borrowed_args)
-                    && let Some(response) =
-                        runtime.execute_plain_sismember_borrowed(key, member, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, offset_arg)) = borrowed_plain_getbit_args(&borrowed_args)
-                    && let Some(response) =
-                        runtime.execute_plain_getbit_borrowed(key, offset_arg, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, element)) = borrowed_plain_lpos_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_lpos_borrowed(key, element, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, element, rank)) = borrowed_plain_lpos_rank_args(&borrowed_args)
-                    && let Some(response) =
-                        runtime.execute_plain_lpos_rank_borrowed(key, element, rank, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some(key) = borrowed_plain_object_encoding_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_object_encoding_borrowed(key, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some(key) = borrowed_plain_object_refcount_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_object_refcount_borrowed(key, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((cmd, key)) = borrowed_plain_object_stat_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_object_stat_borrowed(cmd, key, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some(key) = borrowed_plain_memory_usage_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_memory_usage_borrowed(key, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, range)) = borrowed_plain_bitcount_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_bitcount_borrowed(key, range, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, bit_arg, range)) = borrowed_plain_bitpos_args(&borrowed_args)
-                    && let Some(response) =
-                        runtime.execute_plain_bitpos_borrowed(key, bit_arg, range, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if borrowed_plain_command_count_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_command_count_borrowed(ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if borrowed_plain_dbsize_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_dbsize_borrowed(ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, seconds)) = borrowed_plain_expire_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_expire_borrowed(key, seconds, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, field)) = borrowed_plain_hstrlen_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_hstrlen_borrowed(key, field, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
-                }
-                if let Some((key, field)) = borrowed_plain_hexists_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_hexists_borrowed(key, field, ts)
-                {
-                    return Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: parsed.consumed,
-                        response,
-                    });
+                    b'M' => {
+                        if let Some(pairs) = borrowed_plain_mset_args(&borrowed_args)
+                            && let Some(response) = runtime.execute_plain_mset_borrowed(&pairs, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some(keys) = borrowed_plain_mget_args(&borrowed_args) {
+                            // (frankenredis-5gisf) MGET encodes its `*N` reply directly
+                            // into `out` (zero value clones) — FastEncodedReply, not the
+                            // owned-RespFrame FastReply path.
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if runtime
+                                .execute_plain_mget_borrowed_into(keys, ts, client_resp3, out)
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
+                            copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                            return Ok(BorrowedMultibulkAction::Parsed {
+                                kind: parsed.kind,
+                                consumed: parsed.consumed,
+                                argv_len,
+                            });
+                        }
+                        if let Some(key) = borrowed_plain_memory_usage_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_memory_usage_borrowed(key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                    }
+                    b'O' => {
+                        if let Some(key) = borrowed_plain_object_encoding_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_object_encoding_borrowed(key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some(key) = borrowed_plain_object_refcount_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_object_refcount_borrowed(key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((cmd, key)) = borrowed_plain_object_stat_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_object_stat_borrowed(cmd, key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                    }
+                    b'P' => {
+                        if let Some(msg) = borrowed_plain_ping_args(&borrowed_args) {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if runtime
+                                .execute_plain_ping_borrowed_into(msg, ts, client_resp3, out)
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
+                            copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                            return Ok(BorrowedMultibulkAction::Parsed {
+                                kind: parsed.kind,
+                                consumed: parsed.consumed,
+                                argv_len,
+                            });
+                        }
+                        if let Some((cmd, key)) = borrowed_plain_keymeta_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_keymeta_borrowed(cmd, key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                    }
+                    b'R' => {
+                        if let Some((cmd, key, values)) =
+                            borrowed_plain_keyed_values_args(&borrowed_args)
+                            && let Some(response) = runtime
+                                .execute_plain_keyed_values_write_borrowed(cmd, key, values, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_keyed_pop_borrowed(cmd, key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                    }
+                    b'S' => {
+                        if let Some(key) = borrowed_plain_smembers_args(&borrowed_args) {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if runtime
+                                .execute_plain_smembers_borrowed_into(key, ts, client_resp3, out)
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
+                            copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
+                            return Ok(BorrowedMultibulkAction::Parsed {
+                                kind: parsed.kind,
+                                consumed: parsed.consumed,
+                                argv_len,
+                            });
+                        }
+                        if let Some((key, value)) = borrowed_plain_set_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_set_borrowed(key, value, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, offset, value)) =
+                            borrowed_plain_setrange_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_setrange_borrowed(key, offset, value, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((cmd, key, values)) =
+                            borrowed_plain_keyed_values_args(&borrowed_args)
+                            && let Some(response) = runtime
+                                .execute_plain_keyed_values_write_borrowed(cmd, key, values, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_keyed_pop_borrowed(cmd, key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some(key) = borrowed_plain_strlen_args(&borrowed_args)
+                            && let Some(response) = runtime.execute_plain_strlen_borrowed(key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some(key) = borrowed_plain_scard_args(&borrowed_args)
+                            && let Some(response) = runtime.execute_plain_scard_borrowed(key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_rand_member_borrowed(cmd, key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((cmd, key, count)) =
+                            borrowed_plain_rand_member_count_args(&borrowed_args)
+                            && let Some(response) = runtime
+                                .execute_plain_rand_member_count_borrowed(cmd, key, count, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, members)) = borrowed_plain_smismember_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_smismember_borrowed(key, members, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some(tail) = borrowed_plain_sintercard_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_sintercard_borrowed(tail, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, member)) = borrowed_plain_sismember_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_sismember_borrowed(key, member, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                    }
+                    b'T' => {
+                        if let Some((cmd, key)) = borrowed_plain_keymeta_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_keymeta_borrowed(cmd, key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                    }
+                    b'X' => {
+                        if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_cardinality_borrowed(cmd, key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                    }
+                    b'Z' => {
+                        if let Some((key, pairs)) = borrowed_plain_zadd_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_zadd_borrowed(key, pairs, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, delta, member)) =
+                            borrowed_plain_zincrby_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_zincrby_borrowed(key, delta, member, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((cmd, key)) = borrowed_plain_keyed_pop_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_keyed_pop_borrowed(cmd, key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_cardinality_borrowed(cmd, key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_rand_member_borrowed(cmd, key, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((cmd, key, count)) =
+                            borrowed_plain_rand_member_count_args(&borrowed_args)
+                            && let Some(response) = runtime
+                                .execute_plain_rand_member_count_borrowed(cmd, key, count, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((cmd, key, member)) = borrowed_plain_rank_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_rank_borrowed(cmd, key, member, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, member)) = borrowed_plain_zscore_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_zscore_borrowed(key, member, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, start, stop)) = borrowed_plain_zrange_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_zrange_borrowed(key, start, stop, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                        if let Some((key, members)) = borrowed_plain_zmscore_args(&borrowed_args)
+                            && let Some(response) =
+                                runtime.execute_plain_zmscore_borrowed(key, members, ts)
+                        {
+                            return Ok(BorrowedMultibulkAction::FastReply {
+                                consumed: parsed.consumed,
+                                response,
+                            });
+                        }
+                    }
+                    _ => {}
                 }
 
                 copy_borrowed_argv_into_scratch(&borrowed_args, argv_scratch);
@@ -4134,9 +4337,7 @@ fn borrowed_plain_bitpos_args<'a>(
     Option<(&'a [u8], Option<&'a [u8]>, Option<&'a [u8]>)>,
 )> {
     match borrowed_args {
-        [command, key, bit] if command.eq_ignore_ascii_case(b"BITPOS") => {
-            Some((*key, *bit, None))
-        }
+        [command, key, bit] if command.eq_ignore_ascii_case(b"BITPOS") => Some((*key, *bit, None)),
         [command, key, bit, start] if command.eq_ignore_ascii_case(b"BITPOS") => {
             Some((*key, *bit, Some((*start, None, None))))
         }
