@@ -1,0 +1,9 @@
+# baseline f07def / frankenredis fb419289d5090eb3589e0fc565baffb02f5cbf0b62cd021e85c2152dcc90f1a0 / redis e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+# DBSIZE redis
+ DBSIZE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                             DBSIZE: rps=1021376.0 (overall: 1017306.8) avg_msec=0.473 (overall: 0.473)                                                                           DBSIZE: 1020408.19 requests per second, p50=0.391 msec
+# DBSIZE fr
+ DBSIZE: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                              DBSIZE: rps=929848.6 (overall: 929848.6) avg_msec=0.504 (overall: 0.504)                                                                         DBSIZE: 952380.94 requests per second, p50=0.391 msec
+# COMMAND COUNT redis
+ COMMAND COUNT: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                    COMMAND COUNT: rps=995072.0 (overall: 991107.6) avg_msec=0.483 (overall: 0.483)                                                                                COMMAND COUNT: 993377.50 requests per second, p50=0.423 msec
+# COMMAND COUNT fr
+ COMMAND COUNT: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                                     COMMAND COUNT: rps=938454.2 (overall: 938454.2) avg_msec=0.687 (overall: 0.687)                                                                                COMMAND COUNT: 937500.00 requests per second, p50=0.631 msec

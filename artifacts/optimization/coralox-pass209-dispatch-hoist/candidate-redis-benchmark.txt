@@ -1,0 +1,15 @@
+candidate_binary_sha256 835127e724b1692fb41860435ea977c623bc535326cc2106f5074f44c33815bf  /data/projects/frankenredis/target-coralox-pass209-dispatch-candidate/release-perf/frankenredis
+redis_binary_sha256 e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7  /data/projects/frankenredis/legacy_redis_code/redis/src/redis-server
+bench_binary_sha256 8931ebb4de7ea5ae700bf4cf866ad246535743496318ad4e19b46af1c58d7a0b  /data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark
+
+# redis DBSIZE
+ DBSIZE: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                              DBSIZE: rps=976446.2 (overall: 976446.2) avg_msec=0.461 (overall: 0.461)                                                                         DBSIZE: 980392.19 requests per second, p50=0.439 msec
+
+# frankenredis candidate DBSIZE
+ DBSIZE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                             DBSIZE: rps=1040320.0 (overall: 1036175.4) avg_msec=0.432 (overall: 0.432)                                                                           DBSIZE: 1030927.81 requests per second, p50=0.375 msec
+
+# redis COMMAND COUNT
+ COMMAND COUNT: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                    COMMAND COUNT: rps=933312.0 (overall: 929593.7) avg_msec=0.505 (overall: 0.505)                                                                                COMMAND COUNT: 967741.94 requests per second, p50=0.407 msec
+
+# frankenredis candidate COMMAND COUNT
+ COMMAND COUNT: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                    COMMAND COUNT: rps=890390.5 (overall: 886857.1) avg_msec=0.599 (overall: 0.599)                                                                                COMMAND COUNT: 914634.12 requests per second, p50=0.543 msec

@@ -1,0 +1,40 @@
+baseline_binary_sha256 fb419289d5090eb3589e0fc565baffb02f5cbf0b62cd021e85c2152dcc90f1a0  /data/projects/frankenredis/target-coralox-n3uyd-baseline/release-perf/frankenredis
+candidate_binary_sha256 835127e724b1692fb41860435ea977c623bc535326cc2106f5074f44c33815bf  /data/projects/frankenredis/target-coralox-pass209-dispatch-candidate/release-perf/frankenredis
+redis_binary_sha256 e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7  /data/projects/frankenredis/legacy_redis_code/redis/src/redis-server
+bench_binary_sha256 8931ebb4de7ea5ae700bf4cf866ad246535743496318ad4e19b46af1c58d7a0b  /data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark
+
+# round 1 baseline DBSIZE
+ DBSIZE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                             DBSIZE: rps=1019712.0 (overall: 1015649.4) avg_msec=0.496 (overall: 0.496)                                                                           DBSIZE: 999999.94 requests per second, p50=0.447 msec
+
+# round 1 candidate DBSIZE
+ DBSIZE: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                              DBSIZE: rps=999713.2 (overall: 999713.2) avg_msec=0.433 (overall: 0.433)                                                                         DBSIZE: 990099.00 requests per second, p50=0.383 msec
+
+# round 1 baseline COMMAND_COUNT
+ COMMAND COUNT: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                    COMMAND COUNT: rps=1003665.4 (overall: 999682.5) avg_msec=0.649 (overall: 0.649)                                                                                 COMMAND COUNT: 952380.94 requests per second, p50=0.647 msec
+
+# round 1 candidate COMMAND_COUNT
+ COMMAND COUNT: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                    COMMAND COUNT: rps=993024.0 (overall: 989067.8) avg_msec=0.557 (overall: 0.557)                                                                                COMMAND COUNT: 990099.00 requests per second, p50=0.503 msec
+
+# round 2 baseline DBSIZE
+ DBSIZE: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                              DBSIZE: rps=1055490.1 (overall: 1055490.1) avg_msec=0.480 (overall: 0.480)                                                                           DBSIZE: 1052631.62 requests per second, p50=0.391 msec
+
+# round 2 candidate DBSIZE
+ DBSIZE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                             DBSIZE: rps=932544.0 (overall: 928828.8) avg_msec=0.509 (overall: 0.509)                                                                         DBSIZE: 923076.94 requests per second, p50=0.479 msec
+
+# round 2 baseline COMMAND_COUNT
+ COMMAND COUNT: rps=0.0 (overall: -nan) avg_msec=-nan (overall: -nan)                                                                     COMMAND COUNT: rps=927298.9 (overall: 927298.9) avg_msec=0.701 (overall: 0.701)                                                                                COMMAND COUNT: 946372.25 requests per second, p50=0.655 msec
+
+# round 2 candidate COMMAND_COUNT
+ COMMAND COUNT: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                    COMMAND COUNT: rps=1023043.9 (overall: 1018984.1) avg_msec=0.470 (overall: 0.470)                                                                                  COMMAND COUNT: 1006711.38 requests per second, p50=0.423 msec
+
+# round 3 baseline DBSIZE
+ DBSIZE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                             DBSIZE: rps=980608.0 (overall: 976701.2) avg_msec=0.555 (overall: 0.555)                                                                         DBSIZE: 949367.06 requests per second, p50=0.535 msec
+
+# round 3 candidate DBSIZE
+ DBSIZE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                             DBSIZE: rps=997952.0 (overall: 993976.1) avg_msec=0.470 (overall: 0.470)                                                                         DBSIZE: 993377.50 requests per second, p50=0.399 msec
+
+# round 3 baseline COMMAND_COUNT
+ COMMAND COUNT: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                    COMMAND COUNT: rps=905088.0 (overall: 901482.1) avg_msec=0.630 (overall: 0.630)                                                                                COMMAND COUNT: 900900.88 requests per second, p50=0.607 msec
+
+# round 3 candidate COMMAND_COUNT
+ COMMAND COUNT: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                    COMMAND COUNT: rps=912765.0 (overall: 909142.8) avg_msec=0.556 (overall: 0.556)                                                                                COMMAND COUNT: 925925.94 requests per second, p50=0.503 msec
