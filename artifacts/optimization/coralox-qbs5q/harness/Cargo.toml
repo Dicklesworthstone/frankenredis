@@ -1,0 +1,10 @@
+[package]
+name = "fr-qbs5q-list-restore-harness"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+fr-store = { path = "../../../../crates/fr-store" }

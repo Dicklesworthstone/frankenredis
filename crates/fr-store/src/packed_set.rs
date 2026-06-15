@@ -1102,6 +1102,7 @@ impl<'a> Iterator for PackedListIter<'a> {
 }
 
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::sync::Arc;
 
 /// Storage for a list: a packed buffer while small, promoting to a chunked COW
@@ -1134,31 +1135,98 @@ impl Default for ListRepr {
 const LIST_CHUNK_TARGET: usize = 128;
 
 #[derive(Clone, Debug)]
-struct ListChunk {
-    elems: Arc<Vec<Vec<u8>>>,
+enum ListChunk {
+    Owned {
+        elems: Arc<Vec<Vec<u8>>>,
+    },
+    ListpackStrings {
+        bytes: Arc<Vec<u8>>,
+        ranges: Arc<Vec<Range<usize>>>,
+    },
 }
 
 impl ListChunk {
     fn from_vec(elems: Vec<Vec<u8>>) -> Self {
-        Self {
+        Self::Owned {
             elems: Arc::new(elems),
         }
     }
 
+    fn from_listpack_strings(bytes: Vec<u8>, ranges: Vec<Range<usize>>) -> Self {
+        Self::ListpackStrings {
+            bytes: Arc::new(bytes),
+            ranges: Arc::new(ranges),
+        }
+    }
+
     fn len(&self) -> usize {
-        self.elems.len()
+        match self {
+            Self::Owned { elems } => elems.len(),
+            Self::ListpackStrings { ranges, .. } => ranges.len(),
+        }
     }
 
     fn is_empty(&self) -> bool {
-        self.elems.is_empty()
+        self.len() == 0
     }
 
     fn get(&self, idx: usize) -> Option<&[u8]> {
-        self.elems.get(idx).map(Vec::as_slice)
+        match self {
+            Self::Owned { elems } => elems.get(idx).map(Vec::as_slice),
+            Self::ListpackStrings { bytes, ranges } => {
+                ranges.get(idx).map(|range| &bytes[range.clone()])
+            }
+        }
     }
 
     fn make_mut(&mut self) -> &mut Vec<Vec<u8>> {
-        Arc::make_mut(&mut self.elems)
+        if let Self::ListpackStrings { bytes, ranges } = self {
+            let elems = ranges
+                .iter()
+                .map(|range| bytes[range.clone()].to_vec())
+                .collect();
+            *self = Self::from_vec(elems);
+        }
+        match self {
+            Self::Owned { elems } => Arc::make_mut(elems),
+            Self::ListpackStrings { .. } => unreachable!("packed listpack node was materialized"),
+        }
+    }
+
+    fn iter(&self) -> ListChunkIter<'_> {
+        match self {
+            Self::Owned { elems } => ListChunkIter::Owned(elems.iter()),
+            Self::ListpackStrings { bytes, ranges } => ListChunkIter::ListpackStrings {
+                bytes,
+                ranges: ranges.iter(),
+            },
+        }
+    }
+
+    fn iter_from(&self, start: usize) -> ListChunkIter<'_> {
+        match self {
+            Self::Owned { elems } => {
+                let start = start.min(elems.len());
+                ListChunkIter::Owned(elems[start..].iter())
+            }
+            Self::ListpackStrings { bytes, ranges } => {
+                let start = start.min(ranges.len());
+                ListChunkIter::ListpackStrings {
+                    bytes,
+                    ranges: ranges[start..].iter(),
+                }
+            }
+        }
+    }
+
+    fn iter_rev(&self) -> ListChunkRevIter<'_> {
+        match self {
+            Self::Owned { elems } => ListChunkRevIter::Owned(elems.iter().rev()),
+            Self::ListpackStrings { bytes, ranges } => ListChunkRevIter::ListpackStrings {
+                bytes,
+                ranges: ranges.iter().rev(),
+            },
+        }
     }
 }
 
@@ -1340,7 +1408,7 @@ impl ChunkedList {
             let mut base = 0usize;
             let mut idx = 0usize;
             for chunk in self.chunks.iter() {
-                let n = chunk.elems.len();
+                let n = chunk.len();
                 if start < base + n {
                     break;
                 }
@@ -1352,7 +1420,7 @@ impl ChunkedList {
             let mut base = self.len;
             let mut idx = self.chunks.len();
             for chunk in self.chunks.iter().rev() {
-                base -= chunk.elems.len();
+                base -= chunk.len();
                 idx -= 1;
                 if start >= base {
                     break;
@@ -1362,14 +1430,61 @@ impl ChunkedList {
         };
         let local = start - base;
         let mut chunks = self.chunks.range(chunk_idx..);
-        let current = chunks.next().map(|c| {
-            let mut it = c.elems.iter();
-            for _ in 0..local {
-                it.next();
-            }
-            it
-        });
+        let current = chunks.next().map(|c| c.iter_from(local));
         ChunkedListIter { chunks, current }
+    }
+}
+
+pub(crate) enum RestoredListNode {
+    Plain(Vec<u8>),
+    Elements(Vec<Vec<u8>>),
+    ListpackStrings {
+        bytes: Vec<u8>,
+        ranges: Vec<Range<usize>>,
+    },
+}
+
+fn flush_restore_plain_chunk(out: &mut ChunkedList, chunk: &mut Vec<Vec<u8>>) {
+    if chunk.is_empty() {
+        return;
+    }
+    let chunk = std::mem::take(chunk);
+    out.len += chunk.len();
+    out.chunks.push_back(ListChunk::from_vec(chunk));
+}
+
+impl ChunkedList {
+    fn from_restored_nodes(nodes: Vec<RestoredListNode>) -> Self {
+        let mut out = ChunkedList::default();
+        let mut plain_chunk = Vec::with_capacity(LIST_CHUNK_TARGET);
+        for node in nodes {
+            match node {
+                RestoredListNode::Plain(elem) => {
+                    plain_chunk.push(elem);
+                    if plain_chunk.len() == LIST_CHUNK_TARGET {
+                        flush_restore_plain_chunk(&mut out, &mut plain_chunk);
+                        plain_chunk = Vec::with_capacity(LIST_CHUNK_TARGET);
+                    }
+                }
+                RestoredListNode::Elements(elems) => {
+                    for elem in elems {
+                        plain_chunk.push(elem);
+                        if plain_chunk.len() == LIST_CHUNK_TARGET {
+                            flush_restore_plain_chunk(&mut out, &mut plain_chunk);
+                            plain_chunk = Vec::with_capacity(LIST_CHUNK_TARGET);
+                        }
+                    }
+                }
+                RestoredListNode::ListpackStrings { bytes, ranges } => {
+                    flush_restore_plain_chunk(&mut out, &mut plain_chunk);
+                    out.len += ranges.len();
+                    out.chunks
+                        .push_back(ListChunk::from_listpack_strings(bytes, ranges));
+                }
+            }
+        }
+        flush_restore_plain_chunk(&mut out, &mut plain_chunk);
+        out
     }
 }
 
@@ -1395,7 +1510,7 @@ impl From<VecDeque<Vec<u8>>> for ChunkedList {
 
 pub struct ChunkedListIter<'a> {
     chunks: std::collections::vec_deque::Iter<'a, ListChunk>,
-    current: Option<std::slice::Iter<'a, Vec<u8>>>,
+    current: Option<ListChunkIter<'a>>,
 }
 
 impl<'a> Iterator for ChunkedListIter<'a> {
@@ -1406,10 +1521,31 @@ impl<'a> Iterator for ChunkedListIter<'a> {
             if let Some(current) = &mut self.current
                 && let Some(elem) = current.next()
             {
-                return Some(elem.as_slice());
+                return Some(elem);
             }
             let chunk = self.chunks.next()?;
-            self.current = Some(chunk.elems.iter());
+            self.current = Some(chunk.iter());
+        }
+    }
+}
+
+enum ListChunkIter<'a> {
+    Owned(std::slice::Iter<'a, Vec<u8>>),
+    ListpackStrings {
+        bytes: &'a [u8],
+        ranges: std::slice::Iter<'a, Range<usize>>,
+    },
+}
+
+impl<'a> Iterator for ListChunkIter<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Owned(iter) => iter.next().map(Vec::as_slice),
+            Self::ListpackStrings { bytes, ranges } => {
+                ranges.next().map(|range| &bytes[range.clone()])
+            }
         }
     }
 }
@@ -1418,7 +1554,7 @@ impl<'a> Iterator for ChunkedListIter<'a> {
 /// elements within each chunk in reverse. (frankenredis-gjyzr)
 pub struct ChunkedListRevIter<'a> {
     chunks: std::iter::Rev<std::collections::vec_deque::Iter<'a, ListChunk>>,
-    current: Option<std::iter::Rev<std::slice::Iter<'a, Vec<u8>>>>,
+    current: Option<ListChunkRevIter<'a>>,
 }
 
 impl<'a> Iterator for ChunkedListRevIter<'a> {
@@ -1429,10 +1565,31 @@ impl<'a> Iterator for ChunkedListRevIter<'a> {
             if let Some(current) = &mut self.current
                 && let Some(elem) = current.next()
             {
-                return Some(elem.as_slice());
+                return Some(elem);
             }
             let chunk = self.chunks.next()?;
-            self.current = Some(chunk.elems.iter().rev());
+            self.current = Some(chunk.iter_rev());
+        }
+    }
+}
+
+enum ListChunkRevIter<'a> {
+    Owned(std::iter::Rev<std::slice::Iter<'a, Vec<u8>>>),
+    ListpackStrings {
+        bytes: &'a [u8],
+        ranges: std::iter::Rev<std::slice::Iter<'a, Range<usize>>>,
+    },
+}
+
+impl<'a> Iterator for ListChunkRevIter<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Owned(iter) => iter.next().map(Vec::as_slice),
+            Self::ListpackStrings { bytes, ranges } => {
+                ranges.next().map(|range| &bytes[range.clone()])
+            }
         }
     }
 }
@@ -1875,6 +2032,18 @@ impl ListValue {
         *self = ListValue::default();
     }
 
+    pub(crate) fn from_restored_quicklist2_nodes(nodes: Vec<RestoredListNode>) -> Self {
+        let mut list = ListValue {
+            repr: ListRepr::Deque(Arc::new(ChunkedList::from_restored_nodes(nodes))),
+            lp_bytes: LIST_LP_OVERHEAD,
+            forced_quicklist: false,
+            fill: -2,
+            decided_by_write: false,
+        };
+        list.rebuild_growth_state();
+        list
+    }
+
     #[must_use]
     pub fn iter(&self) -> ListValueIter<'_> {
         match &self.repr {
@@ -2261,8 +2430,8 @@ impl<'a> Iterator for PackedZSetIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChunkedList, LIST_CHUNK_TARGET, ListRepr, ListValue, PACKED_MAX_ENTRIES, PackedList,
-        PackedStrMap, PackedStrSet, PackedZSet, zset_cmp,
+        ChunkedList, LIST_CHUNK_TARGET, ListChunk, ListRepr, ListValue, PACKED_MAX_ENTRIES,
+        PackedList, PackedStrMap, PackedStrSet, PackedZSet, zset_cmp,
     };
     use indexmap::{IndexMap, IndexSet};
     use proptest::prelude::*;
@@ -2486,11 +2655,23 @@ mod tests {
             copy_deque.chunks.get(1),
         ) {
             (Some(source_front), Some(copy_front), Some(source_tail), Some(copy_tail)) => {
-                assert!(!std::sync::Arc::ptr_eq(
-                    &source_front.elems,
-                    &copy_front.elems
-                ));
-                assert!(std::sync::Arc::ptr_eq(&source_tail.elems, &copy_tail.elems));
+                let ListChunk::Owned {
+                    elems: source_front,
+                } = source_front
+                else {
+                    unreachable!("push-built list chunks are owned");
+                };
+                let ListChunk::Owned { elems: copy_front } = copy_front else {
+                    unreachable!("push-built list chunks are owned");
+                };
+                let ListChunk::Owned { elems: source_tail } = source_tail else {
+                    unreachable!("push-built list chunks are owned");
+                };
+                let ListChunk::Owned { elems: copy_tail } = copy_tail else {
+                    unreachable!("push-built list chunks are owned");
+                };
+                assert!(!std::sync::Arc::ptr_eq(source_front, copy_front));
+                assert!(std::sync::Arc::ptr_eq(source_tail, copy_tail));
             }
             _ => {
                 unreachable!("129-element deque must split into two chunks");

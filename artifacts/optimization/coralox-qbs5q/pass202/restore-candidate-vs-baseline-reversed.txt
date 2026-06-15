@@ -1,0 +1,11 @@
+Benchmark 1: target-coralox-qbs5q-pass202-candidate/release/fr-qbs5q-list-restore-harness --list-len 10000 --payload-size 16 --repeats 500 --ring 8
+  Time (mean ± σ):     298.8 ms ±   8.6 ms    [User: 295.6 ms, System: 3.0 ms]
+  Range (min … max):   287.9 ms … 313.3 ms    10 runs
+
+Benchmark 2: /data/projects/.scratch/frankenredis-qbs5q-baseline-b8487d8bf/target-coralox-qbs5q-pass202-baseline/release/fr-qbs5q-list-restore-harness --list-len 10000 --payload-size 16 --repeats 500 --ring 8
+  Time (mean ± σ):     456.8 ms ±  23.1 ms    [User: 449.7 ms, System: 6.5 ms]
+  Range (min … max):   427.1 ms … 486.6 ms    10 runs
+
+Summary
+  target-coralox-qbs5q-pass202-candidate/release/fr-qbs5q-list-restore-harness --list-len 10000 --payload-size 16 --repeats 500 --ring 8 ran
+    1.53 ± 0.09 times faster than /data/projects/.scratch/frankenredis-qbs5q-baseline-b8487d8bf/target-coralox-qbs5q-pass202-baseline/release/fr-qbs5q-list-restore-harness --list-len 10000 --payload-size 16 --repeats 500 --ring 8

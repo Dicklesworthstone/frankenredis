@@ -13,6 +13,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::ops::Range;
 
 /// A decoded listpack entry: integer or byte-string.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,6 +357,105 @@ pub fn decode_listpack(data: &[u8]) -> Result<Vec<ListpackEntry>, ListpackError>
     Ok(entries)
 }
 
+fn decode_string_entry_range(
+    data: &[u8],
+    cursor: usize,
+) -> Result<Option<(Range<usize>, usize)>, ListpackError> {
+    let first = *data.get(cursor).ok_or(ListpackError::TruncatedEntry)?;
+
+    if first & 0x80 == 0 {
+        return Ok(None);
+    }
+    if first & 0xC0 == 0x80 {
+        let slen = (first & 0x3F) as usize;
+        let start = cursor + 1;
+        let end = start
+            .checked_add(slen)
+            .ok_or(ListpackError::StringLengthOverflow)?;
+        if end > data.len() {
+            return Err(ListpackError::TruncatedEntry);
+        }
+        let data_len = 1 + slen;
+        let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+        return Ok(Some((start..end, entry_len)));
+    }
+    if first & 0xE0 == 0xC0 {
+        return Ok(None);
+    }
+    if first & 0xF0 == 0xE0 {
+        let second = *data.get(cursor + 1).ok_or(ListpackError::TruncatedEntry)?;
+        let slen = ((u32::from(first & 0x0F) << 8) | u32::from(second)) as usize;
+        let start = cursor + 2;
+        let end = start
+            .checked_add(slen)
+            .ok_or(ListpackError::StringLengthOverflow)?;
+        if end > data.len() {
+            return Err(ListpackError::TruncatedEntry);
+        }
+        let data_len = 2 + slen;
+        let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+        return Ok(Some((start..end, entry_len)));
+    }
+    match first {
+        0xF0 => {
+            if cursor + 5 > data.len() {
+                return Err(ListpackError::TruncatedEntry);
+            }
+            let slen = u32::from_le_bytes([
+                data[cursor + 1],
+                data[cursor + 2],
+                data[cursor + 3],
+                data[cursor + 4],
+            ]) as usize;
+            let start = cursor + 5;
+            let end = start
+                .checked_add(slen)
+                .ok_or(ListpackError::StringLengthOverflow)?;
+            if end > data.len() {
+                return Err(ListpackError::TruncatedEntry);
+            }
+            let data_len = 5 + slen;
+            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            Ok(Some((start..end, entry_len)))
+        }
+        0xF1..=0xF4 => Ok(None),
+        _ => Err(ListpackError::InvalidEncoding(first)),
+    }
+}
+
+/// Return byte ranges for a listpack whose entries are all string encodings.
+///
+/// Integer encodings are not lossy, but their Redis-observable value is the
+/// decimal string form of the integer. Callers that need borrowed payload bytes
+/// should fall back to [`decode_listpack`] when this returns `Ok(None)`.
+pub fn decode_string_ranges_if_all_strings(
+    data: &[u8],
+) -> Result<Option<Vec<Range<usize>>>, ListpackError> {
+    let (total_bytes, num_elements) = parse_header(data)?;
+    let end = (total_bytes as usize) - 1;
+    let mut cursor = LISTPACK_HEADER_SIZE;
+    let mut ranges = Vec::new();
+    while cursor < end {
+        let Some((range, consumed)) = decode_string_entry_range(data, cursor)? else {
+            return Ok(None);
+        };
+        ranges.push(range);
+        cursor = cursor
+            .checked_add(consumed)
+            .ok_or(ListpackError::TruncatedEntry)?;
+        if cursor > end {
+            return Err(ListpackError::TruncatedEntry);
+        }
+    }
+    if cursor != end {
+        return Err(ListpackError::MissingTerminator);
+    }
+    if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN && ranges.len() != usize::from(num_elements) {
+        return Err(ListpackError::ElementCountMismatch);
+    }
+    Ok(Some(ranges))
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -621,6 +721,24 @@ mod tests {
             decode_listpack(&lp).unwrap(),
             vec![ListpackEntry::Integer(3), ListpackEntry::Integer(5)]
         );
+    }
+
+    #[test]
+    fn decode_string_ranges_borrows_string_payloads() {
+        let first = entry_6bit_str(b"alpha");
+        let second = entry_6bit_str(b"beta");
+        let lp = assemble(&[&first, &second]);
+        let ranges = decode_string_ranges_if_all_strings(&lp)
+            .unwrap()
+            .expect("all entries are strings");
+        let borrowed: Vec<&[u8]> = ranges.iter().map(|range| &lp[range.clone()]).collect();
+        assert_eq!(borrowed, vec![b"alpha".as_slice(), b"beta".as_slice()]);
+    }
+
+    #[test]
+    fn decode_string_ranges_returns_none_for_integer_node() {
+        let lp = assemble(&[&entry_6bit_str(b"alpha"), &entry_7bit_uint(42)]);
+        assert_eq!(decode_string_ranges_if_all_strings(&lp).unwrap(), None);
     }
 
     #[test]

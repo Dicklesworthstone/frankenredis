@@ -4,7 +4,9 @@
 // `GenericSet` stores a small set in one packed buffer, promoting to an IndexSet
 // hashtable past the threshold. SMEMBERS/SSCAN/SPOP output is unchanged.
 mod packed_set;
-use packed_set::{GenericSet, HashFieldMap, ListValue, PackedZSet, PackedZSetIter};
+use packed_set::{
+    GenericSet, HashFieldMap, ListValue, PackedZSet, PackedZSetIter, RestoredListNode,
+};
 
 use fr_expire::evaluate_expiry;
 use std::borrow::Cow;
@@ -20032,7 +20034,7 @@ impl Store {
             RDB_TYPE_LIST_QUICKLIST_2 => {
                 let (node_count, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
-                let mut list = VecDeque::new();
+                let mut nodes = Vec::with_capacity(node_count);
                 for _ in 0..node_count {
                     let (container, consumed) = decode_length(payload, cursor)?;
                     cursor += consumed;
@@ -20043,23 +20045,41 @@ impl Store {
                             if item.is_empty() {
                                 return Err(StoreError::InvalidDumpPayload);
                             }
-                            list.push_back(item);
+                            nodes.push(RestoredListNode::Plain(item));
                         }
                         2 => {
                             let (listpack, consumed) =
                                 decode_rdb_string(payload, cursor, data_end)?;
                             cursor += consumed;
-                            for item in decode_listpack_strings(&listpack)? {
-                                list.push_back(item);
+                            match fr_persist::listpack::decode_string_ranges_if_all_strings(
+                                &listpack,
+                            )
+                            .map_err(|_| StoreError::InvalidDumpPayload)?
+                            {
+                                Some(ranges) => {
+                                    if !ranges.is_empty() {
+                                        nodes.push(RestoredListNode::ListpackStrings {
+                                            bytes: listpack,
+                                            ranges,
+                                        });
+                                    }
+                                }
+                                None => {
+                                    let elems = decode_listpack_strings(&listpack)?;
+                                    if !elems.is_empty() {
+                                        nodes.push(RestoredListNode::Elements(elems));
+                                    }
+                                }
                             }
                         }
                         _ => return Err(StoreError::InvalidDumpPayload),
                     }
                 }
+                let list = ListValue::from_restored_quicklist2_nodes(nodes);
                 if list.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::List(Box::new(list.into()))
+                Value::List(Box::new(list))
             }
             RDB_TYPE_LIST_QUICKLIST => {
                 let (node_count, consumed) = decode_length(payload, cursor)?;
@@ -39860,6 +39880,48 @@ mod tests {
             Ok(items) if matches!(items.as_slice(), [item] if item.is_empty()) => Ok(()),
             _ => Err("quicklist2 PACKED empty element restored incorrectly"),
         }
+    }
+
+    #[test]
+    fn restore_quicklist2_string_node_keeps_order_and_dump_bytes() -> Result<(), &'static str> {
+        let listpack = encode_listpack_strings(&[
+            b"alpha".as_slice(),
+            b"bravo".as_slice(),
+            b"charlie".as_slice(),
+        ])
+        .ok_or("encode listpack")?;
+        let mut body = vec![RDB_TYPE_LIST_QUICKLIST_2];
+        encode_length(&mut body, 1);
+        encode_length(&mut body, 2);
+        append_raw_dump_bulk(&mut body, &listpack);
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        store
+            .restore_key(b"ql", 0, &payload, false, 100)
+            .map_err(|_| "quicklist2 string node restore failed")?;
+        assert_eq!(
+            store
+                .lrange(b"ql", 0, -1, 100)
+                .map_err(|_| "lrange failed")?,
+            vec![b"alpha".to_vec(), b"bravo".to_vec(), b"charlie".to_vec()]
+        );
+        assert_eq!(
+            store.dump_key(b"ql", 100).ok_or("dump missing")?,
+            payload,
+            "restored string-only quicklist2 node must dump byte-identically"
+        );
+
+        store
+            .lset(b"ql", 1, b"B".to_vec(), 100)
+            .map_err(|_| "lset failed")?;
+        assert_eq!(
+            store
+                .lrange(b"ql", 0, -1, 100)
+                .map_err(|_| "lrange failed")?,
+            vec![b"alpha".to_vec(), b"B".to_vec(), b"charlie".to_vec()]
+        );
+        Ok(())
     }
 
     #[test]
