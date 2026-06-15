@@ -3109,6 +3109,14 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some(key) = borrowed_plain_getdel_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_getdel_borrowed(key, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some(key) = borrowed_plain_llen_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_llen_borrowed(key, ts)
                 {
@@ -3855,6 +3863,14 @@ fn borrowed_plain_sintercard_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&
 fn borrowed_plain_strlen_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
     match borrowed_args {
         [command, key] if command.eq_ignore_ascii_case(b"STRLEN") => Some(*key),
+        _ => None,
+    }
+}
+
+/// `GETDEL key` (argc 2); any other arity falls to generic dispatch.
+fn borrowed_plain_getdel_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<&'a [u8]> {
+    match borrowed_args {
+        [command, key] if command.eq_ignore_ascii_case(b"GETDEL") => Some(*key),
         _ => None,
     }
 }
