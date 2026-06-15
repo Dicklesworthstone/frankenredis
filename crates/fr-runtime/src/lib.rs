@@ -728,6 +728,35 @@ fn plain_object_refcount_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"OBJECT".to_vec(), b"REFCOUNT".to_vec(), key.to_vec()]
 }
 
+/// `OBJECT IDLETIME key` / `OBJECT FREQ key` — single-key introspection reads
+/// that lacked a borrow fast path and fell to the owned-argv generic dispatch
+/// (~0.30x FR-SLOWER under deep pipelining). (frankenredis-6233m)
+#[derive(Copy, Clone)]
+pub enum PlainObjectStatCmd {
+    Idletime,
+    Freq,
+}
+
+impl PlainObjectStatCmd {
+    fn sub_upper(self) -> &'static [u8] {
+        match self {
+            PlainObjectStatCmd::Idletime => b"IDLETIME",
+            PlainObjectStatCmd::Freq => b"FREQ",
+        }
+    }
+
+    fn name_lower(self) -> &'static str {
+        match self {
+            PlainObjectStatCmd::Idletime => "object|idletime",
+            PlainObjectStatCmd::Freq => "object|freq",
+        }
+    }
+}
+
+fn plain_object_stat_owned_argv(cmd: PlainObjectStatCmd, key: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"OBJECT".to_vec(), cmd.sub_upper().to_vec(), key.to_vec()]
+}
+
 fn plain_memory_usage_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"MEMORY".to_vec(), b"USAGE".to_vec(), key.to_vec()]
 }
@@ -11126,6 +11155,168 @@ impl Runtime {
                 reason: format!(
                     "command 'OBJECT|REFCOUNT' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    fn can_execute_plain_object_stat_borrowed(
+        &mut self,
+        cmd: PlainObjectStatCmd,
+        key: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"OBJECT".len()
+            || self.policy.gate.max_bulk_len < cmd.sub_upper().len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Conservative borrowed fast path for `OBJECT IDLETIME key` / `OBJECT FREQ
+    /// key` (argc 3). Mirrors the generic `object_cmd` IDLETIME/FREQ branches
+    /// EXACTLY: `store.exists_no_touch` first (nil for a missing key, recording
+    /// the keyspace lookup), then — for a present key — the same
+    /// policy-conditional reply: IDLETIME errors under an LFU policy else returns
+    /// `store.object_idletime`; FREQ returns `store.object_freq` as an Integer
+    /// under LFU else the "LFU not selected" error (nil when the object carries no
+    /// frequency). Returns None (defers) on any disabling state. (frankenredis-6233m)
+    pub fn execute_plain_object_stat_borrowed(
+        &mut self,
+        cmd: PlainObjectStatCmd,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_object_stat_borrowed(cmd, key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_argv_len_sum = b"OBJECT".len() + cmd.sub_upper().len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let reply = if !self.server.store.exists_no_touch(key, now_ms) {
+            RespFrame::BulkString(None)
+        } else {
+            match cmd {
+                PlainObjectStatCmd::Idletime => {
+                    if self.server.store.maxmemory_policy.tracks_lfu() {
+                        RespFrame::Error(
+                            "ERR An LFU maxmemory policy is selected, idle time not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.".to_string(),
+                        )
+                    } else {
+                        match self.server.store.object_idletime(key, now_ms) {
+                            Some(idle_secs) => RespFrame::Integer(idle_secs as i64),
+                            None => RespFrame::BulkString(None),
+                        }
+                    }
+                }
+                PlainObjectStatCmd::Freq => match self.server.store.object_freq(key, now_ms) {
+                    None => RespFrame::BulkString(None),
+                    Some(freq) if self.server.store.maxmemory_policy.tracks_lfu() => {
+                        RespFrame::Integer(freq.into())
+                    }
+                    Some(_) => RespFrame::Error(
+                        "ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.".to_string(),
+                    ),
+                },
+            }
+        };
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_object_stat_borrowed_metrics(
+            cmd, key, failed, elapsed_us, now_ms, packet_id,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_object_stat_borrowed_metrics(
+        &mut self,
+        cmd: PlainObjectStatCmd,
+        key: &[u8],
+        failed: bool,
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_object_stat_owned_argv(cmd, key));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_object_stat_owned_argv(cmd, key));
+            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(cmd.name_lower(), elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_object_stat_owned_argv(cmd, key));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command '{}' took {}us, exceeding budget {}ms",
+                    cmd.name_lower(),
+                    elapsed_us,
+                    self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
                 output: &RespFrame::Integer(0),
@@ -25442,8 +25633,8 @@ mod tests {
     use super::{
         ACL_FILE_NOT_CONFIGURED_ERR, AOF_DISK_ERROR_WRITE_DENIED, AclPubsubDefault, ClientSession,
         ClientUnblockMode, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER,
-        OutputBufferClassLimit, PlainCardinalityCmd, PlainKeyMetaCmd, PlainRandMemberCmd,
-        RDB_DISK_ERROR_WRITE_DENIED, Runtime, ServerState,
+        OutputBufferClassLimit, PlainCardinalityCmd, PlainKeyMetaCmd, PlainObjectStatCmd,
+        PlainRandMemberCmd, RDB_DISK_ERROR_WRITE_DENIED, Runtime, ServerState,
         acl_list_entries_from_rules, build_hello_response, canonical_static_config_param,
         canonicalize_acl_rules, classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
@@ -26474,6 +26665,55 @@ mod tests {
         assert_eq!(
             direct.server.store.stat_keyspace_misses,
             generic.server.store.stat_keyspace_misses
+        );
+    }
+
+    #[test]
+    fn plain_object_stat_borrowed_matches_generic() {
+        // (frankenredis-6233m) OBJECT IDLETIME/FREQ key borrow == generic dispatch
+        // under the default (non-LFU) policy where the fast path engages: IDLETIME
+        // returns an Integer idle time (or nil for a missing key); FREQ returns the
+        // "LFU not selected" error for an existing key (nil for missing). Compares
+        // reply + the object|idletime / object|freq command name + keyspace and
+        // error stat parity.
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"s", b"hello"]), 1000);
+            rt.execute_frame(command(&[b"RPUSH", b"l", b"a", b"b"]), 1000);
+        }
+        let cases: &[(PlainObjectStatCmd, &[u8], &[u8])] = &[
+            (PlainObjectStatCmd::Idletime, b"IDLETIME", b"s"),
+            (PlainObjectStatCmd::Idletime, b"IDLETIME", b"l"),
+            (PlainObjectStatCmd::Idletime, b"IDLETIME", b"missing"),
+            (PlainObjectStatCmd::Freq, b"FREQ", b"s"),
+            (PlainObjectStatCmd::Freq, b"FREQ", b"l"),
+            (PlainObjectStatCmd::Freq, b"FREQ", b"missing"),
+        ];
+        // Same ts for fast and generic per case so the idle-time delta is identical.
+        for (i, (cmd, sub, key)) in cases.iter().enumerate() {
+            let ts = 2000 + i as u64;
+            let f = direct
+                .execute_plain_object_stat_borrowed(*cmd, key, ts)
+                .expect("object stat fast path should engage");
+            let g = generic.execute_frame(command(&[b"OBJECT", sub, key]), ts);
+            assert_eq!(f, g, "OBJECT {sub:?} {key:?}");
+        }
+        assert_eq!(
+            direct.session.last_command_name,
+            generic.session.last_command_name
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            direct.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
         );
     }
 

@@ -37,7 +37,7 @@ use fr_protocol::{BorrowedCommandArgsKind, ParserConfig, RespFrame, RespParseErr
 use fr_repl::ReplOffset;
 use fr_runtime::{
     ClientSession, ClientUnblockMode, PlainCardinalityCmd, PlainKeyMetaCmd, PlainKeyedPopCmd,
-    PlainKeyedValuesCmd, PlainRandMemberCmd, PlainRankCmd, Runtime,
+    PlainKeyedValuesCmd, PlainObjectStatCmd, PlainRandMemberCmd, PlainRankCmd, Runtime,
 };
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token, Waker};
@@ -3300,6 +3300,14 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some((cmd, key)) = borrowed_plain_object_stat_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_object_stat_borrowed(cmd, key, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some(key) = borrowed_plain_memory_usage_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_memory_usage_borrowed(key, ts)
                 {
@@ -4040,6 +4048,27 @@ fn borrowed_plain_object_refcount_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Opt
         }
         _ => None,
     }
+}
+
+/// Recognizes `OBJECT IDLETIME key` / `OBJECT FREQ key` (argc 3). Other OBJECT
+/// subcommands / arities fall to generic dispatch.
+fn borrowed_plain_object_stat_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(PlainObjectStatCmd, &'a [u8])> {
+    let [command, sub, key] = borrowed_args else {
+        return None;
+    };
+    if !command.eq_ignore_ascii_case(b"OBJECT") {
+        return None;
+    }
+    let cmd = if sub.eq_ignore_ascii_case(b"IDLETIME") {
+        PlainObjectStatCmd::Idletime
+    } else if sub.eq_ignore_ascii_case(b"FREQ") {
+        PlainObjectStatCmd::Freq
+    } else {
+        return None;
+    };
+    Some((cmd, *key))
 }
 
 /// Only `MEMORY USAGE key` (argc 3, no SAMPLES); SAMPLES/other forms fall to generic.
