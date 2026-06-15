@@ -1,0 +1,4 @@
+head 1fc7cf304e5dccc4040b020458df52df16450387
+frankenredis_sha256 52cb561a6e73be4387e0bfb8a7a79be6755cf59fd6192df8165ca2d4762d9bf0  /data/projects/frankenredis/target-coralox-pass210-v1a3b-candidate/release-perf/frankenredis
+fr_bench_sha256 4d26377afc3dcde7e0d0f4ca780bbd2e1f3dba4c5ba1a041db3005ad61973c1b  /data/projects/frankenredis/target-coralox-pass210-v1a3b-candidate/release-perf/fr-bench
+redis_sha256 e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7  /data/projects/frankenredis/legacy_redis_code/redis/src/redis-server

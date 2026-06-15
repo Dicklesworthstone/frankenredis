@@ -60,7 +60,7 @@ const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
 const MAX_FRAMES_PER_CLIENT_TICK: usize = 4096;
 const MAX_REPLY_BYTES_PER_CLIENT_TICK: usize = 16 * 1024 * 1024;
 const DIRECT_OWNED_SET_MIN_VALUE: usize = 32 * 1024;
-const DIRECT_OWNED_SET_CHUNK: usize = 64 * 1024;
+const DIRECT_OWNED_SET_CHUNK: usize = 256 * 1024;
 
 /// Describes a blocked-on-list operation.
 #[derive(Debug, Clone)]

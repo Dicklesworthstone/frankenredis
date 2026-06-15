@@ -1,0 +1,8 @@
+request_sha256 d507f6a6c6958d7f175f9332aa104de75859f6be99f3557d5c041f42451216f5  artifacts/optimization/coralox-pass210-v1a3b/split-large-set-proof-request.resp
+redis_response_sha256 ee784c22fa4ad7cd4432d1ee0e83c41a2e30b7e148a1e5e06b702c7af25d505a  artifacts/optimization/coralox-pass210-v1a3b/proof-redis-response.resp
+baseline_response_sha256 ee784c22fa4ad7cd4432d1ee0e83c41a2e30b7e148a1e5e06b702c7af25d505a  artifacts/optimization/coralox-pass210-v1a3b/proof-baseline-response.resp
+candidate_response_sha256 ee784c22fa4ad7cd4432d1ee0e83c41a2e30b7e148a1e5e06b702c7af25d505a  artifacts/optimization/coralox-pass210-v1a3b/proof-candidate-response.resp
+redis_baseline_cmp match
+redis_candidate_cmp match
+request_len 1376564
+response_len 1376341
