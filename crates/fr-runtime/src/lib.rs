@@ -512,8 +512,16 @@ impl PlainRandMemberCmd {
     }
 }
 
-fn plain_rand_member_owned_argv(cmd: PlainRandMemberCmd, key: &[u8]) -> Vec<Vec<u8>> {
-    vec![cmd.name_upper().as_bytes().to_vec(), key.to_vec()]
+fn plain_rand_member_owned_argv(
+    cmd: PlainRandMemberCmd,
+    key: &[u8],
+    count: Option<&[u8]>,
+) -> Vec<Vec<u8>> {
+    let mut argv = vec![cmd.name_upper().as_bytes().to_vec(), key.to_vec()];
+    if let Some(count) = count {
+        argv.push(count.to_vec());
+    }
+    argv
 }
 
 /// `TTL key` / `PTTL key` / `TYPE key` — single-key metadata reads that return
@@ -12674,7 +12682,7 @@ impl Runtime {
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_rand_member_borrowed_metrics(
-            cmd, key, elapsed_us, now_ms, packet_id, failed,
+            cmd, key, None, elapsed_us, now_ms, packet_id, failed,
         );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
@@ -12700,10 +12708,131 @@ impl Runtime {
         Some(reply)
     }
 
+    /// Conservative borrowed fast path for the plain count form (argc 3, no
+    /// WITHVALUES/WITHSCORES modifier): `SRANDMEMBER key count` /
+    /// `HRANDFIELD key count` / `ZRANDMEMBER key count`. Returns a flat array of
+    /// bulk strings (members/fields only). Mirrors the generic count branch
+    /// EXACTLY: parse count via the long-range rule (reject i64::MIN) BEFORE any
+    /// side effect — declining to generic on a malformed/MIN count — then the
+    /// SAME store `*_count` draw and keyspace accounting (srandmember_count
+    /// records its own lookup; hrandfield/zrandmember_count are no-stat so one
+    /// `exists_no_touch` is recorded first). Wrong-type yields the same WRONGTYPE.
+    /// (frankenredis-nimdk)
+    pub fn execute_plain_rand_member_count_borrowed(
+        &mut self,
+        cmd: PlainRandMemberCmd,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        // parse_i64_arg_long_range: parse then reject i64::MIN. Decline on either
+        // so the generic path owns the exact "not an integer" / "out of range".
+        let count = parse_i64_arg(count_arg).ok()?;
+        if count == i64::MIN {
+            return None;
+        }
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < cmd.name_upper().len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || count_arg.len() > self.policy.gate.max_bulk_len
+            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_argv_len_sum = cmd.name_upper().len() + key.len() + count_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let reply = match cmd {
+            PlainRandMemberCmd::Srandmember => {
+                match self.server.store.srandmember_count(key, count, now_ms) {
+                    Ok(members) => RespFrame::Array(Some(
+                        members
+                            .into_iter()
+                            .map(|m| RespFrame::BulkString(Some(m)))
+                            .collect(),
+                    )),
+                    Err(err) => CommandError::Store(err).to_resp(),
+                }
+            }
+            PlainRandMemberCmd::Hrandfield => {
+                let _ = self.server.store.exists_no_touch(key, now_ms);
+                match self.server.store.hrandfield_count(key, count, now_ms) {
+                    Ok(pairs) => RespFrame::Array(Some(
+                        pairs
+                            .into_iter()
+                            .map(|(field, _)| RespFrame::BulkString(Some(field)))
+                            .collect(),
+                    )),
+                    Err(err) => CommandError::Store(err).to_resp(),
+                }
+            }
+            PlainRandMemberCmd::Zrandmember => {
+                let _ = self.server.store.exists_no_touch(key, now_ms);
+                match self.server.store.zrandmember_count(key, count, now_ms) {
+                    Ok(pairs) => RespFrame::Array(Some(
+                        pairs
+                            .into_iter()
+                            .map(|(member, _)| RespFrame::BulkString(Some(member)))
+                            .collect(),
+                    )),
+                    Err(err) => CommandError::Store(err).to_resp(),
+                }
+            }
+        };
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_rand_member_borrowed_metrics(
+            cmd,
+            key,
+            Some(count_arg),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)] // Count-bearing rand-member metrics mirrors range helpers.
     fn record_plain_rand_member_borrowed_metrics(
         &mut self,
         cmd: PlainRandMemberCmd,
         key: &[u8],
+        count: Option<&[u8]>,
         elapsed_us: u64,
         now_ms: u64,
         packet_id: u64,
@@ -12713,14 +12842,14 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| plain_rand_member_owned_argv(cmd, key));
+            let argv_ref = argv.get_or_insert_with(|| plain_rand_member_owned_argv(cmd, key, count));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| plain_rand_member_owned_argv(cmd, key));
+            let argv_ref = argv.get_or_insert_with(|| plain_rand_member_owned_argv(cmd, key, count));
             self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
@@ -12736,7 +12865,7 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| plain_rand_member_owned_argv(cmd, key));
+            let argv_ref = argv.get_or_insert_with(|| plain_rand_member_owned_argv(cmd, key, count));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -26701,6 +26830,111 @@ mod tests {
         assert_eq!(
             fast.server.store.stat_total_reads_processed,
             generic.server.store.stat_total_reads_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            fast.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+    }
+
+    #[test]
+    fn plain_rand_member_count_borrowed_matches_generic() {
+        // (frankenredis-nimdk) The plain count form (argc 3, no modifier)
+        // SRANDMEMBER/HRANDFIELD/ZRANDMEMBER borrowed fast path == generic. Twin
+        // fixed-seed runtimes run an identical op sequence so the random samples
+        // advance in lockstep and must be byte-identical fast-vs-generic. Covers
+        // positive count (distinct), negative count (repeats), count > size,
+        // count 0, missing key, wrong-type, and the deferral cases (bad integer,
+        // i64::MIN). A golden hash pins the fast-path reply stream.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"SADD", b"s", b"a", b"b", b"c", b"d", b"e"]), 1);
+            rt.execute_frame(
+                command(&[b"HSET", b"h", b"f1", b"v1", b"f2", b"v2", b"f3", b"v3"]),
+                1,
+            );
+            rt.execute_frame(command(&[b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3", b"c"]), 1);
+            rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1); // wrong type
+        }
+
+        type RandMemberCountCase<'a> = (PlainRandMemberCmd, &'a [u8], &'a [u8], &'a [u8]);
+
+        let cases: &[RandMemberCountCase<'_>] = &[
+            (PlainRandMemberCmd::Srandmember, b"SRANDMEMBER", b"s", b"3"),
+            (PlainRandMemberCmd::Srandmember, b"SRANDMEMBER", b"s", b"-4"),
+            (PlainRandMemberCmd::Srandmember, b"SRANDMEMBER", b"s", b"100"),
+            (PlainRandMemberCmd::Srandmember, b"SRANDMEMBER", b"s", b"0"),
+            (PlainRandMemberCmd::Srandmember, b"SRANDMEMBER", b"nokey", b"3"),
+            (PlainRandMemberCmd::Srandmember, b"SRANDMEMBER", b"str", b"3"),
+            (PlainRandMemberCmd::Hrandfield, b"HRANDFIELD", b"h", b"2"),
+            (PlainRandMemberCmd::Hrandfield, b"HRANDFIELD", b"h", b"-5"),
+            (PlainRandMemberCmd::Hrandfield, b"HRANDFIELD", b"nokey", b"2"),
+            (PlainRandMemberCmd::Hrandfield, b"HRANDFIELD", b"str", b"2"),
+            (PlainRandMemberCmd::Zrandmember, b"ZRANDMEMBER", b"z", b"2"),
+            (PlainRandMemberCmd::Zrandmember, b"ZRANDMEMBER", b"z", b"-6"),
+            (PlainRandMemberCmd::Zrandmember, b"ZRANDMEMBER", b"nokey", b"2"),
+            (PlainRandMemberCmd::Zrandmember, b"ZRANDMEMBER", b"str", b"2"),
+        ];
+
+        let mut golden = DefaultHasher::new();
+        let defer_ts = 2u64 + cases.len() as u64;
+        for (ts, &(cmd, name, key, count)) in (2u64..).zip(cases.iter()) {
+            let f = fast
+                .execute_plain_rand_member_count_borrowed(cmd, key, count, ts)
+                .expect("count rand-member should take the borrowed fast path");
+            let g = generic.execute_frame(command(&[name, key, count]), ts);
+            assert_eq!(
+                f,
+                g,
+                "fast != generic for {} {:?} {:?}",
+                cmd.name_upper(),
+                key,
+                count
+            );
+            f.to_bytes().hash(&mut golden);
+        }
+        const GOLDEN_RAND_MEMBER_COUNT_REPLY_STREAM: u64 = 7727168197067802684;
+        assert_eq!(
+            golden.finish(),
+            GOLDEN_RAND_MEMBER_COUNT_REPLY_STREAM,
+            "rand-member count fast-path reply stream changed (RNG/encoding drift)"
+        );
+
+        // Deferral: malformed integer + i64::MIN are not fast-pathed.
+        assert!(
+            fast.execute_plain_rand_member_count_borrowed(
+                PlainRandMemberCmd::Srandmember,
+                b"s",
+                b"notint",
+                defer_ts
+            )
+            .is_none()
+        );
+        assert!(
+            fast.execute_plain_rand_member_count_borrowed(
+                PlainRandMemberCmd::Srandmember,
+                b"s",
+                b"-9223372036854775808",
+                defer_ts
+            )
+            .is_none()
+        );
+
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
         );
         assert_eq!(
             fast.server.store.stat_keyspace_hits,
