@@ -1,0 +1,2 @@
+current target-coralox-8ap9a-baseline/release-perf/frankenredis 0093cdac5ee8354471a260f64abbeb57aaf98cad8a2f429b304f8bb892cc4be5
+candidate target-coralox-8ap9a-candidate/release-perf/frankenredis 3f93d640bbdb277f2239ac88a91c1a80f3943ae8d0a96792623b39056522d01a

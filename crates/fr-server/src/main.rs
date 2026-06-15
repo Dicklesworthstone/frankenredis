@@ -3183,6 +3183,15 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some((key, start, stop)) = borrowed_plain_zrange_args(&borrowed_args)
+                    && let Some(response) =
+                        runtime.execute_plain_zrange_borrowed(key, start, stop, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some((key, start, end)) = borrowed_plain_getrange_args(&borrowed_args) {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if runtime
@@ -3954,6 +3963,17 @@ fn borrowed_plain_lindex_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a 
 fn borrowed_plain_zscore_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
     match borrowed_args {
         [command, key, member] if command.eq_ignore_ascii_case(b"ZSCORE") => Some((*key, *member)),
+        _ => None,
+    }
+}
+
+fn borrowed_plain_zrange_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(&'a [u8], &'a [u8], &'a [u8])> {
+    match borrowed_args {
+        [command, key, start, stop] if command.eq_ignore_ascii_case(b"ZRANGE") => {
+            Some((*key, *start, *stop))
+        }
         _ => None,
     }
 }
