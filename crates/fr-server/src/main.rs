@@ -3281,8 +3281,9 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
-                if let Some((key, bit_arg)) = borrowed_plain_bitpos_args(&borrowed_args)
-                    && let Some(response) = runtime.execute_plain_bitpos_borrowed(key, bit_arg, ts)
+                if let Some((key, bit_arg, range)) = borrowed_plain_bitpos_args(&borrowed_args)
+                    && let Some(response) =
+                        runtime.execute_plain_bitpos_borrowed(key, bit_arg, range, ts)
                 {
                     return Ok(BorrowedMultibulkAction::FastReply {
                         consumed: parsed.consumed,
@@ -3953,9 +3954,31 @@ fn borrowed_plain_memory_usage_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option
 
 /// Only the no-range `BITCOUNT key` form (argc 2); ranged forms fall to generic.
 /// Only the no-range `BITPOS key bit` form (argc 3); ranged forms fall to generic.
-fn borrowed_plain_bitpos_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
+/// Recognizes `BITPOS key bit [start [end [BYTE|BIT]]]` (argc 3/4/5/6). Returns
+/// the borrowed key, bit arg, and the raw range args `(start, end?, unit?)`; the
+/// runtime parses them (and defers on a non-0/1 bit / malformed integer / bad
+/// unit) so generic dispatch owns every error reply.
+#[allow(clippy::type_complexity)]
+fn borrowed_plain_bitpos_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(
+    &'a [u8],
+    &'a [u8],
+    Option<(&'a [u8], Option<&'a [u8]>, Option<&'a [u8]>)>,
+)> {
     match borrowed_args {
-        [command, key, bit] if command.eq_ignore_ascii_case(b"BITPOS") => Some((*key, *bit)),
+        [command, key, bit] if command.eq_ignore_ascii_case(b"BITPOS") => {
+            Some((*key, *bit, None))
+        }
+        [command, key, bit, start] if command.eq_ignore_ascii_case(b"BITPOS") => {
+            Some((*key, *bit, Some((*start, None, None))))
+        }
+        [command, key, bit, start, end] if command.eq_ignore_ascii_case(b"BITPOS") => {
+            Some((*key, *bit, Some((*start, Some(*end), None))))
+        }
+        [command, key, bit, start, end, unit] if command.eq_ignore_ascii_case(b"BITPOS") => {
+            Some((*key, *bit, Some((*start, Some(*end), Some(*unit)))))
+        }
         _ => None,
     }
 }

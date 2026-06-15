@@ -690,8 +690,27 @@ fn plain_bitcount_owned_argv(
     argv
 }
 
-fn plain_bitpos_owned_argv(key: &[u8], bit_arg: &[u8]) -> Vec<Vec<u8>> {
-    vec![b"BITPOS".to_vec(), key.to_vec(), bit_arg.to_vec()]
+/// Raw trailing range args for the borrowed `BITPOS` fast path:
+/// `(start, end?, unit?)`. The recognizer guarantees `unit` implies `end`
+/// (only argc 6 carries a BYTE|BIT modifier); args are parsed lazily.
+type PlainBitposRange<'a> = (&'a [u8], Option<&'a [u8]>, Option<&'a [u8]>);
+
+fn plain_bitpos_owned_argv(
+    key: &[u8],
+    bit_arg: &[u8],
+    range: Option<PlainBitposRange<'_>>,
+) -> Vec<Vec<u8>> {
+    let mut argv = vec![b"BITPOS".to_vec(), key.to_vec(), bit_arg.to_vec()];
+    if let Some((start, end, unit)) = range {
+        argv.push(start.to_vec());
+        if let Some(end) = end {
+            argv.push(end.to_vec());
+        }
+        if let Some(unit) = unit {
+            argv.push(unit.to_vec());
+        }
+    }
+    argv
 }
 
 fn plain_dbsize_owned_argv() -> Vec<Vec<u8>> {
@@ -11379,8 +11398,8 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_bitpos_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
-        if self.policy.gate.max_array_len < 3
+    fn can_execute_plain_bitpos_borrowed(&mut self, key: &[u8], argc: usize, now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < argc
             || self.policy.gate.max_bulk_len < b"BITPOS".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
@@ -11389,27 +11408,57 @@ impl Runtime {
         self.plain_borrowed_default_key_read_allows(now_ms)
     }
 
-    /// Conservative borrowed fast path for the no-range `BITPOS key bit` form
-    /// (argc 3); ranged forms fall to generic. Mirrors the generic argc==3 path:
-    /// store.key_type (missing -> -1/0 by bit, non-string -> WRONGTYPE) then
-    /// store.bitpos for a string — byte-identical keyspace accounting (a single
-    /// hit via key_type now that store.bitpos no longer double-counts). Defers on
-    /// a bit arg that is not 0/1. (cold-cmd audit)
+    /// Conservative borrowed fast path for `BITPOS key bit [start [end [BYTE|BIT]]]`
+    /// (argc 3/4/5/6). Mirrors the generic `bitpos` path EXACTLY: the 0/1 bit and
+    /// every range arg are parsed *before* any observable store work, so a bad bit,
+    /// a malformed integer, a bad BYTE|BIT unit (argc 6: validated *before* end per
+    /// abpzk), or any disabling client state declines (returns None) to the generic
+    /// path — which re-derives the identical reply (incl. the lookup-before-range
+    /// precedence: missing key -> -1/0 by bit, non-string -> WRONGTYPE) with no
+    /// double-counted keyspace stat. (cold-cmd audit / frankenredis-bitcountrange)
     pub fn execute_plain_bitpos_borrowed(
         &mut self,
         key: &[u8],
         bit_arg: &[u8],
+        range: Option<PlainBitposRange<'_>>,
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_bitpos_borrowed(key, now_ms) {
-            return None;
-        }
         // Only fast-path a well-formed 0/1 bit; defer the bit-arg error to generic.
         let bit = match parse_i64_arg(bit_arg) {
             Ok(0) => false,
             Ok(1) => true,
             _ => return None,
         };
+        // Parse the range BEFORE any side effect so a parse error / bad unit
+        // declines cleanly. argc 6 validates the unit BEFORE parsing end (abpzk).
+        let (start_idx, end_idx, unit, argc) = match range {
+            None => (None, None, fr_store::BitRangeUnit::Byte, 3usize),
+            Some((start_bytes, end_opt, unit_opt)) => {
+                let start = parse_i64_arg(start_bytes).ok()?;
+                let unit = match unit_opt {
+                    None => fr_store::BitRangeUnit::Byte,
+                    Some(unit_bytes) => {
+                        if unit_bytes.eq_ignore_ascii_case(b"bit") {
+                            fr_store::BitRangeUnit::Bit
+                        } else if unit_bytes.eq_ignore_ascii_case(b"byte") {
+                            fr_store::BitRangeUnit::Byte
+                        } else {
+                            return None;
+                        }
+                    }
+                };
+                let end = match end_opt {
+                    Some(end_bytes) => Some(parse_i64_arg(end_bytes).ok()?),
+                    None => None,
+                };
+                let argc = 4 + usize::from(end_opt.is_some()) + usize::from(unit_opt.is_some());
+                (Some(start), end, unit, argc)
+            }
+        };
+
+        if !self.can_execute_plain_bitpos_borrowed(key, argc, now_ms) {
+            return None;
+        }
 
         self.server.store.stat_total_commands_processed += 1;
         if self.session.connected_at_ms == 0 {
@@ -11418,7 +11467,12 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("bitpos");
-        self.session.last_argv_len_sum = b"BITPOS".len() + key.len() + bit_arg.len();
+        self.session.last_argv_len_sum = b"BITPOS".len()
+            + key.len()
+            + bit_arg.len()
+            + range.map_or(0, |(s, e, u)| {
+                s.len() + e.map_or(0, <[u8]>::len) + u.map_or(0, <[u8]>::len)
+            });
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -11427,23 +11481,24 @@ impl Runtime {
         let start = Instant::now();
         let reply = match self.server.store.key_type(key, now_ms) {
             None => RespFrame::Integer(if bit { -1 } else { 0 }),
-            Some("string") => match self.server.store.bitpos(
-                key,
-                bit,
-                None,
-                None,
-                fr_store::BitRangeUnit::Byte,
-                now_ms,
-            ) {
-                Ok(pos) => RespFrame::Integer(pos),
-                Err(err) => CommandError::Store(err).to_resp(),
-            },
+            Some("string") => {
+                match self
+                    .server
+                    .store
+                    .bitpos(key, bit, start_idx, end_idx, unit, now_ms)
+                {
+                    Ok(pos) => RespFrame::Integer(pos),
+                    Err(err) => CommandError::Store(err).to_resp(),
+                }
+            }
             Some(_) => CommandError::Store(fr_store::StoreError::WrongType).to_resp(),
         };
         let elapsed_us = start.elapsed().as_micros() as u64;
         let failed = matches!(reply, RespFrame::Error(_));
 
-        self.record_plain_bitpos_borrowed_metrics(key, bit_arg, elapsed_us, now_ms, packet_id, failed);
+        self.record_plain_bitpos_borrowed_metrics(
+            key, bit_arg, range, elapsed_us, now_ms, packet_id, failed,
+        );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
         self.server.propagate_expired_key_deletions(&lazy_evicted);
@@ -11473,6 +11528,7 @@ impl Runtime {
         &mut self,
         key: &[u8],
         bit_arg: &[u8],
+        range: Option<PlainBitposRange<'_>>,
         elapsed_us: u64,
         now_ms: u64,
         packet_id: u64,
@@ -11482,14 +11538,14 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| plain_bitpos_owned_argv(key, bit_arg));
+            let argv_ref = argv.get_or_insert_with(|| plain_bitpos_owned_argv(key, bit_arg, range));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| plain_bitpos_owned_argv(key, bit_arg));
+            let argv_ref = argv.get_or_insert_with(|| plain_bitpos_owned_argv(key, bit_arg, range));
             self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
 
@@ -11505,7 +11561,7 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| plain_bitpos_owned_argv(key, bit_arg));
+            let argv_ref = argv.get_or_insert_with(|| plain_bitpos_owned_argv(key, bit_arg, range));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -25361,15 +25417,23 @@ mod tests {
         let mut ts = 2;
         for (key, bit) in cases {
             let f = direct
-                .execute_plain_bitpos_borrowed(key, bit, ts)
+                .execute_plain_bitpos_borrowed(key, bit, None, ts)
                 .expect("bitpos fast path");
             let g = generic.execute_frame(command(&[b"BITPOS", key, bit]), ts);
             assert_eq!(f, g, "key={key:?} bit={bit:?}");
             ts += 1;
         }
         // bad bit arg -> defer
-        assert!(direct.execute_plain_bitpos_borrowed(b"s", b"2", ts).is_none());
-        assert!(direct.execute_plain_bitpos_borrowed(b"s", b"x", ts).is_none());
+        assert!(
+            direct
+                .execute_plain_bitpos_borrowed(b"s", b"2", None, ts)
+                .is_none()
+        );
+        assert!(
+            direct
+                .execute_plain_bitpos_borrowed(b"s", b"x", None, ts)
+                .is_none()
+        );
         assert_eq!(
             direct.server.store.stat_keyspace_hits,
             generic.server.store.stat_keyspace_hits,
@@ -25378,6 +25442,96 @@ mod tests {
         assert_eq!(
             direct.server.store.stat_keyspace_misses,
             generic.server.store.stat_keyspace_misses
+        );
+    }
+
+    #[test]
+    fn plain_bitpos_ranged_borrowed_matches_generic() {
+        // (frankenredis-bitcountrange twin) BITPOS key bit start [end [BYTE|BIT]]
+        // borrow == generic across argc 3/4/5/6: pos/neg/reversed indices, BIT/BYTE,
+        // set/unset bit, missing/wrong-type keys, and the deferral cases (bad bit,
+        // bad start/end integer, bad unit). Twin runtimes; compare reply + stats.
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"s", b"\xff\x0f\x00\xaa"]), 1);
+            rt.execute_frame(command(&[b"SET", b"z", b"\x00\x00\x00"]), 1);
+            rt.execute_frame(command(&[b"RPUSH", b"l", b"x"]), 1);
+        }
+        // (key, bit, trailing range args) engage cases.
+        let engage: &[(&[u8], &[u8], &[&[u8]])] = &[
+            (b"s", b"1", &[b"0"]),
+            (b"s", b"0", &[b"0"]),
+            (b"s", b"1", &[b"1", b"-1"]),
+            (b"s", b"0", &[b"0", b"-1"]),
+            (b"s", b"1", &[b"0", b"-1", b"BYTE"]),
+            (b"s", b"1", &[b"8", b"31", b"BIT"]),
+            (b"s", b"0", &[b"0", b"7", b"BIT"]),
+            (b"s", b"1", &[b"-2", b"-1"]),
+            (b"z", b"1", &[b"0", b"-1"]),
+            (b"z", b"0", &[b"0", b"-1", b"BIT"]),
+            (b"missing", b"1", &[b"0", b"-1", b"BYTE"]),
+            (b"missing", b"0", &[b"0"]),
+            (b"l", b"1", &[b"0", b"-1"]),
+            (b"l", b"0", &[b"0", b"0", b"BIT"]),
+        ];
+        let mut ts = 2u64;
+        for (key, bit, tail) in engage {
+            let range = match tail {
+                [s] => Some((*s, None, None)),
+                [s, e] => Some((*s, Some(*e), None)),
+                [s, e, u] => Some((*s, Some(*e), Some(*u))),
+                _ => unreachable!(),
+            };
+            let f = direct
+                .execute_plain_bitpos_borrowed(key, bit, range, ts)
+                .expect("ranged bitpos fast path should engage");
+            let mut argv = vec![b"BITPOS".to_vec(), key.to_vec(), bit.to_vec()];
+            argv.extend(tail.iter().map(|a| a.to_vec()));
+            let g = generic.execute_frame(command_owned(argv), ts);
+            assert_eq!(f, g, "engage key={key:?} bit={bit:?} tail={tail:?}");
+            ts += 1;
+        }
+        // Deferral cases: fast path returns None (no side effect); drive both
+        // through generic to keep stats in lockstep, then assert the decline.
+        let defer: &[(&[u8], &[u8], &[&[u8]])] = &[
+            (b"s", b"2", &[b"0"]),               // bad bit
+            (b"s", b"1", &[b"nan", b"0"]),       // bad start integer
+            (b"s", b"1", &[b"0", b"nan", b"BIT"]), // bad end integer
+            (b"s", b"1", &[b"0", b"0", b"NOPE"]), // bad unit
+            (b"missing", b"1", &[b"nan"]),       // missing key short-circuits to -1
+        ];
+        for (key, bit, tail) in defer {
+            let range = match tail {
+                [s] => Some((*s, None, None)),
+                [s, e] => Some((*s, Some(*e), None)),
+                [s, e, u] => Some((*s, Some(*e), Some(*u))),
+                _ => unreachable!(),
+            };
+            assert!(
+                direct
+                    .execute_plain_bitpos_borrowed(key, bit, range, ts)
+                    .is_none(),
+                "ranged bitpos must defer key={key:?} bit={bit:?} tail={tail:?}"
+            );
+            let mut argv = vec![b"BITPOS".to_vec(), key.to_vec(), bit.to_vec()];
+            argv.extend(tail.iter().map(|a| a.to_vec()));
+            let f = direct.execute_frame(command_owned(argv.clone()), ts);
+            let g = generic.execute_frame(command_owned(argv), ts);
+            assert_eq!(f, g, "defer key={key:?} bit={bit:?} tail={tail:?}");
+            ts += 1;
+        }
+        assert_eq!(
+            direct.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            direct.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
         );
     }
 
