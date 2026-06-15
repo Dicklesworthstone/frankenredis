@@ -20607,9 +20607,10 @@ fn encode_dump_quicklist2(
     // accumulator and RE-ENCODED the entire listpack on every append — O(n *
     // node_size) (a 10000-element DUMP took ~62ms vs redis ~0.17ms). Each
     // listpack entry's encoded length is computable in O(1)
-    // (listpack_entry_encoded_len), so we keep a running node byte count and
-    // reproduce the IDENTICAL node-boundary predicate without re-encoding —
-    // byte-exact output, O(n) total. (frankenredis-list-dump-quicklist-reencode-q5ody)
+    // (listpack_entry_encoded_len), so we keep a precise running node byte
+    // count. Admission still mirrors Redis quicklist's conservative
+    // raw-value-len + 8 estimate rather than using the exact next entry length.
+    // (frankenredis-list-dump-quicklist-reencode-q5ody, frankenredis-s36di)
     let mut nodes = Vec::new();
     let mut packed: Vec<&[u8]> = Vec::new();
     let mut packed_bytes = LISTPACK_FRAME_OVERHEAD;
@@ -20628,7 +20629,7 @@ fn encode_dump_quicklist2(
             && !quicklist_packed_node_accepts(
                 packed.len(),
                 packed_bytes,
-                entry_bytes,
+                item.len(),
                 list_max_listpack_size,
             )
         {
@@ -20679,7 +20680,7 @@ fn retained_quicklist2_chunks_match_dump_rules(
                     && quicklist_packed_node_accepts(
                         previous_count,
                         previous_bytes,
-                        entry_bytes,
+                        item.len(),
                         list_max_listpack_size,
                     )
                 {
@@ -20688,7 +20689,7 @@ fn retained_quicklist2_chunks_match_dump_rules(
             } else if !quicklist_packed_node_accepts(
                 index,
                 packed_bytes,
-                entry_bytes,
+                item.len(),
                 list_max_listpack_size,
             ) {
                 return false;
@@ -20753,25 +20754,32 @@ fn listpack_entry_encoded_len(entry: &[u8]) -> usize {
     data_len + backlen_len(data_len)
 }
 
-/// Incremental form of `quicklist_packed_node_allows_append`: given the current
-/// packed node's entry count + accumulated listpack byte size and the next
-/// entry's encoded size, decide whether the next entry still fits. Reproduces
-/// the exact predicate of `quicklist_packed_node_fits` (positive fill = entry
-/// count + 8192 SIZE_SAFETY_LIMIT; negative fill = byte budget) using the
-/// running size instead of re-encoding. Caller guarantees the node is non-empty.
+/// Upstream quicklist.c uses raw value length plus this estimate, not exact
+/// listpack entry length, when deciding whether a node can accept another value.
+const QUICKLIST_SIZE_ESTIMATE_OVERHEAD: usize = 8;
+
+/// Incremental form of Redis `_quicklistNodeAllowInsert`: given the current
+/// packed node's entry count + precise accumulated listpack byte size and the
+/// next raw value length, decide whether the next entry still fits. Caller
+/// guarantees the node is non-empty.
 fn quicklist_packed_node_accepts(
     current_count: usize,
     current_bytes: usize,
-    next_entry_bytes: usize,
+    next_value_len: usize,
     list_max_listpack_size: i64,
 ) -> bool {
-    let trial_bytes = current_bytes + next_entry_bytes;
+    let trial_bytes = current_bytes + next_value_len + QUICKLIST_SIZE_ESTIMATE_OVERHEAD;
     if list_max_listpack_size >= 0 {
-        if current_count + 1 > list_max_listpack_size as usize {
+        const SIZE_SAFETY_LIMIT: usize = 8192;
+        if trial_bytes > SIZE_SAFETY_LIMIT {
             return false;
         }
-        const SIZE_SAFETY_LIMIT: usize = 8192;
-        return trial_bytes <= SIZE_SAFETY_LIMIT;
+        let count_limit = if list_max_listpack_size == 0 {
+            1
+        } else {
+            list_max_listpack_size as usize
+        };
+        return current_count < count_limit;
     }
     let max_bytes = match list_max_listpack_size {
         -1 => 4096,
@@ -24758,7 +24766,9 @@ fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usi
 
 #[cfg(test)]
 mod quicklist_dump_fix_tests {
-    use super::{encode_listpack_strings, listpack_entry_encoded_len};
+    use super::{
+        encode_listpack_strings, listpack_entry_encoded_len, quicklist_packed_node_accepts,
+    };
 
     fn lp_entry_len_via_encoder(entry: &[u8]) -> usize {
         // encode_listpack_strings([e]) = 6 header + entry-bytes + 1 terminator,
@@ -24809,6 +24819,20 @@ mod quicklist_dump_fix_tests {
                 "mismatch for entry {c:?}"
             );
         }
+    }
+
+    #[test]
+    fn quicklist_packed_node_accepts_matches_redis_size_estimate_overhead() {
+        // Redis quicklist.c::_quicklistNodeAllowInsert checks
+        // node->sz + raw_value_len + SIZE_ESTIMATE_OVERHEAD(8). It intentionally
+        // does not use the exact encoded length of the next listpack entry.
+        assert!(quicklist_packed_node_accepts(1, 8180, 4, -2));
+        assert!(!quicklist_packed_node_accepts(1, 8180, 5, -2));
+        assert!(quicklist_packed_node_accepts(1, 8180, 4, 128));
+        assert!(!quicklist_packed_node_accepts(1, 8180, 5, 128));
+
+        // Positive fill=0 is normalized upstream to a one-entry count limit.
+        assert!(!quicklist_packed_node_accepts(1, 100, 1, 0));
     }
 }
 
@@ -40584,6 +40608,42 @@ mod tests {
             store2.lrange(b"l", 0, -1, 100).unwrap(),
             vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
         );
+    }
+
+    #[test]
+    fn dump_quicklist2_uses_redis_size_estimate_for_node_boundaries() {
+        let mut store = Store::new();
+        let first = vec![b'a'; 8_174];
+        let second = b"b".to_vec();
+        let items = vec![first.clone(), second.clone()];
+        store.rpush(b"l", &items, 100).unwrap();
+
+        let payload = store.dump_key(b"l", 100).unwrap();
+        let data_end = payload.len() - DUMP_TRAILER_LEN;
+        assert_eq!(payload[0], RDB_TYPE_LIST_QUICKLIST_2);
+        let mut cursor = 1;
+        let (node_count, consumed) = decode_length(&payload, cursor).unwrap();
+        cursor += consumed;
+        assert_eq!(node_count, 2);
+
+        let (container, consumed) = decode_length(&payload, cursor).unwrap();
+        cursor += consumed;
+        assert_eq!(container, 2);
+        let (listpack, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
+        cursor += consumed;
+        assert_eq!(decode_listpack_strings(&listpack).unwrap(), vec![first]);
+
+        let (container, consumed) = decode_length(&payload, cursor).unwrap();
+        cursor += consumed;
+        assert_eq!(container, 2);
+        let (listpack, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
+        cursor += consumed;
+        assert_eq!(decode_listpack_strings(&listpack).unwrap(), vec![second]);
+        assert_eq!(cursor, data_end);
+
+        let mut restored = Store::new();
+        restored.restore_key(b"l", 0, &payload, false, 100).unwrap();
+        assert_eq!(restored.lrange(b"l", 0, -1, 100).unwrap(), items);
     }
 
     #[test]
