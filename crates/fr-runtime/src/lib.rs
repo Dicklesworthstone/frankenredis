@@ -481,6 +481,41 @@ fn plain_cardinality_owned_argv(cmd: PlainCardinalityCmd, key: &[u8]) -> Vec<Vec
     vec![cmd.name_upper().as_bytes().to_vec(), key.to_vec()]
 }
 
+/// `SRANDMEMBER key` / `HRANDFIELD key` / `ZRANDMEMBER key` — the no-count
+/// random-read forms that return a single random member as a bulk string (or
+/// nil for a missing/empty container). They lacked a borrow fast path and fell
+/// to owned-argv generic dispatch — measured ~0.40-0.45x FR-SLOWER under deep
+/// pipelining (the per-command machinery, not allocation). The count forms
+/// (argc >= 3) build an array and defer to generic. (frankenredis-c3btx)
+#[derive(Copy, Clone)]
+pub enum PlainRandMemberCmd {
+    Srandmember,
+    Hrandfield,
+    Zrandmember,
+}
+
+impl PlainRandMemberCmd {
+    fn name_upper(self) -> &'static str {
+        match self {
+            PlainRandMemberCmd::Srandmember => "SRANDMEMBER",
+            PlainRandMemberCmd::Hrandfield => "HRANDFIELD",
+            PlainRandMemberCmd::Zrandmember => "ZRANDMEMBER",
+        }
+    }
+
+    fn name_lower(self) -> &'static str {
+        match self {
+            PlainRandMemberCmd::Srandmember => "srandmember",
+            PlainRandMemberCmd::Hrandfield => "hrandfield",
+            PlainRandMemberCmd::Zrandmember => "zrandmember",
+        }
+    }
+}
+
+fn plain_rand_member_owned_argv(cmd: PlainRandMemberCmd, key: &[u8]) -> Vec<Vec<u8>> {
+    vec![cmd.name_upper().as_bytes().to_vec(), key.to_vec()]
+}
+
 /// `TTL key` / `PTTL key` / `TYPE key` — single-key metadata reads that return
 /// an Integer (TTL/PTTL) or a SimpleString (TYPE) and never error. They lacked a
 /// borrow fast path and fell to the owned-argv generic dispatch — measured
@@ -12548,6 +12583,160 @@ impl Runtime {
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
             let argv_ref = argv.get_or_insert_with(|| plain_cardinality_owned_argv(cmd, key));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command '{}' took {}us, exceeding budget {}ms",
+                    cmd.name_upper(),
+                    elapsed_us,
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    fn can_execute_plain_rand_member_borrowed(
+        &mut self,
+        cmd: PlainRandMemberCmd,
+        key: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < cmd.name_upper().len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// Conservative borrowed fast path for the no-count `SRANDMEMBER key` /
+    /// `HRANDFIELD key` / `ZRANDMEMBER key` forms (argc 2). Mirrors the generic
+    /// no-count branch EXACTLY: a single bulk-string (or nil) reply, the SAME
+    /// store RNG draw, and the SAME keyspace accounting — `store.srandmember`
+    /// records its own lookup, whereas `hrandfield`/`zrandmember` are no-stat so
+    /// the generic (and this path) record one `exists_no_touch` before the draw
+    /// (mirroring `record_source_key_lookups`). A non-matching container type
+    /// yields the same WRONGTYPE. Count forms (argc >= 3) are not recognized and
+    /// defer to generic. (frankenredis-c3btx)
+    pub fn execute_plain_rand_member_borrowed(
+        &mut self,
+        cmd: PlainRandMemberCmd,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_rand_member_borrowed(cmd, key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_argv_len_sum = cmd.name_upper().len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let result = match cmd {
+            // store.srandmember records its own keyspace lookup (record_keyspace_lookup).
+            PlainRandMemberCmd::Srandmember => self.server.store.srandmember(key, now_ms),
+            // store.hrandfield / store.zrandmember are no-stat: mirror the generic's
+            // record_source_key_lookups(store, &[key]) (one exists_no_touch) first.
+            PlainRandMemberCmd::Hrandfield => {
+                let _ = self.server.store.exists_no_touch(key, now_ms);
+                self.server.store.hrandfield(key, now_ms)
+            }
+            PlainRandMemberCmd::Zrandmember => {
+                let _ = self.server.store.exists_no_touch(key, now_ms);
+                self.server.store.zrandmember(key, now_ms)
+            }
+        };
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match result {
+            Ok(Some(member)) => RespFrame::BulkString(Some(member)),
+            Ok(None) => RespFrame::BulkString(None),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_rand_member_borrowed_metrics(
+            cmd, key, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_rand_member_borrowed_metrics(
+        &mut self,
+        cmd: PlainRandMemberCmd,
+        key: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_rand_member_owned_argv(cmd, key));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_rand_member_owned_argv(cmd, key));
+            self.server.record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(cmd.name_lower(), elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_rand_member_owned_argv(cmd, key));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -24868,8 +25057,8 @@ mod tests {
     use super::{
         ACL_FILE_NOT_CONFIGURED_ERR, AOF_DISK_ERROR_WRITE_DENIED, AclPubsubDefault, ClientSession,
         ClientUnblockMode, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER,
-        OutputBufferClassLimit, PlainCardinalityCmd, PlainKeyMetaCmd, RDB_DISK_ERROR_WRITE_DENIED,
-        Runtime, ServerState,
+        OutputBufferClassLimit, PlainCardinalityCmd, PlainKeyMetaCmd, PlainRandMemberCmd,
+        RDB_DISK_ERROR_WRITE_DENIED, Runtime, ServerState,
         acl_list_entries_from_rules, build_hello_response, canonical_static_config_param,
         canonicalize_acl_rules, classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
@@ -26443,6 +26632,87 @@ mod tests {
         assert_eq!(
             fast.session.last_argv_len_sum,
             generic.session.last_argv_len_sum
+        );
+    }
+
+    #[test]
+    fn plain_rand_member_borrowed_matches_generic() {
+        // (frankenredis-c3btx) The no-count SRANDMEMBER/HRANDFIELD/ZRANDMEMBER
+        // borrowed fast path == generic dispatch. The store RNG is fixed-seed
+        // (rng_seed 0xDEADBEEF_C0FFEE11) and the two runtimes run an IDENTICAL op
+        // sequence, so the random picks advance in lockstep and must be
+        // byte-identical fast-vs-generic. Covers present container (random pick),
+        // missing key (nil), wrong-type (WRONGTYPE), and pins a golden sha of the
+        // fast-path reply stream so the output is determinism-locked (random
+        // output can't be golden-diffed vs redis).
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"SADD", b"s", b"a", b"b", b"c", b"d", b"e"]), 1);
+            rt.execute_frame(
+                command(&[b"HSET", b"h", b"f1", b"v1", b"f2", b"v2", b"f3", b"v3"]),
+                1,
+            );
+            rt.execute_frame(command(&[b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3", b"c"]), 1);
+            rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1); // wrong type for all three
+        }
+
+        let cases: &[(PlainRandMemberCmd, &[u8], &[u8])] = &[
+            (PlainRandMemberCmd::Srandmember, b"SRANDMEMBER", b"s"),
+            (PlainRandMemberCmd::Srandmember, b"SRANDMEMBER", b"s"),
+            (PlainRandMemberCmd::Srandmember, b"SRANDMEMBER", b"nokey"),
+            (PlainRandMemberCmd::Srandmember, b"SRANDMEMBER", b"str"),
+            (PlainRandMemberCmd::Hrandfield, b"HRANDFIELD", b"h"),
+            (PlainRandMemberCmd::Hrandfield, b"HRANDFIELD", b"h"),
+            (PlainRandMemberCmd::Hrandfield, b"HRANDFIELD", b"nokey"),
+            (PlainRandMemberCmd::Hrandfield, b"HRANDFIELD", b"str"),
+            (PlainRandMemberCmd::Zrandmember, b"ZRANDMEMBER", b"z"),
+            (PlainRandMemberCmd::Zrandmember, b"ZRANDMEMBER", b"z"),
+            (PlainRandMemberCmd::Zrandmember, b"ZRANDMEMBER", b"nokey"),
+            (PlainRandMemberCmd::Zrandmember, b"ZRANDMEMBER", b"str"),
+        ];
+
+        let mut golden = DefaultHasher::new();
+        let mut ts = 2u64;
+        for (cmd, name, key) in cases {
+            let f = fast
+                .execute_plain_rand_member_borrowed(*cmd, key, ts)
+                .expect("no-count rand-member should take the borrowed fast path");
+            let g = generic.execute_frame(command(&[name, key]), ts);
+            assert_eq!(f, g, "fast != generic for {} {:?}", cmd.name_upper(), key);
+            f.to_bytes().hash(&mut golden);
+            ts += 1;
+        }
+        // Determinism lock: fixed seed + fixed op order => fixed reply stream.
+        const GOLDEN_RAND_MEMBER_REPLY_STREAM: u64 = 14997283138918296680;
+        assert_eq!(
+            golden.finish(),
+            GOLDEN_RAND_MEMBER_REPLY_STREAM,
+            "rand-member fast-path reply stream changed (RNG/encoding drift)"
+        );
+
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_reads_processed,
+            generic.server.store.stat_total_reads_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            fast.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
         );
     }
 

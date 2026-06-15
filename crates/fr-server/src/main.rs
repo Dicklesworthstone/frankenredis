@@ -37,7 +37,7 @@ use fr_protocol::{BorrowedCommandArgsKind, ParserConfig, RespFrame, RespParseErr
 use fr_repl::ReplOffset;
 use fr_runtime::{
     ClientSession, ClientUnblockMode, PlainCardinalityCmd, PlainKeyMetaCmd, PlainKeyedPopCmd,
-    PlainKeyedValuesCmd, PlainRankCmd, Runtime,
+    PlainKeyedValuesCmd, PlainRandMemberCmd, PlainRankCmd, Runtime,
 };
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token, Waker};
@@ -3141,6 +3141,14 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args)
+                    && let Some(response) = runtime.execute_plain_rand_member_borrowed(cmd, key, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some((cmd, key, member)) = borrowed_plain_rank_args(&borrowed_args)
                     && let Some(response) =
                         runtime.execute_plain_rank_borrowed(cmd, key, member, ts)
@@ -3864,6 +3872,26 @@ fn borrowed_plain_cardinality_args<'a>(
         PlainCardinalityCmd::Hlen
     } else if command.eq_ignore_ascii_case(b"XLEN") {
         PlainCardinalityCmd::Xlen
+    } else {
+        return None;
+    };
+    Some((cmd, *key))
+}
+
+/// Recognizes the no-count `SRANDMEMBER key` / `HRANDFIELD key` /
+/// `ZRANDMEMBER key` forms (argc 2). Count forms (argc >= 3) fall to generic.
+fn borrowed_plain_rand_member_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(PlainRandMemberCmd, &'a [u8])> {
+    let [command, key] = borrowed_args else {
+        return None;
+    };
+    let cmd = if command.eq_ignore_ascii_case(b"SRANDMEMBER") {
+        PlainRandMemberCmd::Srandmember
+    } else if command.eq_ignore_ascii_case(b"HRANDFIELD") {
+        PlainRandMemberCmd::Hrandfield
+    } else if command.eq_ignore_ascii_case(b"ZRANDMEMBER") {
+        PlainRandMemberCmd::Zrandmember
     } else {
         return None;
     };
