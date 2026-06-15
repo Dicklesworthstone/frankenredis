@@ -24785,9 +24785,26 @@ mod quicklist_dump_fix_tests {
         let mut cases: Vec<Vec<u8>> = Vec::new();
         // integers across every encoding band + boundaries
         for v in [
-            0i64, 1, 127, 128, -1, -4096, 4095, 4096, -4097, 32767, -32768, 32768, 8_388_607,
-            -8_388_608, 8_388_608, 2_147_483_647, -2_147_483_648, 2_147_483_648,
-            i64::MAX, i64::MIN,
+            0i64,
+            1,
+            127,
+            128,
+            -1,
+            -4096,
+            4095,
+            4096,
+            -4097,
+            32767,
+            -32768,
+            32768,
+            8_388_607,
+            -8_388_608,
+            8_388_608,
+            2_147_483_647,
+            -2_147_483_648,
+            2_147_483_648,
+            i64::MAX,
+            i64::MIN,
         ] {
             cases.push(v.to_string().into_bytes());
         }
@@ -39976,6 +39993,38 @@ mod tests {
                 .lrange(b"ql", 0, -1, 100)
                 .map_err(|_| "lrange failed")?,
             vec![b"alpha".to_vec(), b"B".to_vec(), b"charlie".to_vec()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dump_retained_quicklist2_falls_back_for_mergeable_nodes() -> Result<(), &'static str> {
+        let first = encode_listpack_strings(&[b"alpha".as_slice()]).ok_or("encode first")?;
+        let second = encode_listpack_strings(&[b"bravo".as_slice()]).ok_or("encode second")?;
+        let mut split_body = vec![RDB_TYPE_LIST_QUICKLIST_2];
+        encode_length(&mut split_body, 2);
+        encode_length(&mut split_body, 2);
+        append_raw_dump_bulk(&mut split_body, &first);
+        encode_length(&mut split_body, 2);
+        append_raw_dump_bulk(&mut split_body, &second);
+        let split_payload = append_dump_footer(split_body);
+
+        let merged = encode_listpack_strings(&[b"alpha".as_slice(), b"bravo".as_slice()])
+            .ok_or("encode merged")?;
+        let mut merged_body = vec![RDB_TYPE_LIST_QUICKLIST_2];
+        encode_length(&mut merged_body, 1);
+        encode_length(&mut merged_body, 2);
+        append_raw_dump_bulk(&mut merged_body, &merged);
+        let merged_payload = append_dump_footer(merged_body);
+
+        let mut store = Store::new();
+        store
+            .restore_key(b"ql", 0, &split_payload, false, 100)
+            .map_err(|_| "quicklist2 split restore failed")?;
+        assert_eq!(
+            store.dump_key(b"ql", 100).ok_or("dump missing")?,
+            merged_payload,
+            "mergeable retained nodes must use the canonical encoder"
         );
         Ok(())
     }
