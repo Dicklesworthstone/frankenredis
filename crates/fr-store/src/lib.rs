@@ -2501,8 +2501,9 @@ impl SetValue {
             }
             return;
         }
-        let members: Vec<Vec<u8>> = other.iter().map(|m| m.into_owned()).collect();
-        self.extend(members, max_intset_entries);
+        for member in other.iter() {
+            self.insert_borrowed(member.as_ref(), max_intset_entries);
+        }
     }
 }
 

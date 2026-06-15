@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark -p 28640 -n 200 -c 1 -P 1 -q getrange bigstr 0 -1
+  Time (mean ± σ):      57.6 ms ±   6.9 ms    [User: 11.7 ms, System: 34.7 ms]
+  Range (min … max):    44.4 ms …  66.3 ms    10 runs
+
+Benchmark 2: /data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark -p 28641 -n 200 -c 1 -P 1 -q getrange bigstr 0 -1
+  Time (mean ± σ):      52.2 ms ±   4.5 ms    [User: 11.1 ms, System: 31.7 ms]
+  Range (min … max):    46.3 ms …  58.7 ms    10 runs
+
+Summary
+  /data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark -p 28641 -n 200 -c 1 -P 1 -q getrange bigstr 0 -1 ran
+    1.10 ± 0.16 times faster than /data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark -p 28640 -n 200 -c 1 -P 1 -q getrange bigstr 0 -1

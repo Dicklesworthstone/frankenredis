@@ -1,0 +1,11 @@
+Benchmark 1: python3 /data/projects/frankenredis/artifacts/optimization/frankenredis-xy7vh/sunionstore_focus.py --port 26933 --mode bench --runs 20 --warmups 2 --json-out /data/projects/frankenredis/artifacts/optimization/frankenredis-xy7vh/pass206-reversed-candidate-last.json
+  Time (mean ± σ):     615.8 ms ±  31.1 ms    [User: 27.3 ms, System: 14.3 ms]
+  Range (min … max):   565.4 ms … 654.9 ms    8 runs
+
+Benchmark 2: python3 /data/projects/frankenredis/artifacts/optimization/frankenredis-xy7vh/sunionstore_focus.py --port 26932 --mode bench --runs 20 --warmups 2 --json-out /data/projects/frankenredis/artifacts/optimization/frankenredis-xy7vh/pass206-reversed-current-last.json
+  Time (mean ± σ):     695.1 ms ±  29.9 ms    [User: 30.1 ms, System: 12.3 ms]
+  Range (min … max):   654.6 ms … 733.0 ms    8 runs
+
+Summary
+  python3 /data/projects/frankenredis/artifacts/optimization/frankenredis-xy7vh/sunionstore_focus.py --port 26933 --mode bench --runs 20 --warmups 2 --json-out /data/projects/frankenredis/artifacts/optimization/frankenredis-xy7vh/pass206-reversed-candidate-last.json ran
+    1.13 ± 0.07 times faster than python3 /data/projects/frankenredis/artifacts/optimization/frankenredis-xy7vh/sunionstore_focus.py --port 26932 --mode bench --runs 20 --warmups 2 --json-out /data/projects/frankenredis/artifacts/optimization/frankenredis-xy7vh/pass206-reversed-current-last.json

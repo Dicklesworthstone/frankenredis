@@ -1,0 +1,64 @@
+{
+  "results": [
+    {
+      "command": "python3 /data/projects/frankenredis/artifacts/optimization/frankenredis-xy7vh/sunionstore_focus.py --port 26933 --mode bench --runs 20 --warmups 2 --json-out /data/projects/frankenredis/artifacts/optimization/frankenredis-xy7vh/pass206-reversed-candidate-last.json",
+      "mean": 0.6158497745700001,
+      "stddev": 0.031076042240308688,
+      "median": 0.6172656498200001,
+      "user": 0.0273225,
+      "system": 0.01428672,
+      "min": 0.56543241582,
+      "max": 0.6549477818200001,
+      "times": [
+        0.6032099078200001,
+        0.56543241582,
+        0.6328930788200001,
+        0.6482373118200001,
+        0.6549477818200001,
+        0.5878701538200001,
+        0.6313213918200001,
+        0.6028861548200001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 /data/projects/frankenredis/artifacts/optimization/frankenredis-xy7vh/sunionstore_focus.py --port 26932 --mode bench --runs 20 --warmups 2 --json-out /data/projects/frankenredis/artifacts/optimization/frankenredis-xy7vh/pass206-reversed-current-last.json",
+      "mean": 0.69508620032,
+      "stddev": 0.02992315991445229,
+      "median": 0.6940923883200001,
+      "user": 0.03013175,
+      "system": 0.01229247,
+      "min": 0.6545649458200001,
+      "max": 0.7330274178200001,
+      "times": [
+        0.6680001028200001,
+        0.6860158958200001,
+        0.7330274178200001,
+        0.6694120268200001,
+        0.7021688808200001,
+        0.72077024182,
+        0.7267300908200001,
+        0.6545649458200001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

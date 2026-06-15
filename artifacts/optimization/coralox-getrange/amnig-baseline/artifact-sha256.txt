@@ -1,0 +1,5 @@
+fdbd1a7b3cd72c3f1041bb44df74d0e8d58c5feafcc4b5a03b06d7603b97deb9  artifacts/optimization/coralox-getrange/amnig-baseline/baseline-binary-sha256.txt
+5781e7676036ff4d36f48f90a664358a702510696cbc3abcaa0b903f5bdaf527  artifacts/optimization/coralox-getrange/amnig-baseline/baseline-getrange-redis-vs-fr.json
+3a4250a1390a281b9ffb96ae76966052eb20d14fdf320e878ad5208b1e0cf907  artifacts/optimization/coralox-getrange/amnig-baseline/baseline-getrange-redis-vs-fr.txt
+d0c6b2884b24a3a4c3e6924c0ae474faa1ea2430fe56afddaa878c667a9c0ce5  artifacts/optimization/coralox-getrange/amnig-baseline/oracle-binaries-sha256.txt
+3e16d8f851a488f8fd897a68f4b3bdf14c890916b53a59cf3456a56555dcb6bc  artifacts/optimization/coralox-getrange/amnig-baseline/perf-smoke.txt
