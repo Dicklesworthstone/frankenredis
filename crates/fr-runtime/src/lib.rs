@@ -315,6 +315,15 @@ fn plain_append_owned_argv(key: &[u8], value: &[u8]) -> Vec<Vec<u8>> {
     vec![b"APPEND".to_vec(), key.to_vec(), value.to_vec()]
 }
 
+fn plain_setrange_owned_argv(key: &[u8], offset: &[u8], value: &[u8]) -> Vec<Vec<u8>> {
+    vec![
+        b"SETRANGE".to_vec(),
+        key.to_vec(),
+        offset.to_vec(),
+        value.to_vec(),
+    ]
+}
+
 fn plain_decrby_owned_argv(key: &[u8], delta: &[u8]) -> Vec<Vec<u8>> {
     vec![b"DECRBY".to_vec(), key.to_vec(), delta.to_vec()]
 }
@@ -7780,6 +7789,161 @@ impl Runtime {
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
                 output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    fn can_execute_plain_setrange_borrowed(
+        &mut self,
+        key: &[u8],
+        offset: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"SETRANGE".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || offset.len() > self.policy.gate.max_bulk_len
+            || value.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// Borrowed fast path for the hot valid `SETRANGE key offset value` write
+    /// form. It deliberately declines malformed offsets, negative offsets,
+    /// empty values, and proto-max-bulk-len overflows before side effects, so
+    /// the generic handler keeps those exact error/stat paths. Valid writes use
+    /// the same `Store::setrange` primitive as generic dispatch.
+    pub fn execute_plain_setrange_borrowed(
+        &mut self,
+        key: &[u8],
+        offset_arg: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_setrange_borrowed(key, offset_arg, value, now_ms) {
+            return None;
+        }
+        let offset = parse_i64_arg(offset_arg).ok()?;
+        if offset < 0 || value.is_empty() {
+            return None;
+        }
+        let offset_u64 = u64::try_from(offset).ok()?;
+        if offset_u64.saturating_add(value.len() as u64) > 536_870_912 {
+            return None;
+        }
+        let offset_usize = usize::try_from(offset_u64).ok()?;
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("setrange");
+        self.session.last_argv_len_sum =
+            b"SETRANGE".len() + key.len() + offset_arg.len() + value.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = Instant::now();
+        let result = self.server.store.setrange(key, offset_usize, value, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let reply = match result {
+            Ok(new_len) => RespFrame::Integer(i64::try_from(new_len).unwrap_or(i64::MAX)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_setrange_borrowed_metrics(
+            key, offset_arg, value, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_plain_setrange_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        offset: &[u8],
+        value: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_setrange_owned_argv(key, offset, value));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_setrange_owned_argv(key, offset, value));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("setrange", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_setrange_owned_argv(key, offset, value));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'SETRANGE' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
             });
         }
     }
@@ -26731,8 +26895,7 @@ mod tests {
         // Deferral cases: rank 0 / i64::MIN / non-integer -> None (no side effect);
         // drive both through generic to keep stats in lockstep, then assert decline.
         let defer: [&[u8]; 3] = [b"0", b"-9223372036854775808", b"notint"];
-        let mut ts = 100u64;
-        for rank in defer {
+        for (ts, rank) in (100u64..).zip(defer) {
             assert!(
                 direct
                     .execute_plain_lpos_rank_borrowed(b"l", b"b", rank, ts)
@@ -26742,7 +26905,6 @@ mod tests {
             let f = direct.execute_frame(command(&[b"LPOS", b"l", b"b", b"RANK", rank]), ts);
             let g = generic.execute_frame(command(&[b"LPOS", b"l", b"b", b"RANK", rank]), ts);
             assert_eq!(f, g, "defer rank={rank:?}");
-            ts += 1;
         }
         assert_eq!(
             direct.server.store.stat_keyspace_hits,
@@ -27546,15 +27708,13 @@ mod tests {
         ];
 
         let mut golden = DefaultHasher::new();
-        let mut ts = 2u64;
-        for (cmd, name, key) in cases {
+        for (ts, &(cmd, name, key)) in (2u64..).zip(cases.iter()) {
             let f = fast
-                .execute_plain_rand_member_borrowed(*cmd, key, ts)
+                .execute_plain_rand_member_borrowed(cmd, key, ts)
                 .expect("no-count rand-member should take the borrowed fast path");
             let g = generic.execute_frame(command(&[name, key]), ts);
             assert_eq!(f, g, "fast != generic for {} {:?}", cmd.name_upper(), key);
             f.to_bytes().hash(&mut golden);
-            ts += 1;
         }
         // Determinism lock: fixed seed + fixed op order => fixed reply stream.
         const GOLDEN_RAND_MEMBER_REPLY_STREAM: u64 = 14997283138918296680;
@@ -28293,6 +28453,96 @@ mod tests {
         // a configured replica link / subscribe disables the write fast path
         rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
         assert!(rt.execute_plain_append_borrowed(b"s", b"x", 4).is_none());
+    }
+
+    #[test]
+    fn plain_setrange_borrowed_fast_path_matches_generic_and_defers_cold_errors() {
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"s", b"abcde"]), 1);
+            rt.execute_frame(command(&[b"LPUSH", b"l", b"x"]), 1);
+        }
+
+        let overwrite = fast
+            .execute_plain_setrange_borrowed(b"s", b"2", b"XYZ", 2)
+            .expect("valid SETRANGE should take borrowed fast path");
+        assert_eq!(
+            overwrite,
+            generic.execute_frame(command(&[b"SETRANGE", b"s", b"2", b"XYZ"]), 2)
+        );
+        assert_eq!(overwrite, RespFrame::Integer(5));
+
+        let create = fast
+            .execute_plain_setrange_borrowed(b"fresh", b"3", b"zz", 3)
+            .expect("missing-key SETRANGE should take borrowed fast path");
+        assert_eq!(
+            create,
+            generic.execute_frame(command(&[b"SETRANGE", b"fresh", b"3", b"zz"]), 3)
+        );
+        assert_eq!(create, RespFrame::Integer(5));
+
+        let wrong_type = fast
+            .execute_plain_setrange_borrowed(b"l", b"0", b"x", 4)
+            .expect("wrong-type SETRANGE should still reply on fast path");
+        assert_eq!(
+            wrong_type,
+            generic.execute_frame(command(&[b"SETRANGE", b"l", b"0", b"x"]), 4)
+        );
+        assert!(matches!(wrong_type, RespFrame::Error(_)));
+
+        assert_eq!(
+            fast.execute_frame(command(&[b"GET", b"s"]), 5),
+            generic.execute_frame(command(&[b"GET", b"s"]), 5)
+        );
+        assert_eq!(
+            fast.execute_frame(command(&[b"GET", b"fresh"]), 5),
+            generic.execute_frame(command(&[b"GET", b"fresh"]), 5)
+        );
+        assert!(
+            fast.execute_plain_setrange_borrowed(b"s", b"x", b"y", 6)
+                .is_none()
+        );
+        assert!(
+            fast.execute_plain_setrange_borrowed(b"s", b"-1", b"y", 6)
+                .is_none()
+        );
+        assert!(
+            fast.execute_plain_setrange_borrowed(b"s", b"0", b"", 6)
+                .is_none()
+        );
+        assert!(
+            fast.execute_plain_setrange_borrowed(b"s", b"600000000", b"y", 6)
+                .is_none()
+        );
+
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_writes_processed,
+            generic.server.store.stat_total_writes_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+    }
+
+    #[test]
+    fn plain_setrange_borrowed_fast_path_disabled_in_non_default_states() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"s", b"abc"]), 1);
+        assert!(
+            rt.execute_plain_setrange_borrowed(b"s", b"1", b"x", 2)
+                .is_some()
+        );
+        rt.execute_frame(command(&[b"MULTI"]), 3);
+        assert!(
+            rt.execute_plain_setrange_borrowed(b"s", b"1", b"x", 4)
+                .is_none()
+        );
     }
 
     #[test]

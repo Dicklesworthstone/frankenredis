@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark -p 27110 -n 300000 -P 16 -c 50 -q SETRANGE s 32 x",
+      "mean": 0.3090310892,
+      "stddev": 0.00399289633463875,
+      "median": 0.3090662292,
+      "user": 0.0613045,
+      "system": 0.24090622,
+      "min": 0.3040842102,
+      "max": 0.3145101852,
+      "times": [
+        0.3108826622,
+        0.3040842102,
+        0.3145101852,
+        0.3066121592,
+        0.3090662292
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark -p 27111 -n 300000 -P 16 -c 50 -q SETRANGE s 32 x",
+      "mean": 0.4624558252,
+      "stddev": 0.009983909509116472,
+      "median": 0.4638646072,
+      "user": 0.08103069999999998,
+      "system": 0.32303881999999995,
+      "min": 0.4463437762,
+      "max": 0.47133931020000003,
+      "times": [
+        0.4608226022,
+        0.4638646072,
+        0.4699088302,
+        0.4463437762,
+        0.47133931020000003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+Benchmark 1: /data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark -p 27111 -n 300000 -P 16 -c 50 -q SETRANGE s 32 x
+  Time (mean ± σ):     448.9 ms ±  10.2 ms    [User: 75.6 ms, System: 313.3 ms]
+  Range (min … max):   439.5 ms … 469.5 ms    7 runs
+
+Benchmark 2: /data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark -p 27112 -n 300000 -P 16 -c 50 -q SETRANGE s 32 x
+  Time (mean ± σ):     287.9 ms ±  11.0 ms    [User: 57.3 ms, System: 229.2 ms]
+  Range (min … max):   268.5 ms … 300.1 ms    7 runs
+
+Summary
+  /data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark -p 27112 -n 300000 -P 16 -c 50 -q SETRANGE s 32 x ran
+    1.56 ± 0.07 times faster than /data/projects/frankenredis/legacy_redis_code/redis/src/redis-benchmark -p 27111 -n 300000 -P 16 -c 50 -q SETRANGE s 32 x

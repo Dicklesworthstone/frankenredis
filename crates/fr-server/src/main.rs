@@ -2975,6 +2975,15 @@ fn parse_borrowed_multibulk_action(
                         response,
                     });
                 }
+                if let Some((key, offset, value)) = borrowed_plain_setrange_args(&borrowed_args)
+                    && let Some(response) =
+                        runtime.execute_plain_setrange_borrowed(key, offset, value, ts)
+                {
+                    return Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: parsed.consumed,
+                        response,
+                    });
+                }
                 if let Some(key) = borrowed_plain_incr_args(&borrowed_args)
                     && let Some(response) = runtime.execute_plain_incr_borrowed(key, ts)
                 {
@@ -3586,6 +3595,17 @@ fn borrowed_plain_ping_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<Option<
 fn borrowed_plain_set_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option<(&'a [u8], &'a [u8])> {
     match borrowed_args {
         [command, key, value] if command.eq_ignore_ascii_case(b"SET") => Some((*key, *value)),
+        _ => None,
+    }
+}
+
+fn borrowed_plain_setrange_args<'a>(
+    borrowed_args: &'a [&'a [u8]],
+) -> Option<(&'a [u8], &'a [u8], &'a [u8])> {
+    match borrowed_args {
+        [command, key, offset, value] if command.eq_ignore_ascii_case(b"SETRANGE") => {
+            Some((*key, *offset, *value))
+        }
         _ => None,
     }
 }

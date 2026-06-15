@@ -1,0 +1,2 @@
+6f3fdda58377c9ceddc51d3c3b8bf6b4244685c4644a093293c459e985c0ead9  target-coralox-eoaib-current/release/frankenredis
+8f5ffcee3fab066593f10e48b05ffbc67fa517ea82771a41b8e8f0ed9b4cbc25  target-coralox-eoaib-candidate/release/frankenredis
