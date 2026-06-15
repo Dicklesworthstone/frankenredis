@@ -1,0 +1,48 @@
+47bzu pass204: raw-emits retained quicklist2 listpack nodes on DUMP
+
+baseline commit: eb7a38092
+candidate: working tree before commit
+harness: artifacts/optimization/coralox-47bzu/harness
+shape: restored QUICKLIST_2 string-listpack list, list_len=10000 payload_size=16 repeats=2000
+
+golden proof:
+- source/restored DUMP sha256: 308fb090d09d0b431758a85fc724cfd627d5203c8cf23835f004e78a783efad8
+- baseline source/restored dumps: identical
+- candidate source/restored dumps: identical
+- baseline source/restored vs candidate source/restored: identical
+- checksum: 9886209619068676861
+- state_digest: b7c8d7e9054dd6bd
+- object encoding: quicklist
+- LLEN: 10000
+
+benchmark:
+- baseline-only hyperfine: 2.974s +/- 0.039
+- forward paired baseline: 2.990s +/- 0.054
+- forward paired candidate: 2.561s +/- 0.037
+- forward speedup: 1.17x +/- 0.03
+- reversed paired candidate: 2.588s +/- 0.058
+- reversed paired baseline: 3.035s +/- 0.079
+- reversed speedup: 1.17x +/- 0.04
+
+score:
+- impact: 1.17
+- confidence: 0.95
+- effort: 0.45
+- score: 2.47
+
+isomorphism:
+- DUMP bytes are unchanged for the retained string-only quicklist2 shape.
+- The raw-emission path is gated on retained chunks that exactly match the current greedy DUMP node-boundary predicates.
+- Mutated/materialized, owned, plain, integer/mixed, invalid, or config-mismatched nodes fall back to the old encoder.
+- Ordering/tie-breaking, floating point, and RNG surfaces are unchanged.
+
+validation:
+- rch exec -- env CARGO_TARGET_DIR=target-coralox-47bzu-baseline cargo build --release --manifest-path artifacts/optimization/coralox-47bzu/harness/Cargo.toml
+- rch exec -- env CARGO_TARGET_DIR=target-coralox-47bzu-candidate cargo build --release --manifest-path artifacts/optimization/coralox-47bzu/harness/Cargo.toml
+- rch exec -- cargo test -j 1 -p fr-store restore_quicklist2_string_node_keeps_order_and_dump_bytes -- --nocapture
+- rch exec -- cargo check -j 1 -p fr-store --all-targets
+- rch exec -- cargo clippy -j 1 -p fr-store --all-targets -- -D warnings
+- cargo fmt --manifest-path artifacts/optimization/coralox-47bzu/harness/Cargo.toml -- --check
+- rustfmt --edition 2024 --check crates/fr-store/src/packed_set.rs artifacts/optimization/coralox-47bzu/harness/src/main.rs
+- cargo fmt -p fr-store -- --check remains nonzero from pre-existing unrelated integer-boundary test array formatting in crates/fr-store/src/lib.rs.
+- ubs on changed files remains nonzero on broad existing fr-store inventory; embedded fmt, clippy, cargo check, and test-build sections were clean.

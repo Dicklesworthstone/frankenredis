@@ -1,0 +1,2 @@
+308fb090d09d0b431758a85fc724cfd627d5203c8cf23835f004e78a783efad8  artifacts/optimization/coralox-47bzu/pass204/candidate-golden-source.dump
+308fb090d09d0b431758a85fc724cfd627d5203c8cf23835f004e78a783efad8  artifacts/optimization/coralox-47bzu/pass204/candidate-golden-restored.dump

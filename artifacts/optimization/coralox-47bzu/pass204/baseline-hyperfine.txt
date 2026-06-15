@@ -1,0 +1,4 @@
+Benchmark 1: target-coralox-47bzu-baseline/release/fr-47bzu-dump-harness --list-len 10000 --payload-size 16 --repeats 2000
+  Time (mean ± σ):      2.974 s ±  0.039 s    [User: 2.971 s, System: 0.002 s]
+  Range (min … max):    2.904 s …  3.034 s    10 runs
+ 

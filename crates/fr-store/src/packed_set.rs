@@ -1236,6 +1236,11 @@ struct ChunkedList {
     len: usize,
 }
 
+pub(crate) struct RetainedListpackChunk<'a> {
+    pub(crate) bytes: &'a [u8],
+    pub(crate) ranges: &'a [Range<usize>],
+}
+
 impl ChunkedList {
     fn len(&self) -> usize {
         self.len
@@ -2042,6 +2047,25 @@ impl ListValue {
         };
         list.rebuild_growth_state();
         list
+    }
+
+    pub(crate) fn retained_listpack_chunks(&self) -> Option<Vec<RetainedListpackChunk<'_>>> {
+        let ListRepr::Deque(list) = &self.repr else {
+            return None;
+        };
+        let mut chunks = Vec::with_capacity(list.chunks.len());
+        for chunk in &list.chunks {
+            match chunk {
+                ListChunk::ListpackStrings { bytes, ranges } if !ranges.is_empty() => {
+                    chunks.push(RetainedListpackChunk {
+                        bytes: bytes.as_slice(),
+                        ranges: ranges.as_slice(),
+                    });
+                }
+                _ => return None,
+            }
+        }
+        (!chunks.is_empty()).then_some(chunks)
     }
 
     #[must_use]

@@ -1,0 +1,3 @@
+308fb090d09d0b431758a85fc724cfd627d5203c8cf23835f004e78a783efad8  artifacts/optimization/coralox-47bzu/pass204/baseline-golden-source.dump
+308fb090d09d0b431758a85fc724cfd627d5203c8cf23835f004e78a783efad8  artifacts/optimization/coralox-47bzu/pass204/baseline-golden-restored.dump
+cb65a8d7f39c193eec8b6185782587dc8e326ca6cbf7ab0174bd7336ee6d2574  target-coralox-47bzu-baseline/release/fr-47bzu-dump-harness

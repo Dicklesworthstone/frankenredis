@@ -6,6 +6,7 @@
 mod packed_set;
 use packed_set::{
     GenericSet, HashFieldMap, ListValue, PackedZSet, PackedZSetIter, RestoredListNode,
+    RetainedListpackChunk,
 };
 
 use fr_expire::evaluate_expiry;
@@ -20596,6 +20597,16 @@ fn encode_dump_quicklist2(
     if list.is_empty() {
         return None;
     }
+    if let Some(chunks) = list.retained_listpack_chunks()
+        && retained_quicklist2_chunks_match_dump_rules(&chunks, list_max_listpack_size)
+    {
+        encode_length(buf, chunks.len());
+        for chunk in chunks {
+            encode_length(buf, 2);
+            encode_rdb_string(buf, chunk.bytes);
+        }
+        return Some(());
+    }
 
     enum Node<'a> {
         Plain(&'a [u8]),
@@ -20658,6 +20669,52 @@ fn encode_dump_quicklist2(
         }
     }
     Some(())
+}
+
+fn retained_quicklist2_chunks_match_dump_rules(
+    chunks: &[RetainedListpackChunk<'_>],
+    list_max_listpack_size: i64,
+) -> bool {
+    let mut previous: Option<(usize, usize)> = None;
+    for chunk in chunks {
+        let mut packed_bytes = LISTPACK_FRAME_OVERHEAD;
+        let mut first_entry_bytes = None;
+        for (index, range) in chunk.ranges.iter().enumerate() {
+            let Some(item) = chunk.bytes.get(range.clone()) else {
+                return false;
+            };
+            if quicklist_plain_node_required(item, list_max_listpack_size) {
+                return false;
+            }
+            let entry_bytes = listpack_entry_encoded_len(item);
+            if index == 0 {
+                first_entry_bytes = Some(entry_bytes);
+                if let Some((previous_count, previous_bytes)) = previous
+                    && quicklist_packed_node_accepts(
+                        previous_count,
+                        previous_bytes,
+                        entry_bytes,
+                        list_max_listpack_size,
+                    )
+                {
+                    return false;
+                }
+            } else if !quicklist_packed_node_accepts(
+                index,
+                packed_bytes,
+                entry_bytes,
+                list_max_listpack_size,
+            ) {
+                return false;
+            }
+            packed_bytes += entry_bytes;
+        }
+        if first_entry_bytes.is_none() || packed_bytes != chunk.bytes.len() {
+            return false;
+        }
+        previous = Some((chunk.ranges.len(), packed_bytes));
+    }
+    true
 }
 
 /// Listpack frame overhead in bytes: 6-byte header (4 total-bytes + 2 element
@@ -20744,7 +20801,6 @@ fn quicklist_plain_node_required(item: &[u8], list_max_listpack_size: i64) -> bo
     list_max_listpack_size < 0
         && !quicklist_packed_node_fits(&[item], list_max_listpack_size).unwrap_or(false)
 }
-
 
 fn quicklist_packed_node_fits(entries: &[&[u8]], list_max_listpack_size: i64) -> Option<bool> {
     if list_max_listpack_size >= 0 {

@@ -1,0 +1,10 @@
+[package]
+name = "fr-47bzu-list-dump-harness"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+fr-store = { path = "../../../../crates/fr-store" }

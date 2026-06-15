@@ -1,0 +1,11 @@
+Benchmark 1: target-coralox-47bzu-candidate/release/fr-47bzu-list-dump-harness --list-len 10000 --payload-size 16 --repeats 500
+  Time (mean ± σ):     615.7 ms ±  18.7 ms    [User: 613.3 ms, System: 2.0 ms]
+  Range (min … max):   589.8 ms … 650.3 ms    12 runs
+ 
+Benchmark 2: /data/projects/.scratch/frankenredis-coralox-47bzu-baseline/target-coralox-47bzu-baseline/release/fr-47bzu-list-dump-harness --list-len 10000 --payload-size 16 --repeats 500
+  Time (mean ± σ):     914.3 ms ± 102.3 ms    [User: 904.9 ms, System: 3.0 ms]
+  Range (min … max):   827.8 ms … 1131.7 ms    12 runs
+ 
+Summary
+  target-coralox-47bzu-candidate/release/fr-47bzu-list-dump-harness --list-len 10000 --payload-size 16 --repeats 500 ran
+    1.48 ± 0.17 times faster than /data/projects/.scratch/frankenredis-coralox-47bzu-baseline/target-coralox-47bzu-baseline/release/fr-47bzu-list-dump-harness --list-len 10000 --payload-size 16 --repeats 500

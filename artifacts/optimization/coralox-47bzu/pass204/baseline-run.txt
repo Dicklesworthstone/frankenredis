@@ -1,0 +1,15 @@
+golden_source_len=73568
+golden_restored_len=73568
+golden_dumps_equal=true
+golden_llen=10000
+golden_encoding=quicklist
+golden_head_len=3
+list_len=10000
+payload_size=16
+repeats=2000
+payload_bytes=73568
+dump_ns=3031058179
+dump_ns_per_op=1515529.090
+checksum=9886209619068676861
+state_digest=b7c8d7e9054dd6bd
+memory_bytes=196728
