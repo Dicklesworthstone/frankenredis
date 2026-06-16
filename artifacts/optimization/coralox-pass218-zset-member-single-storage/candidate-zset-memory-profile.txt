@@ -1,0 +1,4 @@
+zset RSS profile: 500 keys x 800 small members = 400000 members
+  redis: data-RSS 37.71 MB, 99 bytes/member
+  fr   : data-RSS 58.23 MB, 153 bytes/member
+  ratio fr/redis = 1.54x

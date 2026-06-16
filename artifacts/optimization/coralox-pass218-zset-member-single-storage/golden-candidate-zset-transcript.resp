@@ -1,0 +1,210 @@
+>>> FLUSHALL
++OK
+
+>>> ZADD z 1 b 1 a -0 znegzero 0 zposzero 2.5 c
+:5
+
+>>> ZRANGE z 0 -1 WITHSCORES
+*10
+$8
+znegzero
+$1
+0
+$8
+zposzero
+$1
+0
+$1
+a
+$1
+1
+$1
+b
+$1
+1
+$1
+c
+$3
+2.5
+
+>>> ZREVRANGE z 0 -1 WITHSCORES
+*10
+$1
+c
+$3
+2.5
+$1
+b
+$1
+1
+$1
+a
+$1
+1
+$8
+zposzero
+$1
+0
+$8
+znegzero
+$1
+0
+
+>>> ZRANK z a
+:2
+
+>>> ZREVRANK z a
+:2
+
+>>> ZCOUNT z -inf +inf
+:5
+
+>>> ZRANGEBYSCORE z 0 1 WITHSCORES
+*8
+$8
+znegzero
+$1
+0
+$8
+zposzero
+$1
+0
+$1
+a
+$1
+1
+$1
+b
+$1
+1
+
+>>> ZADD zlex 0 alpha 0 alpine 0 beta 0 omega
+:4
+
+>>> ZRANGEBYLEX zlex [alpha [omega
+*4
+$5
+alpha
+$6
+alpine
+$4
+beta
+$5
+omega
+
+>>> ZREVRANGEBYLEX zlex [omega (alpha LIMIT 0 3
+*3
+$5
+omega
+$4
+beta
+$6
+alpine
+
+>>> ZLEXCOUNT zlex [alpha [omega
+:4
+
+>>> ZREM z b
+:1
+
+>>> ZRANGE z 0 -1 WITHSCORES
+*8
+$8
+znegzero
+$1
+0
+$8
+zposzero
+$1
+0
+$1
+a
+$1
+1
+$1
+c
+$3
+2.5
+
+>>> ZINCRBY z 1.25 a
+$4
+2.25
+
+>>> ZRANGE z 0 -1 WITHSCORES
+*8
+$8
+znegzero
+$1
+0
+$8
+zposzero
+$1
+0
+$1
+a
+$4
+2.25
+$1
+c
+$3
+2.5
+
+>>> ZPOPMIN z 2
+*4
+$8
+znegzero
+$1
+0
+$8
+zposzero
+$1
+0
+
+>>> ZPOPMAX z 2
+*4
+$1
+c
+$3
+2.5
+$1
+a
+$4
+2.25
+
+>>> ZRANGE z 0 -1 WITHSCORES
+*0
+
+>>> ZADD u1 1 a 3 c
+:2
+
+>>> ZADD u2 2 a 4 d
+:2
+
+>>> ZUNIONSTORE uout 2 u1 u2 WEIGHTS 2 3 AGGREGATE SUM
+:3
+
+>>> ZRANGE uout 0 -1 WITHSCORES
+*6
+$1
+c
+$1
+6
+$1
+a
+$1
+8
+$1
+d
+$2
+12
+
+>>> ZINTERSTORE iout 2 u1 u2 AGGREGATE MIN
+:1
+
+>>> ZRANGE iout 0 -1 WITHSCORES
+*2
+$1
+a
+$1
+1
+
