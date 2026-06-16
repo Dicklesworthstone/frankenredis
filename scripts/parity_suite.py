@@ -91,6 +91,8 @@ PORT_BASED = [
     ("flag_error_edge_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # non-zero-DB error/key parity + internal-namespace (\0frdb\0) leak guard.
     ("multidb_namespace_leak_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    # feature-completeness: every redis 7.2.4 command + container subcommand is wired up.
+    ("command_coverage_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
 ]
 
 # Older differs use argparse flags: --oracle <port> --fr <port>
