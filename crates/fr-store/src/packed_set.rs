@@ -205,7 +205,7 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexSet;
 
 /// Hashtable storage for a large generic set (the former `GenericSet` alias).
 type SetHashTable = IndexSet<SetMember, foldhash::quality::RandomState>;
@@ -545,83 +545,8 @@ impl<'a> Iterator for GenericSetIter<'a> {
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum HashFieldBytes {
-    Inline {
-        len: u8,
-        bytes: [u8; Self::INLINE_CAPACITY],
-    },
-    Heap(Vec<u8>),
-}
-
-impl HashFieldBytes {
-    const INLINE_CAPACITY: usize = 15;
-
-    fn from_slice(bytes: &[u8]) -> Self {
-        if bytes.len() <= Self::INLINE_CAPACITY {
-            let len = match u8::try_from(bytes.len()) {
-                Ok(len) => len,
-                Err(_) => return Self::Heap(bytes.to_vec()),
-            };
-            let mut inline = [0u8; Self::INLINE_CAPACITY];
-            inline[..bytes.len()].copy_from_slice(bytes);
-            Self::Inline { len, bytes: inline }
-        } else {
-            Self::Heap(bytes.to_vec())
-        }
-    }
-
-    fn from_vec(bytes: Vec<u8>) -> Self {
-        if bytes.len() <= Self::INLINE_CAPACITY {
-            Self::from_slice(&bytes)
-        } else {
-            Self::Heap(bytes)
-        }
-    }
-
-    fn as_slice(&self) -> &[u8] {
-        match self {
-            Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
-            Self::Heap(bytes) => bytes,
-        }
-    }
-
-    fn into_vec(self) -> Vec<u8> {
-        match self {
-            Self::Inline { len, bytes } => bytes[..usize::from(len)].to_vec(),
-            Self::Heap(bytes) => bytes,
-        }
-    }
-}
-
-impl Borrow<[u8]> for HashFieldBytes {
-    fn borrow(&self) -> &[u8] {
-        self.as_slice()
-    }
-}
-
-impl AsRef<[u8]> for HashFieldBytes {
-    fn as_ref(&self) -> &[u8] {
-        self.as_slice()
-    }
-}
-
-impl PartialEq for HashFieldBytes {
-    fn eq(&self, other: &Self) -> bool {
-        self.as_slice() == other.as_slice()
-    }
-}
-
-impl Eq for HashFieldBytes {}
-
-impl Hash for HashFieldBytes {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.as_slice().hash(state);
-    }
-}
-
-/// Hashtable storage for a large hash (the former `HashFieldMap` alias).
-pub type FieldHashTable = IndexMap<HashFieldBytes, HashFieldBytes, foldhash::quality::RandomState>;
+// `HashFieldBytes` / `FieldHashTable` (the former inline-or-heap IndexMap backing
+// for the Hash variant) were superseded by `CompactFieldMap` (frankenredis-ideww).
 
 /// Storage for a hash's field→value map: a packed listpack-style buffer while
 /// small, promoting to an `IndexMap` hashtable past the threshold. Drop-in for
@@ -631,7 +556,7 @@ pub type FieldHashTable = IndexMap<HashFieldBytes, HashFieldBytes, foldhash::qua
 #[derive(Clone, Debug)]
 pub enum HashFieldMap {
     Packed(PackedStrMap),
-    Hash(FieldHashTable),
+    Hash(CompactFieldMap),
 }
 
 impl Default for HashFieldMap {
@@ -660,15 +585,9 @@ impl HashFieldMap {
                 .iter()
                 .any(|(f, v)| f.len() > PACKED_MAX_VALUE || v.len() > PACKED_MAX_VALUE);
         if to_hash {
-            let mut h: FieldHashTable = IndexMap::with_capacity_and_hasher(
-                pairs.len(),
-                foldhash::quality::RandomState::default(),
-            );
+            let mut h = CompactFieldMap::new();
             for (field, value) in pairs {
-                h.insert(
-                    HashFieldBytes::from_vec(field),
-                    HashFieldBytes::from_vec(value),
-                );
+                h.insert(&field, &value);
             }
             HashFieldMap::Hash(h)
         } else {
@@ -698,7 +617,7 @@ impl HashFieldMap {
     pub fn get(&self, field: &[u8]) -> Option<&[u8]> {
         match self {
             HashFieldMap::Packed(p) => p.get(field),
-            HashFieldMap::Hash(h) => h.get(field).map(|v| v.as_slice()),
+            HashFieldMap::Hash(h) => h.get(field),
         }
     }
 
@@ -714,18 +633,15 @@ impl HashFieldMap {
     pub fn get_index(&self, idx: usize) -> Option<(&[u8], &[u8])> {
         match self {
             HashFieldMap::Packed(p) => p.get_index(idx),
-            HashFieldMap::Hash(h) => h.get_index(idx).map(|(k, v)| (k.as_slice(), v.as_slice())),
+            HashFieldMap::Hash(h) => h.get_index(idx),
         }
     }
 
     fn promote(&mut self) {
         if let HashFieldMap::Packed(p) = self {
-            let mut h: FieldHashTable = IndexMap::with_capacity_and_hasher(
-                p.len() + 1,
-                foldhash::quality::RandomState::default(),
-            );
+            let mut h = CompactFieldMap::new();
             for (k, v) in p.iter() {
-                h.insert(HashFieldBytes::from_slice(k), HashFieldBytes::from_slice(v));
+                h.insert(k, v);
             }
             *self = HashFieldMap::Hash(h);
         }
@@ -743,12 +659,7 @@ impl HashFieldMap {
         }
         match self {
             HashFieldMap::Packed(p) => p.insert(field, value),
-            HashFieldMap::Hash(h) => h
-                .insert(
-                    HashFieldBytes::from_vec(field),
-                    HashFieldBytes::from_vec(value),
-                )
-                .map(HashFieldBytes::into_vec),
+            HashFieldMap::Hash(h) => h.insert(&field, &value),
         }
     }
 
@@ -774,25 +685,17 @@ impl HashFieldMap {
         }
         match self {
             HashFieldMap::Packed(p) => p.insert_borrowed(field, value),
-            HashFieldMap::Hash(h) => {
-                if let Some(slot) = h.get_mut(field) {
-                    *slot = HashFieldBytes::from_vec(value);
-                    false
-                } else {
-                    h.insert(
-                        HashFieldBytes::from_slice(field),
-                        HashFieldBytes::from_vec(value),
-                    );
-                    true
-                }
-            }
+            // CompactFieldMap::insert keeps an existing field's position and
+            // returns its old value (Some) — so `is_none()` is exactly "newly
+            // added", matching the IndexMap get_mut/insert split byte-for-byte.
+            HashFieldMap::Hash(h) => h.insert(field, &value).is_none(),
         }
     }
 
     pub fn shift_remove(&mut self, field: &[u8]) -> Option<Vec<u8>> {
         match self {
             HashFieldMap::Packed(p) => p.shift_remove(field),
-            HashFieldMap::Hash(h) => h.shift_remove(field).map(HashFieldBytes::into_vec),
+            HashFieldMap::Hash(h) => h.shift_remove(field),
         }
     }
 
@@ -806,7 +709,7 @@ impl HashFieldMap {
     pub fn swap_remove(&mut self, field: &[u8]) -> Option<Vec<u8>> {
         match self {
             HashFieldMap::Packed(p) => p.shift_remove(field),
-            HashFieldMap::Hash(h) => h.swap_remove(field).map(HashFieldBytes::into_vec),
+            HashFieldMap::Hash(h) => h.swap_remove(field),
         }
     }
 
@@ -850,7 +753,7 @@ impl FromIterator<(Vec<u8>, Vec<u8>)> for HashFieldMap {
 /// Borrowing iterator over a `HashFieldMap`'s (field, value) pairs.
 pub enum HashFieldMapIter<'a> {
     Packed(PackedStrMapIter<'a>),
-    Hash(indexmap::map::Iter<'a, HashFieldBytes, HashFieldBytes>),
+    Hash(CompactFieldMapIter<'a>),
 }
 
 impl<'a> Iterator for HashFieldMapIter<'a> {
@@ -858,7 +761,7 @@ impl<'a> Iterator for HashFieldMapIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             HashFieldMapIter::Packed(it) => it.next(),
-            HashFieldMapIter::Hash(it) => it.next().map(|(k, v)| (k.as_slice(), v.as_slice())),
+            HashFieldMapIter::Hash(it) => it.next(),
         }
     }
 }
@@ -3205,10 +3108,7 @@ mod tests {
 
     #[test]
     fn hash_field_map_inline_hash_bytes_preserve_indexmap_semantics() {
-        let mut map = super::HashFieldMap::Hash(super::FieldHashTable::with_capacity_and_hasher(
-            PACKED_MAX_ENTRIES + 1,
-            foldhash::quality::RandomState::default(),
-        ));
+        let mut map = super::HashFieldMap::Hash(super::CompactFieldMap::new());
         let mut oracle: IndexMap<Vec<u8>, Vec<u8>> = IndexMap::new();
         let long_field = b"abcdefghijklmnopqrstuvwxyz0123456789".to_vec();
         let long_value = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".to_vec();
