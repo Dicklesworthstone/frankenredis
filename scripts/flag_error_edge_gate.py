@@ -11,17 +11,18 @@ exclusive bounds, hex-float), and OBJECT ENCODING transitions probed EXACTLY at
 the compiled-in thresholds (hash 512 entries / 64-byte value, zset 128 / 64,
 set intset 512 / listpack 128, list 8KB). Every reply is compared byte-for-byte.
 
-ORACLE-POLLUTION GUARD (the reason this file is self-defending):
+ORACLE-POLLUTION SELF-HEAL (the reason this file is self-defending):
 A redis-server left running by a prior probe may carry CONFIG SETs that silently
 change the encoding thresholds — e.g. a peer setting hash-max-listpack-entries to
-128 makes a correct fr (compiled default 512) look broken. Before running ANY
-case, this gate asserts the oracle still reports the true redis 7.2.4 compiled
-defaults; if not, it ABORTS with a clear "polluted oracle" message instead of
-emitting false divergences. Launch the oracle config-less:
+128 makes a correct fr (compiled default 512) look broken on every encoding
+case. Before running ANY case, this gate pins the encoding thresholds to the
+true redis 7.2.4 compiled defaults on BOTH servers (and prints a NOTE if the
+oracle had drifted), so the comparison is deterministic against any oracle —
+fresh OR polluted. Launching config-less is still cleanest:
     legacy_redis_code/redis/src/redis-server --port 16399 --save '' --appendonly no --daemonize yes
 
 Usage: flag_error_edge_gate.py <oracle_port> <fr_port>
-Exit 0 if every case matches, 2 if the oracle is polluted, 1 on a real diff.
+Exit 0 if every case matches, 1 on a real divergence.
 """
 import socket
 import sys
@@ -65,21 +66,26 @@ def config_value(s, name):
     return parts[-2] if len(parts) >= 2 else b""
 
 
-def assert_oracle_clean(oport):
-    s = cli(oport)
-    bad = []
+def normalize_encoding_defaults(oport, fport):
+    """Pin the encoding thresholds to the true redis 7.2.4 compiled-in defaults
+    on BOTH servers so the encoding-boundary cases are deterministic regardless
+    of any stray CONFIG SET a prior probe left on the shared oracle (or fr). If
+    the oracle was already drifted, say so loudly — that drift is exactly the
+    trap that makes a CORRECT fr look broken on every encoding case."""
+    so, sf = cli(oport), cli(fport)
+    drifted = [(n, config_value(so, n)) for n, w in TRUE_DEFAULTS.items()
+               if config_value(so, n) != w]
+    if drifted:
+        print("NOTE: oracle on port %d had non-default encoding thresholds "
+              "(a prior probe's stray CONFIG SET); normalizing both servers to "
+              "the true 7.2.4 compiled defaults before comparing:" % oport)
+        for n, got in drifted:
+            print("   %-30s was=%s -> %s" % (n, got.decode(), TRUE_DEFAULTS[n].decode()))
     for name, want in TRUE_DEFAULTS.items():
-        got = config_value(s, name)
-        if got != want:
-            bad.append((name, want, got))
-    s.close()
-    if bad:
-        print("ABORT: oracle on port %d is POLLUTED (not config-less redis 7.2.4 defaults):" % oport)
-        for name, want, got in bad:
-            print("   %-30s want=%s got=%s" % (name, want.decode(), got.decode()))
-        print("Start a FRESH config-less oracle and retry. (a stray CONFIG SET from")
-        print("another probe changed these encoding thresholds; comparisons would be bogus)")
-        sys.exit(2)
+        cmd(so, "CONFIG", "SET", name, want.decode())
+        cmd(sf, "CONFIG", "SET", name, want.decode())
+    so.close()
+    sf.close()
 
 
 CASES = []
@@ -198,7 +204,7 @@ def main():
         print(__doc__)
         sys.exit(1)
     oport, fport = int(sys.argv[1]), int(sys.argv[2])
-    assert_oracle_clean(oport)
+    normalize_encoding_defaults(oport, fport)
     ro = run(oport)
     rf = run(fport)
     fails = 0

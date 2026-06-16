@@ -12,7 +12,8 @@ Two gate classes are run:
   * port-based parity gates (run against one shared fr+redis pair):
       dump_byte_equality_gate, introspection_semantics_gate,
       rare_write_state_gate, keyspace_accounting_gate,
-      cmdstat_keyspace_parity_gate, command_getkeys_gate
+      cmdstat_keyspace_parity_gate, command_getkeys_gate,
+      flag_error_edge_gate (flag-conflict / error-order / encoding boundaries)
 
 Usage: parity_suite.py <redis-server-bin> <fr-bin>
 Both servers are launched with --enable-debug-command; the redis oracle is
@@ -85,6 +86,9 @@ PORT_BASED = [
     ("watch_semantics_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("multi_exec_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("validation_order_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    # self-heals encoding thresholds on both servers before comparing, so it is
+    # immune to a stray CONFIG SET left by an earlier gate on the shared oracle.
+    ("flag_error_edge_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
 ]
 
 # Older differs use argparse flags: --oracle <port> --fr <port>
