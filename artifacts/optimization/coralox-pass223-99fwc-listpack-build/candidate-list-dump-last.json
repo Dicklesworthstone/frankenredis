@@ -1,0 +1,19 @@
+{
+  "dump_digest_sha256": "4d7c09d7478db6f2d88d5960dba5b9fc1dc84e4c7066d84e093e63fd7a9715e2",
+  "dump_ns_per_op": 529536.3999903202,
+  "dump_payload_bytes": 73568,
+  "dump_pipeline": 16,
+  "dump_seconds": 0.21181455999612808,
+  "dumps": 400,
+  "list_len": 10000,
+  "load_batch": 512,
+  "load_seconds": 0.012051583034917712,
+  "payload_size": 16,
+  "port": 31302,
+  "rss_after_load_kb": 7208,
+  "rss_before_kb": 6304,
+  "rss_delta_kb": 904,
+  "server_bin": "/data/projects/.scratch/frankenredis-coralox-pass223-final-candidate-target/release-perf/frankenredis",
+  "transcript_bytes": 74435,
+  "transcript_sha256": "fd59a87dd1072ba62410edb891bb2302b1db6a3a5525b38984144860ab955517"
+}

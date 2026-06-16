@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/coralox-pass223-99fwc-listpack-build/list_dump_once.py --server-bin /data/projects/.scratch/frankenredis-coralox-pass223-final-baseline-target/release-perf/frankenredis --port 31301 --list-len 10000 --payload-size 16 --dumps 400 --dump-pipeline 16 --json-out artifacts/optimization/coralox-pass223-99fwc-listpack-build/baseline-list-dump-last.json --transcript-out artifacts/optimization/coralox-pass223-99fwc-listpack-build/baseline-list-dump-golden.resp",
+      "mean": 0.30966466680285715,
+      "stddev": 0.007735159415478277,
+      "median": 0.30846630966000005,
+      "user": 0.24555939142857144,
+      "system": 0.05002587428571429,
+      "min": 0.29961632566,
+      "max": 0.31989616266000004,
+      "times": [
+        0.30521147166000007,
+        0.29961632566,
+        0.31669446566000004,
+        0.30846630966000005,
+        0.31526516566000007,
+        0.30250276666000003,
+        0.31989616266000004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/coralox-pass223-99fwc-listpack-build/list_dump_once.py --server-bin /data/projects/.scratch/frankenredis-coralox-pass223-final-candidate-target/release-perf/frankenredis --port 31302 --list-len 10000 --payload-size 16 --dumps 400 --dump-pipeline 16 --json-out artifacts/optimization/coralox-pass223-99fwc-listpack-build/candidate-list-dump-last.json --transcript-out artifacts/optimization/coralox-pass223-99fwc-listpack-build/candidate-list-dump-golden.resp",
+      "mean": 0.34110872208857146,
+      "stddev": 0.07636423214487394,
+      "median": 0.31964389566000007,
+      "user": 0.2453351057142857,
+      "system": 0.05314358857142857,
+      "min": 0.30030580166000004,
+      "max": 0.5131024646600001,
+      "times": [
+        0.31237706166000007,
+        0.30073762066000004,
+        0.5131024646600001,
+        0.31964389566000007,
+        0.30030580166000004,
+        0.32152285566000005,
+        0.32007135466000003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

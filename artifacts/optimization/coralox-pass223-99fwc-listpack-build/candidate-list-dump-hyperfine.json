@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/coralox-pass223-99fwc-listpack-build/list_dump_once.py --server-bin /data/tmp/frankenredis-coralox-pass223-candidate-target/release-perf/frankenredis --port 31302 --list-len 10000 --payload-size 16 --dumps 400 --dump-pipeline 16 --json-out artifacts/optimization/coralox-pass223-99fwc-listpack-build/candidate-list-dump-last.json --transcript-out artifacts/optimization/coralox-pass223-99fwc-listpack-build/candidate-list-dump-golden.resp",
+      "mean": 0.34826206422,
+      "stddev": 0.008208484164646654,
+      "median": 0.34656359502,
+      "user": 0.28163962000000003,
+      "system": 0.05378309999999999,
+      "min": 0.34115802702000003,
+      "max": 0.36230211502,
+      "times": [
+        0.34656359502,
+        0.36230211502,
+        0.34401146102,
+        0.34727512302,
+        0.34115802702000003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
