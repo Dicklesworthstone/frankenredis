@@ -5,8 +5,8 @@
 // hashtable past the threshold. SMEMBERS/SSCAN/SPOP output is unchanged.
 mod packed_set;
 use packed_set::{
-    GenericSet, HashFieldMap, ListValue, PackedZSet, PackedZSetIter, RestoredListNode,
-    RetainedListpackChunk,
+    GenericSet, HashFieldMap, ListValue, PackedStreamFields, PackedZSet, PackedZSetIter,
+    RestoredListNode, RetainedListpackChunk,
 };
 
 use fr_expire::evaluate_expiry;
@@ -225,7 +225,11 @@ pub fn keyspace_events_to_string(flags: u32) -> String {
 
 pub type StreamId = (u64, u64);
 pub type StreamField = (Vec<u8>, Vec<u8>);
-pub type StreamEntries = BTreeMap<StreamId, Vec<StreamField>>;
+/// Per-entry stream fields are stored COMPACTLY as [`PackedStreamFields`] (one
+/// contiguous buffer per entry) instead of a scattered `Vec<StreamField>` —
+/// ~6.9x less RAM (frankenredis-p8wd1). The public `StreamRecord` materialization
+/// (`to_pairs`) is unchanged, so callers still see `Vec<StreamField>`.
+pub type StreamEntries = BTreeMap<StreamId, PackedStreamFields>;
 pub type StreamRecord = (StreamId, Vec<StreamField>);
 pub type StreamInfoBounds = (usize, Option<StreamRecord>, Option<StreamRecord>);
 /// (name, pending_count, idle_ms)
@@ -14854,7 +14858,9 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Stream(entries) => {
-                    let inserted = entries.insert(id, fields.to_vec()).is_none();
+                    let inserted = entries
+                        .insert(id, PackedStreamFields::from_pairs(fields))
+                        .is_none();
                     let default_entries_added =
                         u64::try_from(entries.len().saturating_sub(1)).unwrap_or(u64::MAX);
                     Self::mark_digest_stale_fields(
@@ -14880,8 +14886,8 @@ impl Store {
                 _ => Err(StoreError::WrongType),
             },
             None => {
-                let mut entries = BTreeMap::new();
-                entries.insert(id, fields.to_vec());
+                let mut entries = StreamEntries::new();
+                entries.insert(id, PackedStreamFields::from_pairs(fields));
                 self.stream_groups.remove(key);
                 self.stream_max_deleted_ids.remove(key);
                 // Set high watermark to the first entry's ID
@@ -14921,7 +14927,10 @@ impl Store {
         }
         self.stream_groups.remove(key);
         self.stream_max_deleted_ids.remove(key);
-        let map: StreamEntries = entries.into_iter().collect();
+        let map: StreamEntries = entries
+            .into_iter()
+            .map(|(id, fields)| (id, PackedStreamFields::from_pairs(&fields)))
+            .collect();
         let count = map.len() as u64;
         let last_id = *map
             .keys()
@@ -14995,7 +15004,7 @@ impl Store {
                         }
                         let mut out = Vec::new();
                         for (id, fields) in entries.range(start..=end) {
-                            out.push((*id, fields.clone()));
+                            out.push((*id, fields.to_pairs()));
                             if let Some(limit) = count
                                 && out.len() >= limit
                             {
@@ -15043,7 +15052,7 @@ impl Store {
                         }
                         let mut out = Vec::new();
                         for (id, fields) in entries.range(start..=end).rev() {
-                            out.push((*id, fields.clone()));
+                            out.push((*id, fields.to_pairs()));
                             if let Some(limit) = count
                                 && out.len() >= limit
                             {
@@ -15272,7 +15281,7 @@ impl Store {
                     }
                     let mut out = Vec::new();
                     for (id, fields) in entries.range((Excluded(start_exclusive), Unbounded)) {
-                        out.push((*id, fields.clone()));
+                        out.push((*id, fields.to_pairs()));
                         if let Some(limit) = count
                             && out.len() >= limit
                         {
@@ -15322,7 +15331,7 @@ impl Store {
                                 for (id, fields) in entries
                                     .range((Excluded(group_state.last_delivered_id), Unbounded))
                                 {
-                                    out.push((*id, fields.clone()));
+                                    out.push((*id, fields.to_pairs()));
                                     if out.len() >= limit {
                                         break;
                                     }
@@ -15352,7 +15361,7 @@ impl Store {
                                     // >=1 field by XADD arity); the command layer
                                     // renders it as a nil value array.
                                     match entries.get(id) {
-                                        Some(fields) => out.push((*id, fields.clone())),
+                                        Some(fields) => out.push((*id, fields.to_pairs())),
                                         None => out.push((*id, Vec::new())),
                                     }
                                     if out.len() >= limit {
@@ -15638,7 +15647,7 @@ impl Store {
                     let mut out = BTreeMap::new();
                     for id in ids {
                         if let Some(fields) = entries.get(id) {
-                            out.insert(*id, fields.clone());
+                            out.insert(*id, fields.to_pairs());
                         }
                     }
                     out
@@ -15815,7 +15824,7 @@ impl Store {
                     let mut fields_by_id = BTreeMap::new();
                     for (id, _) in &snapshot {
                         if let Some(fields) = entries.get(id) {
-                            fields_by_id.insert(*id, fields.clone());
+                            fields_by_id.insert(*id, fields.to_pairs());
                         }
                     }
 
@@ -15966,10 +15975,10 @@ impl Store {
                     let len = entries.len();
                     let first = entries
                         .first_key_value()
-                        .map(|(id, fields)| (*id, fields.clone()));
+                        .map(|(id, fields)| (*id, fields.to_pairs()));
                     let last = entries
                         .last_key_value()
-                        .map(|(id, fields)| (*id, fields.clone()));
+                        .map(|(id, fields)| (*id, fields.to_pairs()));
                     Ok(Some((len, first, last)))
                 }
                 _ => Err(StoreError::WrongType),
@@ -15997,10 +16006,10 @@ impl Store {
                     let len = entries.len();
                     let first = entries
                         .first_key_value()
-                        .map(|(id, fields)| (*id, fields.clone()));
+                        .map(|(id, fields)| (*id, fields.to_pairs()));
                     let last = entries
                         .last_key_value()
-                        .map(|(id, fields)| (*id, fields.clone()));
+                        .map(|(id, fields)| (*id, fields.to_pairs()));
                     Ok(Some((len, first, last)))
                 }
                 _ => Err(StoreError::WrongType),
@@ -18716,7 +18725,7 @@ impl Store {
                 for ((ms, seq), fields) in entries {
                     hash = fnv1a_update(hash, &ms.to_le_bytes());
                     hash = fnv1a_update(hash, &seq.to_le_bytes());
-                    for (field, value) in fields {
+                    for (field, value) in fields.iter() {
                         hash = fnv1a_update(hash, field);
                         hash = fnv1a_update(hash, value);
                     }
@@ -20314,9 +20323,12 @@ impl Store {
                 else {
                     return Err(StoreError::InvalidDumpPayload);
                 };
-                let mut entries = BTreeMap::new();
+                let mut entries = StreamEntries::new();
                 for (ms, seq, fields) in stream_entries {
-                    if entries.insert((ms, seq), fields).is_some() {
+                    if entries
+                        .insert((ms, seq), PackedStreamFields::from_pairs(&fields))
+                        .is_some()
+                    {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                 }
@@ -20735,9 +20747,9 @@ impl Store {
                             let id = format!("{ms}-{seq}");
                             let mut argv =
                                 vec![b"XADD".to_vec(), logical_key.clone(), id.into_bytes()];
-                            for (fname, fval) in fields {
-                                argv.push(fname.clone());
-                                argv.push(fval.clone());
+                            for (fname, fval) in fields.iter() {
+                                argv.push(fname.to_vec());
+                                argv.push(fval.to_vec());
                             }
                             commands.push(argv);
                         }
@@ -21204,7 +21216,7 @@ fn encoded_length_size(len: usize) -> usize {
 fn dump_stream_entries(entries: &StreamEntries) -> Vec<fr_persist::StreamEntry> {
     entries
         .iter()
-        .map(|((ms, seq), fields)| (*ms, *seq, fields.clone()))
+        .map(|((ms, seq), fields)| (*ms, *seq, fields.to_pairs()))
         .collect()
 }
 
@@ -44875,7 +44887,7 @@ mod tests {
                                 AofValueSnapshot::Stream {
                                     entries: entries
                                         .iter()
-                                        .map(|(id, fields)| (*id, fields.clone()))
+                                        .map(|(id, fields)| (*id, fields.to_pairs()))
                                         .collect(),
                                     last_id: store
                                         .stream_last_ids

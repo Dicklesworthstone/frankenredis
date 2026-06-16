@@ -25260,9 +25260,9 @@ fn mix_debug_object_digest(store: &mut Store, key: &[u8], now_ms: u64, digest: &
             for ((ms, seq), fields) in entries {
                 let item_id = format!("{ms}.{seq}");
                 mix_digest(digest, item_id.as_bytes());
-                for (field, value) in fields {
-                    mix_digest(digest, &field);
-                    mix_digest(digest, &value);
+                for (field, value) in fields.iter() {
+                    mix_digest(digest, field);
+                    mix_digest(digest, value);
                 }
             }
         }
