@@ -863,6 +863,328 @@ impl<'a> Iterator for HashFieldMapIter<'a> {
     }
 }
 
+// ─────────────── compact arena+index field map (frankenredis-ideww) ──────────
+
+/// (frankenredis-ideww) Compact insertion-ordered field→value map for the
+/// hashtable-range hash encoding (129+ fields). Stores every field+value pair
+/// contiguously in ONE arena (no per-entry heap block, no per-entry stored u64
+/// hash) with a small open-addressing index for O(1) lookup and an `order` list
+/// for O(1) positional access + insertion-order iteration. Targets
+/// ~redis-listpack RAM (~35-41 B/field vs the current `IndexMap` ~127) while
+/// KEEPING O(1) get/insert — vs redis's listpack which is compact but O(n) scan.
+/// Drop-in for the `IndexMap<HashFieldBytes,HashFieldBytes>` surface used by
+/// `HashFieldMap::Hash`; NOT yet wired in (validated by an equivalence test vs
+/// `IndexMap` first).
+///
+/// Entry layout in `buf`: `[flen varint][field][vlen varint][value]`. A value
+/// update appends a fresh entry (old bytes become dead, reclaimed by `compact`
+/// once dead exceeds half the arena) and keeps the field's order position, so
+/// HGETALL/HKEYS/HVALS order is byte-for-byte identical to `IndexMap::insert`.
+#[derive(Clone, Debug, Default)]
+#[allow(dead_code)] // wired into HashFieldMap::Hash in a follow-up (frankenredis-ideww)
+pub(crate) struct CompactFieldMap {
+    buf: Vec<u8>,
+    /// `buf` offsets of live entries, in insertion order. `order.len()` == count.
+    order: Vec<u32>,
+    /// Open-addressing slots (linear probe). 0 = EMPTY, 1 = TOMBSTONE, else the
+    /// occupant's `pos_in_order + 2`. `slots.len()` is a power of two (or 0).
+    slots: Vec<u32>,
+    /// Dead (unreferenced) bytes in `buf`, from value updates / removals.
+    dead: usize,
+    /// Tombstone slot count (for the rehash-on-load trigger).
+    tombs: usize,
+    state: foldhash::quality::RandomState,
+}
+
+#[allow(dead_code)]
+const CFM_EMPTY: u32 = 0;
+#[allow(dead_code)]
+const CFM_TOMB: u32 = 1;
+
+#[allow(dead_code)]
+fn cfm_decode(buf: &[u8], off: u32) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+    let off = off as usize;
+    let (flen, p) = read_varint(buf, off);
+    let (fs, fe) = (p, p + flen);
+    let (vlen, p2) = read_varint(buf, fe);
+    let (vs, ve) = (p2, p2 + vlen);
+    (fs..fe, vs..ve)
+}
+
+#[allow(dead_code)]
+impl CompactFieldMap {
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub(crate) fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    #[must_use]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    fn hash(&self, field: &[u8]) -> u64 {
+        use std::hash::{BuildHasher, Hash, Hasher};
+        let mut h = self.state.build_hasher();
+        field.hash(&mut h);
+        h.finish()
+    }
+
+    fn entry_size(&self, off: u32) -> usize {
+        let (_, vr) = cfm_decode(&self.buf, off);
+        vr.end - off as usize
+    }
+
+    /// Returns the `order` position of `field`, or `None`.
+    fn lookup(&self, field: &[u8]) -> Option<usize> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let mask = self.slots.len() - 1;
+        let mut slot = (self.hash(field) as usize) & mask;
+        loop {
+            let s = self.slots[slot];
+            if s == CFM_EMPTY {
+                return None;
+            }
+            if s != CFM_TOMB {
+                let pos = (s - 2) as usize;
+                let (fr, _) = cfm_decode(&self.buf, self.order[pos]);
+                if &self.buf[fr] == field {
+                    return Some(pos);
+                }
+            }
+            slot = (slot + 1) & mask;
+        }
+    }
+
+    /// Rebuild `slots` at `new_cap` (power of two), dropping tombstones and
+    /// re-probing every live entry from `order`.
+    fn rehash(&mut self, new_cap: usize) {
+        let cap = new_cap.next_power_of_two().max(8);
+        let mut slots = vec![CFM_EMPTY; cap];
+        let mask = cap - 1;
+        for (pos, &off) in self.order.iter().enumerate() {
+            let (fr, _) = cfm_decode(&self.buf, off);
+            // Re-hash from the field bytes already in `buf`.
+            let h = {
+                use std::hash::{BuildHasher, Hash, Hasher};
+                let mut hh = self.state.build_hasher();
+                self.buf[fr].hash(&mut hh);
+                hh.finish()
+            };
+            let mut slot = (h as usize) & mask;
+            while slots[slot] != CFM_EMPTY {
+                slot = (slot + 1) & mask;
+            }
+            slots[slot] = (pos as u32) + 2;
+        }
+        self.slots = slots;
+        self.tombs = 0;
+    }
+
+    fn append_entry(&mut self, field: &[u8], value: &[u8]) -> u32 {
+        let off = self.buf.len() as u32;
+        write_varint(&mut self.buf, field.len());
+        self.buf.extend_from_slice(field);
+        write_varint(&mut self.buf, value.len());
+        self.buf.extend_from_slice(value);
+        off
+    }
+
+    /// Insert `field`→`value`; returns the previous value if the field existed.
+    /// Matches `IndexMap::insert` (existing field keeps its position).
+    pub(crate) fn insert(&mut self, field: &[u8], value: &[u8]) -> Option<Vec<u8>> {
+        if let Some(pos) = self.lookup(field) {
+            let old_off = self.order[pos];
+            let (_, vr) = cfm_decode(&self.buf, old_off);
+            let old_value = self.buf[vr].to_vec();
+            self.dead += self.entry_size(old_off);
+            let new_off = self.append_entry(field, value);
+            self.order[pos] = new_off;
+            self.maybe_compact();
+            return Some(old_value);
+        }
+        // New field. Ensure load factor < 0.75 (count slots used incl tombstones).
+        let used = self.order.len() + self.tombs + 1;
+        if self.slots.is_empty() || used * 4 >= self.slots.len() * 3 {
+            let target = (self.order.len() + 1) * 2;
+            self.rehash(target.max(self.slots.len()));
+        }
+        let new_off = self.append_entry(field, value);
+        let pos = self.order.len();
+        self.order.push(new_off);
+        // Probe for an EMPTY or reusable TOMBSTONE slot.
+        let mask = self.slots.len() - 1;
+        let mut slot = (self.hash(field) as usize) & mask;
+        let mut first_tomb: Option<usize> = None;
+        loop {
+            let s = self.slots[slot];
+            if s == CFM_EMPTY {
+                let target = first_tomb.unwrap_or(slot);
+                if self.slots[target] == CFM_TOMB {
+                    self.tombs -= 1;
+                }
+                self.slots[target] = (pos as u32) + 2;
+                break;
+            }
+            if s == CFM_TOMB && first_tomb.is_none() {
+                first_tomb = Some(slot);
+            }
+            slot = (slot + 1) & mask;
+        }
+        self.maybe_compact();
+        None
+    }
+
+    #[must_use]
+    pub(crate) fn get(&self, field: &[u8]) -> Option<&[u8]> {
+        let pos = self.lookup(field)?;
+        let (_, vr) = cfm_decode(&self.buf, self.order[pos]);
+        Some(&self.buf[vr])
+    }
+
+    #[must_use]
+    pub(crate) fn contains_key(&self, field: &[u8]) -> bool {
+        self.lookup(field).is_some()
+    }
+
+    /// The (field, value) at insertion-order index `idx`.
+    #[must_use]
+    pub(crate) fn get_index(&self, idx: usize) -> Option<(&[u8], &[u8])> {
+        let off = *self.order.get(idx)?;
+        let (fr, vr) = cfm_decode(&self.buf, off);
+        Some((&self.buf[fr], &self.buf[vr]))
+    }
+
+    #[must_use]
+    pub(crate) fn iter(&self) -> CompactFieldMapIter<'_> {
+        CompactFieldMapIter {
+            map: self,
+            pos: 0,
+        }
+    }
+
+    /// Set the slot holding `field` to TOMBSTONE. (Field must be present.)
+    fn tombstone_slot(&mut self, field: &[u8]) {
+        let mask = self.slots.len() - 1;
+        let mut slot = (self.hash(field) as usize) & mask;
+        loop {
+            let s = self.slots[slot];
+            if s >= 2 {
+                let pos = (s - 2) as usize;
+                let (fr, _) = cfm_decode(&self.buf, self.order[pos]);
+                if &self.buf[fr] == field {
+                    self.slots[slot] = CFM_TOMB;
+                    self.tombs += 1;
+                    return;
+                }
+            }
+            slot = (slot + 1) & mask;
+        }
+    }
+
+    /// Repoint the slot holding `field` to order position `pos`.
+    fn repoint_slot(&mut self, field: &[u8], pos: usize) {
+        let mask = self.slots.len() - 1;
+        let mut slot = (self.hash(field) as usize) & mask;
+        loop {
+            let s = self.slots[slot];
+            if s >= 2 {
+                let cur = (s - 2) as usize;
+                let (fr, _) = cfm_decode(&self.buf, self.order[cur]);
+                if &self.buf[fr] == field {
+                    self.slots[slot] = (pos as u32) + 2;
+                    return;
+                }
+            }
+            slot = (slot + 1) & mask;
+        }
+    }
+
+    /// Order-preserving remove (HDEL on small/listpack-range hashes). O(n).
+    pub(crate) fn shift_remove(&mut self, field: &[u8]) -> Option<Vec<u8>> {
+        let pos = self.lookup(field)?;
+        let off = self.order[pos];
+        let (_, vr) = cfm_decode(&self.buf, off);
+        let value = self.buf[vr].to_vec();
+        self.dead += self.entry_size(off);
+        self.order.remove(pos);
+        // Positions shifted → rebuild the index from `order`.
+        self.rehash(self.slots.len().max(8));
+        self.maybe_compact();
+        Some(value)
+    }
+
+    /// Unordered remove (HDEL on hashtable-range hashes, where order is
+    /// unspecified). O(1): swap the last entry into the gap.
+    pub(crate) fn swap_remove(&mut self, field: &[u8]) -> Option<Vec<u8>> {
+        let pos = self.lookup(field)?;
+        let off = self.order[pos];
+        let (_, vr) = cfm_decode(&self.buf, off);
+        let value = self.buf[vr].to_vec();
+        self.dead += self.entry_size(off);
+        self.tombstone_slot(field);
+        let last = self.order.len() - 1;
+        if pos != last {
+            let moved_off = self.order[last];
+            self.order[pos] = moved_off;
+            let (mfr, _) = cfm_decode(&self.buf, moved_off);
+            let mfield = self.buf[mfr].to_vec();
+            self.repoint_slot(&mfield, pos);
+        }
+        self.order.pop();
+        self.maybe_compact();
+        Some(value)
+    }
+
+    /// Reclaim dead arena bytes and/or shrink-rebuild the index when either has
+    /// grown past half. Offsets change, so `order` + `slots` are rebuilt.
+    fn maybe_compact(&mut self) {
+        if self.dead * 2 > self.buf.len() && self.dead > 64 {
+            let mut new_buf = Vec::with_capacity(self.buf.len() - self.dead);
+            let mut new_order = Vec::with_capacity(self.order.len());
+            for &off in &self.order {
+                let (fr, vr) = cfm_decode(&self.buf, off);
+                let new_off = new_buf.len() as u32;
+                write_varint(&mut new_buf, fr.end - fr.start);
+                new_buf.extend_from_slice(&self.buf[fr]);
+                write_varint(&mut new_buf, vr.end - vr.start);
+                new_buf.extend_from_slice(&self.buf[vr]);
+                new_order.push(new_off);
+            }
+            self.buf = new_buf;
+            self.order = new_order;
+            self.dead = 0;
+            self.rehash(self.slots.len().max(8));
+        } else if self.tombs * 4 >= self.slots.len() {
+            self.rehash(self.slots.len().max(8));
+        }
+    }
+}
+
+/// Insertion-order iterator over a [`CompactFieldMap`].
+#[allow(dead_code)]
+pub(crate) struct CompactFieldMapIter<'a> {
+    map: &'a CompactFieldMap,
+    pos: usize,
+}
+
+#[allow(dead_code)]
+impl<'a> Iterator for CompactFieldMapIter<'a> {
+    type Item = (&'a [u8], &'a [u8]);
+    fn next(&mut self) -> Option<Self::Item> {
+        let pair = self.map.get_index(self.pos)?;
+        self.pos += 1;
+        Some(pair)
+    }
+}
+
 // ───────────────────────── packed string MAP (for small hashes) ────────────
 
 /// Packed field→value map for SMALL hashes: a sequence of
@@ -2619,12 +2941,72 @@ impl<'a> Iterator for PackedZSetIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChunkedList, LIST_CHUNK_TARGET, ListChunk, ListRepr, ListValue, PACKED_MAX_ENTRIES,
-        PackedList, PackedStrMap, PackedStrSet, PackedZSet, zset_cmp,
+        ChunkedList, CompactFieldMap, LIST_CHUNK_TARGET, ListChunk, ListRepr, ListValue,
+        PACKED_MAX_ENTRIES, PackedList, PackedStrMap, PackedStrSet, PackedZSet, zset_cmp,
     };
     use indexmap::{IndexMap, IndexSet};
     use proptest::prelude::*;
     use std::collections::VecDeque;
+
+    #[test]
+    fn compact_field_map_matches_indexmap_under_random_ops_ideww() {
+        // CompactFieldMap must be a byte-for-byte drop-in for the
+        // IndexMap<field,value> backing HashFieldMap::Hash: same returns, same
+        // insertion-order iteration, same positional access, across a long
+        // randomized op stream (insert incl. updates, get, contains, get_index,
+        // shift_remove [order-preserving], swap_remove [unordered]).
+        let mut rng: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        // Small key space to force collisions / updates / re-inserts.
+        let key = |n: u64| format!("field_{}", n % 40).into_bytes();
+        let val = |n: u64| format!("value_data_{}", n).into_bytes();
+
+        let mut c = CompactFieldMap::new();
+        let mut o: IndexMap<Vec<u8>, Vec<u8>, foldhash::quality::RandomState> =
+            IndexMap::with_hasher(foldhash::quality::RandomState::default());
+
+        let check = |c: &CompactFieldMap, o: &IndexMap<Vec<u8>, Vec<u8>, _>| {
+            assert_eq!(c.len(), o.len(), "len");
+            let ci: Vec<(Vec<u8>, Vec<u8>)> =
+                c.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect();
+            let oi: Vec<(Vec<u8>, Vec<u8>)> =
+                o.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            assert_eq!(ci, oi, "iteration order/content");
+            for i in 0..o.len() {
+                let cp = c.get_index(i).map(|(k, v)| (k.to_vec(), v.to_vec()));
+                let op = o.get_index(i).map(|(k, v)| (k.clone(), v.clone()));
+                assert_eq!(cp, op, "get_index({i})");
+            }
+        };
+
+        for _ in 0..20_000 {
+            let r = next();
+            let k = key(r);
+            match r % 10 {
+                0..=4 => {
+                    let v = val(next());
+                    assert_eq!(c.insert(&k, &v), o.insert(k.clone(), v.clone()), "insert");
+                }
+                5 => assert_eq!(c.get(&k).map(<[u8]>::to_vec), o.get(&k).cloned(), "get"),
+                6 => assert_eq!(c.contains_key(&k), o.contains_key(&k), "contains"),
+                7 => assert_eq!(c.shift_remove(&k), o.shift_remove(&k), "shift_remove"),
+                8 => assert_eq!(c.swap_remove(&k), o.swap_remove(&k), "swap_remove"),
+                _ => {
+                    let idx = (next() as usize) % (o.len() + 1);
+                    let cp = c.get_index(idx).map(|(k, v)| (k.to_vec(), v.to_vec()));
+                    let op = o.get_index(idx).map(|(k, v)| (k.clone(), v.clone()));
+                    assert_eq!(cp, op, "get_index");
+                }
+            }
+            check(&c, &o);
+        }
+        assert!(c.len() > 0, "expected a non-trivial residual map");
+    }
 
     #[test]
     fn insert_dedup_order_contains() {
