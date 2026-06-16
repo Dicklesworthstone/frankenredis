@@ -27068,25 +27068,44 @@ fn sort_generic(
             elements.reverse();
         }
     } else {
-        // (frankenredis-dryll) Numeric sort by a plain-keyed BY pattern (has '*',
-        // no '->' hash deref): read each weight as f64 directly via
+        // (frankenredis-dryll) Numeric sort by a plain-keyed BY pattern (a
+        // StringKey plan: has '*', and its only `->` — if any — is NOT a hash
+        // deref after the '*'): read each weight as f64 directly via
         // store.get_sort_weight, which skips the int->string->f64 round-trip that
         // dominated the profile (~50% in i64::to_string). The string-keyed-byte
         // path (`sort_keys`) is only built for ALPHA, the no-BY case, and
-        // hash-field BY — none of which benefit from the int fast path.
+        // hash-field BY — none of which benefit from the int fast path. The
+        // plan's `->` is taken from the pattern after the '*' (matching upstream
+        // `lookupKeyByPattern`), so a `->` inside an element or before the '*'
+        // stays a StringKey here. (frankenredis-sortarrow)
         let numeric_fast = !alpha
             && by_pattern
                 .as_ref()
-                .is_some_and(|p| p.contains(&b'*') && !p.windows(2).any(|w| w == b"->"));
+                .is_some_and(|p| matches!(plan_sort_pattern(p), SortPattern::StringKey { .. }));
 
         // Build sort keys for each element (skipped for the numeric fast path).
+        // The pattern's `*`/`->` split is invariant across elements, so it is
+        // planned ONCE and every element reuses a single key buffer.
         let sort_keys: Vec<Option<Vec<u8>>> = if numeric_fast {
             Vec::new()
         } else {
-            elements
-                .iter()
-                .map(|el| sort_lookup_by_pattern(store, &by_pattern, el, now_ms))
-                .collect()
+            match by_pattern.as_ref() {
+                None => elements.iter().map(|el| Some(el.clone())).collect(),
+                Some(pattern) => {
+                    let plan = plan_sort_pattern(pattern);
+                    let mut keybuf: Vec<u8> = Vec::new();
+                    elements
+                        .iter()
+                        .map(|el| match &plan {
+                            // BY without '*' is the dontsort case (never reaches
+                            // here); upstream's BY resolution falls back to the
+                            // element value itself.
+                            SortPattern::NoStar => Some(el.clone()),
+                            _ => resolve_sort_pattern(store, &plan, el, now_ms, &mut keybuf),
+                        })
+                        .collect()
+                }
+            }
         };
 
         // Compute the LIMIT window [start, end) up front so we can sort ONLY the
@@ -27272,28 +27291,25 @@ fn sort_generic(
             .map(|el| RespFrame::BulkString(Some(el.clone())))
             .collect()
     } else {
-        // (frankenredis-5gisf GET-facet) Precompute each GET pattern's `*`
+        // (frankenredis-5gisf GET-facet) Precompute each GET pattern's `*`/`->`
         // split ONCE (the pattern is constant across all elements) and reuse a
         // single scratch key buffer for every element×pattern substitution,
-        // instead of re-scanning for `*` and allocating a fresh lookup-key Vec
-        // per call inside sort_lookup_get_pattern (sliced.len()*patterns allocs
-        // -> 0, mirroring the numeric_fast BY buffer-reuse above). Byte-exact:
-        // the substituted key, the resolve (string / `->` hash deref), and the
-        // missing/wrong-type handling are unchanged.
+        // instead of re-scanning the pattern and allocating a fresh lookup-key
+        // Vec per element (sliced.len()*patterns allocs -> 0). The string /
+        // `->`-hash resolve now comes from the planned pattern (matching
+        // upstream `lookupKeyByPattern`), so a `->` inside an element or before
+        // the `*` is NOT a hash deref. (frankenredis-sortarrow)
         enum GetPlan<'a> {
-            Element,           // `GET #` -> the element itself
-            NoStar,            // pattern without `*` -> always NULL (upstream)
-            Sub(&'a [u8], &'a [u8]), // text before/after the single `*`
+            Element, // `GET #` -> the element itself
+            Pat(SortPattern<'a>),
         }
         let plans: Vec<GetPlan> = get_patterns
             .iter()
             .map(|pat| {
                 if pat.as_slice() == b"#" {
                     GetPlan::Element
-                } else if let Some(pos) = pat.iter().position(|&b| b == b'*') {
-                    GetPlan::Sub(&pat[..pos], &pat[pos + 1..])
                 } else {
-                    GetPlan::NoStar
+                    GetPlan::Pat(plan_sort_pattern(pat))
                 }
             })
             .collect();
@@ -27310,14 +27326,10 @@ fn sort_generic(
             for plan in &plans {
                 match plan {
                     GetPlan::Element => out.push(RespFrame::BulkString(Some(el.clone()))),
-                    GetPlan::NoStar => out.push(missing(use_store)),
-                    GetPlan::Sub(pre, post) => {
-                        keybuf.clear();
-                        keybuf.reserve(pre.len() + el.len() + post.len());
-                        keybuf.extend_from_slice(pre);
-                        keybuf.extend_from_slice(el);
-                        keybuf.extend_from_slice(post);
-                        match sort_resolve_key_or_hash(store, &keybuf, now_ms) {
+                    // A pattern without `*` yields NULL upstream; `NoStar`
+                    // resolves to None below.
+                    GetPlan::Pat(sp) => {
+                        match resolve_sort_pattern(store, sp, el, now_ms, &mut keybuf) {
                             Some(v) => out.push(RespFrame::BulkString(Some(v))),
                             None => out.push(missing(use_store)),
                         }
@@ -27363,56 +27375,90 @@ fn sort_ro_cmd(
     sort_generic(argv, store, now_ms, /* readonly */ true, "SORT_RO")
 }
 
-/// Look up a sort key using a BY pattern for the SORT command.
-/// Substitutes `*` with the element value. Supports `->` for hash field dereference.
-/// Returns None if the key doesn't exist or is the wrong type.
-fn sort_lookup_by_pattern(
-    store: &mut Store,
-    by_pattern: &Option<Vec<u8>>,
-    element: &[u8],
-    now_ms: u64,
-) -> Option<Vec<u8>> {
-    let pattern = match by_pattern {
-        Some(p) => p,
-        None => return Some(element.to_vec()),
-    };
-
-    // Substitute * with element value
-    let star_pos = pattern.iter().position(|&b| b == b'*');
-    let lookup_key = match star_pos {
-        Some(pos) => {
-            let mut k = Vec::with_capacity(pattern.len() + element.len());
-            k.extend_from_slice(&pattern[..pos]);
-            k.extend_from_slice(element);
-            k.extend_from_slice(&pattern[pos + 1..]);
-            k
-        }
-        None => return Some(element.to_vec()),
-    };
-
-    // Check for hash field dereference (->)
-    sort_resolve_key_or_hash(store, &lookup_key, now_ms)
+/// How a SORT `BY`/`GET` pattern resolves once its `*` and optional `->` hash
+/// field have been located. Computed ONCE per pattern (both are invariant
+/// across elements), then applied to every element with a reused key buffer.
+///
+/// Mirrors upstream `lookupKeyByPattern` (sort.c): the `*` substitution point
+/// and the `->` hash-field split are BOTH derived from the PATTERN, and the
+/// `->` is searched ONLY in the pattern text AFTER the `*`
+/// (`strstr(spat + prefixlen + 1, "->")`), with a non-empty field required
+/// (`*(f+2) != '\0'`). The substituted element value is never scanned for
+/// `->`, so an element that itself contains `->`, or a `->` sitting before the
+/// `*`, does NOT trigger a hash dereference. The previous implementation
+/// searched the fully-substituted key, which mis-classified those cases as
+/// hash lookups and diverged from Redis. (frankenredis-sortarrow)
+enum SortPattern<'a> {
+    /// Pattern has no `*`. For `BY` this is the `dontsort` case (handled
+    /// before key resolution); for `GET` upstream yields NULL.
+    NoStar,
+    /// `prefix` + element + `suffix` → string key lookup.
+    StringKey { prefix: &'a [u8], suffix: &'a [u8] },
+    /// `prefix` + element + `mid` → hash key; `field` (pattern text after the
+    /// `->`) is fixed across all elements.
+    HashKey {
+        prefix: &'a [u8],
+        mid: &'a [u8],
+        field: &'a [u8],
+    },
 }
 
-// (frankenredis-5gisf GET-facet) The former `sort_lookup_get_pattern` helper
-// (one fresh lookup-key Vec per element×pattern) was inlined into the GET
-// output loop above with a precomputed `*` split and a reused scratch buffer
-// (alloc -> 0). `GET #`, no-`*`, and the string/`->`-hash resolve are handled
-// by the GetPlan match there.
+/// Locate the `*` and the optional hash-field `->` in a SORT pattern, matching
+/// upstream `lookupKeyByPattern`. See [`SortPattern`].
+fn plan_sort_pattern(pattern: &[u8]) -> SortPattern<'_> {
+    let Some(star) = pattern.iter().position(|&b| b == b'*') else {
+        return SortPattern::NoStar;
+    };
+    let prefix = &pattern[..star];
+    let after = &pattern[star + 1..];
+    // Upstream searches for "->" strictly AFTER the '*' and requires a
+    // non-empty field; otherwise the whole `after` stays part of the key.
+    if let Some(arrow) = after.windows(2).position(|w| w == b"->") {
+        let field = &after[arrow + 2..];
+        if !field.is_empty() {
+            return SortPattern::HashKey {
+                prefix,
+                mid: &after[..arrow],
+                field,
+            };
+        }
+    }
+    SortPattern::StringKey {
+        prefix,
+        suffix: after,
+    }
+}
 
-/// Resolve a key that may contain `->` for hash field dereference.
-/// Without `->`, looks up as a string key.
-/// With `->`, looks up hash key and field.
-fn sort_resolve_key_or_hash(store: &mut Store, key: &[u8], now_ms: u64) -> Option<Vec<u8>> {
-    // Check for hash field dereference: key->field
-    if let Some(arrow_pos) = key.windows(2).position(|w| w == b"->") {
-        let hash_key = &key[..arrow_pos];
-        let field = &key[arrow_pos + 2..];
-        // Attempt hash lookup; silently return None on wrong type or missing
-        store.hget(hash_key, field, now_ms).ok().flatten()
-    } else {
-        // String key lookup; silently return None on wrong type or missing
-        store.get(key, now_ms).ok().flatten()
+/// Apply a precomputed [`SortPattern`] to one element, reusing `keybuf` for the
+/// substituted key. Returns the resolved value, or None on missing key, wrong
+/// type, or a `NoStar` pattern (mirroring `store.get`/`hget` → None). Byte-exact
+/// with the former `sort_resolve_key_or_hash`, only with the `->` split taken
+/// from the pattern instead of the substituted key.
+fn resolve_sort_pattern(
+    store: &mut Store,
+    plan: &SortPattern<'_>,
+    element: &[u8],
+    now_ms: u64,
+    keybuf: &mut Vec<u8>,
+) -> Option<Vec<u8>> {
+    match plan {
+        SortPattern::NoStar => None,
+        SortPattern::StringKey { prefix, suffix } => {
+            keybuf.clear();
+            keybuf.reserve(prefix.len() + element.len() + suffix.len());
+            keybuf.extend_from_slice(prefix);
+            keybuf.extend_from_slice(element);
+            keybuf.extend_from_slice(suffix);
+            store.get(keybuf, now_ms).ok().flatten()
+        }
+        SortPattern::HashKey { prefix, mid, field } => {
+            keybuf.clear();
+            keybuf.reserve(prefix.len() + element.len() + mid.len());
+            keybuf.extend_from_slice(prefix);
+            keybuf.extend_from_slice(element);
+            keybuf.extend_from_slice(mid);
+            store.hget(keybuf, field, now_ms).ok().flatten()
+        }
     }
 }
 
@@ -56851,6 +56897,55 @@ mod tests {
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"Alice".to_vec())),
                 RespFrame::BulkString(Some(b"Bob".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sort_by_pattern_arrow_only_after_star_is_hash_deref() {
+        // (frankenredis-sortarrow) Upstream lookupKeyByPattern locates the hash
+        // field "->" ONLY in the pattern text AFTER the '*'. A "->" coming from
+        // the substituted element value (or sitting before the '*') is part of a
+        // plain STRING key, NOT a hash dereference. The trap below seeds BOTH a
+        // string key `weight_a->b` and a hash `weight_a` field `b`: the BY
+        // pattern `weight_*` has no "->" after the '*', so the string weights
+        // (5, 8) — not the hash weights (99, 1) — must drive the order.
+        let mut store = Store::new();
+        for val in [b"a->b".to_vec(), b"c->d".to_vec()] {
+            dispatch_argv(&[b"RPUSH".to_vec(), b"mylist".to_vec(), val], &mut store, 0).unwrap();
+        }
+        for (k, v) in [
+            (b"weight_a->b".to_vec(), b"5".to_vec()),
+            (b"weight_c->d".to_vec(), b"8".to_vec()),
+        ] {
+            dispatch_argv(&[b"SET".to_vec(), k, v], &mut store, 0).unwrap();
+        }
+        // Hash traps that MUST be ignored by `weight_*`.
+        for (k, f, v) in [
+            (b"weight_a".to_vec(), b"b".to_vec(), b"99".to_vec()),
+            (b"weight_c".to_vec(), b"d".to_vec(), b"1".to_vec()),
+        ] {
+            dispatch_argv(&[b"HSET".to_vec(), k, f, v], &mut store, 0).unwrap();
+        }
+        let out = dispatch_argv(
+            &[
+                b"SORT".to_vec(),
+                b"mylist".to_vec(),
+                b"BY".to_vec(),
+                b"weight_*".to_vec(),
+                b"GET".to_vec(),
+                b"#".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // String weights: weight_a->b=5 < weight_c->d=8 => [a->b, c->d].
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"a->b".to_vec())),
+                RespFrame::BulkString(Some(b"c->d".to_vec())),
             ]))
         );
     }
