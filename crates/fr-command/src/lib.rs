@@ -5545,9 +5545,15 @@ fn zrank_generic(
                 // no-stat zmscore for the score read so WITHSCORE does not
                 // double-count keyspace_hits (upstream looks the key up once).
                 let score = store.zmscore(&argv[1], &[argv[2].as_slice()], now_ms)?[0].unwrap_or(0.0);
+                // The score element honors the negotiated protocol: a RESP3 Double
+                // (`,<score>`) under HELLO 3, a bulk string under RESP2 — matching
+                // upstream t_zset.c zrankGenericCommand's addReplyDouble. (Was always
+                // a bulk string, which diverged from redis only in RESP3.)
+                let score_frame =
+                    zpop_score_frame(score, store.dispatch_client_ctx.resp_protocol_version);
                 Ok(RespFrame::Array(Some(vec![
                     RespFrame::Integer(rank_i),
-                    RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
+                    score_frame,
                 ])))
             } else {
                 Ok(RespFrame::Integer(rank_i))
@@ -69236,6 +69242,82 @@ mod tests {
                 RespFrame::Double("5".to_string()),
             ]))
         );
+    }
+
+    #[test]
+    fn zrank_withscore_score_is_resp3_double_under_hello3() {
+        // Upstream t_zset.c zrankGenericCommand emits the score via
+        // addReplyDouble, so under RESP3 it is a Double (`,<score>`) and under
+        // RESP2 a bulk string. The rank stays an Integer in both. (Regression:
+        // fr previously always emitted the score as a bulk string, diverging
+        // from redis only in RESP3.)
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"3.5".to_vec(),
+                b"a".to_vec(),
+                b"1".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zadd");
+
+        // RESP2: score is a bulk string.
+        let out = dispatch_argv(
+            &[b"ZRANK".to_vec(), b"z".to_vec(), b"a".to_vec(), b"WITHSCORE".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("zrank withscore resp2");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::BulkString(Some(b"3.5".to_vec())),
+            ]))
+        );
+
+        // RESP3: score is a Double; ZREVRANK matches.
+        store.dispatch_client_ctx.resp_protocol_version = 3;
+        let out = dispatch_argv(
+            &[b"ZRANK".to_vec(), b"z".to_vec(), b"a".to_vec(), b"WITHSCORE".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("zrank withscore resp3");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::Double("3.5".to_string()),
+            ]))
+        );
+        let out = dispatch_argv(
+            &[b"ZREVRANK".to_vec(), b"z".to_vec(), b"b".to_vec(), b"WITHSCORE".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("zrevrank withscore resp3");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::Double("1".to_string()),
+            ]))
+        );
+
+        // Missing member: null array (RESP3 `_`), no score frame at all.
+        let out = dispatch_argv(
+            &[b"ZRANK".to_vec(), b"z".to_vec(), b"nope".to_vec(), b"WITHSCORE".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("zrank withscore missing resp3");
+        assert_eq!(out, RespFrame::Array(None));
     }
 
     #[test]
