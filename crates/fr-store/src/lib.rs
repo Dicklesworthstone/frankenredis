@@ -14846,6 +14846,43 @@ impl Store {
         }
     }
 
+    /// (frankenredis-qxfmrstream) Bulk-seed a FRESH stream's entries in one O(n)
+    /// pass instead of N individual `xadd`s. Each `xadd` does a BTreeMap insert
+    /// (O(log n)), TWO `key.to_vec()` allocations (for the `stream_last_ids` /
+    /// `stream_entries_added` entry lookups), and per-entry watermark/added
+    /// bookkeeping that the RDB metadata follow-up (`xsetid_with_metadata` /
+    /// `restore_stream_entries_added`) immediately overwrites. This collects the
+    /// entries into the `BTreeMap` once (O(n) bottom-up), takes OWNERSHIP of the
+    /// field vectors (no second clone — the loader's caller cloned once already
+    /// where `xadd` would have re-cloned via `to_vec`), and sets the watermark /
+    /// added counters a single time to exactly the values the `xadd` loop would
+    /// leave (high id = the last sorted key; added = entry count). Used only by
+    /// the RDB / DEBUG RELOAD stream loader, where the key is fresh; byte-
+    /// identical final state to the incremental `xadd` loop.
+    pub fn load_stream_entries(
+        &mut self,
+        key: &[u8],
+        entries: Vec<(StreamId, Vec<StreamField>)>,
+        now_ms: u64,
+    ) {
+        if entries.is_empty() {
+            return;
+        }
+        self.stream_groups.remove(key);
+        self.stream_max_deleted_ids.remove(key);
+        let map: StreamEntries = entries.into_iter().collect();
+        let count = map.len() as u64;
+        let last_id = *map
+            .keys()
+            .next_back()
+            .expect("non-empty stream has a maximum id");
+        self.stream_last_ids.insert(key.to_vec(), last_id);
+        self.stream_entries_added.insert(key.to_vec(), count);
+        self.internal_entries_insert(key.to_vec(), Entry::new(Value::Stream(map), None, now_ms));
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(count);
+    }
+
     pub fn xlen(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(0);
@@ -34974,6 +35011,55 @@ mod tests {
         assert_eq!(store.xlast_id(b"s", 0).unwrap(), Some((1_000, 1)));
         assert_eq!(store.key_type(b"s", 0), Some("stream"));
         assert_eq!(store.value_type(b"s", 0), Some(ValueType::Stream));
+    }
+
+    #[test]
+    fn load_stream_entries_matches_xadd_loop_qxfmrstream() {
+        // (frankenredis-qxfmrstream) The bulk RDB stream loader must leave the
+        // exact same observable state as seeding the same entries one at a time
+        // with xadd (entries + order + length + high watermark + entries-added).
+        let entries: Vec<((u64, u64), Vec<(Vec<u8>, Vec<u8>)>)> = (1..=60u64)
+            .map(|i| {
+                let mut binval = format!("v{i}").into_bytes();
+                binval.push(0xff);
+                (
+                    (i, 1),
+                    vec![
+                        (format!("f{i}").into_bytes(), binval),
+                        (b"g".to_vec(), vec![0u8, (i % 256) as u8]),
+                    ],
+                )
+            })
+            .collect();
+
+        let mut loop_store = Store::new();
+        for ((ms, seq), fields) in &entries {
+            loop_store.xadd(b"s", (*ms, *seq), fields, 0).unwrap();
+        }
+
+        let mut bulk_store = Store::new();
+        bulk_store.load_stream_entries(b"s", entries.clone(), 0);
+
+        let full = |st: &mut Store| {
+            st.xrange(b"s", (0, 0), (u64::MAX, u64::MAX), None, 0).unwrap()
+        };
+        assert_eq!(full(&mut loop_store), full(&mut bulk_store), "entries differ");
+        assert_eq!(
+            loop_store.xlen(b"s", 0).unwrap(),
+            bulk_store.xlen(b"s", 0).unwrap()
+        );
+        assert_eq!(
+            loop_store.xlast_id(b"s", 0).unwrap(),
+            bulk_store.xlast_id(b"s", 0).unwrap()
+        );
+        assert_eq!(
+            loop_store.stream_last_ids.get(b"s".as_slice()),
+            bulk_store.stream_last_ids.get(b"s".as_slice())
+        );
+        assert_eq!(
+            loop_store.stream_entries_added.get(b"s".as_slice()),
+            bulk_store.stream_entries_added.get(b"s".as_slice())
+        );
     }
 
     #[test]

@@ -25771,11 +25771,22 @@ fn apply_rdb_entries_to_store(
                 entries_added,
                 max_deleted,
             ) => {
-                for (ms, seq, fields) in stream_entries {
-                    let field_pairs: Vec<(Vec<u8>, Vec<u8>)> =
-                        fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                    let _ = store.xadd(&key, (*ms, *seq), &field_pairs, now_ms);
-                }
+                // (frankenredis-qxfmrstream) Bulk-load all entries in one O(n)
+                // pass — one field clone (not the former clone-here +
+                // xadd-re-clone), one BTreeMap build, watermark/added set once —
+                // instead of N individual `xadd`s. The metadata follow-up below
+                // overwrites the bookkeeping, so the final state is unchanged.
+                let owned_entries: Vec<(fr_store::StreamId, Vec<fr_store::StreamField>)> =
+                    stream_entries
+                        .iter()
+                        .map(|(ms, seq, fields)| {
+                            (
+                                (*ms, *seq),
+                                fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                            )
+                        })
+                        .collect();
+                store.load_stream_entries(&key, owned_entries, now_ms);
                 if let Some((wm_ms, wm_seq)) = watermark {
                     let _ = store.xsetid_with_metadata(
                         &key,
