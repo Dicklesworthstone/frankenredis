@@ -1,0 +1,3 @@
+baseline d277aec747ea2f971e3af89b4c8d2daee1a1756f439b065587696f23b9470fb0 artifacts/optimization/coralox-pass220-uhthd-lfu-min-u32/baseline-golden-transcript.resp.txt
+candidate d277aec747ea2f971e3af89b4c8d2daee1a1756f439b065587696f23b9470fb0 artifacts/optimization/coralox-pass220-uhthd-lfu-min-u32/candidate-golden-transcript.resp.txt
+match True

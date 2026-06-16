@@ -1,0 +1,11 @@
+{
+  "bytes_per_key": 258.27328,
+  "load_seconds": 18.125557421997655,
+  "n": 1000000,
+  "pipeline": 256,
+  "port": 28322,
+  "rss_after_kb": 257564,
+  "rss_before_kb": 5344,
+  "rss_delta_kb": 252220,
+  "server_bin": "/data/tmp/cargo-target/release-perf/frankenredis"
+}

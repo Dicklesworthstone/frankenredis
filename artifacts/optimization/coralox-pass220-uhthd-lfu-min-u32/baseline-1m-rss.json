@@ -1,0 +1,11 @@
+{
+  "bytes_per_key": 276.15232,
+  "load_seconds": 17.943451831990387,
+  "n": 1000000,
+  "pipeline": 256,
+  "port": 28321,
+  "rss_after_kb": 275012,
+  "rss_before_kb": 5332,
+  "rss_delta_kb": 269680,
+  "server_bin": "/data/tmp/frankenredis-coralox-pass220-baseline"
+}

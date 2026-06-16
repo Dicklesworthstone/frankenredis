@@ -1,0 +1,4 @@
+n=1000000 key=key:%08d value=val:%08d fr_bin=/data/tmp/cargo-target/release-perf/frankenredis
+redis pid=587941 before_kb=8352 after_kb=95084 delta_kb=86732 bytes_per_key=88.8 load_seconds=1.564
+fr pid=588900 before_kb=6164 after_kb=365784 delta_kb=359620 bytes_per_key=368.3 load_seconds=1.908
+ratio_fr_redis=4.146

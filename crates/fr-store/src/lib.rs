@@ -3191,8 +3191,10 @@ struct Entry {
     /// non-zero invariant never excludes a real deadline. Shaves 8B off EVERY
     /// keyspace `Entry`. Read via `expiry_ms()`. (frankenredis-w2t01)
     expires_at_ms: Option<std::num::NonZeroU64>,
-    /// Last access timestamp in milliseconds (for OBJECT IDLETIME / LRU).
-    last_access_ms: u64,
+    /// Last access timestamp in whole seconds (for OBJECT IDLETIME / LRU).
+    /// Redis stores LRU access time at second granularity, so keeping the same
+    /// clock here preserves the observable surface while avoiding a per-key u64.
+    last_access_s: u32,
     /// LFU access frequency counter exposed via OBJECT FREQ when LFU eviction is active.
     lfu_freq: u8,
     /// Last LFU access/decrement timestamp in whole minutes.
@@ -3267,6 +3269,11 @@ struct ZIntercardCache {
 /// vendored 7.2.4 returns 5. (frankenredis-lfuinit)
 const LFU_INIT_VAL: u8 = 5;
 
+#[inline]
+fn lru_access_seconds(now_ms: u64) -> u32 {
+    u32::try_from(now_ms / 1000).unwrap_or(u32::MAX)
+}
+
 impl Entry {
     /// The absolute expiry deadline (ms), if any. Read accessor over the
     /// niche-packed `Option<NonZeroU64>` storage. (frankenredis-w2t01)
@@ -3286,7 +3293,7 @@ impl Entry {
         Self {
             value,
             expires_at_ms: expires_at_ms.and_then(std::num::NonZeroU64::new),
-            last_access_ms: now_ms,
+            last_access_s: lru_access_seconds(now_ms),
             lfu_freq: LFU_INIT_VAL,
             lfu_last_touch_min: now_ms / 60_000,
             // Assigned at the `internal_entries_insert` choke point once the key
@@ -3307,7 +3314,7 @@ impl Entry {
         if touch_disabled() {
             return;
         }
-        self.last_access_ms = now_ms;
+        self.last_access_s = lru_access_seconds(now_ms);
     }
 
     fn current_lfu_freq(&self, now_ms: u64, decay_time: u64) -> u8 {
@@ -3369,7 +3376,7 @@ impl Entry {
     }
 
     fn refresh_db_add_metadata(&mut self, now_ms: u64) {
-        self.last_access_ms = now_ms;
+        self.last_access_s = lru_access_seconds(now_ms);
         self.lfu_freq = LFU_INIT_VAL;
         self.lfu_last_touch_min = now_ms / 60_000;
     }
@@ -6064,7 +6071,7 @@ impl Store {
             };
             entry.value = canonical_string_value_from_slice(value);
             entry.set_expiry_ms(None);
-            entry.last_access_ms = now_ms;
+            entry.last_access_s = lru_access_seconds(now_ms);
             entry.lfu_freq = next_lfu_freq;
             entry.lfu_last_touch_min = now_ms / 60_000;
             entry.modification_count = entry.modification_count.wrapping_add(1);
@@ -6127,9 +6134,9 @@ impl Store {
             } else {
                 0
             };
-            let replaced_value = std::mem::replace(&mut entry.value, canonical_string_value(value));
+            entry.value = canonical_string_value(value);
             entry.set_expiry_ms(None);
-            entry.last_access_ms = now_ms;
+            entry.last_access_s = lru_access_seconds(now_ms);
             entry.lfu_freq = next_lfu_freq;
             entry.lfu_last_touch_min = now_ms / 60_000;
             entry.modification_count = entry.modification_count.wrapping_add(1);
@@ -7087,7 +7094,7 @@ impl Store {
             if grew {
                 bytes.resize(needed_bytes, 0);
             }
-            entry.last_access_ms = now_ms;
+            entry.last_access_s = lru_access_seconds(now_ms);
             entry.lfu_freq = LFU_INIT_VAL;
             entry.lfu_last_touch_min = now_ms / 60_000;
             entry.modification_count = entry.modification_count.wrapping_add(1);
@@ -7143,7 +7150,7 @@ impl Store {
                 || old_value != bitfield_read(bytes, bit_offset, bits, false);
 
             let had_expiry = entry.expires_at_ms.is_some();
-            entry.last_access_ms = now_ms;
+            entry.last_access_s = lru_access_seconds(now_ms);
             entry.lfu_freq = LFU_INIT_VAL;
             entry.lfu_last_touch_min = now_ms / 60_000;
             entry.modification_count = entry.modification_count.wrapping_add(1);
@@ -7780,10 +7787,9 @@ impl Store {
         if !self.drop_if_expired(key, now_ms) {
             return None;
         }
-        self.entries.get(key).map(|entry| {
-            let idle_ms = now_ms.saturating_sub(entry.last_access_ms);
-            idle_ms / 1000
-        })
+        self.entries
+            .get(key)
+            .map(|entry| u64::from(lru_access_seconds(now_ms).saturating_sub(entry.last_access_s)))
     }
 
     /// Return the per-object LRU clock value used by upstream's DEBUG OBJECT
@@ -7791,14 +7797,14 @@ impl Store {
     /// the object's lruclock was last refreshed:
     ///   getLRUClock() == (mstime() / LRU_CLOCK_RESOLUTION) & LRU_CLOCK_MAX
     /// where LRU_CLOCK_RESOLUTION = 1000ms and LRU_CLOCK_MAX = (1<<24)-1.
-    /// fr derives the clock from the entry's last_access_ms, which under
+    /// fr derives the clock from the entry's last_access_s, which under
     /// the default noeviction policy carries the creation/last-access
     /// timestamp — matching what `DEBUG OBJECT lru:<n>` should report.
     /// (frankenredis-debugobjlru)
     pub fn object_lru_clock(&self, key: &[u8]) -> Option<u32> {
         self.entries.get(key).map(|entry| {
-            const LRU_CLOCK_MAX: u64 = (1 << 24) - 1;
-            ((entry.last_access_ms / 1000) & LRU_CLOCK_MAX) as u32
+            const LRU_CLOCK_MAX: u32 = (1 << 24) - 1;
+            entry.last_access_s & LRU_CLOCK_MAX
         })
     }
 
@@ -9305,7 +9311,7 @@ impl Store {
     /// the final `HashFieldMap` is the same (per-field `insert` in order), the
     /// one-way `force_hash_hashtable_encoding` flag is a function of the final
     /// size so refreshing once at the end matches refreshing per insert, `dirty`
-    /// and `modification_count` advance by `fields.len()`, and `last_access_ms`
+    /// and `modification_count` advance by `fields.len()`, and `last_access_s`
     /// is set to `now_ms`. Under an LFU policy each field's `bump_lfu_freq` +
     /// `next_rand()` advance is observable (OBJECT FREQ / PRNG state), so that
     /// case delegates to per-field `hset` to preserve the exact sequence.
@@ -19041,16 +19047,16 @@ impl Store {
 
     fn select_lru_eviction_candidate_from_keys(&self, keys: &[Vec<u8>]) -> Option<Vec<u8>> {
         let mut best_key: Option<Vec<u8>> = None;
-        let mut best_access = u64::MAX;
+        let mut best_access = u32::MAX;
         for key in keys {
             let Some(entry) = self.entries.get(key.as_slice()) else {
                 continue;
             };
-            if entry.last_access_ms < best_access
-                || (entry.last_access_ms == best_access
+            if entry.last_access_s < best_access
+                || (entry.last_access_s == best_access
                     && best_key.as_ref().is_none_or(|best| key < best))
             {
-                best_access = entry.last_access_ms;
+                best_access = entry.last_access_s;
                 best_key = Some(key.clone());
             }
         }
@@ -19064,20 +19070,20 @@ impl Store {
     ) -> Option<Vec<u8>> {
         let mut best_key: Option<Vec<u8>> = None;
         let mut best_freq = u8::MAX;
-        let mut best_access = u64::MAX;
+        let mut best_access = u32::MAX;
         for key in keys {
             let Some(entry) = self.entries.get(key.as_slice()) else {
                 continue;
             };
             let freq = entry.current_lfu_freq(now_ms, self.lfu_decay_time);
             if freq < best_freq
-                || (freq == best_freq && entry.last_access_ms < best_access)
+                || (freq == best_freq && entry.last_access_s < best_access)
                 || (freq == best_freq
-                    && entry.last_access_ms == best_access
+                    && entry.last_access_s == best_access
                     && best_key.as_ref().is_none_or(|best| key < best))
             {
                 best_freq = freq;
-                best_access = entry.last_access_ms;
+                best_access = entry.last_access_s;
                 best_key = Some(key.clone());
             }
         }
@@ -25604,8 +25610,8 @@ mod tests {
                 .entries
                 .get(b"k".as_ref())
                 .expect("exists entry")
-                .last_access_ms,
-            100
+                .last_access_s,
+            0
         );
 
         assert!(!store.exists_no_touch(b"missing", 200));
@@ -25630,8 +25636,8 @@ mod tests {
                 .entries
                 .get(b"k".as_ref())
                 .expect("entry remains")
-                .last_access_ms,
-            200
+                .last_access_s,
+            0
         );
 
         let missing = store
@@ -25653,8 +25659,8 @@ mod tests {
                 .entries
                 .get(b"list".as_ref())
                 .expect("list entry remains")
-                .last_access_ms,
-            400
+                .last_access_s,
+            0
         );
     }
 
@@ -25672,16 +25678,16 @@ mod tests {
                 .entries
                 .get(b"list".as_ref())
                 .expect("list entry")
-                .last_access_ms,
-            10
+                .last_access_s,
+            0
         );
         assert_eq!(
             store
                 .entries
                 .get(b"set".as_ref())
                 .expect("set entry")
-                .last_access_ms,
-            10
+                .last_access_s,
+            0
         );
 
         let touched = store.touch(&[b"list", b"missing"], 100);
@@ -25691,8 +25697,8 @@ mod tests {
                 .entries
                 .get(b"list".as_ref())
                 .expect("list entry")
-                .last_access_ms,
-            100
+                .last_access_s,
+            0
         );
         assert_eq!(store.stat_keyspace_hits, 1);
         assert_eq!(store.stat_keyspace_misses, 1);
@@ -25704,8 +25710,8 @@ mod tests {
                 .entries
                 .get(b"set".as_ref())
                 .expect("set entry")
-                .last_access_ms,
-            200
+                .last_access_s,
+            0
         );
         assert_eq!(store.stat_keyspace_hits, 2);
         assert_eq!(store.stat_keyspace_misses, 1);
@@ -25919,7 +25925,7 @@ mod tests {
             let _ = store.state_digest();
             let modification_count = {
                 let entry = store.entries.get_mut(b"n".as_slice()).expect("seeded key");
-                entry.last_access_ms = 1_234;
+                entry.last_access_s = 1;
                 entry.lfu_freq = 200;
                 entry.lfu_last_touch_min = 55;
                 entry.modification_count = 41;
@@ -25986,7 +25992,7 @@ mod tests {
         let _ = store.state_digest();
         let modification_count = {
             let entry = store.entries.get_mut(b"n".as_slice()).expect("seeded key");
-            entry.last_access_ms = 1_234;
+            entry.last_access_s = 1;
             entry.lfu_freq = 200;
             entry.lfu_last_touch_min = 55;
             entry.modification_count = 41;
@@ -26048,14 +26054,14 @@ mod tests {
         assert_eq!(store.pttl(b"k", 2_000), PttlValue::Remaining(4_000));
         assert_eq!(store.stat_keyspace_hits, 1);
         assert_eq!(store.stat_keyspace_misses, 0);
-        // Access time should NOT be updated - stays at original 1_000 from set()
+        // Access time should NOT be updated - stays at original second from set().
         assert_eq!(
             store
                 .entries
                 .get(b"k".as_ref())
                 .expect("pttl entry")
-                .last_access_ms,
-            1_000
+                .last_access_s,
+            1
         );
     }
 
@@ -28058,8 +28064,8 @@ mod tests {
                 .entries
                 .get(b"k".as_ref())
                 .expect("type entry")
-                .last_access_ms,
-            100
+                .last_access_s,
+            0
         );
 
         assert_eq!(store.object_encoding(b"k", 250), Some("embstr"));
@@ -28069,8 +28075,8 @@ mod tests {
                 .entries
                 .get(b"k".as_ref())
                 .expect("encoding entry")
-                .last_access_ms,
-            100
+                .last_access_s,
+            0
         );
 
         assert_eq!(store.key_type(b"missing", 300), None);
@@ -28097,8 +28103,8 @@ mod tests {
                 .entries
                 .get(b"k".as_ref())
                 .expect("idletime entry")
-                .last_access_ms,
-            100
+                .last_access_s,
+            0
         );
 
         assert_eq!(store.object_idletime(b"missing", 2_100), None);
@@ -28237,14 +28243,14 @@ mod tests {
             .get_mut(b"old-hot".as_slice())
             .expect("hot entry");
         hot.lfu_freq = 200;
-        hot.last_access_ms = 0;
+        hot.last_access_s = 0;
 
         let cold = store
             .entries
             .get_mut(b"new-cold".as_slice())
             .expect("cold entry");
         cold.lfu_freq = 5;
-        cold.last_access_ms = 10_000;
+        cold.last_access_s = 10;
 
         assert_eq!(
             store.select_eviction_candidate(10_000, 16),
@@ -28271,21 +28277,21 @@ mod tests {
             .get_mut(b"persistent-rare".as_slice())
             .expect("persistent entry");
         persistent.lfu_freq = 1;
-        persistent.last_access_ms = 0;
+        persistent.last_access_s = 0;
 
         let hot = store
             .entries
             .get_mut(b"volatile-hot".as_slice())
             .expect("volatile hot entry");
         hot.lfu_freq = 100;
-        hot.last_access_ms = 0;
+        hot.last_access_s = 0;
 
         let cold = store
             .entries
             .get_mut(b"volatile-cold".as_slice())
             .expect("volatile cold entry");
         cold.lfu_freq = 4;
-        cold.last_access_ms = 10_000;
+        cold.last_access_s = 10;
 
         assert_eq!(
             store.select_eviction_candidate(10_000, 16),
@@ -38168,21 +38174,16 @@ mod tests {
             size_of::<std::collections::VecDeque<Vec<u8>>>(),
         );
         // Cumulative Entry-shrink vs the original inline-fat-Value layout
-        // (Value=120, Entry=168): boxing the 3 fat variants caps Value at 32B,
-        // and niche-packing the expiry (Option<NonZeroU64>) drops Entry to 72B.
-        // (frankenredis-uhthd) Entry then grows by one `u32` (`random_slot`, the
-        // RANDOMKEY back-index) to 80B — a deliberate trade: +8B/Entry buys the
-        // deletion of the separate `random_key_positions` map, which cost ~66
-        // bytes/key (a full duplicate key + its own over-allocated table), so the
-        // *net* per-key keyspace footprint drops. A follow-up (lfu_last_touch_min
-        // u64->u32) can reclaim this 8B and return Entry to 72B.
+        // (Value=120, Entry=168): boxing the fat variants, niche-packing expiry,
+        // and storing LRU at Redis's second granularity keep the hot keyspace
+        // entry compact even with the RANDOMKEY back-index in `random_slot`.
         assert!(
             value_sz <= 32,
             "Value should be <=32B (boxed fat variants), got {value_sz}"
         );
         assert!(
-            entry_sz <= 80,
-            "Entry should be <=80B (boxed variants + niche-packed expiry + RANDOMKEY slot), got {entry_sz}"
+            entry_sz <= 64,
+            "Entry should be <=64B (boxed variants + second-granular LRU + RANDOMKEY slot), got {entry_sz}"
         );
     }
 
