@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/coralox-pass222-p8wd1-stream-node-grouping/stream_load_once.py --server-bin /data/tmp/frankenredis-coralox-pass222-rebased-candidate-target/release-perf/frankenredis --port 31232 --streams 100 --entries-per-stream 1000 --pipeline 128 --json-out artifacts/optimization/coralox-pass222-p8wd1-stream-node-grouping/candidate-stream-rss-last.json --transcript-out artifacts/optimization/coralox-pass222-p8wd1-stream-node-grouping/candidate-stream-golden.resp",
+      "mean": 2.9791068765200004,
+      "stddev": 0.08675089358047514,
+      "median": 3.01256676692,
+      "user": 2.00825218,
+      "system": 0.95693612,
+      "min": 2.84471785792,
+      "max": 3.05238902992,
+      "times": [
+        3.04377545192,
+        2.9420852759200002,
+        3.01256676692,
+        2.84471785792,
+        3.05238902992
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

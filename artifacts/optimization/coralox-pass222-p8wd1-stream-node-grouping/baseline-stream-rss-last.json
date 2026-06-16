@@ -1,0 +1,15 @@
+{
+  "bytes_per_entry": 106.98752,
+  "entries": 100000,
+  "entries_per_stream": 1000,
+  "load_seconds": 2.089818020001985,
+  "pipeline": 128,
+  "port": 31231,
+  "rss_after_kb": 16780,
+  "rss_before_kb": 6332,
+  "rss_delta_kb": 10448,
+  "server_bin": "/data/tmp/frankenredis-coralox-pass222-rebased-baseline-target/release-perf/frankenredis",
+  "streams": 100,
+  "transcript_bytes": 9939,
+  "transcript_sha256": "34149eaaf5911f71631a87db32ce20223fe7760c33040ac2e1c1f792b0f6b141"
+}

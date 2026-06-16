@@ -1189,8 +1189,10 @@ impl<'a> Iterator for PackedStreamFieldsIter<'a> {
 
 // ─────────────────────── packed stream LOG (arena per stream) ───────────────
 
+const PACKED_STREAM_NODE_MAX_ENTRIES: usize = 100;
+
 /// (frankenredis-p8wd1 step 3) A whole stream's entries stored as ONE shared
-/// arena plus a sorted `BTreeMap<StreamId, FieldSpan>` index, replacing
+/// arena plus a sorted stream-node index, replacing
 /// `BTreeMap<StreamId, PackedStreamFields>` (a separate heap allocation **and**
 /// a 28-byte value — `Vec` header + count — *per entry*).
 ///
@@ -1208,7 +1210,7 @@ impl<'a> Iterator for PackedStreamFieldsIter<'a> {
 #[derive(Clone, Debug, Default)]
 pub struct PackedStreamLog {
     arena: Vec<u8>,
-    index: std::collections::BTreeMap<(u64, u64), FieldSpan>,
+    nodes: std::collections::BTreeMap<(u64, u64), StreamNode>,
     /// (frankenredis-p8wd1 step 4 / Redis SAMEFIELDS) Interned field NAMES for
     /// this stream, indexed by the per-entry `[field_idx]` written into the
     /// arena. Stream schemas are near-always stable, so each name is stored ONCE
@@ -1223,6 +1225,7 @@ pub struct PackedStreamLog {
     field_dict: Vec<Box<[u8]>>,
     /// Bytes in `arena` belonging to removed/overwritten entries (compaction hint).
     dead: usize,
+    len: usize,
 }
 
 /// Logical equality: the SAME ids in order with the SAME decoded (field, value)
@@ -1231,7 +1234,7 @@ pub struct PackedStreamLog {
 /// would be wrong.)
 impl PartialEq for PackedStreamLog {
     fn eq(&self, other: &Self) -> bool {
-        self.index.len() == other.index.len()
+        self.len() == other.len()
             && self
                 .iter()
                 .zip(other.iter())
@@ -1247,6 +1250,37 @@ struct FieldSpan {
     len: u32,
     /// Number of (field, value) pairs.
     count: u32,
+}
+
+#[derive(Clone, Debug)]
+struct StreamNode {
+    entries: Vec<StreamNodeEntry>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StreamNodeEntry {
+    id: (u64, u64),
+    span: FieldSpan,
+}
+
+impl StreamNode {
+    fn with_entry(id: (u64, u64), span: FieldSpan) -> Self {
+        let mut entries = Vec::with_capacity(PACKED_STREAM_NODE_MAX_ENTRIES);
+        entries.push(StreamNodeEntry { id, span });
+        Self { entries }
+    }
+
+    fn first_id(&self) -> Option<(u64, u64)> {
+        self.entries.first().map(|entry| entry.id)
+    }
+
+    fn last_id(&self) -> Option<(u64, u64)> {
+        self.entries.last().map(|entry| entry.id)
+    }
+
+    fn position(&self, id: (u64, u64)) -> Result<usize, usize> {
+        self.entries.binary_search_by_key(&id, |entry| entry.id)
+    }
 }
 
 /// A borrowed view over one entry's packed fields. The arena holds
@@ -1319,12 +1353,12 @@ impl PackedStreamLog {
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.index.len()
+        self.len
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.index.is_empty()
+        self.len == 0
     }
 
     #[inline]
@@ -1347,6 +1381,81 @@ impl PackedStreamLog {
         }
     }
 
+    fn node_key_for(&self, id: (u64, u64)) -> Option<(u64, u64)> {
+        self.nodes
+            .range(..=id)
+            .next_back()
+            .and_then(|(key, node)| node.position(id).is_ok().then_some(*key))
+    }
+
+    fn insert_new_span(&mut self, id: (u64, u64), span: FieldSpan) {
+        if self.nodes.is_empty() {
+            self.nodes.insert(id, StreamNode::with_entry(id, span));
+            self.len += 1;
+            return;
+        }
+
+        if let Some(key) = self.nodes.range(..=id).next_back().map(|(key, _)| *key) {
+            let node_len = self.nodes.get(&key).map_or(0, |node| node.entries.len());
+            let node_last = self.nodes.get(&key).and_then(StreamNode::last_id);
+            if node_last.is_some_and(|last_id| id > last_id) {
+                if node_len >= PACKED_STREAM_NODE_MAX_ENTRIES {
+                    self.nodes.insert(id, StreamNode::with_entry(id, span));
+                } else if let Some(node) = self.nodes.get_mut(&key) {
+                    node.entries.push(StreamNodeEntry { id, span });
+                }
+                self.len += 1;
+                return;
+            }
+
+            let mut node = self.nodes.remove(&key).expect("node key came from map");
+            let pos = node
+                .position(id)
+                .expect_err("new stream id was checked absent before insertion");
+            node.entries.insert(pos, StreamNodeEntry { id, span });
+            self.reinsert_node_after_insert(node, pos);
+            self.len += 1;
+            return;
+        }
+
+        let first_key = self
+            .nodes
+            .keys()
+            .next()
+            .copied()
+            .expect("non-empty stream index has a first node");
+        let mut node = self.nodes.remove(&first_key).expect("first key exists");
+        node.entries.insert(0, StreamNodeEntry { id, span });
+        self.reinsert_node_after_insert(node, 0);
+        self.len += 1;
+    }
+
+    fn reinsert_node_after_insert(&mut self, mut node: StreamNode, inserted_pos: usize) {
+        if node.entries.len() > PACKED_STREAM_NODE_MAX_ENTRIES {
+            let split_at = if inserted_pos == node.entries.len() - 1 {
+                PACKED_STREAM_NODE_MAX_ENTRIES
+            } else {
+                node.entries.len() / 2
+            };
+            let right_entries = node.entries.split_off(split_at);
+            let right = StreamNode {
+                entries: right_entries,
+            };
+            if let Some(left_key) = node.first_id() {
+                self.nodes.insert(left_key, node);
+            }
+            let right_key = right
+                .first_id()
+                .expect("split right node contains at least one entry");
+            self.nodes.insert(right_key, right);
+        } else {
+            let key = node
+                .first_id()
+                .expect("reinserted stream node contains at least one entry");
+            self.nodes.insert(key, node);
+        }
+    }
+
     /// Insert/overwrite `id`'s fields (packed into the arena). Returns `true` if
     /// an entry with this id already existed (whose old bytes are now dead).
     pub fn insert<F: AsRef<[u8]>, V: AsRef<[u8]>>(
@@ -1366,81 +1475,105 @@ impl PackedStreamLog {
             len: u32::try_from(self.arena.len() - off).unwrap_or(u32::MAX),
             count: u32::try_from(pairs.len()).unwrap_or(u32::MAX),
         };
-        let replaced = self.index.insert(id, span);
-        if let Some(old) = replaced {
-            self.dead += old.len as usize;
+        if let Some(key) = self.node_key_for(id) {
+            let old_len = {
+                let node = self.nodes.get_mut(&key).expect("node key came from map");
+                let pos = node.position(id).expect("node contains requested id");
+                let old = std::mem::replace(&mut node.entries[pos].span, span);
+                old.len as usize
+            };
+            self.dead += old_len;
             self.maybe_compact();
             true
         } else {
+            self.insert_new_span(id, span);
             false
         }
     }
 
     #[must_use]
     pub fn get(&self, id: (u64, u64)) -> Option<FieldsRef<'_>> {
-        self.index.get(&id).map(|span| self.span_slice(span))
+        let key = self.node_key_for(id)?;
+        let node = self.nodes.get(&key)?;
+        let pos = node.position(id).ok()?;
+        Some(self.span_slice(&node.entries[pos].span))
     }
 
     #[must_use]
     pub fn contains_key(&self, id: (u64, u64)) -> bool {
-        self.index.contains_key(&id)
+        self.node_key_for(id).is_some()
     }
 
     /// Remove `id`; returns `true` if it existed. The freed span is marked dead
     /// and the arena compacted once dead bytes exceed half its length.
     pub fn remove(&mut self, id: (u64, u64)) -> bool {
-        if let Some(span) = self.index.remove(&id) {
-            self.dead += span.len as usize;
-            self.maybe_compact();
-            true
-        } else {
-            false
+        let Some(key) = self.node_key_for(id) else {
+            return false;
+        };
+        let mut node = self.nodes.remove(&key).expect("node key came from map");
+        let pos = node.position(id).expect("node contains requested id");
+        let removed = node.entries.remove(pos);
+        self.len -= 1;
+        self.dead += removed.span.len as usize;
+        if let Some(new_key) = node.first_id() {
+            self.nodes.insert(new_key, node);
         }
+        self.maybe_compact();
+        true
     }
 
     #[must_use]
     pub fn last_id(&self) -> Option<(u64, u64)> {
-        self.index.keys().next_back().copied()
+        self.nodes
+            .values()
+            .next_back()
+            .and_then(StreamNode::last_id)
     }
 
     #[must_use]
     pub fn first_id(&self) -> Option<(u64, u64)> {
-        self.index.keys().next().copied()
+        self.nodes.values().next().and_then(StreamNode::first_id)
     }
 
     /// Smallest id with its fields (BTreeMap-compatible).
     #[must_use]
     pub fn first_key_value(&self) -> Option<(&(u64, u64), FieldsRef<'_>)> {
-        self.index
-            .iter()
+        self.nodes
+            .values()
             .next()
-            .map(|(id, span)| (id, self.span_slice(span)))
+            .and_then(|node| node.entries.first())
+            .map(|entry| (&entry.id, self.span_slice(&entry.span)))
     }
 
     /// Largest id with its fields (BTreeMap-compatible).
     #[must_use]
     pub fn last_key_value(&self) -> Option<(&(u64, u64), FieldsRef<'_>)> {
-        self.index
-            .iter()
+        self.nodes
+            .values()
             .next_back()
-            .map(|(id, span)| (id, self.span_slice(span)))
+            .and_then(|node| node.entries.last())
+            .map(|entry| (&entry.id, self.span_slice(&entry.span)))
     }
 
     /// Iterate `(&id, FieldsRef)` in ascending id order.
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = (&(u64, u64), FieldsRef<'_>)> {
-        self.index
-            .iter()
-            .map(move |(id, span)| (id, self.span_slice(span)))
+        self.nodes.values().flat_map(move |node| {
+            node.entries
+                .iter()
+                .map(move |entry| (&entry.id, self.span_slice(&entry.span)))
+        })
     }
 
     /// Iterate field views only (for the memory estimate).
     pub fn values(&self) -> impl Iterator<Item = FieldsRef<'_>> {
-        self.index.values().map(move |span| self.span_slice(span))
+        self.iter().map(|(_, fields)| fields)
     }
 
     /// Iterate the stream ids in ascending order.
     pub fn keys(&self) -> impl DoubleEndedIterator<Item = &(u64, u64)> {
-        self.index.keys()
+        self.nodes
+            .values()
+            .flat_map(|node| node.entries.iter().map(|entry| &entry.id))
     }
 
     /// Iterate `(&id, FieldsRef)` over a stream-id range; double-ended for
@@ -1449,9 +1582,22 @@ impl PackedStreamLog {
         &self,
         bounds: R,
     ) -> impl DoubleEndedIterator<Item = (&(u64, u64), FieldsRef<'_>)> {
-        self.index
-            .range(bounds)
-            .map(move |(id, span)| (id, self.span_slice(span)))
+        let lower = match bounds.start_bound() {
+            std::ops::Bound::Included(id) | std::ops::Bound::Excluded(id) => self
+                .nodes
+                .range(..=*id)
+                .next_back()
+                .map_or(*id, |(key, _)| *key),
+            std::ops::Bound::Unbounded => (0, 0),
+        };
+        self.nodes
+            .range(lower..)
+            .flat_map(move |(_, node)| {
+                node.entries
+                    .iter()
+                    .map(move |entry| (&entry.id, self.span_slice(&entry.span)))
+            })
+            .filter(move |(id, _)| stream_id_in_bounds(&bounds, id))
     }
 
     fn maybe_compact(&mut self) {
@@ -1463,16 +1609,35 @@ impl PackedStreamLog {
     /// Rebuild the arena from the live spans (in id order), dropping dead bytes.
     fn compact(&mut self) {
         let mut new_arena = Vec::with_capacity(self.arena.len().saturating_sub(self.dead));
-        for span in self.index.values_mut() {
-            let start = span.off;
-            let end = span.off + span.len as usize;
-            let new_off = new_arena.len();
-            new_arena.extend_from_slice(&self.arena[start..end]);
-            span.off = new_off;
+        for node in self.nodes.values_mut() {
+            for entry in &mut node.entries {
+                let start = entry.span.off;
+                let end = entry.span.off + entry.span.len as usize;
+                let new_off = new_arena.len();
+                new_arena.extend_from_slice(&self.arena[start..end]);
+                entry.span.off = new_off;
+            }
         }
         self.arena = new_arena;
         self.dead = 0;
     }
+}
+
+fn stream_id_in_bounds<R: std::ops::RangeBounds<(u64, u64)> + ?Sized>(
+    bounds: &R,
+    id: &(u64, u64),
+) -> bool {
+    let start_ok = match bounds.start_bound() {
+        std::ops::Bound::Included(start) => id >= start,
+        std::ops::Bound::Excluded(start) => id > start,
+        std::ops::Bound::Unbounded => true,
+    };
+    let end_ok = match bounds.end_bound() {
+        std::ops::Bound::Included(end) => id <= end,
+        std::ops::Bound::Excluded(end) => id < end,
+        std::ops::Bound::Unbounded => true,
+    };
+    start_ok && end_ok
 }
 
 // ───────────────────────── packed string MAP (for small hashes) ────────────
@@ -3232,8 +3397,8 @@ impl<'a> Iterator for PackedZSetIter<'a> {
 mod tests {
     use super::{
         ChunkedList, CompactFieldMap, CompactStrSet, LIST_CHUNK_TARGET, ListChunk, ListRepr,
-        ListValue, PACKED_MAX_ENTRIES, PackedList, PackedStrMap, PackedStrSet, PackedStreamFields,
-        PackedStreamLog, PackedZSet, zset_cmp,
+        ListValue, PACKED_MAX_ENTRIES, PACKED_STREAM_NODE_MAX_ENTRIES, PackedList, PackedStrMap,
+        PackedStrSet, PackedStreamFields, PackedStreamLog, PackedZSet, zset_cmp,
     };
 
     #[test]
@@ -3314,10 +3479,20 @@ mod tests {
             assert!(log.remove(id));
             oracle.remove(&id);
         }
-        // Equivalence: len, get (incl. exact packed bytes), full iter, ranges.
+        // Equivalence: len, get (incl. exact decoded pairs), full iter, ranges.
         assert_eq!(log.len(), oracle.len());
         assert_eq!(log.first_id(), oracle.keys().next().copied());
         assert_eq!(log.last_id(), oracle.keys().next_back().copied());
+        assert!(
+            log.nodes.len() < oracle.len(),
+            "stream entries are grouped into nodes"
+        );
+        assert!(
+            log.nodes
+                .values()
+                .all(|node| node.entries.len() <= PACKED_STREAM_NODE_MAX_ENTRIES),
+            "each stream node obeys Redis's default stream-node-max-entries cap"
+        );
         for (id, want) in &oracle {
             let got = log.get(*id).expect("present");
             // SAMEFIELDS encodes field NAMES once in the dict + a per-entry
