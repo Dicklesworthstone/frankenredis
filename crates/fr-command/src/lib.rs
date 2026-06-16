@@ -26630,10 +26630,14 @@ fn bzpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     for key in &argv[1..argv.len() - 1] {
         match store.zpopmin(key, now_ms) {
             Ok(Some((member, score))) => {
+                // The score honors the negotiated protocol (RESP3 Double / RESP2
+                // bulk string), matching upstream genericZpopCommand's
+                // addReplyDouble used by the BZPOPMIN immediate-serve reply.
+                let proto = store.dispatch_client_ctx.resp_protocol_version;
                 return Ok(RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(key.clone())),
                     RespFrame::BulkString(Some(member)),
-                    RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
+                    zpop_score_frame(score, proto),
                 ])));
             }
             Ok(None) => continue,
@@ -26652,10 +26656,11 @@ fn bzpopmax(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     for key in &argv[1..argv.len() - 1] {
         match store.zpopmax(key, now_ms) {
             Ok(Some((member, score))) => {
+                let proto = store.dispatch_client_ctx.resp_protocol_version;
                 return Ok(RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(key.clone())),
                     RespFrame::BulkString(Some(member)),
-                    RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
+                    zpop_score_frame(score, proto),
                 ])));
             }
             Ok(None) => continue,
@@ -47848,6 +47853,47 @@ mod tests {
                 RespFrame::BulkString(Some(b"myzset".to_vec())),
                 RespFrame::BulkString(Some(b"a".to_vec())),
                 RespFrame::BulkString(Some(b"1".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn bzpopmin_bzpopmax_score_is_resp3_double_under_hello3() {
+        // Upstream genericZpopCommand emits the score via addReplyDouble, so the
+        // BZPOPMIN/BZPOPMAX immediate-serve `[key, member, score]` reply uses a
+        // RESP3 Double under HELLO 3 (a bulk string under RESP2). (Regression:
+        // fr hardcoded a bulk string, diverging from redis only in RESP3.)
+        let mut store = Store::new();
+        store
+            .zadd(b"z", &[(1.0, b"a".to_vec()), (2.5, b"b".to_vec())], 0)
+            .unwrap();
+        store.dispatch_client_ctx.resp_protocol_version = 3;
+        let out = dispatch_argv(
+            &[b"BZPOPMIN".to_vec(), b"z".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("bzpopmin resp3");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"z".to_vec())),
+                RespFrame::BulkString(Some(b"a".to_vec())),
+                RespFrame::Double("1".to_string()),
+            ]))
+        );
+        let out = dispatch_argv(
+            &[b"BZPOPMAX".to_vec(), b"z".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("bzpopmax resp3");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"z".to_vec())),
+                RespFrame::BulkString(Some(b"b".to_vec())),
+                RespFrame::Double("2.5".to_string()),
             ]))
         );
     }
