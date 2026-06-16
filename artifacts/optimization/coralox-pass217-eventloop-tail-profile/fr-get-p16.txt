@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:28840
+workload: get
+clients: 50  requests: 60000  pipeline: 16  keyspace: 10000  datasize: 32
+elapsed: 59 ms  throughput: 1000617.50 ops/sec
+latency(us): min=97 p50=716 p95=941 p99=1043 p999=1255 max=1471 mean=735.75
+bytes: sent=3053298 received=2340000 key_prefix=pass217:fr:get:p16:

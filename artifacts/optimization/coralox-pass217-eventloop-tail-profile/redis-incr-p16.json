@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781577493045,
+  "host": "127.0.0.1",
+  "port": 28841,
+  "workload": "incr",
+  "clients": 50,
+  "requests": 60000,
+  "pipeline": 16,
+  "keyspace": 10000,
+  "datasize": 32,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "pass217:redis:incr:p16:",
+  "total_time_ms": 68,
+  "ops_per_sec": 871205.950719974,
+  "bytes_sent": 3413399,
+  "bytes_received": 241599,
+  "latency_us": {
+    "min": 35,
+    "p50": 776,
+    "p95": 1199,
+    "p99": 1633,
+    "p999": 2177,
+    "max": 2315,
+    "mean": 839.1903500000006,
+    "samples": 60000
+  }
+}

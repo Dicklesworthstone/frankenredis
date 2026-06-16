@@ -1,0 +1,29 @@
+{
+  "schema_version": "fr_bench_report/v1",
+  "generated_at_ms": 1781577538287,
+  "host": "127.0.0.1",
+  "port": 28850,
+  "workload": "set",
+  "clients": 50,
+  "requests": 120000,
+  "pipeline": 1,
+  "keyspace": 10000,
+  "datasize": 32,
+  "read_percent": 50,
+  "db": 0,
+  "key_prefix": "pass217:setp1:fr:4:",
+  "total_time_ms": 1431,
+  "ops_per_sec": 83844.99110316607,
+  "bytes_sent": 10786683,
+  "bytes_received": 600000,
+  "latency_us": {
+    "min": 43,
+    "p50": 570,
+    "p95": 734,
+    "p99": 907,
+    "p999": 1229,
+    "max": 1588,
+    "mean": 593.0348666666647,
+    "samples": 120000
+  }
+}

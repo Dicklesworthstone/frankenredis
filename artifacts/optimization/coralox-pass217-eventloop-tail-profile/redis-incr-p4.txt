@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:28841
+workload: incr
+clients: 50  requests: 60000  pipeline: 4  keyspace: 10000  datasize: 32
+elapsed: 215 ms  throughput: 278969.77 ops/sec
+latency(us): min=58 p50=633 p95=958 p99=1276 p999=1695 max=2079 mean=694.62
+bytes: sent=3353412 received=241666 key_prefix=pass217:redis:incr:p4:

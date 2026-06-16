@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:28840
+workload: incr
+clients: 50  requests: 60000  pipeline: 1  keyspace: 10000  datasize: 32
+elapsed: 706 ms  throughput: 84877.50 ops/sec
+latency(us): min=40 p50=559 p95=751 p99=897 p999=1070 max=2187 mean=583.30
+bytes: sent=3173467 received=241593 key_prefix=pass217:fr:incr:p1:

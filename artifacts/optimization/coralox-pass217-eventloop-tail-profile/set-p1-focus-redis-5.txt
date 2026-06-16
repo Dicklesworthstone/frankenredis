@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:28851
+workload: set
+clients: 50  requests: 120000  pipeline: 1  keyspace: 10000  datasize: 32
+elapsed: 1408 ms  throughput: 85206.54 ops/sec
+latency(us): min=43 p50=554 p95=759 p99=1103 p999=1598 max=3727 mean=582.78
+bytes: sent=11146587 received=600000 key_prefix=pass217:setp1:redis:5:

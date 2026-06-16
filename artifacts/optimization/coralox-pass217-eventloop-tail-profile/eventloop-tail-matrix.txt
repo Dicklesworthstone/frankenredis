@@ -1,0 +1,873 @@
+set:p1     ops=0.950x p99=0.940x p999=1.591x
+get:p1     ops=1.056x p99=0.705x p999=0.654x
+incr:p1    ops=1.060x p99=0.781x p999=0.718x
+mixed:p1   ops=1.032x p99=0.877x p999=0.911x
+ping:p1 {'ping_inline': 1.0310863211142098, 'ping_mbulk': 1.0110496865502758}
+set:p4     ops=1.048x p99=0.755x p999=0.934x
+get:p4     ops=0.988x p99=0.792x p999=0.671x
+incr:p4    ops=1.040x p99=0.846x p999=0.722x
+mixed:p4   ops=1.224x p99=0.704x p999=0.622x
+ping:p4 {'ping_inline': 1.0143198229653942, 'ping_mbulk': 1.1666667273333333}
+set:p16    ops=1.013x p99=0.810x p999=0.743x
+get:p16    ops=1.229x p99=0.574x p999=0.589x
+incr:p16   ops=1.011x p99=0.822x p999=0.852x
+mixed:p16  ops=1.436x p99=0.446x p999=0.430x
+ping:p16 {'ping_inline': 0.9827586403448272, 'ping_mbulk': 1.230366545606022}
+--- json-summary ---
+{
+  "head": "773a3a47db7b3038bebe65bc29bb4cb5aea3ff96",
+  "requests": 60000,
+  "clients": 50,
+  "keyspace": 10000,
+  "datasize": 32,
+  "workloads": {
+    "set:p1": {
+      "redis": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577469806,
+        "host": "127.0.0.1",
+        "port": 28841,
+        "workload": "set",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 1,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:redis:set:p1:",
+        "total_time_ms": 730,
+        "ops_per_sec": 82126.45114256769,
+        "bytes_sent": 5513249,
+        "bytes_received": 300000,
+        "latency_us": {
+          "min": 33,
+          "p50": 569,
+          "p95": 829,
+          "p99": 1129,
+          "p999": 1523,
+          "max": 2205,
+          "mean": 602.3197166666667,
+          "samples": 60000
+        }
+      },
+      "fr": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577470577,
+        "host": "127.0.0.1",
+        "port": 28840,
+        "workload": "set",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 1,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:fr:set:p1:",
+        "total_time_ms": 768,
+        "ops_per_sec": 78058.60851085238,
+        "bytes_sent": 5333242,
+        "bytes_received": 300000,
+        "latency_us": {
+          "min": 79,
+          "p50": 578,
+          "p95": 816,
+          "p99": 1061,
+          "p999": 2423,
+          "max": 26495,
+          "mean": 634.7636166666648,
+          "samples": 60000
+        }
+      },
+      "ratios": {
+        "ops_fr_over_redis": 0.9504685448461212,
+        "p50_fr_over_redis": 1.015817223198594,
+        "p95_fr_over_redis": 0.9843184559710495,
+        "p99_fr_over_redis": 0.9397697077059345,
+        "p999_fr_over_redis": 1.5909389363099147
+      }
+    },
+    "get:p1": {
+      "redis": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577471332,
+        "host": "127.0.0.1",
+        "port": 28841,
+        "workload": "get",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 1,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:redis:get:p1:",
+        "total_time_ms": 739,
+        "ops_per_sec": 81085.52840316392,
+        "bytes_sent": 3173338,
+        "bytes_received": 2340000,
+        "latency_us": {
+          "min": 35,
+          "p50": 568,
+          "p95": 788,
+          "p99": 1184,
+          "p999": 1516,
+          "max": 2269,
+          "mean": 610.290483333334,
+          "samples": 60000
+        }
+      },
+      "fr": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577472051,
+        "host": "127.0.0.1",
+        "port": 28840,
+        "workload": "get",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 1,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:fr:get:p1:",
+        "total_time_ms": 700,
+        "ops_per_sec": 85617.11493661889,
+        "bytes_sent": 2993344,
+        "bytes_received": 2340000,
+        "latency_us": {
+          "min": 41,
+          "p50": 547,
+          "p95": 729,
+          "p99": 835,
+          "p999": 992,
+          "max": 1539,
+          "mean": 578.5998500000007,
+          "samples": 60000
+        }
+      },
+      "ratios": {
+        "ops_fr_over_redis": 1.055886501854234,
+        "p50_fr_over_redis": 0.9630281690140845,
+        "p95_fr_over_redis": 0.9251269035532995,
+        "p99_fr_over_redis": 0.7052364864864865,
+        "p999_fr_over_redis": 0.6543535620052771
+      }
+    },
+    "incr:p1": {
+      "redis": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577472804,
+        "host": "127.0.0.1",
+        "port": 28841,
+        "workload": "incr",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 1,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:redis:incr:p1:",
+        "total_time_ms": 749,
+        "ops_per_sec": 80056.02363230335,
+        "bytes_sent": 3353316,
+        "bytes_received": 241568,
+        "latency_us": {
+          "min": 30,
+          "p50": 579,
+          "p95": 803,
+          "p99": 1149,
+          "p999": 1491,
+          "max": 1839,
+          "mean": 618.0690333333326,
+          "samples": 60000
+        }
+      },
+      "fr": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577473515,
+        "host": "127.0.0.1",
+        "port": 28840,
+        "workload": "incr",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 1,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:fr:incr:p1:",
+        "total_time_ms": 706,
+        "ops_per_sec": 84877.501585586,
+        "bytes_sent": 3173467,
+        "bytes_received": 241593,
+        "latency_us": {
+          "min": 40,
+          "p50": 559,
+          "p95": 751,
+          "p99": 897,
+          "p999": 1070,
+          "max": 2187,
+          "mean": 583.3019833333332,
+          "samples": 60000
+        }
+      },
+      "ratios": {
+        "ops_fr_over_redis": 1.060226298216205,
+        "p50_fr_over_redis": 0.9654576856649395,
+        "p95_fr_over_redis": 0.9352428393524284,
+        "p99_fr_over_redis": 0.7806788511749347,
+        "p999_fr_over_redis": 0.7176391683433937
+      }
+    },
+    "mixed:p1": {
+      "redis": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577474272,
+        "host": "127.0.0.1",
+        "port": 28841,
+        "workload": "mixed",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 1,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:redis:mixed:p1:",
+        "total_time_ms": 739,
+        "ops_per_sec": 81158.81389629023,
+        "bytes_sent": 4465357,
+        "bytes_received": 1318334,
+        "latency_us": {
+          "min": 24,
+          "p50": 572,
+          "p95": 826,
+          "p99": 1134,
+          "p999": 1499,
+          "max": 2040,
+          "mean": 609.8556833333328,
+          "samples": 60000
+        }
+      },
+      "fr": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577475004,
+        "host": "127.0.0.1",
+        "port": 28840,
+        "workload": "mixed",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 1,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:fr:mixed:p1:",
+        "total_time_ms": 716,
+        "ops_per_sec": 83788.93637310322,
+        "bytes_sent": 4292386,
+        "bytes_received": 1312078,
+        "latency_us": {
+          "min": 46,
+          "p50": 562,
+          "p95": 749,
+          "p99": 994,
+          "p999": 1365,
+          "max": 1560,
+          "mean": 590.5476666666681,
+          "samples": 60000
+        }
+      },
+      "ratios": {
+        "ops_fr_over_redis": 1.032407108366245,
+        "p50_fr_over_redis": 0.9825174825174825,
+        "p95_fr_over_redis": 0.9067796610169492,
+        "p99_fr_over_redis": 0.8765432098765432,
+        "p999_fr_over_redis": 0.9106070713809206
+      }
+    },
+    "set:p4": {
+      "redis": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577487680,
+        "host": "127.0.0.1",
+        "port": 28841,
+        "workload": "set",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 4,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:redis:set:p4:",
+        "total_time_ms": 232,
+        "ops_per_sec": 257726.44222138493,
+        "bytes_sent": 5513399,
+        "bytes_received": 300000,
+        "latency_us": {
+          "min": 39,
+          "p50": 720,
+          "p95": 1032,
+          "p99": 1427,
+          "p999": 1828,
+          "max": 2117,
+          "mean": 752.3890833333331,
+          "samples": 60000
+        }
+      },
+      "fr": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577487906,
+        "host": "127.0.0.1",
+        "port": 28840,
+        "workload": "set",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 4,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:fr:set:p4:",
+        "total_time_ms": 222,
+        "ops_per_sec": 270174.38635415456,
+        "bytes_sent": 5333230,
+        "bytes_received": 300000,
+        "latency_us": {
+          "min": 63,
+          "p50": 674,
+          "p95": 950,
+          "p99": 1078,
+          "p999": 1708,
+          "max": 1847,
+          "mean": 717.516666666667,
+          "samples": 60000
+        }
+      },
+      "ratios": {
+        "ops_fr_over_redis": 1.0482990570369064,
+        "p50_fr_over_redis": 0.9361111111111111,
+        "p95_fr_over_redis": 0.9205426356589147,
+        "p99_fr_over_redis": 0.7554309740714786,
+        "p999_fr_over_redis": 0.9343544857768052
+      }
+    },
+    "get:p4": {
+      "redis": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577488134,
+        "host": "127.0.0.1",
+        "port": 28841,
+        "workload": "get",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 4,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:redis:get:p4:",
+        "total_time_ms": 206,
+        "ops_per_sec": 291227.8685810362,
+        "bytes_sent": 3173290,
+        "bytes_received": 2340000,
+        "latency_us": {
+          "min": 49,
+          "p50": 633,
+          "p95": 913,
+          "p99": 1285,
+          "p999": 1717,
+          "max": 2447,
+          "mean": 666.5649833333339,
+          "samples": 60000
+        }
+      },
+      "fr": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577488357,
+        "host": "127.0.0.1",
+        "port": 28840,
+        "workload": "get",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 4,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:fr:get:p4:",
+        "total_time_ms": 208,
+        "ops_per_sec": 287590.85162764246,
+        "bytes_sent": 2993351,
+        "bytes_received": 2340000,
+        "latency_us": {
+          "min": 80,
+          "p50": 641,
+          "p95": 891,
+          "p99": 1018,
+          "p999": 1152,
+          "max": 1203,
+          "mean": 673.9949666666664,
+          "samples": 60000
+        }
+      },
+      "ratios": {
+        "ops_fr_over_redis": 0.9875114391657825,
+        "p50_fr_over_redis": 1.0126382306477093,
+        "p95_fr_over_redis": 0.9759036144578314,
+        "p99_fr_over_redis": 0.7922178988326848,
+        "p999_fr_over_redis": 0.6709376820034945
+      }
+    },
+    "incr:p4": {
+      "redis": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577488577,
+        "host": "127.0.0.1",
+        "port": 28841,
+        "workload": "incr",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 4,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:redis:incr:p4:",
+        "total_time_ms": 215,
+        "ops_per_sec": 278969.7717003448,
+        "bytes_sent": 3353412,
+        "bytes_received": 241666,
+        "latency_us": {
+          "min": 58,
+          "p50": 633,
+          "p95": 958,
+          "p99": 1276,
+          "p999": 1695,
+          "max": 2079,
+          "mean": 694.6160833333339,
+          "samples": 60000
+        }
+      },
+      "fr": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577488788,
+        "host": "127.0.0.1",
+        "port": 28840,
+        "workload": "incr",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 4,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:fr:incr:p4:",
+        "total_time_ms": 206,
+        "ops_per_sec": 290060.93305186275,
+        "bytes_sent": 3173447,
+        "bytes_received": 241628,
+        "latency_us": {
+          "min": 45,
+          "p50": 627,
+          "p95": 897,
+          "p99": 1080,
+          "p999": 1223,
+          "max": 1318,
+          "mean": 671.0884666666655,
+          "samples": 60000
+        }
+      },
+      "ratios": {
+        "ops_fr_over_redis": 1.039757574033618,
+        "p50_fr_over_redis": 0.990521327014218,
+        "p95_fr_over_redis": 0.9363256784968684,
+        "p99_fr_over_redis": 0.8463949843260188,
+        "p999_fr_over_redis": 0.7215339233038348
+      }
+    },
+    "mixed:p4": {
+      "redis": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577489041,
+        "host": "127.0.0.1",
+        "port": 28841,
+        "workload": "mixed",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 4,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:redis:mixed:p4:",
+        "total_time_ms": 233,
+        "ops_per_sec": 256769.45273391338,
+        "bytes_sent": 4458683,
+        "bytes_received": 1324114,
+        "latency_us": {
+          "min": 74,
+          "p50": 712,
+          "p95": 1051,
+          "p99": 1411,
+          "p999": 1865,
+          "max": 2157,
+          "mean": 755.2273833333337,
+          "samples": 60000
+        }
+      },
+      "fr": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577489248,
+        "host": "127.0.0.1",
+        "port": 28840,
+        "workload": "mixed",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 4,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:fr:mixed:p4:",
+        "total_time_ms": 190,
+        "ops_per_sec": 314253.8523869102,
+        "bytes_sent": 4284221,
+        "bytes_received": 1319184,
+        "latency_us": {
+          "min": 38,
+          "p50": 585,
+          "p95": 839,
+          "p99": 994,
+          "p999": 1160,
+          "max": 1470,
+          "mean": 615.5979499999988,
+          "samples": 60000
+        }
+      },
+      "ratios": {
+        "ops_fr_over_redis": 1.223875539091354,
+        "p50_fr_over_redis": 0.8216292134831461,
+        "p95_fr_over_redis": 0.7982873453853473,
+        "p99_fr_over_redis": 0.7044649184975195,
+        "p999_fr_over_redis": 0.6219839142091153
+      }
+    },
+    "set:p16": {
+      "redis": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577492725,
+        "host": "127.0.0.1",
+        "port": 28841,
+        "workload": "set",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 16,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:redis:set:p16:",
+        "total_time_ms": 77,
+        "ops_per_sec": 773513.5850321614,
+        "bytes_sent": 5573363,
+        "bytes_received": 300000,
+        "latency_us": {
+          "min": 41,
+          "p50": 868,
+          "p95": 1464,
+          "p99": 1922,
+          "p999": 2373,
+          "max": 2473,
+          "mean": 945.3380000000003,
+          "samples": 60000
+        }
+      },
+      "fr": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577492805,
+        "host": "127.0.0.1",
+        "port": 28840,
+        "workload": "set",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 16,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:fr:set:p16:",
+        "total_time_ms": 76,
+        "ops_per_sec": 783690.3689508459,
+        "bytes_sent": 5393289,
+        "bytes_received": 300000,
+        "latency_us": {
+          "min": 86,
+          "p50": 979,
+          "p95": 1314,
+          "p99": 1557,
+          "p999": 1763,
+          "max": 1786,
+          "mean": 956.3615999999994,
+          "samples": 60000
+        }
+      },
+      "ratios": {
+        "ops_fr_over_redis": 1.0131565677909347,
+        "p50_fr_over_redis": 1.1278801843317972,
+        "p95_fr_over_redis": 0.8975409836065574,
+        "p99_fr_over_redis": 0.8100936524453695,
+        "p999_fr_over_redis": 0.7429414243573536
+      }
+    },
+    "get:p16": {
+      "redis": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577492894,
+        "host": "127.0.0.1",
+        "port": 28841,
+        "workload": "get",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 16,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:redis:get:p16:",
+        "total_time_ms": 73,
+        "ops_per_sec": 814114.4653079368,
+        "bytes_sent": 3233240,
+        "bytes_received": 2340000,
+        "latency_us": {
+          "min": 68,
+          "p50": 856,
+          "p95": 1297,
+          "p99": 1817,
+          "p999": 2131,
+          "max": 2339,
+          "mean": 909.1679333333343,
+          "samples": 60000
+        }
+      },
+      "fr": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577492971,
+        "host": "127.0.0.1",
+        "port": 28840,
+        "workload": "get",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 16,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:fr:get:p16:",
+        "total_time_ms": 59,
+        "ops_per_sec": 1000617.4977348105,
+        "bytes_sent": 3053298,
+        "bytes_received": 2340000,
+        "latency_us": {
+          "min": 97,
+          "p50": 716,
+          "p95": 941,
+          "p99": 1043,
+          "p999": 1255,
+          "max": 1471,
+          "mean": 735.7528666666653,
+          "samples": 60000
+        }
+      },
+      "ratios": {
+        "ops_fr_over_redis": 1.229086990066353,
+        "p50_fr_over_redis": 0.8364485981308412,
+        "p95_fr_over_redis": 0.725520431765613,
+        "p99_fr_over_redis": 0.5740231150247661,
+        "p999_fr_over_redis": 0.5889253871421868
+      }
+    },
+    "incr:p16": {
+      "redis": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577493045,
+        "host": "127.0.0.1",
+        "port": 28841,
+        "workload": "incr",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 16,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:redis:incr:p16:",
+        "total_time_ms": 68,
+        "ops_per_sec": 871205.950719974,
+        "bytes_sent": 3413399,
+        "bytes_received": 241599,
+        "latency_us": {
+          "min": 35,
+          "p50": 776,
+          "p95": 1199,
+          "p99": 1633,
+          "p999": 2177,
+          "max": 2315,
+          "mean": 839.1903500000006,
+          "samples": 60000
+        }
+      },
+      "fr": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577493117,
+        "host": "127.0.0.1",
+        "port": 28840,
+        "workload": "incr",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 16,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:fr:incr:p16:",
+        "total_time_ms": 68,
+        "ops_per_sec": 880876.9411830099,
+        "bytes_sent": 3233360,
+        "bytes_received": 241620,
+        "latency_us": {
+          "min": 83,
+          "p50": 772,
+          "p95": 1147,
+          "p99": 1342,
+          "p999": 1854,
+          "max": 2005,
+          "mean": 823.9029333333342,
+          "samples": 60000
+        }
+      },
+      "ratios": {
+        "ops_fr_over_redis": 1.0111006937625295,
+        "p50_fr_over_redis": 0.9948453608247423,
+        "p95_fr_over_redis": 0.9566305254378649,
+        "p99_fr_over_redis": 0.8218003674219229,
+        "p999_fr_over_redis": 0.8516306844281121
+      }
+    },
+    "mixed:p16": {
+      "redis": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577493222,
+        "host": "127.0.0.1",
+        "port": 28841,
+        "workload": "mixed",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 16,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:redis:mixed:p16:",
+        "total_time_ms": 87,
+        "ops_per_sec": 681888.4705717791,
+        "bytes_sent": 4522917,
+        "bytes_received": 1320442,
+        "latency_us": {
+          "min": 40,
+          "p50": 998,
+          "p95": 1688,
+          "p99": 2213,
+          "p999": 2763,
+          "max": 3073,
+          "mean": 1096.0321500000007,
+          "samples": 60000
+        }
+      },
+      "fr": {
+        "schema_version": "fr_bench_report/v1",
+        "generated_at_ms": 1781577493299,
+        "host": "127.0.0.1",
+        "port": 28840,
+        "workload": "mixed",
+        "clients": 50,
+        "requests": 60000,
+        "pipeline": 16,
+        "keyspace": 10000,
+        "datasize": 32,
+        "read_percent": 50,
+        "db": 0,
+        "key_prefix": "pass217:fr:mixed:p16:",
+        "total_time_ms": 61,
+        "ops_per_sec": 979430.6664214389,
+        "bytes_sent": 4342728,
+        "bytes_received": 1320510,
+        "latency_us": {
+          "min": 73,
+          "p50": 718,
+          "p95": 925,
+          "p99": 988,
+          "p999": 1189,
+          "max": 1288,
+          "mean": 752.3449166666669,
+          "samples": 60000
+        }
+      },
+      "ratios": {
+        "ops_fr_over_redis": 1.4363502371585253,
+        "p50_fr_over_redis": 0.7194388777555111,
+        "p95_fr_over_redis": 0.5479857819905213,
+        "p99_fr_over_redis": 0.4464527790329869,
+        "p999_fr_over_redis": 0.4303293521534564
+      }
+    }
+  },
+  "ping": {
+    "p1": {
+      "redis": {
+        "ping_inline": 59701.5,
+        "ping_mbulk": 68306.01
+      },
+      "fr": {
+        "ping_inline": 61557.4,
+        "ping_mbulk": 69060.77
+      },
+      "ratios": {
+        "ping_inline": 1.0310863211142098,
+        "ping_mbulk": 1.0110496865502758
+      }
+    },
+    "p4": {
+      "redis": {
+        "ping_inline": 235294.11,
+        "ping_mbulk": 219780.22
+      },
+      "fr": {
+        "ping_inline": 238663.48,
+        "ping_mbulk": 256410.27
+      },
+      "ratios": {
+        "ping_inline": 1.0143198229653942,
+        "ping_mbulk": 1.1666667273333333
+      }
+    },
+    "p16": {
+      "redis": {
+        "ping_inline": 877193.0,
+        "ping_mbulk": 851063.81
+      },
+      "fr": {
+        "ping_inline": 862069.0,
+        "ping_mbulk": 1047120.44
+      },
+      "ratios": {
+        "ping_inline": 0.9827586403448272,
+        "ping_mbulk": 1.230366545606022
+      }
+    }
+  }
+}

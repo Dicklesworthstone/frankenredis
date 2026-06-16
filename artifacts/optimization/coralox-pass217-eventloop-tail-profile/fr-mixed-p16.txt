@@ -1,0 +1,7 @@
+fr-bench summary
+target: 127.0.0.1:28840
+workload: mixed
+clients: 50  requests: 60000  pipeline: 16  keyspace: 10000  datasize: 32
+elapsed: 61 ms  throughput: 979430.67 ops/sec
+latency(us): min=73 p50=718 p95=925 p99=988 p999=1189 max=1288 mean=752.34
+bytes: sent=4342728 received=1320510 key_prefix=pass217:fr:mixed:p16:
