@@ -89,6 +89,8 @@ PORT_BASED = [
     # self-heals encoding thresholds on both servers before comparing, so it is
     # immune to a stray CONFIG SET left by an earlier gate on the shared oracle.
     ("flag_error_edge_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    # non-zero-DB error/key parity + internal-namespace (\0frdb\0) leak guard.
+    ("multidb_namespace_leak_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
 ]
 
 # Older differs use argparse flags: --oracle <port> --fr <port>
