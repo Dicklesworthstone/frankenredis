@@ -1216,20 +1216,33 @@ impl<'a> Iterator for PackedStreamFieldsIter<'a> {
 pub struct PackedStreamLog {
     arena: Vec<u8>,
     index: std::collections::BTreeMap<(u64, u64), FieldSpan>,
+    /// (frankenredis-p8wd1 step 4 / Redis SAMEFIELDS) Interned field NAMES for
+    /// this stream, indexed by the per-entry `[field_idx]` written into the
+    /// arena. Stream schemas are near-always stable, so each name is stored ONCE
+    /// for the whole stream instead of repeated in every entry — for a
+    /// 1000-entry stream with fields `user_id`/`event`/`ts` that turns ~3 names
+    /// per entry into 3 names total + a 1-byte index per field. Bounded by the
+    /// number of DISTINCT field names the stream has ever used (tiny + stable for
+    /// normal schemas; it is append-only so indices stay valid across arena
+    /// compaction — a churning schema is the only case it grows past the live
+    /// set). NOT serialized — DUMP/RESTORE/DIGEST go through `to_pairs`, which
+    /// reconstructs the names, so the observable bytes are unchanged.
+    field_dict: Vec<Box<[u8]>>,
     /// Bytes in `arena` belonging to removed/overwritten entries (compaction hint).
     dead: usize,
 }
 
-/// Logical equality: the SAME ids in order with byte-identical packed fields.
-/// (Two logs with equal content may differ in raw `arena`/`dead` after
-/// compaction, so a derived `PartialEq` would be wrong.)
+/// Logical equality: the SAME ids in order with the SAME decoded (field, value)
+/// pairs. (Two logs with equal content may differ in raw `arena`/`field_dict`
+/// after compaction or different field-insertion order, so a derived `PartialEq`
+/// would be wrong.)
 impl PartialEq for PackedStreamLog {
     fn eq(&self, other: &Self) -> bool {
         self.index.len() == other.index.len()
             && self
                 .iter()
                 .zip(other.iter())
-                .all(|((ia, fa), (ib, fb))| ia == ib && fa.buf == fb.buf)
+                .all(|((ia, fa), (ib, fb))| ia == ib && fa.to_pairs() == fb.to_pairs())
     }
 }
 
@@ -1243,11 +1256,14 @@ struct FieldSpan {
     count: u32,
 }
 
-/// A borrowed view over one entry's packed fields in the arena. Mirrors the read
-/// surface of [`PackedStreamFields`] so stream call sites need no change.
+/// A borrowed view over one entry's packed fields. The arena holds
+/// `[field_idx varint][vlen varint][value]` per field; the field NAME is
+/// recovered from the owning log's `field_dict`. Mirrors the read surface of
+/// [`PackedStreamFields`] so stream call sites need no change.
 #[derive(Clone, Copy)]
 pub struct FieldsRef<'a> {
     buf: &'a [u8],
+    dict: &'a [Box<[u8]>],
     count: u32,
 }
 
@@ -1262,12 +1278,12 @@ impl<'a> FieldsRef<'a> {
         self.count == 0
     }
 
-    /// Iterate the (field, value) pairs in insertion order, borrowed — identical
-    /// decoding to [`PackedStreamFields::iter`].
+    /// Iterate the (field, value) pairs in insertion order, borrowed.
     #[must_use]
-    pub fn iter(&self) -> PackedStreamFieldsIter<'a> {
-        PackedStreamFieldsIter {
+    pub fn iter(&self) -> FieldsRefIter<'a> {
+        FieldsRefIter {
             buf: self.buf,
+            dict: self.dict,
             pos: 0,
         }
     }
@@ -1276,6 +1292,29 @@ impl<'a> FieldsRef<'a> {
     #[must_use]
     pub fn to_pairs(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
         self.iter().map(|(f, v)| (f.to_vec(), v.to_vec())).collect()
+    }
+}
+
+/// Borrowing iterator over a [`FieldsRef`]'s (field, value) pairs. Decodes
+/// `[field_idx][vlen][value]` and resolves the name via the field dict.
+pub struct FieldsRefIter<'a> {
+    buf: &'a [u8],
+    dict: &'a [Box<[u8]>],
+    pos: usize,
+}
+
+impl<'a> Iterator for FieldsRefIter<'a> {
+    type Item = (&'a [u8], &'a [u8]);
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.buf.len() {
+            return None;
+        }
+        let (idx, p) = read_varint(self.buf, self.pos);
+        let (vlen, p2) = read_varint(self.buf, p);
+        let (vs, ve) = (p2, p2 + vlen);
+        self.pos = ve;
+        let name: &[u8] = self.dict.get(idx).map_or(&[][..], |n| n);
+        Some((name, &self.buf[vs..ve]))
     }
 }
 
@@ -1299,7 +1338,19 @@ impl PackedStreamLog {
     fn span_slice(&self, span: &FieldSpan) -> FieldsRef<'_> {
         FieldsRef {
             buf: &self.arena[span.off..span.off + span.len as usize],
+            dict: &self.field_dict,
             count: span.count,
+        }
+    }
+
+    /// Return the index of `name` in the field dict, appending it if new. Linear
+    /// scan: stream field-name cardinality is small and stable in practice.
+    fn intern_field(&mut self, name: &[u8]) -> usize {
+        if let Some(i) = self.field_dict.iter().position(|n| &**n == name) {
+            i
+        } else {
+            self.field_dict.push(name.into());
+            self.field_dict.len() - 1
         }
     }
 
@@ -1312,8 +1363,8 @@ impl PackedStreamLog {
     ) -> bool {
         let off = self.arena.len();
         for (f, v) in pairs {
-            write_varint(&mut self.arena, f.as_ref().len());
-            self.arena.extend_from_slice(f.as_ref());
+            let idx = self.intern_field(f.as_ref());
+            write_varint(&mut self.arena, idx);
             write_varint(&mut self.arena, v.as_ref().len());
             self.arena.extend_from_slice(v.as_ref());
         }
@@ -3269,10 +3320,12 @@ mod tests {
         assert_eq!(log.last_id(), oracle.keys().next_back().copied());
         for (id, want) in &oracle {
             let got = log.get(*id).expect("present");
+            // SAMEFIELDS encodes field NAMES once in the dict + a per-entry
+            // index, so the raw arena bytes differ from the old per-entry-name
+            // layout; the DECODED pairs (what DUMP/XRANGE/DIGEST observe) must be
+            // identical.
             assert_eq!(&got.to_pairs(), want, "fields for {id:?}");
             assert_eq!(got.len(), want.len());
-            // Byte-identical to the standalone PackedStreamFields encoding.
-            assert_eq!(got.buf, &*PackedStreamFields::from_pairs(want).buf, "packed bytes");
         }
         assert!(log.get((1, 0)).is_none()); // trimmed
         // Full iteration matches the oracle order/content.
