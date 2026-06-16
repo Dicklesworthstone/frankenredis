@@ -200,90 +200,8 @@ fn read_varint(buf: &[u8], mut pos: usize) -> (usize, usize) {
     (result, pos)
 }
 
-use std::{
-    borrow::Borrow,
-    hash::{Hash, Hasher},
-};
-
-use indexmap::IndexSet;
-
-/// Hashtable storage for a large generic set (the former `GenericSet` alias).
-type SetHashTable = IndexSet<SetMember, foldhash::quality::RandomState>;
-
-#[derive(Clone, Debug)]
-pub enum SetMember {
-    Inline {
-        len: u8,
-        bytes: [u8; Self::INLINE_CAPACITY],
-    },
-    Heap(Vec<u8>),
-}
-
-impl SetMember {
-    const INLINE_CAPACITY: usize = 23;
-
-    fn from_slice(member: &[u8]) -> Self {
-        if member.len() <= Self::INLINE_CAPACITY {
-            let len = match u8::try_from(member.len()) {
-                Ok(len) => len,
-                Err(_) => return Self::Heap(member.to_vec()),
-            };
-            let mut bytes = [0u8; Self::INLINE_CAPACITY];
-            bytes[..member.len()].copy_from_slice(member);
-            Self::Inline { len, bytes }
-        } else {
-            Self::Heap(member.to_vec())
-        }
-    }
-
-    fn from_vec(member: Vec<u8>) -> Self {
-        if member.len() <= Self::INLINE_CAPACITY {
-            Self::from_slice(&member)
-        } else {
-            Self::Heap(member)
-        }
-    }
-
-    fn as_slice(&self) -> &[u8] {
-        match self {
-            Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
-            Self::Heap(member) => member,
-        }
-    }
-
-    fn into_vec(self) -> Vec<u8> {
-        match self {
-            Self::Inline { len, bytes } => bytes[..usize::from(len)].to_vec(),
-            Self::Heap(member) => member,
-        }
-    }
-}
-
-impl Borrow<[u8]> for SetMember {
-    fn borrow(&self) -> &[u8] {
-        self.as_slice()
-    }
-}
-
-impl AsRef<[u8]> for SetMember {
-    fn as_ref(&self) -> &[u8] {
-        self.as_slice()
-    }
-}
-
-impl PartialEq for SetMember {
-    fn eq(&self, other: &Self) -> bool {
-        self.as_slice() == other.as_slice()
-    }
-}
-
-impl Eq for SetMember {}
-
-impl Hash for SetMember {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.as_slice().hash(state);
-    }
-}
+// `SetMember` / `SetHashTable` (the former inline-or-heap IndexSet backing for
+// the Hash variant) were superseded by `CompactStrSet` (frankenredis-ideww).
 
 /// Storage-promotion thresholds: above these a packed set switches to the
 /// hashtable so membership/removal stay sub-linear. They only bound how large
@@ -302,7 +220,7 @@ const PACKED_MAX_VALUE: usize = 64;
 #[derive(Clone, Debug)]
 pub enum GenericSet {
     Packed(PackedStrSet),
-    Hash(SetHashTable),
+    Hash(CompactStrSet),
 }
 
 impl Default for GenericSet {
@@ -315,10 +233,7 @@ impl GenericSet {
     #[must_use]
     pub fn with_capacity_and_hasher(n: usize, _hasher: foldhash::quality::RandomState) -> Self {
         if n > PACKED_MAX_ENTRIES {
-            GenericSet::Hash(IndexSet::with_capacity_and_hasher(
-                n,
-                foldhash::quality::RandomState::default(),
-            ))
+            GenericSet::Hash(CompactStrSet::new())
         } else {
             GenericSet::Packed(PackedStrSet::with_capacity(n.saturating_mul(8)))
         }
@@ -350,18 +265,15 @@ impl GenericSet {
     pub fn get_index(&self, idx: usize) -> Option<&[u8]> {
         match self {
             GenericSet::Packed(p) => p.iter().nth(idx),
-            GenericSet::Hash(h) => h.get_index(idx).map(|v| v.as_slice()),
+            GenericSet::Hash(h) => h.get_index(idx),
         }
     }
 
     fn promote(&mut self) {
         if let GenericSet::Packed(p) = self {
-            let mut h: SetHashTable = IndexSet::with_capacity_and_hasher(
-                p.len() + 1,
-                foldhash::quality::RandomState::default(),
-            );
+            let mut h = CompactStrSet::new();
             for m in p.iter() {
-                h.insert(SetMember::from_slice(m));
+                h.insert(m);
             }
             *self = GenericSet::Hash(h);
         }
@@ -375,7 +287,7 @@ impl GenericSet {
         }
         match self {
             GenericSet::Packed(p) => p.insert(&member),
-            GenericSet::Hash(h) => h.insert(SetMember::from_vec(member)),
+            GenericSet::Hash(h) => h.insert(&member),
         }
     }
 
@@ -396,13 +308,9 @@ impl GenericSet {
         }
         match self {
             GenericSet::Packed(p) => p.insert(member),
-            GenericSet::Hash(h) => {
-                if h.contains(member) {
-                    false
-                } else {
-                    h.insert(SetMember::from_slice(member))
-                }
-            }
+            // CompactStrSet::insert returns true iff newly added — exactly the
+            // IndexSet contains-then-insert split, byte-for-byte.
+            GenericSet::Hash(h) => h.insert(member),
         }
     }
 
@@ -428,10 +336,9 @@ impl GenericSet {
             }
             GenericSet::Packed(p)
         } else {
-            let mut h: SetHashTable =
-                IndexSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
+            let mut h = CompactStrSet::new();
             for m in members {
-                h.insert(SetMember::from_slice(m.as_ref()));
+                h.insert(m.as_ref());
             }
             GenericSet::Hash(h)
         }
@@ -458,7 +365,7 @@ impl GenericSet {
                 p.remove(&member);
                 Some(member)
             }
-            GenericSet::Hash(h) => h.swap_remove_index(idx).map(SetMember::into_vec),
+            GenericSet::Hash(h) => h.swap_remove_index(idx),
         }
     }
 
@@ -485,7 +392,7 @@ impl GenericSet {
                 }
                 *p = np;
             }
-            GenericSet::Hash(h) => h.retain(|m| keep(m.as_slice())),
+            GenericSet::Hash(h) => h.retain(keep),
         }
     }
 
@@ -523,7 +430,7 @@ impl IntoIterator for GenericSet {
     fn into_iter(self) -> Self::IntoIter {
         let owned: Vec<Vec<u8>> = match self {
             GenericSet::Packed(p) => p.iter().map(<[u8]>::to_vec).collect(),
-            GenericSet::Hash(h) => h.into_iter().map(SetMember::into_vec).collect(),
+            GenericSet::Hash(h) => h.iter().map(<[u8]>::to_vec).collect(),
         };
         owned.into_iter()
     }
@@ -532,7 +439,7 @@ impl IntoIterator for GenericSet {
 /// Borrowing iterator over a `GenericSet`'s members in insertion order.
 pub enum GenericSetIter<'a> {
     Packed(PackedStrSetIter<'a>),
-    Hash(indexmap::set::Iter<'a, SetMember>),
+    Hash(CompactStrSetIter<'a>),
 }
 
 impl<'a> Iterator for GenericSetIter<'a> {
@@ -540,7 +447,7 @@ impl<'a> Iterator for GenericSetIter<'a> {
     fn next(&mut self) -> Option<&'a [u8]> {
         match self {
             GenericSetIter::Packed(it) => it.next(),
-            GenericSetIter::Hash(it) => it.next().map(|v| v.as_slice()),
+            GenericSetIter::Hash(it) => it.next(),
         }
     }
 }
@@ -785,7 +692,7 @@ impl<'a> Iterator for HashFieldMapIter<'a> {
 /// HGETALL/HKEYS/HVALS order is byte-for-byte identical to `IndexMap::insert`.
 #[derive(Clone, Debug, Default)]
 #[allow(dead_code)] // wired into HashFieldMap::Hash in a follow-up (frankenredis-ideww)
-pub(crate) struct CompactFieldMap {
+pub struct CompactFieldMap {
     buf: Vec<u8>,
     /// `buf` offsets of live entries, in insertion order. `order.len()` == count.
     order: Vec<u32>,
@@ -1046,6 +953,31 @@ impl CompactFieldMap {
         Some(value)
     }
 
+    /// Swap-remove the entry at insertion-order position `idx`, returning its
+    /// (field, value). O(1), order NOT preserved (matches `IndexMap::swap_remove_index`).
+    pub(crate) fn remove_index(&mut self, idx: usize) -> Option<(Vec<u8>, Vec<u8>)> {
+        if idx >= self.order.len() {
+            return None;
+        }
+        let off = self.order[idx];
+        let (fr, vr) = cfm_decode(&self.buf, off);
+        let field = self.buf[fr].to_vec();
+        let value = self.buf[vr].to_vec();
+        self.dead += self.entry_size(off);
+        self.tombstone_slot(&field);
+        let last = self.order.len() - 1;
+        if idx != last {
+            let moved_off = self.order[last];
+            self.order[idx] = moved_off;
+            let (mfr, _) = cfm_decode(&self.buf, moved_off);
+            let mfield = self.buf[mfr].to_vec();
+            self.repoint_slot(&mfield, idx);
+        }
+        self.order.pop();
+        self.maybe_compact();
+        Some((field, value))
+    }
+
     /// Reclaim dead arena bytes and/or shrink-rebuild the index when either has
     /// grown past half. Offsets change, so `order` + `slots` are rebuilt.
     fn maybe_compact(&mut self) {
@@ -1073,7 +1005,7 @@ impl CompactFieldMap {
 
 /// Insertion-order iterator over a [`CompactFieldMap`].
 #[allow(dead_code)]
-pub(crate) struct CompactFieldMapIter<'a> {
+pub struct CompactFieldMapIter<'a> {
     map: &'a CompactFieldMap,
     pos: usize,
 }
@@ -1085,6 +1017,91 @@ impl<'a> Iterator for CompactFieldMapIter<'a> {
         let pair = self.map.get_index(self.pos)?;
         self.pos += 1;
         Some(pair)
+    }
+}
+
+/// (frankenredis-ideww) Member-only compact set for the hashtable-range set
+/// encoding — a thin wrapper over [`CompactFieldMap`] (members map to an empty
+/// value), so it inherits the arena+index compactness (vs the heavy `IndexSet`)
+/// and O(1) membership while keeping `IndexSet`'s insertion-order semantics
+/// byte-for-byte. Drop-in for the `IndexSet<SetMember>` surface used by
+/// `GenericSet::Hash`.
+#[derive(Clone, Debug, Default)]
+pub struct CompactStrSet {
+    inner: CompactFieldMap,
+}
+
+impl CompactStrSet {
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub(crate) fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    #[must_use]
+    pub(crate) fn contains(&self, member: &[u8]) -> bool {
+        self.inner.contains_key(member)
+    }
+
+    #[must_use]
+    pub(crate) fn get_index(&self, idx: usize) -> Option<&[u8]> {
+        self.inner.get_index(idx).map(|(m, _)| m)
+    }
+
+    /// Insert `member`; returns `true` if it was newly added (matches `IndexSet::insert`).
+    pub(crate) fn insert(&mut self, member: &[u8]) -> bool {
+        self.inner.insert(member, b"").is_none()
+    }
+
+    pub(crate) fn shift_remove(&mut self, member: &[u8]) -> bool {
+        self.inner.shift_remove(member).is_some()
+    }
+
+    pub(crate) fn swap_remove(&mut self, member: &[u8]) -> bool {
+        self.inner.swap_remove(member).is_some()
+    }
+
+    /// Swap-remove the member at insertion-order position `idx` (matches
+    /// `IndexSet::swap_remove_index`); powers SPOP/SRANDMEMBER.
+    pub(crate) fn swap_remove_index(&mut self, idx: usize) -> Option<Vec<u8>> {
+        self.inner.remove_index(idx).map(|(m, _)| m)
+    }
+
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
+        let survivors: Vec<Vec<u8>> = self
+            .inner
+            .iter()
+            .filter(|(m, _)| keep(m))
+            .map(|(m, _)| m.to_vec())
+            .collect();
+        let mut next = CompactFieldMap::new();
+        for m in &survivors {
+            next.insert(m, b"");
+        }
+        self.inner = next;
+    }
+
+    #[must_use]
+    pub(crate) fn iter(&self) -> CompactStrSetIter<'_> {
+        CompactStrSetIter {
+            inner: self.inner.iter(),
+        }
+    }
+}
+
+/// Insertion-order iterator over a [`CompactStrSet`].
+pub struct CompactStrSetIter<'a> {
+    inner: CompactFieldMapIter<'a>,
+}
+
+impl<'a> Iterator for CompactStrSetIter<'a> {
+    type Item = &'a [u8];
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|(m, _)| m)
     }
 }
 
@@ -2844,12 +2861,68 @@ impl<'a> Iterator for PackedZSetIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChunkedList, CompactFieldMap, LIST_CHUNK_TARGET, ListChunk, ListRepr, ListValue,
-        PACKED_MAX_ENTRIES, PackedList, PackedStrMap, PackedStrSet, PackedZSet, zset_cmp,
+        ChunkedList, CompactFieldMap, CompactStrSet, LIST_CHUNK_TARGET, ListChunk, ListRepr,
+        ListValue, PACKED_MAX_ENTRIES, PackedList, PackedStrMap, PackedStrSet, PackedZSet, zset_cmp,
     };
     use indexmap::{IndexMap, IndexSet};
     use proptest::prelude::*;
     use std::collections::VecDeque;
+
+    #[test]
+    fn compact_str_set_matches_indexset_under_random_ops_ideww() {
+        // CompactStrSet must be a byte-for-byte drop-in for the IndexSet<member>
+        // backing GenericSet::Hash: same returns + insertion-order iteration +
+        // positional access across insert/contains/get_index/shift_remove
+        // [order-preserving] / swap_remove [unordered] / swap_remove_index / retain.
+        let mut rng: u64 = 0xD1B54A32D192ED03;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let key = |n: u64| format!("member_{}", n % 50).into_bytes();
+        let mut c = CompactStrSet::new();
+        let mut o: IndexSet<Vec<u8>, foldhash::quality::RandomState> =
+            IndexSet::with_hasher(foldhash::quality::RandomState::default());
+        let check = |c: &CompactStrSet, o: &IndexSet<Vec<u8>, _>| {
+            assert_eq!(c.len(), o.len());
+            let ci: Vec<Vec<u8>> = c.iter().map(<[u8]>::to_vec).collect();
+            let oi: Vec<Vec<u8>> = o.iter().cloned().collect();
+            assert_eq!(ci, oi, "iteration order");
+            for i in 0..o.len() {
+                assert_eq!(c.get_index(i).map(<[u8]>::to_vec), o.get_index(i).cloned());
+            }
+        };
+        for _ in 0..20_000 {
+            let r = next();
+            let m = key(r);
+            match r % 12 {
+                0..=4 => assert_eq!(c.insert(&m), o.insert(m.clone()), "insert"),
+                5 => assert_eq!(c.contains(&m), o.contains(&m[..]), "contains"),
+                6 => assert_eq!(c.shift_remove(&m), o.shift_remove(&m[..]), "shift_remove"),
+                7 => assert_eq!(c.swap_remove(&m), o.swap_remove(&m[..]), "swap_remove"),
+                8 => {
+                    let idx = (next() as usize) % (o.len() + 1);
+                    assert_eq!(
+                        c.swap_remove_index(idx),
+                        o.swap_remove_index(idx),
+                        "swap_remove_index"
+                    );
+                }
+                9 => {
+                    let keep = next() % 3;
+                    c.retain(|x| x.last().copied().unwrap_or(0) as u64 % 3 != keep);
+                    o.retain(|x| x.last().copied().unwrap_or(0) as u64 % 3 != keep);
+                }
+                _ => {
+                    let idx = (next() as usize) % (o.len() + 1);
+                    assert_eq!(c.get_index(idx).map(<[u8]>::to_vec), o.get_index(idx).cloned());
+                }
+            }
+            check(&c, &o);
+        }
+    }
 
     #[test]
     fn compact_field_map_matches_indexmap_under_random_ops_ideww() {
