@@ -1,0 +1,18 @@
+==============================================================================
+SET val=      64B  fr=  4676644 op/s (   299 MB/s)  redis=  2335229 (   149 MB/s)  ratio=2.00x
+SET val=    1024B  fr=  2752858 op/s (  2819 MB/s)  redis=   885717 (   907 MB/s)  ratio=3.11x
+SET val=    4096B  fr=   782742 op/s (  3206 MB/s)  redis=   440625 (  1805 MB/s)  ratio=1.78x
+SET val=   16384B  fr=   204078 op/s (  3344 MB/s)  redis=   114851 (  1882 MB/s)  ratio=1.78x
+SET val=   65536B  fr=    44253 op/s (  2900 MB/s)  redis=    41886 (  2745 MB/s)  ratio=1.06x
+SET val=  262144B  fr=    14875 op/s (  3900 MB/s)  redis=    16198 (  4246 MB/s)  ratio=0.92x
+SET val= 1048576B  fr=     4197 op/s (  4401 MB/s)  redis=     4331 (  4542 MB/s)  ratio=0.97x
+==============================================================================
+GET val=      64B  fr=  5793569 op/s (   371 MB/s)  redis=  3748921 (   240 MB/s)  ratio=1.55x
+GET val=    1024B  fr=  2575746 op/s (  2638 MB/s)  redis=  1048498 (  1074 MB/s)  ratio=2.46x
+GET val=    4096B  fr=   666449 op/s (  2730 MB/s)  redis=   268603 (  1100 MB/s)  ratio=2.48x
+GET val=   16384B  fr=   183837 op/s (  3012 MB/s)  redis=    72641 (  1190 MB/s)  ratio=2.53x
+GET val=   65536B  fr=    46656 op/s (  3058 MB/s)  redis=    19673 (  1289 MB/s)  ratio=2.37x
+GET val=  262144B  fr=    13040 op/s (  3418 MB/s)  redis=     6210 (  1628 MB/s)  ratio=2.10x
+GET val= 1048576B  fr=     3037 op/s (  3185 MB/s)  redis=     1501 (  1574 MB/s)  ratio=2.02x
+==============================================================================
+all SET/GET sizes >= 0.9x vs redis 7.2.4
