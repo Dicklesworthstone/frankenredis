@@ -1013,6 +1013,10 @@ pub struct RdbStreamMetadata {
 pub enum RdbValue {
     String(Vec<u8>),
     List(Vec<Vec<u8>>),
+    /// Encode-only fast path for lists that already hold Redis-shaped
+    /// QUICKLIST_2 PACKED listpack nodes in memory. Decoding still returns
+    /// `List`, so load/apply paths keep a single canonical semantic shape.
+    ListQuicklist2Packed(Vec<Vec<u8>>),
     Set(Vec<Vec<u8>>),
     /// A set that is HASHTABLE-encoded (upstream `RDB_TYPE_SET`, the plain
     /// count-prefixed member list). Distinct from `Set` (which re-derives
@@ -1513,6 +1517,12 @@ fn encode_rdb_internal(
                         }
                     }
                 }
+                RdbValue::ListQuicklist2Packed(nodes) => {
+                    let payload = encode_quicklist2_packed_payload(nodes);
+                    buf.push(RDB_TYPE_LIST_QUICKLIST_2);
+                    rdb_encode_string(&mut buf, &entry.key);
+                    buf.extend_from_slice(&payload);
+                }
                 RdbValue::Set(members) => {
                     if let Some(thresholds) = options.compact.as_ref() {
                         if let Some(payload) = encode_compact_set_intset(members, thresholds) {
@@ -1833,6 +1843,28 @@ fn encode_compact_list_quicklist2(
         rdb_encode_string(&mut buf, payload);
     }
     Some(buf)
+}
+
+fn listpack_blob_header_matches(blob: &[u8]) -> bool {
+    if blob.len() < listpack::LISTPACK_HEADER_SIZE + 1
+        || blob.last() != Some(&listpack::LISTPACK_EOF)
+    {
+        return false;
+    }
+    let total = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
+    total == blob.len()
+}
+
+fn encode_quicklist2_packed_payload(nodes: &[Vec<u8>]) -> Vec<u8> {
+    debug_assert!(!nodes.is_empty());
+    debug_assert!(nodes.iter().all(|node| listpack_blob_header_matches(node)));
+    let mut buf = Vec::new();
+    rdb_encode_length(&mut buf, nodes.len());
+    for node in nodes {
+        rdb_encode_length(&mut buf, 2);
+        rdb_encode_string(&mut buf, node);
+    }
+    buf
 }
 
 struct StreamRdbValueParts<'a> {

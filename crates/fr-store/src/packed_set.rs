@@ -3189,6 +3189,16 @@ impl ListValue {
     }
 
     #[must_use]
+    pub fn quicklist_packed_node_blobs(&self, fill: i64) -> Option<Vec<Vec<u8>>> {
+        self.quicklist_packed_nodes(fill).map(|nodes| {
+            nodes
+                .into_iter()
+                .map(|node| node.bytes.into_owned())
+                .collect()
+        })
+    }
+
+    #[must_use]
     pub fn iter(&self) -> ListValueIter<'_> {
         match &self.repr {
             ListRepr::Packed(p) => ListValueIter::Packed(p.iter()),

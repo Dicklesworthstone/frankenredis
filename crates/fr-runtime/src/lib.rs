@@ -25489,6 +25489,7 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
     // Expire stale TTL keys first so they are not serialized.
     store.expire_snapshot_volatile_keys(now_ms);
 
+    let list_max_listpack_size = store.list_max_listpack_size;
     let keys = store.all_keys();
     let mut entries = Vec::with_capacity(keys.len());
     for key in keys {
@@ -25499,7 +25500,13 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
         let rdb_value = match value {
             Value::String(v) => RdbValue::String(v.to_vec()),
             Value::Integer(v) => RdbValue::String(v.to_string().into_bytes()),
-            Value::List(l) => RdbValue::List(l.iter().map(<[u8]>::to_vec).collect()),
+            Value::List(l) => {
+                if let Some(nodes) = l.quicklist_packed_node_blobs(list_max_listpack_size) {
+                    RdbValue::ListQuicklist2Packed(nodes)
+                } else {
+                    RdbValue::List(l.iter().map(<[u8]>::to_vec).collect())
+                }
+            }
             Value::Set(s) => {
                 let mut members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
                 // (frankenredis-39is8) Save by ACTUAL encoding: a hashtable set
@@ -25661,6 +25668,26 @@ fn apply_rdb_entries_to_store(
             RdbValue::List(items) => {
                 store
                     .rpush(&key, items, now_ms)
+                    .map_err(|_| PersistError::InvalidFrame)?;
+                if let Some(expires_at_ms) = entry.expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+            }
+            RdbValue::ListQuicklist2Packed(nodes) => {
+                let mut items = Vec::new();
+                for node in nodes {
+                    let spans = fr_persist::listpack::decode_value_spans(node)
+                        .map_err(|_| PersistError::InvalidFrame)?;
+                    for span in spans {
+                        items.push(span.as_bytes(node).to_vec());
+                    }
+                }
+                store
+                    .rpush(&key, &items, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(

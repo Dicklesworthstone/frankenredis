@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "command": "python3 /data/projects/.scratch/frankenredis_rdbsave_probe.py --binary target/x1mmu-pass223-baseline-local/release-perf/frankenredis --name baseline-str-100k-hf --n 100000 --shape str --iters 3 --batch 500 --port 19710",
+      "mean": 1.8156361843000002,
+      "stddev": 0.016170643292607454,
+      "median": 1.8198890214,
+      "user": 0.7031981199999999,
+      "system": 1.0556194600000002,
+      "min": 1.7880880748999999,
+      "max": 1.8388909469,
+      "times": [
+        1.8293260899000001,
+        1.7880880748999999,
+        1.8279583898999998,
+        1.7948573759,
+        1.8032800379,
+        1.8107484328999999,
+        1.8234344519,
+        1.8220297209,
+        1.8388909469,
+        1.8177483219000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
