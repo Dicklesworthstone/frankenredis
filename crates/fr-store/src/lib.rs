@@ -4,6 +4,11 @@
 // `GenericSet` stores a small set in one packed buffer, promoting to an IndexSet
 // hashtable past the threshold. SMEMBERS/SSCAN/SPOP output is unchanged.
 mod packed_set;
+// (frankenredis-uhthd, step 1) Redis-dict-class chaining hash table with native
+// reverse-binary cursor SCAN + O(1) random sampling. Not yet wired into `Store`;
+// when it replaces `entries` it deletes `ordered_keys` + `random_key_slots`.
+#[allow(dead_code)]
+mod keyspace_dict;
 use packed_set::{
     GenericSet, HashFieldMap, ListValue, PackedStreamFields, PackedZSet, PackedZSetIter,
     RestoredListNode, RetainedListpackChunk,
