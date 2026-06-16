@@ -83,6 +83,7 @@ PORT_BASED = [
     ("cmdstat_keyspace_parity_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("command_getkeys_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("ttl_semantics_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("move_swapdb_expiry_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("watch_semantics_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("multi_exec_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("validation_order_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
