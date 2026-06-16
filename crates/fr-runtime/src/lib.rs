@@ -2362,7 +2362,11 @@ impl AuthState {
                 // duplicate entry in ACL GETUSER's `passwords` list.
                 // (frankenredis-aclpassdup)
                 let hash = sha256_hex_bytes(pass.as_bytes());
-                if !user.passwords.iter().any(|p| p.as_slice() == hash.as_slice()) {
+                if !user
+                    .passwords
+                    .iter()
+                    .any(|p| p.as_slice() == hash.as_slice())
+                {
                     user.passwords.push(hash);
                 }
                 user.nopass = false; // adding a password disables nopass
@@ -2378,7 +2382,11 @@ impl AuthState {
                 if let Some(hash_hex) = normalize_acl_hash(hash) {
                     // Dedup like the `>` form above (acl.c listSearchKey gate).
                     // (frankenredis-aclpassdup)
-                    if !user.passwords.iter().any(|p| p.as_slice() == hash_hex.as_slice()) {
+                    if !user
+                        .passwords
+                        .iter()
+                        .any(|p| p.as_slice() == hash_hex.as_slice())
+                    {
                         user.passwords.push(hash_hex);
                     }
                     user.nopass = false;
@@ -44255,7 +44263,9 @@ mod tests {
             ),
             RespFrame::SimpleString("OK".to_string())
         );
-        let bytes = rt.execute_frame(command(&[b"ACL", b"GETUSER", b"dup"]), 1).to_bytes();
+        let bytes = rt
+            .execute_frame(command(&[b"ACL", b"GETUSER", b"dup"]), 1)
+            .to_bytes();
         let count = |needle: &[u8]| bytes.windows(needle.len()).filter(|w| *w == needle).count();
         let h1 = sha256_hex_bytes(b"p1");
         let h2 = sha256_hex_bytes(b"p2");
@@ -44270,9 +44280,17 @@ mod tests {
             command(&[b"ACL", b"SETUSER", b"d2", format!("#{h1_hex}").as_bytes()]),
             1,
         );
-        let bytes2 = rt2.execute_frame(command(&[b"ACL", b"GETUSER", b"d2"]), 2).to_bytes();
-        let count2 = bytes2.windows(h1.len()).filter(|w| *w == h1.as_slice()).count();
-        assert_eq!(count2, 1, "#<hash> matching an existing password must not duplicate");
+        let bytes2 = rt2
+            .execute_frame(command(&[b"ACL", b"GETUSER", b"d2"]), 2)
+            .to_bytes();
+        let count2 = bytes2
+            .windows(h1.len())
+            .filter(|w| *w == h1.as_slice())
+            .count();
+        assert_eq!(
+            count2, 1,
+            "#<hash> matching an existing password must not duplicate"
+        );
     }
 
     #[test]

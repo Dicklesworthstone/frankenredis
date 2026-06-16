@@ -324,7 +324,10 @@ mod tests {
     struct Lcg(u64);
     impl Lcg {
         fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             self.0
         }
     }
@@ -363,7 +366,11 @@ mod tests {
         assert_eq!(d.len(), n as usize);
         assert!(d.bucket_count() >= n as usize); // grew past load factor 1
         for i in 0..n {
-            assert_eq!(d.get(format!("key:{i:08}").as_bytes()), Some(&i), "lost key {i}");
+            assert_eq!(
+                d.get(format!("key:{i:08}").as_bytes()),
+                Some(&i),
+                "lost key {i}"
+            );
         }
         // Remove a scattered third; the rest must survive.
         for i in (0..n).step_by(3) {
@@ -371,7 +378,11 @@ mod tests {
         }
         for i in 0..n {
             let want = if i % 3 == 0 { None } else { Some(&i) };
-            assert_eq!(d.get(format!("key:{i:08}").as_bytes()), want, "key {i} after churn");
+            assert_eq!(
+                d.get(format!("key:{i:08}").as_bytes()),
+                want,
+                "key {i} after churn"
+            );
         }
     }
 
@@ -408,8 +419,9 @@ mod tests {
             d.insert(format!("base{i}").into_bytes().into_boxed_slice(), i);
         }
         // "stable" = keys present at scan start; we remove from it on deletion.
-        let mut stable: std::collections::HashSet<Vec<u8>> =
-            (0..2000u32).map(|i| format!("base{i}").into_bytes()).collect();
+        let mut stable: std::collections::HashSet<Vec<u8>> = (0..2000u32)
+            .map(|i| format!("base{i}").into_bytes())
+            .collect();
         let mut returned: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
         let mut rng = Lcg(0x1234_5678_9abc_def0);
         let mut next_new = 0u32;
@@ -466,7 +478,10 @@ mod tests {
         let mut empty: KeyDict<u32> = KeyDict::new();
         assert!(empty.random_sample(|| 0).is_none());
         empty.insert(k("only"), 1);
-        assert_eq!(empty.random_sample(|| 0).map(|(key, _)| key.to_vec()), Some(b"only".to_vec()));
+        assert_eq!(
+            empty.random_sample(|| 0).map(|(key, _)| key.to_vec()),
+            Some(b"only".to_vec())
+        );
     }
 
     #[test]

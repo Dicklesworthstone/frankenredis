@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "python3 /data/projects/.scratch/frankenredis_uhthd_keyspace_probe.py load-only --kind fr --binary /data/projects/.scratch/frankenredis-uhthd-baseline-20260616-160646/target/uhthd-baseline-local/release-perf/frankenredis --name baseline-head --nkeys 1000000",
+      "mean": 3.5786387810599996,
+      "stddev": 0.49122861338551693,
+      "median": 3.29864376106,
+      "user": 3.32784038,
+      "system": 0.28897589999999995,
+      "min": 3.27744712606,
+      "max": 4.420885796059999,
+      "times": [
+        4.420885796059999,
+        3.27744712606,
+        3.29864376106,
+        3.6103619520600003,
+        3.2858552700600003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 /data/projects/.scratch/frankenredis_uhthd_keyspace_probe.py load-only --kind fr --binary target/uhthd-candidate-local/release-perf/frankenredis --name candidate-ms32 --nkeys 1000000",
+      "mean": 3.25116669486,
+      "stddev": 0.1156299244338074,
+      "median": 3.20203843506,
+      "user": 3.09721138,
+      "system": 0.2833251,
+      "min": 3.16135746406,
+      "max": 3.45052882906,
+      "times": [
+        3.19420549906,
+        3.24770324706,
+        3.20203843506,
+        3.16135746406,
+        3.45052882906
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

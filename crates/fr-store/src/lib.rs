@@ -3191,10 +3191,10 @@ struct Entry {
     /// non-zero invariant never excludes a real deadline. Shaves 8B off EVERY
     /// keyspace `Entry`. Read via `expiry_ms()`. (frankenredis-w2t01)
     expires_at_ms: Option<std::num::NonZeroU64>,
-    /// Last access timestamp in whole seconds (for OBJECT IDLETIME / LRU).
-    /// Redis stores LRU access time at second granularity, so keeping the same
-    /// clock here preserves the observable surface while avoiding a per-key u64.
-    last_access_s: u32,
+    /// Last access timestamp in milliseconds, stored in the low 32 bits.
+    /// This keeps OBJECT IDLETIME's elapsed-second floor behavior while avoiding
+    /// a per-key u64 for the hot keyspace entry.
+    last_access_ms: u32,
     /// LFU access frequency counter exposed via OBJECT FREQ when LFU eviction is active.
     lfu_freq: u8,
     /// Last LFU access/decrement timestamp in whole minutes.
@@ -3270,8 +3270,8 @@ struct ZIntercardCache {
 const LFU_INIT_VAL: u8 = 5;
 
 #[inline]
-fn lru_access_seconds(now_ms: u64) -> u32 {
-    u32::try_from(now_ms / 1000).unwrap_or(u32::MAX)
+fn lru_access_millis(now_ms: u64) -> u32 {
+    now_ms as u32
 }
 
 impl Entry {
@@ -3293,7 +3293,7 @@ impl Entry {
         Self {
             value,
             expires_at_ms: expires_at_ms.and_then(std::num::NonZeroU64::new),
-            last_access_s: lru_access_seconds(now_ms),
+            last_access_ms: lru_access_millis(now_ms),
             lfu_freq: LFU_INIT_VAL,
             lfu_last_touch_min: now_ms / 60_000,
             // Assigned at the `internal_entries_insert` choke point once the key
@@ -3314,7 +3314,7 @@ impl Entry {
         if touch_disabled() {
             return;
         }
-        self.last_access_s = lru_access_seconds(now_ms);
+        self.last_access_ms = lru_access_millis(now_ms);
     }
 
     fn current_lfu_freq(&self, now_ms: u64, decay_time: u64) -> u8 {
@@ -3376,7 +3376,7 @@ impl Entry {
     }
 
     fn refresh_db_add_metadata(&mut self, now_ms: u64) {
-        self.last_access_s = lru_access_seconds(now_ms);
+        self.last_access_ms = lru_access_millis(now_ms);
         self.lfu_freq = LFU_INIT_VAL;
         self.lfu_last_touch_min = now_ms / 60_000;
     }
@@ -6071,7 +6071,7 @@ impl Store {
             };
             entry.value = canonical_string_value_from_slice(value);
             entry.set_expiry_ms(None);
-            entry.last_access_s = lru_access_seconds(now_ms);
+            entry.last_access_ms = lru_access_millis(now_ms);
             entry.lfu_freq = next_lfu_freq;
             entry.lfu_last_touch_min = now_ms / 60_000;
             entry.modification_count = entry.modification_count.wrapping_add(1);
@@ -6136,7 +6136,7 @@ impl Store {
             };
             entry.value = canonical_string_value(value);
             entry.set_expiry_ms(None);
-            entry.last_access_s = lru_access_seconds(now_ms);
+            entry.last_access_ms = lru_access_millis(now_ms);
             entry.lfu_freq = next_lfu_freq;
             entry.lfu_last_touch_min = now_ms / 60_000;
             entry.modification_count = entry.modification_count.wrapping_add(1);
@@ -7094,7 +7094,7 @@ impl Store {
             if grew {
                 bytes.resize(needed_bytes, 0);
             }
-            entry.last_access_s = lru_access_seconds(now_ms);
+            entry.last_access_ms = lru_access_millis(now_ms);
             entry.lfu_freq = LFU_INIT_VAL;
             entry.lfu_last_touch_min = now_ms / 60_000;
             entry.modification_count = entry.modification_count.wrapping_add(1);
@@ -7150,7 +7150,7 @@ impl Store {
                 || old_value != bitfield_read(bytes, bit_offset, bits, false);
 
             let had_expiry = entry.expires_at_ms.is_some();
-            entry.last_access_s = lru_access_seconds(now_ms);
+            entry.last_access_ms = lru_access_millis(now_ms);
             entry.lfu_freq = LFU_INIT_VAL;
             entry.lfu_last_touch_min = now_ms / 60_000;
             entry.modification_count = entry.modification_count.wrapping_add(1);
@@ -7787,9 +7787,9 @@ impl Store {
         if !self.drop_if_expired(key, now_ms) {
             return None;
         }
-        self.entries
-            .get(key)
-            .map(|entry| u64::from(lru_access_seconds(now_ms).saturating_sub(entry.last_access_s)))
+        self.entries.get(key).map(|entry| {
+            u64::from(lru_access_millis(now_ms).wrapping_sub(entry.last_access_ms)) / 1000
+        })
     }
 
     /// Return the per-object LRU clock value used by upstream's DEBUG OBJECT
@@ -7797,14 +7797,14 @@ impl Store {
     /// the object's lruclock was last refreshed:
     ///   getLRUClock() == (mstime() / LRU_CLOCK_RESOLUTION) & LRU_CLOCK_MAX
     /// where LRU_CLOCK_RESOLUTION = 1000ms and LRU_CLOCK_MAX = (1<<24)-1.
-    /// fr derives the clock from the entry's last_access_s, which under
+    /// fr derives the clock from the entry's last_access_ms, which under
     /// the default noeviction policy carries the creation/last-access
     /// timestamp — matching what `DEBUG OBJECT lru:<n>` should report.
     /// (frankenredis-debugobjlru)
     pub fn object_lru_clock(&self, key: &[u8]) -> Option<u32> {
         self.entries.get(key).map(|entry| {
-            const LRU_CLOCK_MAX: u32 = (1 << 24) - 1;
-            entry.last_access_s & LRU_CLOCK_MAX
+            const LRU_CLOCK_MAX: u64 = (1 << 24) - 1;
+            ((u64::from(entry.last_access_ms) / 1000) & LRU_CLOCK_MAX) as u32
         })
     }
 
@@ -8316,10 +8316,10 @@ impl Store {
         keys.swap_remove(slot);
         // swap_remove dropped the last element into `slot` (unless `slot` *was*
         // the last). Point that moved key's back-index at its new position.
-        if let Some(moved) = keys.get(slot).cloned() {
-            if let Some(entry) = self.entries.get_mut(moved.as_ref()) {
-                entry.random_slot = slot as u32;
-            }
+        if let Some(moved) = keys.get(slot).cloned()
+            && let Some(entry) = self.entries.get_mut(moved.as_ref())
+        {
+            entry.random_slot = slot as u32;
         }
     }
 
@@ -9311,7 +9311,7 @@ impl Store {
     /// the final `HashFieldMap` is the same (per-field `insert` in order), the
     /// one-way `force_hash_hashtable_encoding` flag is a function of the final
     /// size so refreshing once at the end matches refreshing per insert, `dirty`
-    /// and `modification_count` advance by `fields.len()`, and `last_access_s`
+    /// and `modification_count` advance by `fields.len()`, and `last_access_ms`
     /// is set to `now_ms`. Under an LFU policy each field's `bump_lfu_freq` +
     /// `next_rand()` advance is observable (OBJECT FREQ / PRNG state), so that
     /// case delegates to per-field `hset` to preserve the exact sequence.
@@ -19052,11 +19052,11 @@ impl Store {
             let Some(entry) = self.entries.get(key.as_slice()) else {
                 continue;
             };
-            if entry.last_access_s < best_access
-                || (entry.last_access_s == best_access
+            if entry.last_access_ms < best_access
+                || (entry.last_access_ms == best_access
                     && best_key.as_ref().is_none_or(|best| key < best))
             {
-                best_access = entry.last_access_s;
+                best_access = entry.last_access_ms;
                 best_key = Some(key.clone());
             }
         }
@@ -19077,13 +19077,13 @@ impl Store {
             };
             let freq = entry.current_lfu_freq(now_ms, self.lfu_decay_time);
             if freq < best_freq
-                || (freq == best_freq && entry.last_access_s < best_access)
+                || (freq == best_freq && entry.last_access_ms < best_access)
                 || (freq == best_freq
-                    && entry.last_access_s == best_access
+                    && entry.last_access_ms == best_access
                     && best_key.as_ref().is_none_or(|best| key < best))
             {
                 best_freq = freq;
-                best_access = entry.last_access_s;
+                best_access = entry.last_access_ms;
                 best_key = Some(key.clone());
             }
         }
@@ -25610,8 +25610,8 @@ mod tests {
                 .entries
                 .get(b"k".as_ref())
                 .expect("exists entry")
-                .last_access_s,
-            0
+                .last_access_ms,
+            100
         );
 
         assert!(!store.exists_no_touch(b"missing", 200));
@@ -25636,8 +25636,8 @@ mod tests {
                 .entries
                 .get(b"k".as_ref())
                 .expect("entry remains")
-                .last_access_s,
-            0
+                .last_access_ms,
+            200
         );
 
         let missing = store
@@ -25659,8 +25659,8 @@ mod tests {
                 .entries
                 .get(b"list".as_ref())
                 .expect("list entry remains")
-                .last_access_s,
-            0
+                .last_access_ms,
+            400
         );
     }
 
@@ -25678,16 +25678,16 @@ mod tests {
                 .entries
                 .get(b"list".as_ref())
                 .expect("list entry")
-                .last_access_s,
-            0
+                .last_access_ms,
+            10
         );
         assert_eq!(
             store
                 .entries
                 .get(b"set".as_ref())
                 .expect("set entry")
-                .last_access_s,
-            0
+                .last_access_ms,
+            10
         );
 
         let touched = store.touch(&[b"list", b"missing"], 100);
@@ -25697,8 +25697,8 @@ mod tests {
                 .entries
                 .get(b"list".as_ref())
                 .expect("list entry")
-                .last_access_s,
-            0
+                .last_access_ms,
+            100
         );
         assert_eq!(store.stat_keyspace_hits, 1);
         assert_eq!(store.stat_keyspace_misses, 1);
@@ -25710,8 +25710,8 @@ mod tests {
                 .entries
                 .get(b"set".as_ref())
                 .expect("set entry")
-                .last_access_s,
-            0
+                .last_access_ms,
+            200
         );
         assert_eq!(store.stat_keyspace_hits, 2);
         assert_eq!(store.stat_keyspace_misses, 1);
@@ -25925,7 +25925,7 @@ mod tests {
             let _ = store.state_digest();
             let modification_count = {
                 let entry = store.entries.get_mut(b"n".as_slice()).expect("seeded key");
-                entry.last_access_s = 1;
+                entry.last_access_ms = 1_000;
                 entry.lfu_freq = 200;
                 entry.lfu_last_touch_min = 55;
                 entry.modification_count = 41;
@@ -25992,7 +25992,7 @@ mod tests {
         let _ = store.state_digest();
         let modification_count = {
             let entry = store.entries.get_mut(b"n".as_slice()).expect("seeded key");
-            entry.last_access_s = 1;
+            entry.last_access_ms = 1_000;
             entry.lfu_freq = 200;
             entry.lfu_last_touch_min = 55;
             entry.modification_count = 41;
@@ -26060,8 +26060,8 @@ mod tests {
                 .entries
                 .get(b"k".as_ref())
                 .expect("pttl entry")
-                .last_access_s,
-            1
+                .last_access_ms,
+            1_000
         );
     }
 
@@ -28064,8 +28064,8 @@ mod tests {
                 .entries
                 .get(b"k".as_ref())
                 .expect("type entry")
-                .last_access_s,
-            0
+                .last_access_ms,
+            100
         );
 
         assert_eq!(store.object_encoding(b"k", 250), Some("embstr"));
@@ -28075,8 +28075,8 @@ mod tests {
                 .entries
                 .get(b"k".as_ref())
                 .expect("encoding entry")
-                .last_access_s,
-            0
+                .last_access_ms,
+            100
         );
 
         assert_eq!(store.key_type(b"missing", 300), None);
@@ -28103,8 +28103,8 @@ mod tests {
                 .entries
                 .get(b"k".as_ref())
                 .expect("idletime entry")
-                .last_access_s,
-            0
+                .last_access_ms,
+            100
         );
 
         assert_eq!(store.object_idletime(b"missing", 2_100), None);
@@ -28243,14 +28243,14 @@ mod tests {
             .get_mut(b"old-hot".as_slice())
             .expect("hot entry");
         hot.lfu_freq = 200;
-        hot.last_access_s = 0;
+        hot.last_access_ms = 0;
 
         let cold = store
             .entries
             .get_mut(b"new-cold".as_slice())
             .expect("cold entry");
         cold.lfu_freq = 5;
-        cold.last_access_s = 10;
+        cold.last_access_ms = 10_000;
 
         assert_eq!(
             store.select_eviction_candidate(10_000, 16),
@@ -28277,21 +28277,21 @@ mod tests {
             .get_mut(b"persistent-rare".as_slice())
             .expect("persistent entry");
         persistent.lfu_freq = 1;
-        persistent.last_access_s = 0;
+        persistent.last_access_ms = 0;
 
         let hot = store
             .entries
             .get_mut(b"volatile-hot".as_slice())
             .expect("volatile hot entry");
         hot.lfu_freq = 100;
-        hot.last_access_s = 0;
+        hot.last_access_ms = 0;
 
         let cold = store
             .entries
             .get_mut(b"volatile-cold".as_slice())
             .expect("volatile cold entry");
         cold.lfu_freq = 4;
-        cold.last_access_s = 10;
+        cold.last_access_ms = 10_000;
 
         assert_eq!(
             store.select_eviction_candidate(10_000, 16),
@@ -35149,7 +35149,9 @@ mod tests {
         // (frankenredis-qxfmrstream) The bulk RDB stream loader must leave the
         // exact same observable state as seeding the same entries one at a time
         // with xadd (entries + order + length + high watermark + entries-added).
-        let entries: Vec<((u64, u64), Vec<(Vec<u8>, Vec<u8>)>)> = (1..=60u64)
+        type StreamEntrySeed = ((u64, u64), Vec<(Vec<u8>, Vec<u8>)>);
+
+        let entries: Vec<StreamEntrySeed> = (1..=60u64)
             .map(|i| {
                 let mut binval = format!("v{i}").into_bytes();
                 binval.push(0xff);
@@ -35172,9 +35174,14 @@ mod tests {
         bulk_store.load_stream_entries(b"s", entries.clone(), 0);
 
         let full = |st: &mut Store| {
-            st.xrange(b"s", (0, 0), (u64::MAX, u64::MAX), None, 0).unwrap()
+            st.xrange(b"s", (0, 0), (u64::MAX, u64::MAX), None, 0)
+                .unwrap()
         };
-        assert_eq!(full(&mut loop_store), full(&mut bulk_store), "entries differ");
+        assert_eq!(
+            full(&mut loop_store),
+            full(&mut bulk_store),
+            "entries differ"
+        );
         assert_eq!(
             loop_store.xlen(b"s", 0).unwrap(),
             bulk_store.xlen(b"s", 0).unwrap()

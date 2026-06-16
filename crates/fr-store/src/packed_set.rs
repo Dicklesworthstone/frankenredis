@@ -739,10 +739,8 @@ impl CompactFieldMap {
     }
 
     fn hash(&self, field: &[u8]) -> u64 {
-        use std::hash::{BuildHasher, Hash, Hasher};
-        let mut h = self.state.build_hasher();
-        field.hash(&mut h);
-        h.finish()
+        use std::hash::BuildHasher;
+        self.state.hash_one(field)
     }
 
     fn entry_size(&self, off: u32) -> usize {
@@ -783,10 +781,8 @@ impl CompactFieldMap {
             let (fr, _) = cfm_decode(&self.buf, off);
             // Re-hash from the field bytes already in `buf`.
             let h = {
-                use std::hash::{BuildHasher, Hash, Hasher};
-                let mut hh = self.state.build_hasher();
-                self.buf[fr].hash(&mut hh);
-                hh.finish()
+                use std::hash::BuildHasher;
+                self.state.hash_one(&self.buf[fr])
             };
             let mut slot = (h as usize) & mask;
             while slots[slot] != CFM_EMPTY {
@@ -874,10 +870,7 @@ impl CompactFieldMap {
 
     #[must_use]
     pub(crate) fn iter(&self) -> CompactFieldMapIter<'_> {
-        CompactFieldMapIter {
-            map: self,
-            pos: 0,
-        }
+        CompactFieldMapIter { map: self, pos: 0 }
     }
 
     /// Set the slot holding `field` to TOMBSTONE. (Field must be present.)
@@ -1290,7 +1283,7 @@ impl<'a> FieldsRef<'a> {
 
     /// Materialize to owned (field, value) pairs.
     #[must_use]
-    pub fn to_pairs(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+    pub fn to_pairs(self) -> Vec<(Vec<u8>, Vec<u8>)> {
         self.iter().map(|(f, v)| (f.to_vec(), v.to_vec())).collect()
     }
 }
@@ -3266,12 +3259,16 @@ mod tests {
             assert_eq!(packed.len(), pairs.len());
             assert_eq!(packed.is_empty(), pairs.is_empty());
             assert_eq!(packed.to_pairs(), pairs, "to_pairs round-trip");
-            let iter: Vec<(Vec<u8>, Vec<u8>)> =
-                packed.iter().map(|(f, v)| (f.to_vec(), v.to_vec())).collect();
+            let iter: Vec<(Vec<u8>, Vec<u8>)> = packed
+                .iter()
+                .map(|(f, v)| (f.to_vec(), v.to_vec()))
+                .collect();
             assert_eq!(iter, pairs, "iter order/content");
             // Rebuilding from a borrowed-pair slice matches.
-            let refs: Vec<(&[u8], &[u8])> =
-                pairs.iter().map(|(f, v)| (f.as_slice(), v.as_slice())).collect();
+            let refs: Vec<(&[u8], &[u8])> = pairs
+                .iter()
+                .map(|(f, v)| (f.as_slice(), v.as_slice()))
+                .collect();
             assert_eq!(PackedStreamFields::from_pairs(&refs), packed);
         }
     }
@@ -3296,7 +3293,10 @@ mod tests {
         for i in 0..1000u64 {
             let id = (i, 0);
             let pairs = mk(i);
-            assert_eq!(log.insert(id, &pairs), oracle.insert(id, pairs.clone()).is_some());
+            assert_eq!(
+                log.insert(id, &pairs),
+                oracle.insert(id, pairs.clone()).is_some()
+            );
         }
         // Overwrite a few ids (XSETID/replace semantics).
         for i in [10u64, 500, 999] {
@@ -3338,17 +3338,22 @@ mod tests {
         let lo = (300, 0);
         let hi = (700, 0);
         let log_range: Vec<(u64, u64)> = log.range(lo..=hi).map(|(id, _)| *id).collect();
-        let oracle_range: Vec<(u64, u64)> =
-            oracle.range(lo..=hi).map(|(id, _)| *id).collect();
+        let oracle_range: Vec<(u64, u64)> = oracle.range(lo..=hi).map(|(id, _)| *id).collect();
         assert_eq!(log_range, oracle_range, "inclusive range");
         let log_rev: Vec<(u64, u64)> = log.range(lo..=hi).rev().map(|(id, _)| *id).collect();
         let mut oracle_rev = oracle_range.clone();
         oracle_rev.reverse();
         assert_eq!(log_rev, oracle_rev, "reversed range (XREVRANGE)");
         // Arena did not leak unbounded dead bytes after all the churn.
-        assert!(log.arena.len() <= (log.dead + oracle_iter.iter().map(|(_, p)| {
-            PackedStreamFields::from_pairs(p).buf.len()
-        }).sum::<usize>()) + 1);
+        assert!(
+            log.arena.len()
+                <= (log.dead
+                    + oracle_iter
+                        .iter()
+                        .map(|(_, p)| { PackedStreamFields::from_pairs(p).buf.len() })
+                        .sum::<usize>())
+                    + 1
+        );
     }
 
     use indexmap::{IndexMap, IndexSet};
@@ -3404,7 +3409,10 @@ mod tests {
                 }
                 _ => {
                     let idx = (next() as usize) % (o.len() + 1);
-                    assert_eq!(c.get_index(idx).map(<[u8]>::to_vec), o.get_index(idx).cloned());
+                    assert_eq!(
+                        c.get_index(idx).map(<[u8]>::to_vec),
+                        o.get_index(idx).cloned()
+                    );
                 }
             }
             check(&c, &o);
@@ -3468,7 +3476,7 @@ mod tests {
             }
             check(&c, &o);
         }
-        assert!(c.len() > 0, "expected a non-trivial residual map");
+        assert!(!c.is_empty(), "expected a non-trivial residual map");
     }
 
     #[test]
