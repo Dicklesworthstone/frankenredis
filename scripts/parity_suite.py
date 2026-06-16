@@ -73,6 +73,7 @@ SELF_ORCH = [
     ("aof_cross_compat_gate.py", [REDIS_BIN, FR_BIN, "29971"]),
     ("replication_cross_compat_gate.py", [REDIS_BIN, FR_BIN, "29981"]),
 ]
+# Gates invoked positionally: <oracle_port> <fr_port>
 PORT_BASED = [
     ("dump_byte_equality_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("introspection_semantics_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
@@ -80,6 +81,17 @@ PORT_BASED = [
     ("keyspace_accounting_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("cmdstat_keyspace_parity_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("command_getkeys_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("ttl_semantics_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("watch_semantics_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("multi_exec_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("validation_order_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+]
+
+# Older differs use argparse flags: --oracle <port> --fr <port>
+ARGPARSE_BASED = [
+    "float_format_differ.py", "zset_differ.py", "hash_differ.py", "set_differ.py",
+    "list_differ.py", "geo_differ.py", "arity_error_differ.py", "bitmap_differ.py",
+    "sort_differ.py", "scan_differ.py",
 ]
 
 
@@ -113,6 +125,14 @@ def main():
                 results.append((name, False, "fr/redis pair did not start"))
                 continue
             ok, tail = run_gate(name, argv)
+            results.append((name, ok, tail))
+        for name in ARGPARSE_BASED:
+            if not os.path.exists(os.path.join(HERE, name)):
+                continue
+            if not pair_ok:
+                results.append((name, False, "fr/redis pair did not start"))
+                continue
+            ok, tail = run_gate(name, ["--oracle", str(ORACLE_PORT), "--fr", str(FR_PORT)])
             results.append((name, ok, tail))
     finally:
         for p in procs:
