@@ -96,6 +96,18 @@ PORT_BASED = [
     # zset total-order under heavy equal-score ties + binary members — guards the
     # FullSortedSet member-storage/index rewrites (peni2 Arc sharing, uybhq follow-up).
     ("zset_tiebreak_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    # grouped stream index (rax-of-listpacks, p8wd1 74a926418): node-boundary
+    # reads + RDB round-trip.
+    ("stream_node_grouping_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    # sealed quicklist chunks (Owned->Listpack, 99fwc 8c2421045): sealed reads +
+    # LSET/LINSERT/LREM re-materialization + DUMP->RESTORE cross-impl.
+    ("list_chunk_seal_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    # OBJECT ENCODING + content survive an RDB round-trip across every type's
+    # encoding boundary — guards the RAM-compaction save/load paths (61e3p class).
+    ("encoding_reload_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    # RESP3 (HELLO 3) reply-TYPE markers (maps/sets/doubles/nulls) across the
+    # collection + introspection commands that change shape under RESP3.
+    ("resp3_reply_type_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
 ]
 
 # Older differs use argparse flags: --oracle <port> --fr <port>
