@@ -3184,6 +3184,18 @@ struct Entry {
     lfu_freq: u8,
     /// Last LFU access/decrement timestamp in whole minutes.
     lfu_last_touch_min: u64,
+    /// Index of this key inside its db's `random_key_slots` Vec — the RANDOMKEY
+    /// sampling back-index. Replaces the separate `random_key_positions`
+    /// HashMap<Arc<[u8]>, (db, slot)>, which kept a full second copy of every
+    /// key plus its own (2x-over-allocated) table — ~66 bytes/key purely to find
+    /// a key's slot for O(1) swap-remove. A single `u32` on the entry does the
+    /// same job; the db is recovered from the key's db-encoded prefix on removal,
+    /// so only the in-Vec slot needs storing. Maintained exclusively at the
+    /// `internal_entries_insert`/`_remove` choke points; RANDOMKEY/DEL/SCAN
+    /// behaviour is byte-identical. (A follow-up can shrink `lfu_last_touch_min`
+    /// to `u32` so this `u32` rides in the existing alignment slot for free — see
+    /// bead frankenredis-uhthd.) (frankenredis-uhthd)
+    random_slot: u32,
     /// Monotonic modification counter (bumped on every write, used by WATCH).
     modification_count: u64,
     /// Upstream Redis 7.2 promotes a String value's encoding from
@@ -3264,6 +3276,9 @@ impl Entry {
             last_access_ms: now_ms,
             lfu_freq: LFU_INIT_VAL,
             lfu_last_touch_min: now_ms / 60_000,
+            // Assigned at the `internal_entries_insert` choke point once the key
+            // is placed in its db's `random_key_slots` Vec. (frankenredis-uhthd)
+            random_slot: 0,
             modification_count: 0,
             force_raw_encoding: false,
             force_string_encoding: false,
@@ -4308,14 +4323,15 @@ pub struct Store {
     /// Physical keys by DB for O(1) RANDOMKEY sampling. `ordered_keys` remains
     /// the deterministic SCAN/KEYS surface; these slots are intentionally
     /// unordered because RANDOMKEY has no ordering contract. (frankenredis-srhju)
-    // (frankenredis-x4tgs) The RANDOMKEY index stored each key's bytes TWICE
-    // (once in the per-db slot Vec, once as the position-map key). Share a single
-    // `Arc<[u8]>` allocation between the two so a key insert allocates the key
-    // bytes once (then refcount-bumps) instead of twice — one of the duplicate
-    // keyspace key copies eliminated. Borrow<[u8]> keeps &[u8] lookups working.
+    // (frankenredis-x4tgs) Shares one `Arc<[u8]>` per key with `entries` /
+    // `ordered_keys` (refcount clones, no byte copies).
+    // (frankenredis-uhthd) The companion `random_key_positions` HashMap<Arc,
+    // (db, slot)> — a full second over-allocated table copying every key (~66
+    // bytes/key) purely to find a key's slot for O(1) swap-remove — is gone. Its
+    // job (the slot index) now rides in `Entry.random_slot`, and the db is
+    // recovered from the key's db-encoded prefix, so removal stays O(1) with
+    // zero extra keyspace table.
     random_key_slots: Vec<Vec<std::sync::Arc<[u8]>>>,
-    random_key_positions:
-        HashMap<std::sync::Arc<[u8]>, (usize, usize), foldhash::quality::RandomState>,
     /// Db-encoded keys that currently carry a TTL (a subset of `ordered_keys`).
     /// The active-expire cycle samples from this set instead of every key, so
     /// it finds expirable keys as efficiently as upstream's `activeExpireCycle`
@@ -4812,7 +4828,6 @@ impl Default for Store {
             scan_cache: Vec::new(),
             db_scan_cache: Vec::new(),
             random_key_slots: vec![Vec::new(); DEFAULT_NUM_DATABASES],
-            random_key_positions: HashMap::default(),
             volatile_keys: BTreeSet::new(),
             volatile_keys_dirty: false,
             expiry_deadline_counts: BTreeMap::new(),
@@ -6099,7 +6114,7 @@ impl Store {
             } else {
                 0
             };
-            entry.value = canonical_string_value(value);
+            let replaced_value = std::mem::replace(&mut entry.value, canonical_string_value(value));
             entry.set_expiry_ms(None);
             entry.last_access_ms = now_ms;
             entry.lfu_freq = next_lfu_freq;
@@ -8239,28 +8254,40 @@ impl Store {
         })
     }
 
-    fn random_key_index_insert(&mut self, db: usize, key: std::sync::Arc<[u8]>) {
+    /// Append `key` to its db's RANDOMKEY sampling Vec and return the slot
+    /// index, which the caller records in the key's `Entry.random_slot` (the
+    /// back-index that replaces the former `random_key_positions` map). Returns
+    /// `u32::MAX` when the key is not indexed (db out of range or slot beyond
+    /// `u32`), which `random_key_index_remove` treats as a no-op. The sole
+    /// caller (`internal_entries_insert`) only invokes this for a genuinely new
+    /// key, so the former `contains_key` dedup guard is unnecessary.
+    /// (frankenredis-uhthd)
+    fn random_key_index_insert(&mut self, db: usize, key: std::sync::Arc<[u8]>) -> u32 {
         if db >= self.database_count {
-            return;
+            return u32::MAX;
         }
         if db >= self.random_key_slots.len() {
             self.random_key_slots.resize_with(db + 1, Vec::new);
         }
-        if self.random_key_positions.contains_key(key.as_ref()) {
-            return;
-        }
         let Some(keys) = self.random_key_slots.get_mut(db) else {
-            return;
+            return u32::MAX;
         };
         let slot = keys.len();
-        keys.push(std::sync::Arc::clone(&key));
-        self.random_key_positions.insert(key, (db, slot));
+        keys.push(key);
+        u32::try_from(slot).unwrap_or(u32::MAX)
     }
 
-    fn random_key_index_remove(&mut self, key: &[u8]) {
-        let Some((db, slot)) = self.random_key_positions.remove(key) else {
+    /// Remove the key at `slot` from db `db`'s RANDOMKEY Vec via swap-remove,
+    /// fixing up the back-index (`Entry.random_slot`) of whichever key was
+    /// swapped into the freed hole. `slot == u32::MAX` (an un-indexed key) is a
+    /// no-op. The `(db, slot)` pair comes from the removed entry's
+    /// `random_slot` + its db-encoded key, replacing the former
+    /// `random_key_positions` lookup. (frankenredis-uhthd)
+    fn random_key_index_remove(&mut self, db: usize, slot: u32) {
+        if slot == u32::MAX {
             return;
-        };
+        }
+        let slot = slot as usize;
         let Some(keys) = self.random_key_slots.get_mut(db) else {
             return;
         };
@@ -8268,8 +8295,12 @@ impl Store {
             return;
         }
         keys.swap_remove(slot);
-        if let Some(moved) = keys.get(slot) {
-            self.random_key_positions.insert(moved.clone(), (db, slot));
+        // swap_remove dropped the last element into `slot` (unless `slot` *was*
+        // the last). Point that moved key's back-index at its new position.
+        if let Some(moved) = keys.get(slot).cloned() {
+            if let Some(entry) = self.entries.get_mut(moved.as_ref()) {
+                entry.random_slot = slot as u32;
+            }
         }
     }
 
@@ -8393,7 +8424,9 @@ impl Store {
         let shared: Option<std::sync::Arc<[u8]>> = if is_new_key {
             let shared: std::sync::Arc<[u8]> = std::sync::Arc::from(key.as_slice());
             self.ordered_keys.insert(std::sync::Arc::clone(&shared));
-            self.random_key_index_insert(db, std::sync::Arc::clone(&shared));
+            // (frankenredis-uhthd) Record the RANDOMKEY slot directly in the
+            // Entry (the back-index that replaced `random_key_positions`).
+            entry.random_slot = self.random_key_index_insert(db, std::sync::Arc::clone(&shared));
             // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
             // resume points.
             self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
@@ -8416,10 +8449,14 @@ impl Store {
             Some(shared) => self.entries.insert(shared, entry),
             // Overwrite: replace the value in place, reusing the existing Arc key
             // (no new key allocation on the hot SET-existing path).
-            None => self
-                .entries
-                .get_mut(key.as_slice())
-                .map(|slot| std::mem::replace(slot, entry)),
+            None => self.entries.get_mut(key.as_slice()).map(|slot| {
+                // (frankenredis-uhthd) The key stays in the same RANDOMKEY slot
+                // across an in-place overwrite, so carry the existing back-index
+                // onto the replacement Entry (which was built with `random_slot:
+                // 0`) instead of corrupting it.
+                entry.random_slot = slot.random_slot;
+                std::mem::replace(slot, entry)
+            }),
         };
         self.update_expiry_deadline(old_expiry, new_expiry);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
@@ -8450,13 +8487,17 @@ impl Store {
             self.hll_register_cache.remove(key);
             self.mem_estimate_cache.borrow_mut().remove(key);
             self.ordered_keys.remove(key);
-            self.random_key_index_remove(key);
+            // (frankenredis-uhthd) The RANDOMKEY back-index lives on the removed
+            // entry now, and its db comes from the db-encoded key — no separate
+            // `random_key_positions` lookup. Compute db once here and reuse it
+            // for the key/expires counters below.
+            let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+            self.random_key_index_remove(db, entry.random_slot);
             self.forget_volatile_key(key);
             // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
             // resume points.
             self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
             self.update_expiry_deadline(entry.expiry_ms(), None);
-            let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
             if db < self.database_count {
                 self.db_key_counts[db] = self.db_key_counts[db].saturating_sub(1);
             }
@@ -8895,7 +8936,6 @@ impl Store {
         for keys in &mut self.random_key_slots {
             keys.clear();
         }
-        self.random_key_positions.clear();
         self.dirty = self.dirty.saturating_add(1);
     }
 
@@ -26104,13 +26144,13 @@ mod tests {
         assert_eq!(store.randomkey_in_db(0, 0), Some(b"db0".to_vec()));
     }
 
-    // (frankenredis-x4tgs) The RANDOMKEY index now shares one Arc<[u8]> between
-    // the slot Vec and the position map instead of storing the key bytes twice.
-    // Verify the index stays internally consistent through inserts AND deletes
-    // (swap_remove + moved-key reindex), and A/B the per-key allocation pattern.
+    // (frankenredis-uhthd) The RANDOMKEY back-index lives in `Entry.random_slot`
+    // now (the separate `random_key_positions` map is gone). Verify the index
+    // stays internally consistent through inserts AND deletes (swap_remove +
+    // moved-key reindex onto the entry): every occupied slot must hold a key
+    // whose entry's `random_slot` points right back at that slot.
     #[test]
-    fn random_key_index_arc_shared_consistent_and_fewer_allocs_x4tgs() {
-        use std::sync::Arc;
+    fn random_key_index_slot_in_entry_consistent_uhthd() {
         let mut store = Store::new();
         for i in 0..5000 {
             store.set(format!("k{i:05}").into_bytes(), b"v".to_vec(), None, 0);
@@ -26119,55 +26159,34 @@ mod tests {
         for i in (0..5000).step_by(3) {
             store.del(&[format!("k{i:05}").into_bytes()], 0);
         }
-        // Invariant: every position maps to a slot holding the SAME key, and the
-        // slot count matches the position map and the live keyspace.
+        // Invariant 1: slot count matches the live keyspace.
         let slot_total: usize = store.random_key_slots.iter().map(Vec::len).sum();
-        assert_eq!(slot_total, store.random_key_positions.len());
         assert_eq!(slot_total, store.entries.len());
-        for (key, &(db, slot)) in &store.random_key_positions {
-            assert_eq!(
-                store.random_key_slots[db][slot].as_ref(),
-                key.as_ref(),
-                "position map and slot Vec disagree after swap_remove churn"
-            );
-            assert!(store.entries.contains_key(key.as_ref()));
+        // Invariant 2: for every slot, the key it holds has an entry whose
+        // back-index points exactly at that slot (round-trip after churn).
+        for (db, keys) in store.random_key_slots.iter().enumerate() {
+            for (slot, key) in keys.iter().enumerate() {
+                let entry = store
+                    .entries
+                    .get(key.as_ref())
+                    .expect("slot Vec holds a key with no live entry");
+                assert_eq!(
+                    entry.random_slot as usize, slot,
+                    "Entry.random_slot disagrees with slot Vec position after swap_remove churn (db {db})"
+                );
+            }
         }
-
-        // A/B: per-key index-insert allocation pattern. OLD stored the key bytes
-        // TWICE (to_vec + clone into two Vec-keyed structures); NEW allocates once
-        // behind an Arc and refcount-clones. Same external behavior, half the
-        // per-key heap allocations.
-        let keys: Vec<Vec<u8>> = (0..200_000)
-            .map(|i| format!("key{i:08}").into_bytes())
-            .collect();
-        let t0 = std::time::Instant::now();
-        let mut old_slots: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
-        let mut old_pos: std::collections::HashMap<Vec<u8>, usize> =
-            std::collections::HashMap::with_capacity(keys.len());
-        for (i, k) in keys.iter().enumerate() {
-            let owned = k.to_vec();
-            old_slots.push(owned.clone());
-            old_pos.insert(owned, i);
+        // Invariant 3: every live key is reachable as a RANDOMKEY sample.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200_000 {
+            if let Some(k) = store.randomkey(0) {
+                seen.insert(k);
+            }
         }
-        let old_ns = t0.elapsed().as_nanos().max(1);
-        std::hint::black_box((&old_slots, &old_pos));
-
-        let t1 = std::time::Instant::now();
-        let mut new_slots: Vec<Arc<[u8]>> = Vec::with_capacity(keys.len());
-        let mut new_pos: std::collections::HashMap<Arc<[u8]>, usize> =
-            std::collections::HashMap::with_capacity(keys.len());
-        for (i, k) in keys.iter().enumerate() {
-            let shared: Arc<[u8]> = Arc::from(k.as_slice());
-            new_slots.push(Arc::clone(&shared));
-            new_pos.insert(shared, i);
-        }
-        let new_ns = t1.elapsed().as_nanos().max(1);
-        std::hint::black_box((&new_slots, &new_pos));
-
-        println!(
-            "RANDOMKEY index per-key alloc A/B (x{}): old(2 Vec copies)={old_ns}ns new(1 Arc shared)={new_ns}ns ratio={:.2}x",
-            keys.len(),
-            old_ns as f64 / new_ns as f64
+        assert_eq!(
+            seen.len(),
+            store.entries.len(),
+            "RANDOMKEY must be able to reach every live key"
         );
     }
 
@@ -38135,15 +38154,20 @@ mod tests {
         );
         // Cumulative Entry-shrink vs the original inline-fat-Value layout
         // (Value=120, Entry=168): boxing the 3 fat variants caps Value at 32B,
-        // and niche-packing the expiry (Option<NonZeroU64>) drops Entry to 72B —
-        // 96 bytes off EVERY key's overhead (~57%).
+        // and niche-packing the expiry (Option<NonZeroU64>) drops Entry to 72B.
+        // (frankenredis-uhthd) Entry then grows by one `u32` (`random_slot`, the
+        // RANDOMKEY back-index) to 80B — a deliberate trade: +8B/Entry buys the
+        // deletion of the separate `random_key_positions` map, which cost ~66
+        // bytes/key (a full duplicate key + its own over-allocated table), so the
+        // *net* per-key keyspace footprint drops. A follow-up (lfu_last_touch_min
+        // u64->u32) can reclaim this 8B and return Entry to 72B.
         assert!(
             value_sz <= 32,
             "Value should be <=32B (boxed fat variants), got {value_sz}"
         );
         assert!(
-            entry_sz <= 72,
-            "Entry should be <=72B (boxed variants + niche-packed expiry), got {entry_sz}"
+            entry_sz <= 80,
+            "Entry should be <=80B (boxed variants + niche-packed expiry + RANDOMKEY slot), got {entry_sz}"
         );
     }
 
