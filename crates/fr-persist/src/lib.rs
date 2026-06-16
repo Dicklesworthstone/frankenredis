@@ -3239,18 +3239,22 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                         let (listpack, consumed) =
                             rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        let entries: Vec<Vec<u8>> = listpack::decode_listpack(&listpack)
-                            .map_err(|_| PersistError::InvalidFrame)?
-                            .into_iter()
-                            .map(|entry| entry.to_bytes())
-                            .collect();
-                        if !entries.len().is_multiple_of(2) {
+                        // (frankenredis-rdbhashdecode) Pair the decoded listpack
+                        // entries straight into `fields`, calling `to_bytes` once
+                        // per entry. The former path materialized an intermediate
+                        // `Vec<Vec<u8>>` and then CLONED every field and value
+                        // into the pairs — allocating each twice. One alloc per
+                        // entry now; the decoded bytes are byte-identical.
+                        let decoded = listpack::decode_listpack(&listpack)
+                            .map_err(|_| PersistError::InvalidFrame)?;
+                        if !decoded.len().is_multiple_of(2) {
                             return Err(PersistError::InvalidFrame);
                         }
-                        let mut fields = Vec::with_capacity(entries.len() / 2);
-                        let mut chunks = entries.chunks_exact(2);
-                        for pair in &mut chunks {
-                            fields.push((pair[0].clone(), pair[1].clone()));
+                        let mut fields = Vec::with_capacity(decoded.len() / 2);
+                        let mut it = decoded.into_iter();
+                        while let Some(field) = it.next() {
+                            let value = it.next().ok_or(PersistError::InvalidFrame)?;
+                            fields.push((field.to_bytes(), value.to_bytes()));
                         }
                         RdbValue::Hash(fields)
                     }
@@ -3261,22 +3265,23 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                         let (listpack, consumed) =
                             rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        let entries: Vec<Vec<u8>> = listpack::decode_listpack(&listpack)
-                            .map_err(|_| PersistError::InvalidFrame)?
-                            .into_iter()
-                            .map(|entry| entry.to_bytes())
-                            .collect();
-                        if !entries.len().is_multiple_of(2) {
+                        // (frankenredis-rdbhashdecode) Same single-alloc pairing
+                        // as the hash listpack above — the member was being
+                        // cloned out of an intermediate `Vec<Vec<u8>>`.
+                        let decoded = listpack::decode_listpack(&listpack)
+                            .map_err(|_| PersistError::InvalidFrame)?;
+                        if !decoded.len().is_multiple_of(2) {
                             return Err(PersistError::InvalidFrame);
                         }
-                        let mut members = Vec::with_capacity(entries.len() / 2);
-                        let mut chunks = entries.chunks_exact(2);
-                        for pair in &mut chunks {
-                            let score = std::str::from_utf8(&pair[1])
+                        let mut members = Vec::with_capacity(decoded.len() / 2);
+                        let mut it = decoded.into_iter();
+                        while let Some(member) = it.next() {
+                            let score_bytes = it.next().ok_or(PersistError::InvalidFrame)?.to_bytes();
+                            let score = std::str::from_utf8(&score_bytes)
                                 .ok()
                                 .and_then(|s| s.parse::<f64>().ok())
                                 .ok_or(PersistError::InvalidFrame)?;
-                            members.push((pair[0].clone(), score));
+                            members.push((member.to_bytes(), score));
                         }
                         RdbValue::SortedSet(members)
                     }
