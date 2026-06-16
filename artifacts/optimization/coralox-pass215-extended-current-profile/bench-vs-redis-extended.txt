@@ -1,0 +1,24 @@
+loadavg=11.40  (high load -> absolute rps noisy; ratio stays stable)
+  fr:28340 exe=/data/projects/.scratch/frankenredis-coralox-pass214b-target/release-perf/frankenredis sha=00000000 connected_slaves=0
+  redis:28341 exe=/data/projects/.scratch/frankenredis-coralox-pass214b-20260616T015830Z/legacy_redis_code/redis/src/redis-server sha=d2c8a4b9 connected_slaves=0
+======================================================================
+ping_inline        median ratio=0.98x  (trials: 0.97, 1.07, 1.02, 0.98, 0.95)
+ping_mbulk         median ratio=1.02x  (trials: 1.01, 0.98, 1.02, 1.02, 1.07)
+set                median ratio=1.02x  (trials: 1.06, 0.99, 1.02, 1.01, 1.09)
+get                median ratio=1.10x  (trials: 1.09, 1.12, 0.96, 1.16, 1.10)
+incr               median ratio=1.03x  (trials: 1.11, 1.02, 1.01, 1.09, 1.03)
+lpush              median ratio=1.08x  (trials: 1.08, 1.06, 1.14, 1.08, 1.02)
+rpush              median ratio=1.07x  (trials: 0.98, 1.07, 0.95, 1.10, 1.07)
+lpop               median ratio=1.16x  (trials: 1.23, 1.16, 0.89, 1.17, 1.07)
+rpop               median ratio=1.11x  (trials: 1.08, 1.11, 1.13, 1.24, 1.10)
+sadd               median ratio=1.00x  (trials: 1.09, 1.06, 0.99, 0.98, 1.00)
+hset               median ratio=1.01x  (trials: 0.99, 1.09, 1.09, 0.99, 1.01)
+spop               median ratio=1.04x  (trials: 1.04, 1.01, 1.04, 1.04, 1.05)
+zadd               median ratio=1.05x  (trials: 1.10, 1.03, 1.06, 0.98, 1.05)
+mset               median ratio=1.26x  (trials: 1.25, 1.24, 1.26, 1.31, 1.26)
+lrange_100         median ratio=1.09x  (trials: 1.07, 1.15, 1.11, 1.06, 1.09)
+lrange_300         median ratio=1.29x  (trials: 1.34, 1.29, 1.31, 1.29, 1.25)
+lrange_500         median ratio=1.25x  (trials: 1.29, 1.25, 1.30, 1.25, 1.25)
+lrange_600         median ratio=1.16x  (trials: 1.12, 1.02, 1.17, 1.17, 1.16)
+======================================================================
+fr at parity-or-faster on all tested commands (median ratio >= 0.9x) vs redis 7.2.4
