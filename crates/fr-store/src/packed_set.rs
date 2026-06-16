@@ -600,6 +600,46 @@ impl Default for HashFieldMap {
 }
 
 impl HashFieldMap {
+    /// (frankenredis-qxfmr) Build a map from already-unique pairs in ONE O(n)
+    /// pass, instead of N incremental `insert`s that each do an O(n) `locate` /
+    /// `contains_key` scan (O(n²) total) plus a mid-stream Packed→Hash promotion
+    /// copy. Used by the RDB / bulk-load path where the input fields are unique.
+    ///
+    /// Byte-identical to inserting the same unique pairs one at a time: the
+    /// `Packed`-vs-`Hash` choice is the SAME predicate `insert` reaches —
+    /// `Packed` iff `len <= PACKED_MAX_ENTRIES` and every field/value
+    /// `<= PACKED_MAX_VALUE`, else `Hash` — and both variants keep insertion
+    /// order (the `PackedStrMap` buffer order, the `IndexMap` insertion order),
+    /// exactly as the incremental path's final state. Caller MUST guarantee the
+    /// pairs have no duplicate fields.
+    #[must_use]
+    pub fn from_unique_pairs(pairs: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
+        let to_hash = pairs.len() > PACKED_MAX_ENTRIES
+            || pairs
+                .iter()
+                .any(|(f, v)| f.len() > PACKED_MAX_VALUE || v.len() > PACKED_MAX_VALUE);
+        if to_hash {
+            let mut h: FieldHashTable = IndexMap::with_capacity_and_hasher(
+                pairs.len(),
+                foldhash::quality::RandomState::default(),
+            );
+            for (field, value) in pairs {
+                h.insert(
+                    HashFieldBytes::from_vec(field),
+                    HashFieldBytes::from_vec(value),
+                );
+            }
+            HashFieldMap::Hash(h)
+        } else {
+            let bytes: usize = pairs.iter().map(|(f, v)| f.len() + v.len() + 10).sum();
+            let mut p = PackedStrMap::with_capacity(bytes);
+            for (field, value) in pairs {
+                p.append(&field, &value);
+            }
+            HashFieldMap::Packed(p)
+        }
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         match self {
@@ -889,6 +929,20 @@ impl PackedStrMap {
             self.len += 1;
             None
         }
+    }
+
+    /// (frankenredis-qxfmr) Append a guaranteed-NEW field/value to the end of the
+    /// buffer WITHOUT the O(n) `locate` scan `insert` performs. Caller MUST
+    /// guarantee the field is not already present — appending a duplicate would
+    /// create two records for the same field. Byte-identical to `insert(field,
+    /// value)` on a field that does not yet exist; used to bulk-build a fresh map
+    /// from already-unique pairs in one O(n) pass instead of N×O(n) inserts.
+    pub fn append(&mut self, field: &[u8], value: &[u8]) {
+        write_varint(&mut self.buf, field.len());
+        self.buf.extend_from_slice(field);
+        write_varint(&mut self.buf, value.len());
+        self.buf.extend_from_slice(value);
+        self.len += 1;
     }
 
     /// Borrowed-field upsert for callers that only need "was this field new?"
@@ -2611,6 +2665,73 @@ mod tests {
         );
         assert_eq!(s.pop_index(0), Some(b"alpha".to_vec()));
         assert_eq!(s.into_iter().collect::<Vec<_>>(), vec![long]);
+    }
+
+    #[test]
+    fn hash_field_map_from_unique_pairs_matches_insert_loop_qxfmr() {
+        use super::{HashFieldMap, PACKED_MAX_VALUE};
+        let big = vec![b'x'; PACKED_MAX_VALUE + 1];
+        let atcap = vec![b'y'; PACKED_MAX_VALUE];
+        let cases: Vec<Vec<(Vec<u8>, Vec<u8>)>> = vec![
+            vec![],
+            (0..1)
+                .map(|i| (format!("f{i}").into_bytes(), format!("v{i}").into_bytes()))
+                .collect(),
+            // Packed boundary: exactly PACKED_MAX_ENTRIES stays Packed.
+            (0..PACKED_MAX_ENTRIES)
+                .map(|i| (format!("f{i}").into_bytes(), format!("v{i}").into_bytes()))
+                .collect(),
+            // One past the boundary promotes to Hash.
+            (0..=PACKED_MAX_ENTRIES)
+                .map(|i| (format!("f{i}").into_bytes(), format!("v{i}").into_bytes()))
+                .collect(),
+            (0..300)
+                .map(|i| (format!("f{i}").into_bytes(), format!("v{i}").into_bytes()))
+                .collect(),
+            // Value == PACKED_MAX_VALUE stays Packed; one over promotes.
+            vec![
+                (b"f".to_vec(), atcap.clone()),
+                (b"g".to_vec(), b"y".to_vec()),
+            ],
+            vec![(b"f".to_vec(), big.clone()), (b"g".to_vec(), b"y".to_vec())],
+            // Oversize field promotes.
+            vec![(big.clone(), b"v".to_vec())],
+            // Binary field/value with NUL, CR/LF, high bytes.
+            vec![
+                (b"f\x00\xff".to_vec(), b"v\r\n\x00".to_vec()),
+                (b"g".to_vec(), b"\xfe".to_vec()),
+            ],
+        ];
+        for pairs in cases {
+            let mut loop_map = HashFieldMap::default();
+            for (f, v) in &pairs {
+                loop_map.insert(f.clone(), v.clone());
+            }
+            let bulk_map = HashFieldMap::from_unique_pairs(pairs.clone());
+            // Same encoding variant (Packed vs Hash) — observable via OBJECT
+            // ENCODING and the internal repr the incremental path would reach.
+            assert_eq!(
+                std::mem::discriminant(&loop_map),
+                std::mem::discriminant(&bulk_map),
+                "variant mismatch for {} pairs",
+                pairs.len()
+            );
+            // Same length and same INSERTION-ORDER iteration (HGETALL/HKEYS).
+            assert_eq!(loop_map.len(), bulk_map.len());
+            let loop_iter: Vec<(Vec<u8>, Vec<u8>)> = loop_map
+                .iter()
+                .map(|(f, v)| (f.to_vec(), v.to_vec()))
+                .collect();
+            let bulk_iter: Vec<(Vec<u8>, Vec<u8>)> = bulk_map
+                .iter()
+                .map(|(f, v)| (f.to_vec(), v.to_vec()))
+                .collect();
+            assert_eq!(loop_iter, bulk_iter, "iteration mismatch");
+            // Every field resolves to its value.
+            for (f, v) in &pairs {
+                assert_eq!(bulk_map.get(f), Some(v.as_slice()));
+            }
+        }
     }
 
     #[test]

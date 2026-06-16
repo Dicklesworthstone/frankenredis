@@ -9226,8 +9226,33 @@ impl Store {
         let Value::Hash(m) = &mut entry.value else {
             return Err(StoreError::WrongType);
         };
-        for (field, value) in fields {
-            m.insert(field, value);
+        // (frankenredis-qxfmr) When seeding a FRESH hash (the RDB / bulk-load
+        // case — `hset_many`'s only callers) from UNIQUE fields, build it in one
+        // O(n) pass via `from_unique_pairs` instead of N `insert`s that each do
+        // an O(n) `locate`/`contains_key` scan (O(n²) total — the dominant cost
+        // in hash RDB reload). An O(n) borrowed-slice scan confirms the input is
+        // unique; a non-empty target or any duplicate field falls back to the
+        // order-/overwrite-preserving incremental loop, so the final state is
+        // byte-identical either way.
+        if m.is_empty() {
+            let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
+                std::collections::HashSet::with_capacity_and_hasher(
+                    fields.len(),
+                    foldhash::quality::RandomState::default(),
+                );
+            let unique = fields.iter().all(|(f, _)| seen.insert(f.as_slice()));
+            drop(seen);
+            if unique {
+                **m = HashFieldMap::from_unique_pairs(fields);
+            } else {
+                for (field, value) in fields {
+                    m.insert(field, value);
+                }
+            }
+        } else {
+            for (field, value) in fields {
+                m.insert(field, value);
+            }
         }
         entry.touch(now_ms);
         entry.modification_count = entry.modification_count.wrapping_add(count);
