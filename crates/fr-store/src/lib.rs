@@ -21546,12 +21546,40 @@ fn parse_listpack_integer(entry: &[u8]) -> Option<i64> {
     if entry.is_empty() || entry.len() >= 21 {
         return None;
     }
-    let value = std::str::from_utf8(entry).ok()?.parse::<i64>().ok()?;
-    if value.to_string().as_bytes() == entry {
-        Some(value)
-    } else {
-        None
+    // Accept only the CANONICAL decimal form (exactly what the prior
+    // `value.to_string() == entry` round-trip accepted), but WITHOUT allocating a
+    // String per element — this runs once per element on every listpack DUMP /
+    // RDB save, so the per-int allocation showed up as wall-clock cost on
+    // integer-heavy collections. Canonical = optional leading '-', no '+', no
+    // redundant leading zero, and not "-0".
+    if !listpack_int_bytes_are_canonical(entry) {
+        return None;
     }
+    // Bytes are ASCII (optional '-' then digits), so from_utf8 cannot fail;
+    // parse still rejects out-of-i64-range values (e.g. "9223372036854775808").
+    std::str::from_utf8(entry).ok()?.parse::<i64>().ok()
+}
+
+/// True iff `entry` is the canonical base-10 text of some integer — i.e. equal to
+/// `n.to_string().as_bytes()` for the `n` it parses to. Allocation-free.
+fn listpack_int_bytes_are_canonical(entry: &[u8]) -> bool {
+    let digits = match entry.first() {
+        Some(b'-') => &entry[1..],
+        Some(_) => entry,
+        None => return false,
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    // Redundant leading zero ("007", "00") — only "0" itself may start with '0'.
+    if digits[0] == b'0' && digits.len() > 1 {
+        return false;
+    }
+    // "-0" is non-canonical (to_string yields "0").
+    if entry[0] == b'-' && digits == b"0" {
+        return false;
+    }
+    true
 }
 
 fn encode_listpack_integer_entry(buf: &mut Vec<u8>, value: i64) {

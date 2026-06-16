@@ -2114,12 +2114,40 @@ fn parse_listpack_integer(entry: &[u8]) -> Option<i64> {
     if entry.is_empty() || entry.len() >= 21 {
         return None;
     }
-    let value = std::str::from_utf8(entry).ok()?.parse::<i64>().ok()?;
-    if value.to_string().as_bytes() == entry {
-        Some(value)
-    } else {
-        None
+    // Accept only the CANONICAL decimal form (exactly what the prior
+    // `value.to_string() == entry` round-trip accepted), but WITHOUT allocating a
+    // String per element — this runs once per element on every listpack RDB
+    // encode, so the per-int allocation showed up as wall-clock cost on
+    // integer-heavy collections. Canonical = optional leading '-', no '+', no
+    // redundant leading zero, and not "-0".
+    if !listpack_int_bytes_are_canonical(entry) {
+        return None;
     }
+    // Bytes are ASCII (optional '-' then digits), so from_utf8 cannot fail;
+    // parse still rejects out-of-i64-range values (e.g. "9223372036854775808").
+    std::str::from_utf8(entry).ok()?.parse::<i64>().ok()
+}
+
+/// True iff `entry` is the canonical base-10 text of some integer — i.e. equal to
+/// `n.to_string().as_bytes()` for the `n` it parses to. Allocation-free.
+fn listpack_int_bytes_are_canonical(entry: &[u8]) -> bool {
+    let digits = match entry.first() {
+        Some(b'-') => &entry[1..],
+        Some(_) => entry,
+        None => return false,
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    // Redundant leading zero ("007", "00") — only "0" itself may start with '0'.
+    if digits[0] == b'0' && digits.len() > 1 {
+        return false;
+    }
+    // "-0" is non-canonical (to_string yields "0").
+    if entry[0] == b'-' && digits == b"0" {
+        return false;
+    }
+    true
 }
 
 fn encode_listpack_integer_entry(buf: &mut Vec<u8>, value: i64) {
@@ -3524,6 +3552,56 @@ pub fn read_rdb_file_with_functions(
 #[cfg(test)]
 mod tests {
     use fr_protocol::{RespFrame, RespParseError};
+
+    #[test]
+    fn parse_listpack_integer_matches_to_string_roundtrip() {
+        // The allocation-free canonical check must accept/reject EXACTLY the set
+        // the old `value.to_string() == entry` round-trip did.
+        fn oracle(entry: &[u8]) -> Option<i64> {
+            if entry.is_empty() || entry.len() >= 21 {
+                return None;
+            }
+            let value = std::str::from_utf8(entry).ok()?.parse::<i64>().ok()?;
+            if value.to_string().as_bytes() == entry {
+                Some(value)
+            } else {
+                None
+            }
+        }
+        let mut cases: Vec<Vec<u8>> = vec![
+            b"0".to_vec(),
+            b"-0".to_vec(),
+            b"00".to_vec(),
+            b"007".to_vec(),
+            b"+7".to_vec(),
+            b"7".to_vec(),
+            b"-7".to_vec(),
+            b"123456789".to_vec(),
+            b"-123456789".to_vec(),
+            b"9223372036854775807".to_vec(),  // i64::MAX
+            b"-9223372036854775808".to_vec(), // i64::MIN
+            b"9223372036854775808".to_vec(),  // MAX+1 -> overflow
+            b"99999999999999999999".to_vec(), // 20 digits, overflow
+            b" 7".to_vec(),
+            b"7 ".to_vec(),
+            b"-".to_vec(),
+            b"".to_vec(),
+            b"1.0".to_vec(),
+            b"0x10".to_vec(),
+            b"1e3".to_vec(),
+            b"\xff\x01".to_vec(),
+        ];
+        for n in [0i64, 1, -1, 42, -42, i64::MAX, i64::MIN, 1000000007] {
+            cases.push(n.to_string().into_bytes());
+        }
+        for entry in &cases {
+            assert_eq!(
+                super::parse_listpack_integer(entry),
+                oracle(entry),
+                "mismatch for {entry:?}"
+            );
+        }
+    }
 
     use super::{
         AofManifest, AofManifestFileType, AofRecord, AofReplaySegmentPosition,
