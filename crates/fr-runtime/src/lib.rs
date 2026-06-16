@@ -2356,7 +2356,15 @@ impl AuthState {
                 user.allowed_commands.remove(&cmd_lower);
                 user.record_command_rule(format!("-{cmd_lower}"));
             } else if let Some(pass) = rule_str.strip_prefix('>') {
-                user.passwords.push(sha256_hex_bytes(pass.as_bytes()));
+                // Upstream acl.c::ACLSetUser appends a password hash only when
+                // it is not already present (the listSearchKey gate), so adding
+                // the same password twice is an idempotent no-op rather than a
+                // duplicate entry in ACL GETUSER's `passwords` list.
+                // (frankenredis-aclpassdup)
+                let hash = sha256_hex_bytes(pass.as_bytes());
+                if !user.passwords.iter().any(|p| p.as_slice() == hash.as_slice()) {
+                    user.passwords.push(hash);
+                }
                 user.nopass = false; // adding a password disables nopass
             } else if let Some(pass) = rule_str.strip_prefix('<') {
                 let hash_hex = sha256_hex_bytes(pass.as_bytes());
@@ -2368,7 +2376,11 @@ impl AuthState {
                 }
             } else if let Some(hash) = rule_str.strip_prefix('#') {
                 if let Some(hash_hex) = normalize_acl_hash(hash) {
-                    user.passwords.push(hash_hex);
+                    // Dedup like the `>` form above (acl.c listSearchKey gate).
+                    // (frankenredis-aclpassdup)
+                    if !user.passwords.iter().any(|p| p.as_slice() == hash_hex.as_slice()) {
+                        user.passwords.push(hash_hex);
+                    }
                     user.nopass = false;
                 } else {
                     // Upstream acl.c::ACLStringSetUser emits the
@@ -44216,6 +44228,41 @@ mod tests {
             matches!(&del_reply, RespFrame::Error(e) if e.contains("NOPERM")),
             "DEL should be denied, got: {del_reply:?}"
         );
+    }
+
+    #[test]
+    fn acl_setuser_dedupes_identical_passwords_aclpassdup() {
+        // (frankenredis-aclpassdup) Upstream acl.c::ACLSetUser only appends a
+        // password hash that isn't already in u->passwords. Adding the same
+        // password twice (via `>` or `#`) is an idempotent no-op, so ACL
+        // GETUSER lists each distinct hash exactly once. fr previously pushed a
+        // duplicate entry. Differential vs redis 7.2.4: `>p1 >p1 >p2` -> 2.
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", b"dup", b"on", b">p1", b">p1", b">p2"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let bytes = rt.execute_frame(command(&[b"ACL", b"GETUSER", b"dup"]), 1).to_bytes();
+        let count = |needle: &[u8]| bytes.windows(needle.len()).filter(|w| *w == needle).count();
+        let h1 = sha256_hex_bytes(b"p1");
+        let h2 = sha256_hex_bytes(b"p2");
+        assert_eq!(count(&h1), 1, "p1 hash must be deduped to a single entry");
+        assert_eq!(count(&h2), 1, "p2 hash appears once");
+
+        // The `#<hash>` form dedupes against an existing `>` password too.
+        let mut rt2 = Runtime::default_strict();
+        let h1_hex = String::from_utf8(h1.clone()).unwrap();
+        rt2.execute_frame(command(&[b"ACL", b"SETUSER", b"d2", b"on", b">p1"]), 0);
+        rt2.execute_frame(
+            command(&[b"ACL", b"SETUSER", b"d2", format!("#{h1_hex}").as_bytes()]),
+            1,
+        );
+        let bytes2 = rt2.execute_frame(command(&[b"ACL", b"GETUSER", b"d2"]), 2).to_bytes();
+        let count2 = bytes2.windows(h1.len()).filter(|w| *w == h1.as_slice()).count();
+        assert_eq!(count2, 1, "#<hash> matching an existing password must not duplicate");
     }
 
     #[test]
