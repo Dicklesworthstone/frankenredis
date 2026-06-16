@@ -1,0 +1,65 @@
+ ZADD: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                           ZADD: rps=65316.0 (overall: 65055.8) avg_msec=0.430 (overall: 0.430)                                                                     ZADD: rps=62248.0 (overall: 63654.7) avg_msec=0.434 (overall: 0.432)                                                                     ZADD: rps=65605.6 (overall: 64305.9) avg_msec=0.413 (overall: 0.425)                                                                     ZADD: rps=69040.0 (overall: 65487.0) avg_msec=0.387 (overall: 0.415)                                                                     ZADD: rps=70980.0 (overall: 66583.9) avg_msec=0.378 (overall: 0.407)                                                                     ZADD: rps=68529.9 (overall: 66908.9) avg_msec=0.388 (overall: 0.404)                                                                     ZADD: rps=67276.0 (overall: 66961.2) avg_msec=0.393 (overall: 0.402)                                                                     ZADD: rps=70700.0 (overall: 67427.9) avg_msec=0.377 (overall: 0.399)                                                                     ZADD: rps=68717.1 (overall: 67571.4) avg_msec=0.386 (overall: 0.398)                                                                     ZADD: rps=64188.0 (overall: 67233.6) avg_msec=0.416 (overall: 0.399)                                                                     ZADD: rps=64288.0 (overall: 66966.2) avg_msec=0.457 (overall: 0.404)                                                                     ZADD: rps=66386.5 (overall: 66917.8) avg_msec=0.407 (overall: 0.405)                                                                     ZADD: rps=61152.0 (overall: 66475.0) avg_msec=0.464 (overall: 0.409)                                                                     ZADD: rps=66324.0 (overall: 66464.2) avg_msec=0.414 (overall: 0.409)                                                                     ZADD: rps=64756.0 (overall: 66350.5) avg_msec=0.426 (overall: 0.410)                                                                     ZADD: rps=66286.9 (overall: 66346.5) avg_msec=0.420 (overall: 0.411)                                                                     ZADD: rps=65076.0 (overall: 66271.9) avg_msec=0.431 (overall: 0.412)                                                                     ZADD: rps=64092.0 (overall: 66150.9) avg_msec=0.431 (overall: 0.413)                                                                     ====== ZADD ======
+  300000 requests completed in 4.54 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+  host configuration "save": 3600 1 300 100 60 10000
+  host configuration "appendonly": no
+  multi-thread: no
+
+Latency by percentile distribution:
+0.000% <= 0.119 milliseconds (cumulative count 1)
+50.000% <= 0.359 milliseconds (cumulative count 181211)
+75.000% <= 0.423 milliseconds (cumulative count 229331)
+87.500% <= 0.471 milliseconds (cumulative count 265721)
+93.750% <= 0.551 milliseconds (cumulative count 282047)
+96.875% <= 0.647 milliseconds (cumulative count 290739)
+98.438% <= 0.799 milliseconds (cumulative count 295315)
+99.219% <= 1.135 milliseconds (cumulative count 297675)
+99.609% <= 3.223 milliseconds (cumulative count 298829)
+99.805% <= 4.447 milliseconds (cumulative count 299422)
+99.902% <= 4.871 milliseconds (cumulative count 299709)
+99.951% <= 5.791 milliseconds (cumulative count 299857)
+99.976% <= 11.495 milliseconds (cumulative count 299928)
+99.988% <= 15.039 milliseconds (cumulative count 299964)
+99.994% <= 15.175 milliseconds (cumulative count 299987)
+99.997% <= 15.191 milliseconds (cumulative count 299992)
+99.998% <= 15.207 milliseconds (cumulative count 299999)
+100.000% <= 15.215 milliseconds (cumulative count 300000)
+100.000% <= 15.215 milliseconds (cumulative count 300000)
+
+Cumulative distribution of latencies:
+0.000% <= 0.103 milliseconds (cumulative count 0)
+0.004% <= 0.207 milliseconds (cumulative count 12)
+0.009% <= 0.303 milliseconds (cumulative count 27)
+72.454% <= 0.407 milliseconds (cumulative count 217363)
+91.634% <= 0.503 milliseconds (cumulative count 274903)
+95.993% <= 0.607 milliseconds (cumulative count 287978)
+97.676% <= 0.703 milliseconds (cumulative count 293028)
+98.482% <= 0.807 milliseconds (cumulative count 295445)
+98.872% <= 0.903 milliseconds (cumulative count 296617)
+99.082% <= 1.007 milliseconds (cumulative count 297247)
+99.201% <= 1.103 milliseconds (cumulative count 297604)
+99.268% <= 1.207 milliseconds (cumulative count 297804)
+99.279% <= 1.303 milliseconds (cumulative count 297836)
+99.341% <= 1.407 milliseconds (cumulative count 298022)
+99.361% <= 1.503 milliseconds (cumulative count 298084)
+99.379% <= 1.607 milliseconds (cumulative count 298138)
+99.384% <= 1.703 milliseconds (cumulative count 298152)
+99.392% <= 1.807 milliseconds (cumulative count 298175)
+99.410% <= 1.903 milliseconds (cumulative count 298230)
+99.438% <= 2.007 milliseconds (cumulative count 298315)
+99.455% <= 2.103 milliseconds (cumulative count 298366)
+99.600% <= 3.103 milliseconds (cumulative count 298800)
+99.743% <= 4.103 milliseconds (cumulative count 299230)
+99.912% <= 5.103 milliseconds (cumulative count 299736)
+99.967% <= 6.103 milliseconds (cumulative count 299900)
+99.983% <= 12.103 milliseconds (cumulative count 299950)
+99.990% <= 15.103 milliseconds (cumulative count 299971)
+100.000% <= 16.103 milliseconds (cumulative count 300000)
+
+Summary:
+  throughput summary: 66122.98 requests per second
+  latency summary (msec):
+          avg       min       p50       p95       p99       max
+        0.413     0.112     0.359     0.583     0.951    15.215

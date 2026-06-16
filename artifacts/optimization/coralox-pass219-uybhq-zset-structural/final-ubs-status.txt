@@ -1,0 +1,2 @@
+ubs_exit=1
+note=ubs completed; command wrapper failed on zsh read-only status variable after scanner exit; see final-ubs-fr-store.txt

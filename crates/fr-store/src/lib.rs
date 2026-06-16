@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 use std::ops::Bound::{Excluded, Included, Unbounded};
-use std::ops::{Deref, DerefMut};
+use std::ops::{Deref, DerefMut, RangeBounds};
 
 /// Generic (hash-backed) set encoding behind `SetValue::Generic` — the non-int
 /// string set. foldhash (not SipHash) for fast SADD/SREM/SISMEMBER membership;
@@ -578,6 +578,7 @@ pub enum StoreError {
 
 const SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES: usize = 128;
 const SORTED_SET_PACKED_DEFAULT_MAX_VALUE: usize = 64;
+const SORTED_SET_COMPACT_FULL_MAX_ENTRIES: usize = 2048;
 const ZSET_INDEX_TREE_WARM_MIN_LEN: usize = 4096;
 const ZSET_INDEX_TREE_WARM_MIN_SKIP: usize = 1024;
 const ZSET_INDEX_TREE_WARM_HITS: u8 = 2;
@@ -606,9 +607,9 @@ struct FullSortedSet {
     /// `swap_remove` keeps removals O(1) at the cost of reordering, which is
     /// invisible. (frankenredis-rqdxh, extends 8kuy1; zrandmember O(1) pick)
     dict: IndexMap<SharedZSetMember, f64, foldhash::quality::RandomState>,
-    /// (score, member) -> ()
-    /// We use ScoreMember wrapper to handle f64 comparison and lexicographical member tie-breaking.
-    ordered: BTreeMap<ScoreMember, ()>,
+    /// Score-ordered member index. Medium full zsets keep a sorted Vec to avoid
+    /// per-node tree overhead; larger zsets keep the old tree-backed range path.
+    ordered: FullZSetOrder,
     /// Lazily-built order-statistic index (treap) over `ordered`, giving
     /// O(log n) ZRANK/ZREVRANK that survives mutations without an O(n) rebuild.
     /// Behavior-invisible: built on first rank query, then kept in sync at every
@@ -695,6 +696,171 @@ impl ScoreMember {
     }
 }
 
+#[derive(Debug, Clone)]
+enum FullZSetOrder {
+    Compact(Vec<ScoreMember>),
+    Tree(BTreeMap<ScoreMember, ()>),
+}
+
+impl FullZSetOrder {
+    fn with_capacity(cap: usize) -> Self {
+        if cap <= SORTED_SET_COMPACT_FULL_MAX_ENTRIES {
+            Self::Compact(Vec::with_capacity(cap))
+        } else {
+            Self::Tree(BTreeMap::new())
+        }
+    }
+
+    fn from_score_members(mut score_members: Vec<ScoreMember>) -> Self {
+        if score_members.len() <= SORTED_SET_COMPACT_FULL_MAX_ENTRIES {
+            score_members.sort();
+            Self::Compact(score_members)
+        } else {
+            Self::Tree(score_members.into_iter().map(|sm| (sm, ())).collect())
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Compact(keys) => keys.len(),
+            Self::Tree(keys) => keys.len(),
+        }
+    }
+
+    fn insert(&mut self, sm: ScoreMember) {
+        match self {
+            Self::Compact(keys) => {
+                let pos = keys.binary_search(&sm).unwrap_or_else(|pos| pos);
+                if keys.get(pos).is_none_or(|existing| *existing != sm) {
+                    keys.insert(pos, sm);
+                }
+                if keys.len() > SORTED_SET_COMPACT_FULL_MAX_ENTRIES {
+                    let old_keys = std::mem::take(keys);
+                    *self = Self::Tree(old_keys.into_iter().map(|key| (key, ())).collect());
+                }
+            }
+            Self::Tree(keys) => {
+                keys.insert(sm, ());
+            }
+        }
+    }
+
+    fn remove(&mut self, sm: &ScoreMember) -> bool {
+        match self {
+            Self::Compact(keys) => keys
+                .binary_search(sm)
+                .map(|pos| {
+                    keys.remove(pos);
+                })
+                .is_ok(),
+            Self::Tree(keys) => keys.remove(sm).is_some(),
+        }
+    }
+
+    #[cfg(test)]
+    fn contains(&self, sm: &ScoreMember) -> bool {
+        match self {
+            Self::Compact(keys) => keys.binary_search(sm).is_ok(),
+            Self::Tree(keys) => keys.contains_key(sm),
+        }
+    }
+
+    fn first(&self) -> Option<&ScoreMember> {
+        match self {
+            Self::Compact(keys) => keys.first(),
+            Self::Tree(keys) => keys.first_key_value().map(|(sm, _)| sm),
+        }
+    }
+
+    fn last(&self) -> Option<&ScoreMember> {
+        match self {
+            Self::Compact(keys) => keys.last(),
+            Self::Tree(keys) => keys.last_key_value().map(|(sm, _)| sm),
+        }
+    }
+
+    fn keys(&self) -> FullZSetOrderIter<'_> {
+        match self {
+            Self::Compact(keys) => FullZSetOrderIter::Compact(keys.iter()),
+            Self::Tree(keys) => FullZSetOrderIter::Tree(keys.keys()),
+        }
+    }
+
+    fn range<R>(&self, range: R) -> FullZSetOrderRange<'_>
+    where
+        R: RangeBounds<ScoreMember>,
+    {
+        match self {
+            Self::Compact(keys) => {
+                let start = match range.start_bound() {
+                    Included(key) => keys.partition_point(|sm| sm < key),
+                    Excluded(key) => keys.partition_point(|sm| sm <= key),
+                    Unbounded => 0,
+                };
+                let end = match range.end_bound() {
+                    Included(key) => keys.partition_point(|sm| sm <= key),
+                    Excluded(key) => keys.partition_point(|sm| sm < key),
+                    Unbounded => keys.len(),
+                };
+                let start = start.min(end);
+                let window = keys.get(start..end).unwrap_or(&[]);
+                FullZSetOrderRange::Compact(window.iter())
+            }
+            Self::Tree(keys) => FullZSetOrderRange::Tree(keys.range(range)),
+        }
+    }
+}
+
+enum FullZSetOrderIter<'a> {
+    Compact(std::slice::Iter<'a, ScoreMember>),
+    Tree(std::collections::btree_map::Keys<'a, ScoreMember, ()>),
+}
+
+impl<'a> Iterator for FullZSetOrderIter<'a> {
+    type Item = &'a ScoreMember;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Compact(iter) => iter.next(),
+            Self::Tree(iter) => iter.next(),
+        }
+    }
+}
+
+impl DoubleEndedIterator for FullZSetOrderIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Compact(iter) => iter.next_back(),
+            Self::Tree(iter) => iter.next_back(),
+        }
+    }
+}
+
+enum FullZSetOrderRange<'a> {
+    Compact(std::slice::Iter<'a, ScoreMember>),
+    Tree(std::collections::btree_map::Range<'a, ScoreMember, ()>),
+}
+
+impl<'a> Iterator for FullZSetOrderRange<'a> {
+    type Item = &'a ScoreMember;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Compact(iter) => iter.next(),
+            Self::Tree(iter) => iter.next().map(|(sm, _)| sm),
+        }
+    }
+}
+
+impl DoubleEndedIterator for FullZSetOrderRange<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Compact(iter) => iter.next_back(),
+            Self::Tree(iter) => iter.next_back().map(|(sm, _)| sm),
+        }
+    }
+}
+
 impl FullSortedSet {
     fn with_capacity(cap: usize) -> Self {
         Self {
@@ -702,7 +868,7 @@ impl FullSortedSet {
                 cap,
                 foldhash::quality::RandomState::default(),
             ),
-            ordered: BTreeMap::new(),
+            ordered: FullZSetOrder::with_capacity(cap),
             rank_tree: None,
             deep_index_reads: 0,
         }
@@ -710,9 +876,9 @@ impl FullSortedSet {
 
     /// (frankenredis-zsetbulk) Build a `FullSortedSet` from already-unique
     /// (member, score) pairs in ONE bulk pass instead of N incremental
-    /// `insert`s. The `ordered` `BTreeMap` is produced via `collect()`, which
-    /// sorts once and bottom-up bulk-builds the tree in O(n) — versus N
-    /// root-to-leaf inserts with node splits scattered across the tree. The
+    /// `insert`s. The `ordered` index is produced in one sorted pass for the
+    /// compact path or via BTreeMap bulk collect for larger sets — versus N
+    /// root-to-leaf inserts with scattered tree node allocation. The
     /// result is byte-identical to inserting the same pairs one at a time: the
     /// `dict` keeps the pairs' iteration order (only ever observed by the random
     /// `ZRANDMEMBER` index pick, so order is unobservable), the `BTreeMap` is
@@ -731,8 +897,7 @@ impl FullSortedSet {
             score_members.push(ScoreMember::actual(score, Arc::clone(&member)));
             dict.insert(member, score);
         }
-        let ordered: BTreeMap<ScoreMember, ()> =
-            score_members.into_iter().map(|sm| (sm, ())).collect();
+        let ordered = FullZSetOrder::from_score_members(score_members);
         Self {
             dict,
             ordered,
@@ -777,11 +942,11 @@ impl FullSortedSet {
             // insert. Only when the tree exists do we still need the clone to feed
             // both `ordered` and the treap. Behaviour-identical either way.
             if let Some(tree) = &mut self.rank_tree {
-                self.ordered.insert(new_sm.clone(), ());
+                self.ordered.insert(new_sm.clone());
                 tree.remove(&old_sm);
                 tree.insert(new_sm);
             } else {
-                self.ordered.insert(new_sm, ());
+                self.ordered.insert(new_sm);
             }
             return false;
         }
@@ -789,10 +954,10 @@ impl FullSortedSet {
         self.dict.insert(Arc::clone(&member), score);
         let new_sm = ScoreMember::actual(score, member);
         if let Some(tree) = &mut self.rank_tree {
-            self.ordered.insert(new_sm.clone(), ());
+            self.ordered.insert(new_sm.clone());
             tree.insert(new_sm);
         } else {
-            self.ordered.insert(new_sm, ());
+            self.ordered.insert(new_sm);
         }
         true
     }
@@ -832,7 +997,7 @@ impl FullSortedSet {
                 .ordered
                 .range(start_key..)
                 .take(count)
-                .filter_map(|(sm, _)| sm.member.as_actual().map(|m| (m.to_vec(), sm.score)))
+                .filter_map(|sm| sm.member.as_actual().map(|m| (m.to_vec(), sm.score)))
                 .collect();
         }
         self.iter_asc()
@@ -858,7 +1023,7 @@ impl FullSortedSet {
                 .range(..=start_key)
                 .rev()
                 .take(count)
-                .filter_map(|(sm, _)| sm.member.as_actual().map(|m| (m.to_vec(), sm.score)))
+                .filter_map(|sm| sm.member.as_actual().map(|m| (m.to_vec(), sm.score)))
                 .collect();
         }
         self.iter_desc()
@@ -876,7 +1041,7 @@ impl FullSortedSet {
     }
 
     fn pop_min(&mut self) -> Option<(Vec<u8>, f64)> {
-        while let Some(sm) = self.ordered.first_key_value().map(|(sm, _)| sm.clone()) {
+        while let Some(sm) = self.ordered.first().cloned() {
             self.ordered.remove(&sm);
             if let Some(tree) = &mut self.rank_tree {
                 tree.remove(&sm);
@@ -891,7 +1056,7 @@ impl FullSortedSet {
     }
 
     fn pop_max(&mut self) -> Option<(Vec<u8>, f64)> {
-        while let Some(sm) = self.ordered.last_key_value().map(|(sm, _)| sm.clone()) {
+        while let Some(sm) = self.ordered.last().cloned() {
             self.ordered.remove(&sm);
             if let Some(tree) = &mut self.rank_tree {
                 tree.remove(&sm);
@@ -1207,7 +1372,7 @@ impl SortedSet {
             SortedSetInner::Full(full) => {
                 let lo_bound = ScoreMember::min_for_score(canonicalize_zero_score(lo));
                 let hi_bound = ScoreMember::max_for_score(canonicalize_zero_score(hi));
-                for (sm, _) in full.ordered.range(lo_bound..=hi_bound) {
+                for sm in full.ordered.range(lo_bound..=hi_bound) {
                     if let Some(member) = sm.member.as_actual() {
                         f(member, sm.score);
                     }
@@ -1250,10 +1415,7 @@ impl SortedSet {
         take: usize,
     ) -> Vec<(Vec<u8>, f64)> {
         if let SortedSetInner::Full(full) = &self.inner
-            && let (Some((first, _)), Some((last, _))) = (
-                full.ordered.first_key_value(),
-                full.ordered.last_key_value(),
-            )
+            && let (Some(first), Some(last)) = (full.ordered.first(), full.ordered.last())
             && first.score == last.score
         {
             let s = first.score;
@@ -1342,7 +1504,7 @@ impl SortedSet {
             let scanned = full
                 .ordered
                 .range(lower..=upper)
-                .filter_map(|(sm, _)| sm.member.as_actual())
+                .filter_map(|sm| sm.member.as_actual())
                 .filter(|m| lex_in_range(m, min, max));
             return if rev {
                 scanned
@@ -1405,10 +1567,7 @@ impl SortedSet {
     /// the count is byte-for-byte identical (incl. the unequal-score handling).
     fn lex_count(&self, min: &[u8], max: &[u8]) -> usize {
         if let SortedSetInner::Full(full) = &self.inner
-            && let (Some((first, _)), Some((last, _))) = (
-                full.ordered.first_key_value(),
-                full.ordered.last_key_value(),
-            )
+            && let (Some(first), Some(last)) = (full.ordered.first(), full.ordered.last())
             && first.score == last.score
         {
             let s = first.score;
@@ -1473,7 +1632,7 @@ impl SortedSet {
             return full
                 .ordered
                 .range(lower..=upper)
-                .filter_map(|(sm, _)| sm.member.as_actual())
+                .filter_map(|sm| sm.member.as_actual())
                 .filter(|m| lex_in_range(m, min, max))
                 .count();
         }
@@ -1625,7 +1784,7 @@ impl SortedSet {
                     full.ordered
                         .range((lower, upper))
                         .rev()
-                        .filter_map(|(sm, _)| {
+                        .filter_map(|sm| {
                             sm.member
                                 .as_actual()
                                 .map(|member| (member.to_vec(), sm.score))
@@ -1636,7 +1795,7 @@ impl SortedSet {
                 } else {
                     full.ordered
                         .range((lower, upper))
-                        .filter_map(|(sm, _)| {
+                        .filter_map(|sm| {
                             sm.member
                                 .as_actual()
                                 .map(|member| (member.to_vec(), sm.score))
@@ -1718,7 +1877,7 @@ impl SortedSet {
                 let (lower, upper) = Self::score_bounds(min, max);
                 full.ordered
                     .range((lower, upper))
-                    .filter(|(sm, _)| sm.member.as_actual().is_some())
+                    .filter(|sm| sm.member.as_actual().is_some())
                     .count()
             }
         }
@@ -1760,7 +1919,7 @@ impl SortedSet {
     fn insert_min_score_sentinel(&mut self, score: f64) {
         self.promote();
         if let SortedSetInner::Full(full) = &mut self.inner {
-            full.ordered.insert(ScoreMember::min_for_score(score), ());
+            full.ordered.insert(ScoreMember::min_for_score(score));
         }
     }
 
@@ -1768,7 +1927,7 @@ impl SortedSet {
     fn insert_max_score_sentinel(&mut self, score: f64) {
         self.promote();
         if let SortedSetInner::Full(full) = &mut self.inner {
-            full.ordered.insert(ScoreMember::max_for_score(score), ());
+            full.ordered.insert(ScoreMember::max_for_score(score));
         }
     }
 
@@ -1777,7 +1936,7 @@ impl SortedSet {
         matches!(
             &self.inner,
             SortedSetInner::Full(full)
-                if full.ordered.contains_key(&ScoreMember::min_for_score(score))
+                if full.ordered.contains(&ScoreMember::min_for_score(score))
         )
     }
 
@@ -1786,7 +1945,7 @@ impl SortedSet {
         matches!(
             &self.inner,
             SortedSetInner::Full(full)
-                if full.ordered.contains_key(&ScoreMember::max_for_score(score))
+                if full.ordered.contains(&ScoreMember::max_for_score(score))
         )
     }
 }
@@ -1797,7 +1956,7 @@ pub struct SortedSetIterAsc<'a> {
 
 enum SortedSetIterAscInner<'a> {
     Packed(PackedZSetIter<'a>),
-    Full(std::collections::btree_map::Keys<'a, ScoreMember, ()>),
+    Full(FullZSetOrderIter<'a>),
 }
 
 impl<'a> Iterator for SortedSetIterAsc<'a> {
@@ -1820,7 +1979,7 @@ impl<'a> Iterator for SortedSetIterAsc<'a> {
 
 enum SortedSetIterDesc<'a> {
     Packed(std::iter::Rev<std::vec::IntoIter<(&'a [u8], f64)>>),
-    Full(std::iter::Rev<std::collections::btree_map::Keys<'a, ScoreMember, ()>>),
+    Full(std::iter::Rev<FullZSetOrderIter<'a>>),
 }
 
 impl<'a> Iterator for SortedSetIterDesc<'a> {
@@ -19709,8 +19868,7 @@ impl Store {
         let Value::List(list) = &entry.value else {
             return None;
         };
-        let (nodes, uncompressed_size) =
-            quicklist_node_stats(list, self.list_max_listpack_size);
+        let (nodes, uncompressed_size) = quicklist_node_stats(list, self.list_max_listpack_size);
         Some((nodes, list.len(), uncompressed_size))
     }
 
@@ -42257,7 +42415,10 @@ mod tests {
         // `name=` with empty value.
         assert_eq!(
             store
-                .function_load(b"#!lua name=\nredis.register_function('f', function() return 1 end)", false)
+                .function_load(
+                    b"#!lua name=\nredis.register_function('f', function() return 1 end)",
+                    false
+                )
                 .expect_err("empty name= must error"),
             charset_err
         );
@@ -42265,14 +42426,20 @@ mod tests {
         // `name=` token → empty value).
         assert_eq!(
             store
-                .function_load(b"#!lua name= \nredis.register_function('f', function() return 1 end)", false)
+                .function_load(
+                    b"#!lua name= \nredis.register_function('f', function() return 1 end)",
+                    false
+                )
                 .expect_err("whitespace-only name= must error"),
             charset_err
         );
         // A wholly absent name token still yields the missing-name wording.
         assert_eq!(
             store
-                .function_load(b"#!lua\nredis.register_function('f', function() return 1 end)", false)
+                .function_load(
+                    b"#!lua\nredis.register_function('f', function() return 1 end)",
+                    false
+                )
                 .expect_err("absent name must error"),
             StoreError::GenericError("ERR Library name was not given".to_string())
         );
