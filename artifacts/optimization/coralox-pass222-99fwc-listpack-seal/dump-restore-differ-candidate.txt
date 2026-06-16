@@ -1,0 +1,1 @@
+OK: DUMP/RESTORE byte-compatible both ways vs redis 7.2.4 (14 keys across all encodings; value round-trip verified)

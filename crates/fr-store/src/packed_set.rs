@@ -2056,6 +2056,7 @@ impl<'a> Iterator for PackedListIter<'a> {
     }
 }
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -2094,6 +2095,9 @@ const LIST_CHUNK_TARGET: usize = 128;
 enum ListChunk {
     Owned {
         elems: Arc<Vec<Vec<u8>>>,
+        /// Exact listpack byte length if known. `0` means a mutable path touched
+        /// the chunk and the value must be recomputed before append/seal.
+        lp_bytes: u64,
     },
     Listpack {
         bytes: Arc<Vec<u8>>,
@@ -2103,8 +2107,10 @@ enum ListChunk {
 
 impl ListChunk {
     fn from_vec(elems: Vec<Vec<u8>>) -> Self {
+        let lp_bytes = owned_listpack_bytes(&elems);
         Self::Owned {
             elems: Arc::new(elems),
+            lp_bytes,
         }
     }
 
@@ -2117,7 +2123,7 @@ impl ListChunk {
 
     fn len(&self) -> usize {
         match self {
-            Self::Owned { elems } => elems.len(),
+            Self::Owned { elems, .. } => elems.len(),
             Self::Listpack { entries, .. } => entries.len(),
         }
     }
@@ -2128,7 +2134,7 @@ impl ListChunk {
 
     fn get(&self, idx: usize) -> Option<&[u8]> {
         match self {
-            Self::Owned { elems } => elems.get(idx).map(Vec::as_slice),
+            Self::Owned { elems, .. } => elems.get(idx).map(Vec::as_slice),
             Self::Listpack { bytes, entries } => {
                 entries.get(idx).map(|entry| entry.as_bytes(bytes))
             }
@@ -2144,14 +2150,100 @@ impl ListChunk {
             *self = Self::from_vec(elems);
         }
         match self {
-            Self::Owned { elems } => Arc::make_mut(elems),
+            Self::Owned { elems, lp_bytes } => {
+                *lp_bytes = 0;
+                Arc::make_mut(elems)
+            }
             Self::Listpack { .. } => unreachable!("packed listpack node was materialized"),
+        }
+    }
+
+    /// (frankenredis-99fwc) Seal a FULL `Owned` chunk into the compact
+    /// `Listpack` representation — one packed blob instead of a `Vec<u8>` (24B
+    /// header + a heap block) PER element. Called when a chunk becomes interior
+    /// (a fresh chunk is started at the same end), so it is never appended to
+    /// again; a later in-place mutation (`make_mut`) transparently re-materializes
+    /// it. No-op for an already-`Listpack`/empty chunk or an over-budget encode.
+    fn seal_if_owned(&mut self, fill: i64) {
+        let Self::Owned { elems, lp_bytes } = self else {
+            return;
+        };
+        if elems.is_empty() {
+            return;
+        }
+        if *lp_bytes == 0 {
+            *lp_bytes = owned_listpack_bytes(elems);
+        }
+        if list_node_exceeds_limit(fill, *lp_bytes, elems.len() as u64) {
+            return;
+        }
+        let slices: Vec<&[u8]> = elems.iter().map(Vec::as_slice).collect();
+        if let Some(blob) = fr_persist::encode_listpack_strings_blob(&slices)
+            && let Ok(spans) = fr_persist::listpack::decode_value_spans(&blob)
+        {
+            *self = Self::from_listpack(blob, spans);
+        }
+    }
+
+    fn accepts_append(&mut self, elem: &[u8], fill: i64) -> bool {
+        match self {
+            Self::Owned { elems, lp_bytes } => {
+                if elems.is_empty() {
+                    return true;
+                }
+                if *lp_bytes == 0 {
+                    *lp_bytes = owned_listpack_bytes(elems);
+                }
+                quicklist_packed_node_accepts_local(elems.len(), *lp_bytes, elem.len(), fill)
+            }
+            Self::Listpack { bytes, entries } => quicklist_packed_node_accepts_local(
+                entries.len(),
+                bytes.len() as u64,
+                elem.len(),
+                fill,
+            ),
+        }
+    }
+
+    fn push_back_owned(&mut self, elem: Vec<u8>) {
+        let added = list_lp_entry_bytes(&elem);
+        if let Self::Listpack { bytes, entries } = self {
+            let elems = entries
+                .iter()
+                .map(|entry| entry.as_bytes(bytes).to_vec())
+                .collect();
+            *self = Self::from_vec(elems);
+        }
+        if let Self::Owned { elems, lp_bytes } = self {
+            if *lp_bytes == 0 {
+                *lp_bytes = owned_listpack_bytes(elems);
+            }
+            Arc::make_mut(elems).push(elem);
+            *lp_bytes += added;
+        }
+    }
+
+    fn push_front_owned(&mut self, elem: Vec<u8>) {
+        let added = list_lp_entry_bytes(&elem);
+        if let Self::Listpack { bytes, entries } = self {
+            let elems = entries
+                .iter()
+                .map(|entry| entry.as_bytes(bytes).to_vec())
+                .collect();
+            *self = Self::from_vec(elems);
+        }
+        if let Self::Owned { elems, lp_bytes } = self {
+            if *lp_bytes == 0 {
+                *lp_bytes = owned_listpack_bytes(elems);
+            }
+            Arc::make_mut(elems).insert(0, elem);
+            *lp_bytes += added;
         }
     }
 
     fn iter(&self) -> ListChunkIter<'_> {
         match self {
-            Self::Owned { elems } => ListChunkIter::Owned(elems.iter()),
+            Self::Owned { elems, .. } => ListChunkIter::Owned(elems.iter()),
             Self::Listpack { bytes, entries } => ListChunkIter::Listpack {
                 bytes,
                 entries: entries.iter(),
@@ -2161,7 +2253,7 @@ impl ListChunk {
 
     fn iter_from(&self, start: usize) -> ListChunkIter<'_> {
         match self {
-            Self::Owned { elems } => {
+            Self::Owned { elems, .. } => {
                 let start = start.min(elems.len());
                 ListChunkIter::Owned(elems[start..].iter())
             }
@@ -2177,13 +2269,41 @@ impl ListChunk {
 
     fn iter_rev(&self) -> ListChunkRevIter<'_> {
         match self {
-            Self::Owned { elems } => ListChunkRevIter::Owned(elems.iter().rev()),
+            Self::Owned { elems, .. } => ListChunkRevIter::Owned(elems.iter().rev()),
             Self::Listpack { bytes, entries } => ListChunkRevIter::Listpack {
                 bytes,
                 entries: entries.iter().rev(),
             },
         }
     }
+}
+
+fn owned_listpack_bytes(elems: &[Vec<u8>]) -> u64 {
+    LIST_LP_OVERHEAD
+        + elems
+            .iter()
+            .map(|elem| list_lp_entry_bytes(elem))
+            .sum::<u64>()
+}
+
+fn quicklist_packed_node_accepts_local(
+    current_count: usize,
+    current_bytes: u64,
+    next_value_len: usize,
+    fill: i64,
+) -> bool {
+    const QUICKLIST_SIZE_ESTIMATE_OVERHEAD: u64 = 8;
+    let trial_bytes = current_bytes
+        .saturating_add(next_value_len as u64)
+        .saturating_add(QUICKLIST_SIZE_ESTIMATE_OVERHEAD);
+    if fill >= 0 {
+        if trial_bytes > LIST_SIZE_SAFETY_LIMIT {
+            return false;
+        }
+        let count_limit = if fill == 0 { 1 } else { fill as usize };
+        return current_count < count_limit;
+    }
+    trial_bytes <= list_neg_fill_size(fill)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2195,6 +2315,10 @@ struct ChunkedList {
 pub(crate) struct RetainedListpackChunk<'a> {
     pub(crate) bytes: &'a [u8],
     pub(crate) entries: &'a [ListpackValueSpan],
+}
+
+pub(crate) struct QuicklistPackedNode<'a> {
+    pub(crate) bytes: Cow<'a, [u8]>,
 }
 
 impl ChunkedList {
@@ -2243,25 +2367,38 @@ impl ChunkedList {
     }
 
     fn push_back(&mut self, elem: Vec<u8>) {
+        self.push_back_with_fill(elem, -2);
+    }
+
+    fn push_back_with_fill(&mut self, elem: Vec<u8>, fill: i64) {
         if let Some(back) = self.chunks.back_mut()
-            && back.len() < LIST_CHUNK_TARGET
+            && back.accepts_append(&elem, fill)
         {
-            back.make_mut().push(elem);
+            back.push_back_owned(elem);
             self.len += 1;
             return;
+        }
+        // (frankenredis-99fwc) The back chunk is complete and about to become
+        // interior. Seal it only if it already satisfies the same quicklist node
+        // boundary that DUMP/DEBUG serialization will later require.
+        if let Some(back) = self.chunks.back_mut() {
+            back.seal_if_owned(fill);
         }
         self.chunks
             .push_back(ListChunk::from_vec(Vec::from([elem])));
         self.len += 1;
     }
 
-    fn push_front(&mut self, elem: Vec<u8>) {
+    fn push_front_with_fill(&mut self, elem: Vec<u8>, fill: i64) {
         if let Some(front) = self.chunks.front_mut()
-            && front.len() < LIST_CHUNK_TARGET
+            && front.accepts_append(&elem, fill)
         {
-            front.make_mut().insert(0, elem);
+            front.push_front_owned(elem);
             self.len += 1;
             return;
+        }
+        if let Some(front) = self.chunks.front_mut() {
+            front.seal_if_owned(fill);
         }
         self.chunks
             .push_front(ListChunk::from_vec(Vec::from([elem])));
@@ -2890,7 +3027,7 @@ impl ListValue {
         self.maybe_promote(elem.len());
         match &mut self.repr {
             ListRepr::Packed(p) => p.push_back(&elem),
-            ListRepr::Deque(d) => Arc::make_mut(d).push_back(elem),
+            ListRepr::Deque(d) => Arc::make_mut(d).push_back_with_fill(elem, self.fill),
         }
     }
 
@@ -2899,7 +3036,7 @@ impl ListValue {
         self.maybe_promote(elem.len());
         match &mut self.repr {
             ListRepr::Packed(p) => p.push_front(&elem),
-            ListRepr::Deque(d) => Arc::make_mut(d).push_front(elem),
+            ListRepr::Deque(d) => Arc::make_mut(d).push_front_with_fill(elem, self.fill),
         }
     }
 
@@ -3008,6 +3145,47 @@ impl ListValue {
             }
         }
         (!chunks.is_empty()).then_some(chunks)
+    }
+
+    pub(crate) fn quicklist_packed_nodes(&self, fill: i64) -> Option<Vec<QuicklistPackedNode<'_>>> {
+        let ListRepr::Deque(list) = &self.repr else {
+            return None;
+        };
+        let mut nodes = Vec::with_capacity(list.chunks.len());
+        let mut previous: Option<(usize, u64)> = None;
+        for chunk in &list.chunks {
+            let (bytes, entries_len, first_len) = match chunk {
+                ListChunk::Listpack { bytes, entries } if !entries.is_empty() => {
+                    let first_len = entries.first()?.as_bytes(bytes).len();
+                    (Cow::Borrowed(bytes.as_slice()), entries.len(), first_len)
+                }
+                ListChunk::Owned { elems, .. } if !elems.is_empty() => {
+                    let slices: Vec<&[u8]> = elems.iter().map(Vec::as_slice).collect();
+                    let blob = fr_persist::encode_listpack_strings_blob(&slices)?;
+                    let first_len = elems.first()?.len();
+                    (Cow::Owned(blob), elems.len(), first_len)
+                }
+                _ => return None,
+            };
+
+            let bytes_len = bytes.len() as u64;
+            if list_node_exceeds_limit(fill, bytes_len, entries_len as u64) {
+                return None;
+            }
+            if let Some((previous_count, previous_bytes)) = previous
+                && quicklist_packed_node_accepts_local(
+                    previous_count,
+                    previous_bytes,
+                    first_len,
+                    fill,
+                )
+            {
+                return None;
+            }
+            previous = Some((entries_len, bytes_len));
+            nodes.push(QuicklistPackedNode { bytes });
+        }
+        (!nodes.is_empty()).then_some(nodes)
     }
 
     #[must_use]
@@ -4006,7 +4184,7 @@ mod tests {
     #[test]
     fn list_value_clone_shares_large_deque_until_mutation() {
         let mut source = ListValue::default();
-        for idx in 0..=PACKED_MAX_ENTRIES {
+        for idx in 0..2_000 {
             source.push_back(list_test_value(idx));
         }
 
@@ -4042,26 +4220,49 @@ mod tests {
             copy_deque.chunks.get(1),
         ) {
             (Some(source_front), Some(copy_front), Some(source_tail), Some(copy_tail)) => {
+                // (frankenredis-99fwc) The first chunk crossed Redis's quicklist
+                // node boundary and was sealed when the second chunk started, so
+                // the untouched source front is `Listpack`; `copy.set(0)`
+                // mutated element 0, re-materializing the copy's front back to
+                // `Owned`. The mutated chunk thus diverged.
+                assert!(matches!(source_front, ListChunk::Listpack { .. }));
                 let ListChunk::Owned {
-                    elems: source_front,
-                } = source_front
+                    elems: _copy_front, ..
+                } = copy_front
                 else {
-                    unreachable!("push-built list chunks are owned");
+                    unreachable!("the mutated copy's front chunk re-materializes to owned");
                 };
-                let ListChunk::Owned { elems: copy_front } = copy_front else {
-                    unreachable!("push-built list chunks are owned");
-                };
-                let ListChunk::Owned { elems: source_tail } = source_tail else {
-                    unreachable!("push-built list chunks are owned");
-                };
-                let ListChunk::Owned { elems: copy_tail } = copy_tail else {
-                    unreachable!("push-built list chunks are owned");
-                };
-                assert!(!std::sync::Arc::ptr_eq(source_front, copy_front));
-                assert!(std::sync::Arc::ptr_eq(source_tail, copy_tail));
+                // The untouched tail remains shared in whichever representation
+                // quicklist-boundary sealing chose for that chunk.
+                match (source_tail, copy_tail) {
+                    (
+                        ListChunk::Owned {
+                            elems: source_tail, ..
+                        },
+                        ListChunk::Owned {
+                            elems: copy_tail, ..
+                        },
+                    ) => assert!(std::sync::Arc::ptr_eq(source_tail, copy_tail)),
+                    (
+                        ListChunk::Listpack {
+                            bytes: source_bytes,
+                            entries: source_entries,
+                        },
+                        ListChunk::Listpack {
+                            bytes: copy_bytes,
+                            entries: copy_entries,
+                        },
+                    ) => {
+                        assert!(std::sync::Arc::ptr_eq(source_bytes, copy_bytes));
+                        assert!(std::sync::Arc::ptr_eq(source_entries, copy_entries));
+                    }
+                    _ => {
+                        unreachable!("untouched tail chunks must retain shared representation");
+                    }
+                }
             }
             _ => {
-                unreachable!("129-element deque must split into two chunks");
+                unreachable!("large deque must split on Redis quicklist node boundaries");
             }
         }
     }

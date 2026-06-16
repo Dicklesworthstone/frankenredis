@@ -20964,6 +20964,14 @@ fn encode_dump_quicklist2(
     if list.is_empty() {
         return None;
     }
+    if let Some(nodes) = list.quicklist_packed_nodes(list_max_listpack_size) {
+        encode_length(buf, nodes.len());
+        for node in nodes {
+            encode_length(buf, 2);
+            encode_rdb_string(buf, node.bytes.as_ref());
+        }
+        return Some(());
+    }
     if let Some(chunks) = list.retained_listpack_chunks()
         && retained_quicklist2_chunks_match_dump_rules(&chunks, list_max_listpack_size)
     {
@@ -21048,6 +21056,10 @@ fn encode_dump_quicklist2(
 fn quicklist_node_stats(list: &ListValue, list_max_listpack_size: i64) -> (usize, usize) {
     if list.is_empty() {
         return (0, 0);
+    }
+    if let Some(nodes) = list.quicklist_packed_nodes(list_max_listpack_size) {
+        let total: usize = nodes.iter().map(|node| node.bytes.len()).sum();
+        return (nodes.len(), total);
     }
     if let Some(chunks) = list.retained_listpack_chunks()
         && retained_quicklist2_chunks_match_dump_rules(&chunks, list_max_listpack_size)

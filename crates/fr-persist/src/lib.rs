@@ -1800,9 +1800,7 @@ fn encode_compact_list_quicklist2(
     let mut node_payloads: Vec<(u8, Vec<u8>)> = Vec::new(); // (container, payload)
     let mut packed: Vec<&[u8]> = Vec::new();
     let mut packed_bytes = LISTPACK_BLOB_OVERHEAD;
-    let flush = |packed: &mut Vec<&[u8]>,
-                 node_payloads: &mut Vec<(u8, Vec<u8>)>|
-     -> Option<()> {
+    let flush = |packed: &mut Vec<&[u8]>, node_payloads: &mut Vec<(u8, Vec<u8>)>| -> Option<()> {
         if !packed.is_empty() {
             let lp = encode_listpack_strings_blob(packed)?;
             node_payloads.push((2, lp)); // PACKED
@@ -2255,7 +2253,12 @@ fn listpack_entry_encoded_len(entry: &[u8]) -> usize {
     data_len + backlen_len(data_len)
 }
 
-fn encode_listpack_strings_blob(entries: &[&[u8]]) -> Option<Vec<u8>> {
+/// Encode an ordered list of byte-strings into a standard listpack blob
+/// (`[u32 total_bytes][u16 entry_count][entries...][0xFF]`). Returns `None` only
+/// if the total would overflow `u32` (>4 GiB), which never happens for a bounded
+/// chunk. Public so the in-memory `ChunkedList` can SEAL a full `Owned` chunk
+/// into the compact `Listpack` representation (frankenredis-99fwc).
+pub fn encode_listpack_strings_blob(entries: &[&[u8]]) -> Option<Vec<u8>> {
     let mut encoded = Vec::new();
     for entry in entries {
         encode_listpack_entry(&mut encoded, entry);
@@ -3304,7 +3307,8 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                         let mut members = Vec::with_capacity(decoded.len() / 2);
                         let mut it = decoded.into_iter();
                         while let Some(member) = it.next() {
-                            let score_bytes = it.next().ok_or(PersistError::InvalidFrame)?.to_bytes();
+                            let score_bytes =
+                                it.next().ok_or(PersistError::InvalidFrame)?.to_bytes();
                             let score = std::str::from_utf8(&score_bytes)
                                 .ok()
                                 .and_then(|s| s.parse::<f64>().ok())
@@ -4572,13 +4576,13 @@ mod tests {
         // bounds discipline (all reads via get()?/checked_add + the
         // backref > output.len() check) and the 512MB OOM cap. (frankenredis-lzfadv)
         let cases: &[&[u8]] = &[
-            &[],                                    // empty
-            &[0x04, b'h', b'i'],                    // literal run wants 5 bytes, only 2 present
-            &[0x1F],                                // literal ctrl, no payload
-            &[0x20, 0x00],                          // backref=1 into empty output
-            &[0xE0, 0x00],                          // copy_len=9 marker, truncated backref
-            &[0xE0, 0xFF],                          // copy_len extended, no backref byte
-            &[0xFF, 0xFF, 0xFF],                    // max ctrl, backref far past output start
+            &[],                                               // empty
+            &[0x04, b'h', b'i'], // literal run wants 5 bytes, only 2 present
+            &[0x1F],             // literal ctrl, no payload
+            &[0x20, 0x00],       // backref=1 into empty output
+            &[0xE0, 0x00],       // copy_len=9 marker, truncated backref
+            &[0xE0, 0xFF],       // copy_len extended, no backref byte
+            &[0xFF, 0xFF, 0xFF], // max ctrl, backref far past output start
             &[0x04, b'a', b'b', b'c', b'd', b'e', 0x20, 0x00], // literal then bad backref
         ];
         for c in cases {
@@ -4740,9 +4744,7 @@ mod tests {
 
     #[test]
     fn large_list_rdb_uses_multinode_quicklist2_not_legacy() {
-        use super::{
-            CompactRdbThresholds, encode_compact_list_quicklist2, rdb_decode_length,
-        };
+        use super::{CompactRdbThresholds, encode_compact_list_quicklist2, rdb_decode_length};
         let th = CompactRdbThresholds::default();
         // > one 8 KiB listpack node, no single oversized element.
         let items: Vec<Vec<u8>> = (0..10000).map(|i| format!("e{i}").into_bytes()).collect();
@@ -4754,11 +4756,9 @@ mod tests {
             "expected multiple PACKED nodes, got {node_count}"
         );
         // Small list → exactly one node.
-        let small = encode_compact_list_quicklist2(
-            &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
-            &th,
-        )
-        .expect("small list encodes");
+        let small =
+            encode_compact_list_quicklist2(&[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], &th)
+                .expect("small list encodes");
         assert_eq!(rdb_decode_length(&small).unwrap().0, 1);
         // Full RDB round-trip through the canonical QUICKLIST_2 path is byte-faithful.
         let entries = vec![RdbEntry {
