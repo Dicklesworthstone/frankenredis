@@ -1,0 +1,428 @@
+diff --git a/crates/fr-store/src/lib.rs b/crates/fr-store/src/lib.rs
+index 9a110f383..5d2fdf4df 100644
+--- a/crates/fr-store/src/lib.rs
++++ b/crates/fr-store/src/lib.rs
+@@ -581,6 +581,8 @@ const ZSET_INDEX_TREE_WARM_MIN_LEN: usize = 4096;
+ const ZSET_INDEX_TREE_WARM_MIN_SKIP: usize = 1024;
+ const ZSET_INDEX_TREE_WARM_HITS: u8 = 2;
+ 
++type ZSetMember = Box<[u8]>;
++
+ #[derive(Debug, Clone)]
+ pub struct SortedSet {
+     inner: SortedSetInner,
+@@ -603,7 +605,7 @@ struct FullSortedSet {
+     /// except ZRANDMEMBER (whose output is an unordered random sample anyway);
+     /// `swap_remove` keeps removals O(1) at the cost of reordering, which is
+     /// invisible. (frankenredis-rqdxh, extends 8kuy1; zrandmember O(1) pick)
+-    dict: IndexMap<Vec<u8>, f64, foldhash::quality::RandomState>,
++    dict: IndexMap<ZSetMember, f64, foldhash::quality::RandomState>,
+     /// (score, member) -> ()
+     /// We use ScoreMember wrapper to handle f64 comparison and lexicographical member tie-breaking.
+     ordered: BTreeMap<ScoreMember, ()>,
+@@ -628,19 +630,19 @@ impl PartialEq for SortedSet {
+ #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+ enum MemberPart {
+     Min,
+-    Actual(Vec<u8>),
++    Actual(ZSetMember),
+     Max,
+ }
+ 
+ impl MemberPart {
+-    fn as_actual(&self) -> Option<&Vec<u8>> {
++    fn as_actual(&self) -> Option<&[u8]> {
+         match self {
+-            MemberPart::Actual(v) => Some(v),
++            MemberPart::Actual(v) => Some(v.as_ref()),
+             MemberPart::Min | MemberPart::Max => None,
+         }
+     }
+ 
+-    fn into_actual(self) -> Option<Vec<u8>> {
++    fn into_actual(self) -> Option<ZSetMember> {
+         match self {
+             MemberPart::Actual(v) => Some(v),
+             MemberPart::Min | MemberPart::Max => None,
+@@ -685,10 +687,13 @@ impl ScoreMember {
+         }
+     }
+ 
+-    fn actual(score: f64, member: Vec<u8>) -> Self {
++    fn actual<M>(score: f64, member: M) -> Self
++    where
++        ZSetMember: From<M>,
++    {
+         Self {
+             score,
+-            member: MemberPart::Actual(member),
++            member: MemberPart::Actual(ZSetMember::from(member)),
+         }
+     }
+ }
+@@ -725,6 +730,7 @@ impl FullSortedSet {
+         let mut score_members: Vec<ScoreMember> = Vec::with_capacity(pairs.len());
+         for (member, score) in pairs {
+             let score = canonicalize_zero_score(score);
++            let member = ZSetMember::from(member);
+             score_members.push(ScoreMember::actual(score, member.clone()));
+             dict.insert(member, score);
+         }
+@@ -752,20 +758,21 @@ impl FullSortedSet {
+         // alloc+free per command. The dict probe is unchanged (one `get_mut` vs the
+         // old one `insert`); behaviour is byte-identical — the slot only changes
+         // when the score differs, exactly as the old equal-score early return.
+-        let existing = match self.dict.get_mut(&member) {
+-            Some(slot) => {
++        let existing = match self.dict.get_full_mut(member.as_slice()) {
++            Some((_idx, shared_member, slot)) => {
+                 let old_score = *slot;
+                 if old_score.total_cmp(&score).is_eq() {
+                     return false;
+                 }
++                let shared_member = shared_member.clone();
+                 *slot = score;
+-                Some(old_score)
++                Some((old_score, shared_member))
+             }
+             None => None,
+         };
+-        if let Some(old_score) = existing {
+-            let old_sm = ScoreMember::actual(old_score, member.clone());
+-            let new_sm = ScoreMember::actual(score, member);
++        if let Some((old_score, shared_member)) = existing {
++            let old_sm = ScoreMember::actual(old_score, shared_member.clone());
++            let new_sm = ScoreMember::actual(score, shared_member);
+             self.ordered.remove(&old_sm);
+             // (frankenredis-zaddmove) When no order-statistic tree is built — the
+             // common case (rank-free zsets, and every ZADD before the first
+@@ -782,8 +789,9 @@ impl FullSortedSet {
+             }
+             return false;
+         }
+-        self.dict.insert(member.clone(), score);
+-        let new_sm = ScoreMember::actual(score, member);
++        let shared_member = ZSetMember::from(member);
++        self.dict.insert(shared_member.clone(), score);
++        let new_sm = ScoreMember::actual(score, shared_member);
+         if let Some(tree) = &mut self.rank_tree {
+             self.ordered.insert(new_sm.clone(), ());
+             tree.insert(new_sm);
+@@ -794,8 +802,8 @@ impl FullSortedSet {
+     }
+ 
+     fn remove(&mut self, member: &[u8]) -> bool {
+-        if let Some(score) = self.dict.swap_remove(member) {
+-            let sm = ScoreMember::actual(score, member.to_vec());
++        if let Some((_idx, shared_member, score)) = self.dict.swap_remove_full(member) {
++            let sm = ScoreMember::actual(score, shared_member);
+             self.ordered.remove(&sm);
+             if let Some(tree) = &mut self.rank_tree {
+                 tree.remove(&sm);
+@@ -810,7 +818,7 @@ impl FullSortedSet {
+         self.dict.get(member).copied()
+     }
+ 
+-    pub fn iter_asc(&self) -> impl Iterator<Item = (&Vec<u8>, &f64)> {
++    pub fn iter_asc(&self) -> impl Iterator<Item = (&[u8], &f64)> {
+         self.ordered
+             .keys()
+             .filter_map(|sm| sm.member.as_actual().map(|member| (member, &sm.score)))
+@@ -828,13 +836,13 @@ impl FullSortedSet {
+                 .ordered
+                 .range(start_key..)
+                 .take(count)
+-                .filter_map(|(sm, _)| sm.member.as_actual().map(|m| (m.clone(), sm.score)))
++                .filter_map(|(sm, _)| sm.member.as_actual().map(|m| (m.to_vec(), sm.score)))
+                 .collect();
+         }
+         self.iter_asc()
+             .skip(start_idx)
+             .take(count)
+-            .map(|(m, s)| (m.clone(), *s))
++            .map(|(m, s)| (m.to_vec(), *s))
+             .collect()
+     }
+ 
+@@ -854,17 +862,17 @@ impl FullSortedSet {
+                 .range(..=start_key)
+                 .rev()
+                 .take(count)
+-                .filter_map(|(sm, _)| sm.member.as_actual().map(|m| (m.clone(), sm.score)))
++                .filter_map(|(sm, _)| sm.member.as_actual().map(|m| (m.to_vec(), sm.score)))
+                 .collect();
+         }
+         self.iter_desc()
+             .skip(start_idx)
+             .take(count)
+-            .map(|(m, s)| (m.clone(), *s))
++            .map(|(m, s)| (m.to_vec(), *s))
+             .collect()
+     }
+ 
+-    fn iter_desc(&self) -> impl Iterator<Item = (&Vec<u8>, &f64)> {
++    fn iter_desc(&self) -> impl Iterator<Item = (&[u8], &f64)> {
+         self.ordered
+             .keys()
+             .rev()
+@@ -879,8 +887,8 @@ impl FullSortedSet {
+             }
+             if let Some(member) = sm.member.into_actual() {
+                 let score = sm.score;
+-                self.dict.swap_remove(&member);
+-                return Some((member, score));
++                self.dict.swap_remove(member.as_ref());
++                return Some((member.into_vec(), score));
+             }
+         }
+         None
+@@ -894,8 +902,8 @@ impl FullSortedSet {
+             }
+             if let Some(member) = sm.member.into_actual() {
+                 let score = sm.score;
+-                self.dict.swap_remove(&member);
+-                return Some((member, score));
++                self.dict.swap_remove(member.as_ref());
++                return Some((member.into_vec(), score));
+             }
+         }
+         None
+@@ -961,7 +969,7 @@ impl FullSortedSet {
+ 
+     fn rank(&mut self, member: &[u8]) -> Option<usize> {
+         let score = self.get_score(member)?;
+-        let target = ScoreMember::actual(score, member.to_vec());
++        let target = ScoreMember::actual(score, member);
+         // Ascending rank == number of members strictly less than `target`.
+         Some(self.ensure_rank_tree().rank_of(&target))
+     }
+@@ -971,7 +979,7 @@ impl FullSortedSet {
+         // For an existing member in a totally-ordered set, the descending rank
+         // is len - 1 - (ascending rank): no separate index needed.
+         let len = self.dict.len();
+-        let target = ScoreMember::actual(score, member.to_vec());
++        let target = ScoreMember::actual(score, member);
+         let asc = self.ensure_rank_tree().rank_of(&target);
+         Some(len - 1 - asc)
+     }
+@@ -1111,8 +1119,11 @@ impl SortedSet {
+             return indices
+                 .iter()
+                 .filter_map(|idx| {
+-                    tree.select(*idx)
+-                        .and_then(|sm| sm.member.into_actual().map(|member| (member, sm.score)))
++                    tree.select(*idx).and_then(|sm| {
++                        sm.member
++                            .into_actual()
++                            .map(|member| (member.into_vec(), sm.score))
++                    })
+                 })
+                 .collect();
+         }
+@@ -1150,7 +1161,11 @@ impl SortedSet {
+         if let SortedSetInner::Full(full) = &self.inner {
+             return indices
+                 .iter()
+-                .filter_map(|&idx| full.dict.get_index(idx).map(|(m, &s)| (m.clone(), s)))
++                .filter_map(|&idx| {
++                    full.dict
++                        .get_index(idx)
++                        .map(|(m, &s)| (m.as_ref().to_vec(), s))
++                })
+                 .collect();
+         }
+         self.members_at_indices(indices)
+@@ -1167,7 +1182,7 @@ impl SortedSet {
+             SortedSetInner::Full(full) => full
+                 .dict
+                 .get_index(idx)
+-                .map(|(m, _)| Cow::Borrowed(m.as_slice())),
++                .map(|(m, _)| Cow::Borrowed(m.as_ref())),
+             SortedSetInner::Packed(_) => self.iter().nth(idx).map(|(m, _)| Cow::Owned(m.to_vec())),
+         }
+     }
+@@ -1267,7 +1282,7 @@ impl SortedSet {
+                     0
+                 } else {
+                     let x = &min[1..];
+-                    let r = tree.rank_of(&ScoreMember::actual(s, x.to_vec()));
++                    let r = tree.rank_of(&ScoreMember::actual(s, x));
+                     if min[0] == b'(' {
+                         r + usize::from(full.get_score(x).is_some())
+                     } else {
+@@ -1278,7 +1293,7 @@ impl SortedSet {
+                     total
+                 } else {
+                     let x = &max[1..];
+-                    let r = tree.rank_of(&ScoreMember::actual(s, x.to_vec()));
++                    let r = tree.rank_of(&ScoreMember::actual(s, x));
+                     if max[0] == b'[' {
+                         r + usize::from(full.get_score(x).is_some())
+                     } else {
+@@ -1297,7 +1312,7 @@ impl SortedSet {
+                             if let Some(sm) = tree.select(top - k)
+                                 && let Some(m) = sm.member.as_actual()
+                             {
+-                                out.push((m.clone(), s));
++                                out.push((m.to_vec(), s));
+                             }
+                         }
+                     } else {
+@@ -1306,7 +1321,7 @@ impl SortedSet {
+                             if let Some(sm) = tree.select(r)
+                                 && let Some(m) = sm.member.as_actual()
+                             {
+-                                out.push((m.clone(), s));
++                                out.push((m.to_vec(), s));
+                             }
+                         }
+                     }
+@@ -1319,14 +1334,14 @@ impl SortedSet {
+             } else if min == b"+" {
+                 return Vec::new();
+             } else {
+-                ScoreMember::actual(s, min[1..].to_vec())
++                ScoreMember::actual(s, &min[1..])
+             };
+             let upper = if max == b"+" {
+                 ScoreMember::max_for_score(s)
+             } else if max == b"-" {
+                 return Vec::new();
+             } else {
+-                ScoreMember::actual(s, max[1..].to_vec())
++                ScoreMember::actual(s, &max[1..])
+             };
+             if lower > upper {
+                 return Vec::new();
+@@ -1341,13 +1356,13 @@ impl SortedSet {
+                     .rev()
+                     .skip(offset)
+                     .take(take)
+-                    .map(|m| (m.clone(), s))
++                    .map(|m| (m.to_vec(), s))
+                     .collect()
+             } else {
+                 scanned
+                     .skip(offset)
+                     .take(take)
+-                    .map(|m| (m.clone(), s))
++                    .map(|m| (m.to_vec(), s))
+                     .collect()
+             };
+         }
+@@ -1421,7 +1436,7 @@ impl SortedSet {
+                     total
+                 } else {
+                     let x = &min[1..];
+-                    let r = tree.rank_of(&ScoreMember::actual(s, x.to_vec()));
++                    let r = tree.rank_of(&ScoreMember::actual(s, x));
+                     // `[x` excludes members < x (rank_of); `(x` also excludes x.
+                     if min[0] == b'(' {
+                         r + usize::from(full.get_score(x).is_some())
+@@ -1435,7 +1450,7 @@ impl SortedSet {
+                     0
+                 } else {
+                     let x = &max[1..];
+-                    let r = tree.rank_of(&ScoreMember::actual(s, x.to_vec()));
++                    let r = tree.rank_of(&ScoreMember::actual(s, x));
+                     // `[x` includes x; `(x` stops before x.
+                     if max[0] == b'[' {
+                         r + usize::from(full.get_score(x).is_some())
+@@ -1450,14 +1465,14 @@ impl SortedSet {
+             } else if min == b"+" {
+                 return 0;
+             } else {
+-                ScoreMember::actual(s, min[1..].to_vec())
++                ScoreMember::actual(s, &min[1..])
+             };
+             let upper = if max == b"+" {
+                 ScoreMember::max_for_score(s)
+             } else if max == b"-" {
+                 return 0;
+             } else {
+-                ScoreMember::actual(s, max[1..].to_vec())
++                ScoreMember::actual(s, &max[1..])
+             };
+             if lower > upper {
+                 return 0;
+@@ -1577,7 +1592,7 @@ impl SortedSet {
+                         if let Some(sm) = tree.select(top - k)
+                             && let Some(m) = sm.member.as_actual()
+                         {
+-                            out.push((m.clone(), sm.score));
++                            out.push((m.to_vec(), sm.score));
+                         }
+                     }
+                 } else {
+@@ -1586,7 +1601,7 @@ impl SortedSet {
+                         if let Some(sm) = tree.select(r)
+                             && let Some(m) = sm.member.as_actual()
+                         {
+-                            out.push((m.clone(), sm.score));
++                            out.push((m.to_vec(), sm.score));
+                         }
+                     }
+                 }
+@@ -1620,7 +1635,7 @@ impl SortedSet {
+                         .filter_map(|(sm, _)| {
+                             sm.member
+                                 .as_actual()
+-                                .map(|member| (member.clone(), sm.score))
++                                .map(|member| (member.to_vec(), sm.score))
+                         })
+                         .skip(offset)
+                         .take(take)
+@@ -1631,7 +1646,7 @@ impl SortedSet {
+                         .filter_map(|(sm, _)| {
+                             sm.member
+                                 .as_actual()
+-                                .map(|member| (member.clone(), sm.score))
++                                .map(|member| (member.to_vec(), sm.score))
+                         })
+                         .skip(offset)
+                         .take(take)
+@@ -1801,7 +1816,7 @@ impl<'a> Iterator for SortedSetIterAsc<'a> {
+             SortedSetIterAscInner::Full(keys) => {
+                 for sm in keys.by_ref() {
+                     if let Some(member) = sm.member.as_actual() {
+-                        return Some((member.as_slice(), sm.score));
++                        return Some((member, sm.score));
+                     }
+                 }
+                 None
+@@ -1824,7 +1839,7 @@ impl<'a> Iterator for SortedSetIterDesc<'a> {
+             SortedSetIterDesc::Full(keys) => {
+                 for sm in keys.by_ref() {
+                     if let Some(member) = sm.member.as_actual() {
+-                        return Some((member.as_slice(), sm.score));
++                        return Some((member, sm.score));
+                     }
+                 }
+                 None
+@@ -1908,7 +1923,7 @@ impl ZRankTreap {
+             MemberPart::Min => mix(0),
+             MemberPart::Actual(v) => {
+                 mix(1);
+-                for &b in v {
++                for &b in v.as_ref() {
+                     mix(b);
+                 }
+             }
+@@ -30975,7 +30990,7 @@ mod tests {
+         // less than the target by the sorted-set total order.
+         fn oracle_rank(model: &BTreeMap<Vec<u8>, f64>, member: &[u8]) -> Option<usize> {
+             let score = *model.get(member)?;
+-            let target = ScoreMember::actual(canonicalize_zero_score(score), member.to_vec());
++            let target = ScoreMember::actual(canonicalize_zero_score(score), member);
+             let mut keys: Vec<ScoreMember> = model
+                 .iter()
+                 .map(|(m, s)| ScoreMember::actual(canonicalize_zero_score(*s), m.clone()))
+@@ -31052,7 +31067,7 @@ mod tests {
+                     let mut c = std::collections::HashMap::with_capacity(self.dict.len());
+                     for (r, sm) in self.ordered.keys().enumerate() {
+                         if let Some(mem) = sm.member.as_actual() {
+-                            c.insert(mem.clone(), r);
++                            c.insert(mem.to_vec(), r);
+                         }
+                     }
+                     self.cache = Some(c);
