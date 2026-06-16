@@ -1,0 +1,53 @@
+artifacts/optimization/coralox-pass217-socket-batch-profile/redis-get-rep1.txt
+ GET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          GET: 2521277.25 requests per second, p50=4.103 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/redis-get-rep2.txt
+ GET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          GET: 2083555.62 requests per second, p50=5.031 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/redis-get-rep3.txt
+ GET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          GET: 2307938.50 requests per second, p50=4.607 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/redis-ping_inline-rep1.txt
+ PING_INLINE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                  PING_INLINE: 2419613.00 requests per second, p50=3.959 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/redis-ping_inline-rep2.txt
+ PING_INLINE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                  PING_INLINE: 2400256.00 requests per second, p50=4.199 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/redis-ping_inline-rep3.txt
+ PING_INLINE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                  PING_INLINE: 2608973.75 requests per second, p50=3.903 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/redis-set-rep1.txt
+ SET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          SET: 2174145.00 requests per second, p50=4.791 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/redis-set-rep2.txt
+ SET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          SET: 1449429.88 requests per second, p50=6.543 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/redis-set-rep3.txt
+ SET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          SET: 2083555.62 requests per second, p50=5.143 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/fr-get-rep1.txt
+ GET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          GET: 3191830.00 requests per second, p50=2.047 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/fr-get-rep2.txt
+ GET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          GET: 3030626.25 requests per second, p50=2.287 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/fr-get-rep3.txt
+ GET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          GET: 3125333.25 requests per second, p50=2.175 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/fr-ping_inline-rep1.txt
+ PING_INLINE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                  PING_INLINE: 3191830.00 requests per second, p50=2.279 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/fr-ping_inline-rep2.txt
+ PING_INLINE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                  PING_INLINE: 3261217.50 requests per second, p50=2.055 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/fr-ping_inline-rep3.txt
+ PING_INLINE: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                                  PING_INLINE: 3409454.50 requests per second, p50=1.751 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/fr-set-rep1.txt
+ SET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          SET: 2027243.25 requests per second, p50=4.135 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/fr-set-rep2.txt
+ SET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          SET: 2439284.50 requests per second, p50=4.127 msec
+
+artifacts/optimization/coralox-pass217-socket-batch-profile/fr-set-rep3.txt
+ SET: rps=0.0 (overall: 0.0) avg_msec=-nan (overall: -nan)                                                          SET: 2678857.00 requests per second, p50=3.711 msec
