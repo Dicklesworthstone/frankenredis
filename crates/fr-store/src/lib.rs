@@ -18988,14 +18988,23 @@ impl Store {
                 "ERR Engine '{engine_display}' not found"
             )));
         }
-        if lib_name.is_empty() {
+        // Upstream functions.c distinguishes a MISSING `name=` token from a
+        // present-but-empty one: `libraryGetMetaData` reports "Library name was
+        // not given" only when the field is absent, whereas `name=` with an
+        // empty/whitespace value falls through to functionsVerifyName, which
+        // fails the same charset+length check as any other invalid name ("...
+        // must be at least one character long"). fr previously collapsed both
+        // into "name was not given" because it only inspected the parsed value.
+        // (frankenredis-fnemptyname)
+        if !name_seen {
             return Err(StoreError::GenericError(
                 "ERR Library name was not given".to_string(),
             ));
         }
-        if !lib_name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        if lib_name.is_empty()
+            || !lib_name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
         {
             return Err(StoreError::GenericError(
                 "ERR Library names can only contain letters, numbers, \
@@ -42221,6 +42230,43 @@ mod tests {
                 "ERR Library names can only contain letters, numbers, or underscores(_) and must be at least one character long"
                     .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn function_load_present_but_empty_name_is_charset_error_not_missing() {
+        // (frankenredis-fnemptyname) Differential vs vendored redis 7.2.4:
+        // a `name=` token present with an EMPTY value is NOT "name was not
+        // given" (that wording is reserved for a wholly ABSENT name token) —
+        // upstream functionsVerifyName rejects the empty string with the same
+        // charset+length wording as any invalid name. fr previously collapsed
+        // present-but-empty into the missing-name wording.
+        let mut store = Store::new();
+        let charset_err = StoreError::GenericError(
+            "ERR Library names can only contain letters, numbers, or underscores(_) and must be at least one character long"
+                .to_string(),
+        );
+        // `name=` with empty value.
+        assert_eq!(
+            store
+                .function_load(b"#!lua name=\nredis.register_function('f', function() return 1 end)", false)
+                .expect_err("empty name= must error"),
+            charset_err
+        );
+        // `name=` followed by only whitespace (split_whitespace yields the bare
+        // `name=` token → empty value).
+        assert_eq!(
+            store
+                .function_load(b"#!lua name= \nredis.register_function('f', function() return 1 end)", false)
+                .expect_err("whitespace-only name= must error"),
+            charset_err
+        );
+        // A wholly absent name token still yields the missing-name wording.
+        assert_eq!(
+            store
+                .function_load(b"#!lua\nredis.register_function('f', function() return 1 end)", false)
+                .expect_err("absent name must error"),
+            StoreError::GenericError("ERR Library name was not given".to_string())
         );
     }
 
