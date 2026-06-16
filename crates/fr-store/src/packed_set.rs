@@ -1105,6 +1105,95 @@ impl<'a> Iterator for CompactStrSetIter<'a> {
     }
 }
 
+/// (frankenredis-p8wd1) Compact storage for ONE stream entry's fields: an
+/// ORDERED list of (field, value) byte pairs packed contiguously into a single
+/// buffer (`[flen varint][field][vlen varint][value]` × count), instead of a
+/// `Vec<(Vec<u8>,Vec<u8>)>` — which costs a 24-byte `Vec` header + a heap block
+/// per field AND per value (~6 allocs / entry). Stream fields are an ordered
+/// list (NO dedup — field names may repeat) read as a whole (XRANGE/XREAD), so
+/// no key index is needed; mirrors redis's listpack-packed stream entry.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code)] // wired into Value::Stream storage in a follow-up (frankenredis-p8wd1)
+pub struct PackedStreamFields {
+    buf: Vec<u8>,
+    count: u32,
+}
+
+#[allow(dead_code)]
+impl PackedStreamFields {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pack an ordered list of (field, value) pairs.
+    #[must_use]
+    pub fn from_pairs<F: AsRef<[u8]>, V: AsRef<[u8]>>(pairs: &[(F, V)]) -> Self {
+        let cap: usize = pairs
+            .iter()
+            .map(|(f, v)| f.as_ref().len() + v.as_ref().len() + 4)
+            .sum();
+        let mut buf = Vec::with_capacity(cap);
+        for (f, v) in pairs {
+            write_varint(&mut buf, f.as_ref().len());
+            buf.extend_from_slice(f.as_ref());
+            write_varint(&mut buf, v.as_ref().len());
+            buf.extend_from_slice(v.as_ref());
+        }
+        Self {
+            buf,
+            count: u32::try_from(pairs.len()).unwrap_or(u32::MAX),
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Iterate the (field, value) pairs in insertion order, borrowed.
+    #[must_use]
+    pub fn iter(&self) -> PackedStreamFieldsIter<'_> {
+        PackedStreamFieldsIter {
+            buf: &self.buf,
+            pos: 0,
+        }
+    }
+
+    /// Materialize back to owned (field, value) pairs (the former representation).
+    #[must_use]
+    pub fn to_pairs(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.iter().map(|(f, v)| (f.to_vec(), v.to_vec())).collect()
+    }
+}
+
+/// Borrowing iterator over a [`PackedStreamFields`]'s (field, value) pairs.
+#[allow(dead_code)]
+pub struct PackedStreamFieldsIter<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Iterator for PackedStreamFieldsIter<'a> {
+    type Item = (&'a [u8], &'a [u8]);
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.buf.len() {
+            return None;
+        }
+        let (flen, p) = read_varint(self.buf, self.pos);
+        let (fs, fe) = (p, p + flen);
+        let (vlen, p2) = read_varint(self.buf, fe);
+        let (vs, ve) = (p2, p2 + vlen);
+        self.pos = ve;
+        Some((&self.buf[fs..fe], &self.buf[vs..ve]))
+    }
+}
+
 // ───────────────────────── packed string MAP (for small hashes) ────────────
 
 /// Packed field→value map for SMALL hashes: a sequence of
@@ -2862,8 +2951,42 @@ impl<'a> Iterator for PackedZSetIter<'a> {
 mod tests {
     use super::{
         ChunkedList, CompactFieldMap, CompactStrSet, LIST_CHUNK_TARGET, ListChunk, ListRepr,
-        ListValue, PACKED_MAX_ENTRIES, PackedList, PackedStrMap, PackedStrSet, PackedZSet, zset_cmp,
+        ListValue, PACKED_MAX_ENTRIES, PackedList, PackedStrMap, PackedStrSet, PackedStreamFields,
+        PackedZSet, zset_cmp,
     };
+
+    #[test]
+    fn packed_stream_fields_round_trips_p8wd1() {
+        // PackedStreamFields must losslessly round-trip an ORDERED list of
+        // (field, value) pairs (incl. empty, binary, duplicate field names),
+        // matching the former Vec<(Vec<u8>,Vec<u8>)> exactly.
+        let cases: Vec<Vec<(Vec<u8>, Vec<u8>)>> = vec![
+            vec![],
+            vec![(b"f".to_vec(), b"v".to_vec())],
+            vec![
+                (b"field_a".to_vec(), b"value_data_1".to_vec()),
+                (b"field_b".to_vec(), b"".to_vec()),
+                (b"field_a".to_vec(), b"dup_field_name".to_vec()),
+                (b"\x00\xff".to_vec(), b"\r\n\x00bin".to_vec()),
+            ],
+            (0..200)
+                .map(|i| (format!("f{i}").into_bytes(), format!("v{i}").into_bytes()))
+                .collect(),
+        ];
+        for pairs in cases {
+            let packed = PackedStreamFields::from_pairs(&pairs);
+            assert_eq!(packed.len(), pairs.len());
+            assert_eq!(packed.is_empty(), pairs.is_empty());
+            assert_eq!(packed.to_pairs(), pairs, "to_pairs round-trip");
+            let iter: Vec<(Vec<u8>, Vec<u8>)> =
+                packed.iter().map(|(f, v)| (f.to_vec(), v.to_vec())).collect();
+            assert_eq!(iter, pairs, "iter order/content");
+            // Rebuilding from a borrowed-pair slice matches.
+            let refs: Vec<(&[u8], &[u8])> =
+                pairs.iter().map(|(f, v)| (f.as_slice(), v.as_slice())).collect();
+            assert_eq!(PackedStreamFields::from_pairs(&refs), packed);
+        }
+    }
     use indexmap::{IndexMap, IndexSet};
     use proptest::prelude::*;
     use std::collections::VecDeque;
