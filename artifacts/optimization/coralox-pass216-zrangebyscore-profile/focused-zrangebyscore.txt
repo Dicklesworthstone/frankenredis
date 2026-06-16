@@ -1,0 +1,76 @@
+trial 01: redis_ms=3.126998 fr_ms=3.146170 fr/redis=1.006
+trial 02: redis_ms=2.279905 fr_ms=2.752587 fr/redis=1.207
+trial 03: redis_ms=2.408396 fr_ms=2.562420 fr/redis=1.064
+trial 04: redis_ms=2.361720 fr_ms=2.880374 fr/redis=1.220
+trial 05: redis_ms=2.814459 fr_ms=2.797375 fr/redis=0.994
+trial 06: redis_ms=2.655845 fr_ms=2.786539 fr/redis=1.049
+trial 07: redis_ms=2.827564 fr_ms=2.644242 fr/redis=0.935
+trial 08: redis_ms=2.934234 fr_ms=2.539484 fr/redis=0.865
+trial 09: redis_ms=2.538567 fr_ms=3.040927 fr/redis=1.198
+trial 10: redis_ms=2.780870 fr_ms=2.748462 fr/redis=0.988
+trial 11: redis_ms=2.350134 fr_ms=2.841552 fr/redis=1.209
+--- summary ---
+{
+  "head": "b6215ebf703a55352303f8d377d91ebe81e818b6",
+  "ports": {
+    "redis": 28741,
+    "fr": 28740
+  },
+  "setup_ms": 682.1243170415983,
+  "command": [
+    "zrangebyscore",
+    "bigz",
+    "100",
+    "200"
+  ],
+  "trials": 11,
+  "iters_per_trial": 8,
+  "redis_ms": [
+    3.1269976243493147,
+    2.279904751048889,
+    2.408395623206161,
+    2.3617197512066923,
+    2.814459498040378,
+    2.6558453755569644,
+    2.827564370818436,
+    2.934233874839265,
+    2.5385671251569875,
+    2.7808697486761957,
+    2.3501340037910268
+  ],
+  "fr_ms": [
+    3.1461702528758906,
+    2.7525873738341033,
+    2.5624197514844127,
+    2.880374377127737,
+    2.797374749206938,
+    2.7865392476087436,
+    2.6442422458785586,
+    2.5394838739885017,
+    3.0409271275857463,
+    2.7484620004543103,
+    2.841552130121272
+  ],
+  "median_ms": {
+    "redis": 2.6558453755569644,
+    "fr": 2.7865392476087436,
+    "fr_over_redis": 1.0492098949941207
+  },
+  "mean_ms": {
+    "redis": 2.643517431517301,
+    "fr": 2.794557557287838,
+    "fr_over_redis": 1.0571360430499768
+  },
+  "golden": {
+    "basic_equal": true,
+    "basic_redis_sha256": "f2d67728d4add2f623ead9e0219b5ab5e8bfbe9b594fba3bb484f4d250ed405c",
+    "basic_fr_sha256": "f2d67728d4add2f623ead9e0219b5ab5e8bfbe9b594fba3bb484f4d250ed405c",
+    "basic_redis_len": 26267,
+    "basic_fr_len": 26267,
+    "withscores_score100_equal": true,
+    "withscores_score100_redis_sha256": "fa4578201e1e9005e0622aa99591e2b65b45e474268c75902c608483a29fcd17",
+    "withscores_score100_fr_sha256": "fa4578201e1e9005e0622aa99591e2b65b45e474268c75902c608483a29fcd17",
+    "withscores_score100_redis_len": 454,
+    "withscores_score100_fr_len": 454
+  }
+}
