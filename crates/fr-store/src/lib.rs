@@ -21553,17 +21553,32 @@ fn decode_listpack_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
 }
 
 fn hash_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<HashFieldMap, StoreError> {
-    let mut chunks = entries.chunks_exact(2);
-    if !chunks.remainder().is_empty() {
+    // (frankenredis-qxfmr) The listpack/ziplist RESTORE path. The former
+    // `for { hash.insert(pair[0].clone(), pair[1].clone()) }` was O(n²) (each
+    // PackedStrMap insert does an O(n) `locate`) and cloned every field/value
+    // out of the owned `entries`. Pair the entries by MOVE, reject duplicate
+    // fields up front (matching the old per-insert `is_some()` guard) with an
+    // O(n) borrowed-slice scan, then bulk-build in one O(n) pass — byte-identical
+    // final state for a valid (duplicate-free) dump.
+    if !entries.len().is_multiple_of(2) {
         return Err(StoreError::InvalidDumpPayload);
     }
-    let mut hash = HashFieldMap::default();
-    for pair in &mut chunks {
-        if hash.insert(pair[0].clone(), pair[1].clone()).is_some() {
-            return Err(StoreError::InvalidDumpPayload);
-        }
+    let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(entries.len() / 2);
+    let mut it = entries.into_iter();
+    while let Some(field) = it.next() {
+        let value = it.next().ok_or(StoreError::InvalidDumpPayload)?;
+        pairs.push((field, value));
     }
-    Ok(hash)
+    let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
+        std::collections::HashSet::with_capacity_and_hasher(
+            pairs.len(),
+            foldhash::quality::RandomState::default(),
+        );
+    if !pairs.iter().all(|(field, _)| seen.insert(field.as_slice())) {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    drop(seen);
+    Ok(HashFieldMap::from_unique_pairs(pairs))
 }
 
 fn zset_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<SortedSet, StoreError> {
