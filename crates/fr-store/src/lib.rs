@@ -10,7 +10,7 @@ mod packed_set;
 #[allow(dead_code)]
 mod keyspace_dict;
 use packed_set::{
-    GenericSet, HashFieldMap, ListValue, PackedStreamFields, PackedZSet, PackedZSetIter,
+    GenericSet, HashFieldMap, ListValue, PackedStreamLog, PackedZSet, PackedZSetIter,
     RestoredListNode, RetainedListpackChunk,
 };
 
@@ -230,11 +230,15 @@ pub fn keyspace_events_to_string(flags: u32) -> String {
 
 pub type StreamId = (u64, u64);
 pub type StreamField = (Vec<u8>, Vec<u8>);
-/// Per-entry stream fields are stored COMPACTLY as [`PackedStreamFields`] (one
-/// contiguous buffer per entry) instead of a scattered `Vec<StreamField>` —
-/// ~6.9x less RAM (frankenredis-p8wd1). The public `StreamRecord` materialization
-/// (`to_pairs`) is unchanged, so callers still see `Vec<StreamField>`.
-pub type StreamEntries = BTreeMap<StreamId, PackedStreamFields>;
+/// A whole stream's entries: a single shared arena plus a sorted
+/// `BTreeMap<StreamId, FieldSpan>` index ([`PackedStreamLog`]) — instead of a
+/// `BTreeMap<StreamId, PackedStreamFields>` that paid a separate heap allocation
+/// AND a 28-byte (`Vec` header + count) value PER entry (frankenredis-p8wd1
+/// step 3). The per-entry field bytes are byte-identical to the old
+/// `PackedStreamFields` layout, so DUMP / DEBUG DIGEST / XRANGE output is
+/// unchanged; only the container shrinks. Reads hand back a `FieldsRef` view
+/// whose `to_pairs`/`iter` mirror the old type, so callers are unchanged.
+pub type StreamEntries = PackedStreamLog;
 pub type StreamRecord = (StreamId, Vec<StreamField>);
 pub type StreamInfoBounds = (usize, Option<StreamRecord>, Option<StreamRecord>);
 /// (name, pending_count, idle_ms)
@@ -2902,7 +2906,11 @@ pub enum Value {
     /// behaviour unchanged (zset ops auto-deref the box). (frankenredis-w2t01)
     SortedSet(Box<SortedSet>),
     /// Stream entries keyed by `(milliseconds, sequence)` stream IDs.
-    Stream(StreamEntries),
+    /// Boxed because [`PackedStreamLog`] (arena `Vec` + index `BTreeMap` + dead
+    /// counter = 48B) would otherwise size every `Value`/`Entry`, even a tiny
+    /// string. Boxing keeps `Value` at 32B; stream ops auto-deref the box.
+    /// (frankenredis-p8wd1)
+    Stream(Box<StreamEntries>),
 }
 
 const SMALL_STR_INLINE_CAP: usize = 15;
@@ -14768,7 +14776,7 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(entries) => {
-                    let btree_last = entries.last_key_value().map(|(id, _)| *id);
+                    let btree_last = entries.last_id();
                     let xsetid_last = self.stream_last_ids.get(key).copied();
                     let last_id = match (btree_last, xsetid_last) {
                         (Some(a), Some(b)) => Some(a.max(b)),
@@ -14831,7 +14839,7 @@ impl Store {
     pub fn stream_last_entry_id(&self, key: &[u8]) -> Result<Option<StreamId>, StoreError> {
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
-                Value::Stream(entries) => Ok(entries.last_key_value().map(|(id, _)| *id)),
+                Value::Stream(entries) => Ok(entries.last_id()),
                 _ => Err(StoreError::WrongType),
             },
             None => Ok(None),
@@ -14842,7 +14850,7 @@ impl Store {
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(entries) => {
-                    let btree_last = entries.last_key_value().map(|(id, _)| *id);
+                    let btree_last = entries.last_id();
                     let xsetid_last = self.stream_last_ids.get(key).copied();
                     Ok(match (btree_last, xsetid_last) {
                         (Some(a), Some(b)) => Some(a.max(b)),
@@ -14903,9 +14911,9 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Stream(entries) => {
-                    let inserted = entries
-                        .insert(id, PackedStreamFields::from_pairs(fields))
-                        .is_none();
+                    // `insert` returns true when an entry with this id already
+                    // existed; a fresh id is therefore `!existed`.
+                    let inserted = !entries.insert(id, fields);
                     let default_entries_added =
                         u64::try_from(entries.len().saturating_sub(1)).unwrap_or(u64::MAX);
                     Self::mark_digest_stale_fields(
@@ -14932,7 +14940,7 @@ impl Store {
             },
             None => {
                 let mut entries = StreamEntries::new();
-                entries.insert(id, PackedStreamFields::from_pairs(fields));
+                entries.insert(id, fields);
                 self.stream_groups.remove(key);
                 self.stream_max_deleted_ids.remove(key);
                 // Set high watermark to the first entry's ID
@@ -14940,7 +14948,7 @@ impl Store {
                 self.stream_entries_added.insert(key.to_vec(), 1);
                 self.internal_entries_insert(
                     key.to_vec(),
-                    Entry::new(Value::Stream(entries), None, now_ms),
+                    Entry::new(Value::Stream(Box::new(entries)), None, now_ms),
                 );
                 self.dirty = self.dirty.saturating_add(1);
                 Ok(())
@@ -14972,10 +14980,10 @@ impl Store {
         }
         self.stream_groups.remove(key);
         self.stream_max_deleted_ids.remove(key);
-        let map: StreamEntries = entries
-            .into_iter()
-            .map(|(id, fields)| (id, PackedStreamFields::from_pairs(&fields)))
-            .collect();
+        let mut map = StreamEntries::new();
+        for (id, fields) in entries {
+            map.insert(id, &fields);
+        }
         let count = map.len() as u64;
         let last_id = *map
             .keys()
@@ -14983,7 +14991,10 @@ impl Store {
             .expect("non-empty stream has a maximum id");
         self.stream_last_ids.insert(key.to_vec(), last_id);
         self.stream_entries_added.insert(key.to_vec(), count);
-        self.internal_entries_insert(key.to_vec(), Entry::new(Value::Stream(map), None, now_ms));
+        self.internal_entries_insert(
+            key.to_vec(),
+            Entry::new(Value::Stream(Box::new(map)), None, now_ms),
+        );
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(count);
     }
@@ -15122,7 +15133,7 @@ impl Store {
                 Value::Stream(entries) => {
                     let mut removed = 0usize;
                     for id in ids {
-                        if entries.remove(id).is_some() {
+                        if entries.remove(*id) {
                             removed = removed.saturating_add(1);
                             max_deleted =
                                 Some(max_deleted.map_or(*id, |current: StreamId| current.max(*id)));
@@ -15177,7 +15188,7 @@ impl Store {
                     let remove_ids: Vec<StreamId> =
                         entries.keys().copied().take(to_remove).collect();
                     for id in &remove_ids {
-                        entries.remove(id);
+                        entries.remove(*id);
                     }
                     // Match Redis stream semantics: trimming removes
                     // stream entries, but pending-entry-list rows remain
@@ -15226,7 +15237,7 @@ impl Store {
                     }
                     let removed = remove_ids.len();
                     for id in &remove_ids {
-                        entries.remove(id);
+                        entries.remove(*id);
                     }
                     // Match Redis stream semantics: trimming removes
                     // stream entries, but pending-entry-list rows remain
@@ -15291,7 +15302,7 @@ impl Store {
                     }
                     if removed > 0 {
                         for id in &ids[..removed] {
-                            entries.remove(id);
+                            entries.remove(*id);
                         }
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
@@ -15405,7 +15416,7 @@ impl Store {
                                     // tombstone sentinel (a live entry always has
                                     // >=1 field by XADD arity); the command layer
                                     // renders it as a nil value array.
-                                    match entries.get(id) {
+                                    match entries.get(*id) {
                                         Some(fields) => out.push((*id, fields.to_pairs())),
                                         None => out.push((*id, Vec::new())),
                                     }
@@ -15691,7 +15702,7 @@ impl Store {
                 Value::Stream(entries) => {
                     let mut out = BTreeMap::new();
                     for id in ids {
-                        if let Some(fields) = entries.get(id) {
+                        if let Some(fields) = entries.get(*id) {
                             out.insert(*id, fields.to_pairs());
                         }
                     }
@@ -15868,7 +15879,7 @@ impl Store {
 
                     let mut fields_by_id = BTreeMap::new();
                     for (id, _) in &snapshot {
-                        if let Some(fields) = entries.get(id) {
+                        if let Some(fields) = entries.get(*id) {
                             fields_by_id.insert(*id, fields.to_pairs());
                         }
                     }
@@ -16138,7 +16149,7 @@ impl Store {
             self.stream_entries_added.insert(key.to_vec(), 0);
             self.internal_entries_insert(
                 key.to_vec(),
-                Entry::new(Value::Stream(BTreeMap::new()), None, now_ms),
+                Entry::new(Value::Stream(Box::new(StreamEntries::new())), None, now_ms),
             );
         }
 
@@ -18767,7 +18778,7 @@ impl Store {
             }
             Value::Stream(entries) => {
                 hash = fnv1a_update(hash, b"X");
-                for ((ms, seq), fields) in entries {
+                for ((ms, seq), fields) in entries.iter() {
                     hash = fnv1a_update(hash, &ms.to_le_bytes());
                     hash = fnv1a_update(hash, &seq.to_le_bytes());
                     for (field, value) in fields.iter() {
@@ -20370,10 +20381,9 @@ impl Store {
                 };
                 let mut entries = StreamEntries::new();
                 for (ms, seq, fields) in stream_entries {
-                    if entries
-                        .insert((ms, seq), PackedStreamFields::from_pairs(&fields))
-                        .is_some()
-                    {
+                    // `insert` returns true if this id already appeared — a
+                    // duplicate in the DUMP payload is malformed.
+                    if entries.insert((ms, seq), &fields) {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                 }
@@ -20381,7 +20391,7 @@ impl Store {
                 restored_stream_entries_added = entries_added;
                 restored_stream_max_deleted_id = max_deleted;
                 restored_stream_groups = Some(restore_stream_groups(groups)?);
-                Value::Stream(entries)
+                Value::Stream(Box::new(entries))
             }
             RDB_TYPE_LIST_ZIPLIST => {
                 let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -20788,7 +20798,7 @@ impl Store {
                         ]);
                     } else {
                         // Each stream entry becomes a separate XADD command.
-                        for ((ms, seq), fields) in entries {
+                        for ((ms, seq), fields) in entries.iter() {
                             let id = format!("{ms}-{seq}");
                             let mut argv =
                                 vec![b"XADD".to_vec(), logical_key.clone(), id.into_bytes()];

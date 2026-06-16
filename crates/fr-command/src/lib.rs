@@ -25257,7 +25257,7 @@ fn mix_debug_object_digest(store: &mut Store, key: &[u8], now_ms: u64, digest: &
             }
         }
         Value::Stream(entries) => {
-            for ((ms, seq), fields) in entries {
+            for ((ms, seq), fields) in entries.iter() {
                 let item_id = format!("{ms}.{seq}");
                 mix_digest(digest, item_id.as_bytes());
                 for (field, value) in fields.iter() {

@@ -1194,6 +1194,243 @@ impl<'a> Iterator for PackedStreamFieldsIter<'a> {
     }
 }
 
+// ─────────────────────── packed stream LOG (arena per stream) ───────────────
+
+/// (frankenredis-p8wd1 step 3) A whole stream's entries stored as ONE shared
+/// arena plus a sorted `BTreeMap<StreamId, FieldSpan>` index, replacing
+/// `BTreeMap<StreamId, PackedStreamFields>` (a separate heap allocation **and**
+/// a 28-byte value — `Vec` header + count — *per entry*).
+///
+/// Each entry's fields are appended to `arena` in the exact
+/// `[flen varint][field][vlen varint][value]` × count layout of
+/// [`PackedStreamFields`], so the bytes (and therefore DUMP / DEBUG DIGEST /
+/// XRANGE output) are byte-identical; only the *container* changes. The index
+/// value shrinks from 28 bytes + a per-entry heap block to a 16-byte
+/// [`FieldSpan`] into the shared arena. XADD appends (stream IDs are monotonic),
+/// XDEL/XTRIM remove from the index and mark the freed span dead; the arena is
+/// compacted once dead bytes exceed half its length.
+///
+/// Reads hand back a [`FieldsRef`] view whose `iter`/`to_pairs`/`len` mirror
+/// `PackedStreamFields`, so the call sites are unchanged.
+#[derive(Clone, Debug, Default)]
+pub struct PackedStreamLog {
+    arena: Vec<u8>,
+    index: std::collections::BTreeMap<(u64, u64), FieldSpan>,
+    /// Bytes in `arena` belonging to removed/overwritten entries (compaction hint).
+    dead: usize,
+}
+
+/// Logical equality: the SAME ids in order with byte-identical packed fields.
+/// (Two logs with equal content may differ in raw `arena`/`dead` after
+/// compaction, so a derived `PartialEq` would be wrong.)
+impl PartialEq for PackedStreamLog {
+    fn eq(&self, other: &Self) -> bool {
+        self.index.len() == other.index.len()
+            && self
+                .iter()
+                .zip(other.iter())
+                .all(|((ia, fa), (ib, fb))| ia == ib && fa.buf == fb.buf)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FieldSpan {
+    /// Offset of this entry's packed bytes in the arena.
+    off: usize,
+    /// Length of the packed bytes.
+    len: u32,
+    /// Number of (field, value) pairs.
+    count: u32,
+}
+
+/// A borrowed view over one entry's packed fields in the arena. Mirrors the read
+/// surface of [`PackedStreamFields`] so stream call sites need no change.
+#[derive(Clone, Copy)]
+pub struct FieldsRef<'a> {
+    buf: &'a [u8],
+    count: u32,
+}
+
+impl<'a> FieldsRef<'a> {
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Iterate the (field, value) pairs in insertion order, borrowed — identical
+    /// decoding to [`PackedStreamFields::iter`].
+    #[must_use]
+    pub fn iter(&self) -> PackedStreamFieldsIter<'a> {
+        PackedStreamFieldsIter {
+            buf: self.buf,
+            pos: 0,
+        }
+    }
+
+    /// Materialize to owned (field, value) pairs.
+    #[must_use]
+    pub fn to_pairs(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.iter().map(|(f, v)| (f.to_vec(), v.to_vec())).collect()
+    }
+}
+
+impl PackedStreamLog {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
+    #[inline]
+    fn span_slice(&self, span: &FieldSpan) -> FieldsRef<'_> {
+        FieldsRef {
+            buf: &self.arena[span.off..span.off + span.len as usize],
+            count: span.count,
+        }
+    }
+
+    /// Insert/overwrite `id`'s fields (packed into the arena). Returns `true` if
+    /// an entry with this id already existed (whose old bytes are now dead).
+    pub fn insert<F: AsRef<[u8]>, V: AsRef<[u8]>>(
+        &mut self,
+        id: (u64, u64),
+        pairs: &[(F, V)],
+    ) -> bool {
+        let off = self.arena.len();
+        for (f, v) in pairs {
+            write_varint(&mut self.arena, f.as_ref().len());
+            self.arena.extend_from_slice(f.as_ref());
+            write_varint(&mut self.arena, v.as_ref().len());
+            self.arena.extend_from_slice(v.as_ref());
+        }
+        let span = FieldSpan {
+            off,
+            len: u32::try_from(self.arena.len() - off).unwrap_or(u32::MAX),
+            count: u32::try_from(pairs.len()).unwrap_or(u32::MAX),
+        };
+        let replaced = self.index.insert(id, span);
+        if let Some(old) = replaced {
+            self.dead += old.len as usize;
+            self.maybe_compact();
+            true
+        } else {
+            false
+        }
+    }
+
+    #[must_use]
+    pub fn get(&self, id: (u64, u64)) -> Option<FieldsRef<'_>> {
+        self.index.get(&id).map(|span| self.span_slice(span))
+    }
+
+    #[must_use]
+    pub fn contains_key(&self, id: (u64, u64)) -> bool {
+        self.index.contains_key(&id)
+    }
+
+    /// Remove `id`; returns `true` if it existed. The freed span is marked dead
+    /// and the arena compacted once dead bytes exceed half its length.
+    pub fn remove(&mut self, id: (u64, u64)) -> bool {
+        if let Some(span) = self.index.remove(&id) {
+            self.dead += span.len as usize;
+            self.maybe_compact();
+            true
+        } else {
+            false
+        }
+    }
+
+    #[must_use]
+    pub fn last_id(&self) -> Option<(u64, u64)> {
+        self.index.keys().next_back().copied()
+    }
+
+    #[must_use]
+    pub fn first_id(&self) -> Option<(u64, u64)> {
+        self.index.keys().next().copied()
+    }
+
+    /// Smallest id with its fields (BTreeMap-compatible).
+    #[must_use]
+    pub fn first_key_value(&self) -> Option<(&(u64, u64), FieldsRef<'_>)> {
+        self.index
+            .iter()
+            .next()
+            .map(|(id, span)| (id, self.span_slice(span)))
+    }
+
+    /// Largest id with its fields (BTreeMap-compatible).
+    #[must_use]
+    pub fn last_key_value(&self) -> Option<(&(u64, u64), FieldsRef<'_>)> {
+        self.index
+            .iter()
+            .next_back()
+            .map(|(id, span)| (id, self.span_slice(span)))
+    }
+
+    /// Iterate `(&id, FieldsRef)` in ascending id order.
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (&(u64, u64), FieldsRef<'_>)> {
+        self.index
+            .iter()
+            .map(move |(id, span)| (id, self.span_slice(span)))
+    }
+
+    /// Iterate field views only (for the memory estimate).
+    pub fn values(&self) -> impl Iterator<Item = FieldsRef<'_>> {
+        self.index.values().map(move |span| self.span_slice(span))
+    }
+
+    /// Iterate the stream ids in ascending order.
+    pub fn keys(&self) -> impl DoubleEndedIterator<Item = &(u64, u64)> {
+        self.index.keys()
+    }
+
+    /// Iterate `(&id, FieldsRef)` over a stream-id range; double-ended for
+    /// XREVRANGE's `.rev()`.
+    pub fn range<R: std::ops::RangeBounds<(u64, u64)>>(
+        &self,
+        bounds: R,
+    ) -> impl DoubleEndedIterator<Item = (&(u64, u64), FieldsRef<'_>)> {
+        self.index
+            .range(bounds)
+            .map(move |(id, span)| (id, self.span_slice(span)))
+    }
+
+    fn maybe_compact(&mut self) {
+        if self.arena.len() > 64 && self.dead > self.arena.len() / 2 {
+            self.compact();
+        }
+    }
+
+    /// Rebuild the arena from the live spans (in id order), dropping dead bytes.
+    fn compact(&mut self) {
+        let mut new_arena = Vec::with_capacity(self.arena.len().saturating_sub(self.dead));
+        for span in self.index.values_mut() {
+            let start = span.off;
+            let end = span.off + span.len as usize;
+            let new_off = new_arena.len();
+            new_arena.extend_from_slice(&self.arena[start..end]);
+            span.off = new_off;
+        }
+        self.arena = new_arena;
+        self.dead = 0;
+    }
+}
+
 // ───────────────────────── packed string MAP (for small hashes) ────────────
 
 /// Packed field→value map for SMALL hashes: a sequence of
@@ -2952,7 +3189,7 @@ mod tests {
     use super::{
         ChunkedList, CompactFieldMap, CompactStrSet, LIST_CHUNK_TARGET, ListChunk, ListRepr,
         ListValue, PACKED_MAX_ENTRIES, PackedList, PackedStrMap, PackedStrSet, PackedStreamFields,
-        PackedZSet, zset_cmp,
+        PackedStreamLog, PackedZSet, zset_cmp,
     };
 
     #[test]
@@ -2987,6 +3224,80 @@ mod tests {
             assert_eq!(PackedStreamFields::from_pairs(&refs), packed);
         }
     }
+    #[test]
+    fn packed_stream_log_matches_btreemap_oracle_p8wd1() {
+        use std::collections::BTreeMap;
+        // PackedStreamLog must be a drop-in for BTreeMap<StreamId,
+        // PackedStreamFields>: same get/range/iter/last/first results and the
+        // SAME packed bytes per entry, across insert (monotonic XADD), overwrite,
+        // remove (XDEL), and front-trim (XTRIM) — including compaction churn.
+        type Pairs = Vec<(Vec<u8>, Vec<u8>)>;
+        let mk = |i: u64| -> Pairs {
+            vec![
+                (b"field_a".to_vec(), format!("value_{i}").into_bytes()),
+                (b"field_b".to_vec(), format!("more_{i}").into_bytes()),
+                (b"seq".to_vec(), i.to_string().into_bytes()),
+            ]
+        };
+        let mut log = PackedStreamLog::new();
+        let mut oracle: BTreeMap<(u64, u64), Pairs> = BTreeMap::new();
+        // Monotonic XADD of 1000 entries.
+        for i in 0..1000u64 {
+            let id = (i, 0);
+            let pairs = mk(i);
+            assert_eq!(log.insert(id, &pairs), oracle.insert(id, pairs.clone()).is_some());
+        }
+        // Overwrite a few ids (XSETID/replace semantics).
+        for i in [10u64, 500, 999] {
+            let pairs = mk(i + 10_000);
+            assert!(log.insert((i, 0), &pairs)); // existed
+            oracle.insert((i, 0), pairs);
+        }
+        // XDEL a scattered third (forces dead bytes + eventual compaction).
+        for i in (0..1000u64).step_by(3) {
+            assert_eq!(log.remove((i, 0)), oracle.remove(&(i, 0)).is_some());
+        }
+        // XTRIM-style front trim of the oldest 100 surviving ids.
+        let trim: Vec<(u64, u64)> = oracle.keys().take(100).copied().collect();
+        for id in trim {
+            assert!(log.remove(id));
+            oracle.remove(&id);
+        }
+        // Equivalence: len, get (incl. exact packed bytes), full iter, ranges.
+        assert_eq!(log.len(), oracle.len());
+        assert_eq!(log.first_id(), oracle.keys().next().copied());
+        assert_eq!(log.last_id(), oracle.keys().next_back().copied());
+        for (id, want) in &oracle {
+            let got = log.get(*id).expect("present");
+            assert_eq!(&got.to_pairs(), want, "fields for {id:?}");
+            assert_eq!(got.len(), want.len());
+            // Byte-identical to the standalone PackedStreamFields encoding.
+            assert_eq!(got.buf, &*PackedStreamFields::from_pairs(want).buf, "packed bytes");
+        }
+        assert!(log.get((1, 0)).is_none()); // trimmed
+        // Full iteration matches the oracle order/content.
+        let log_iter: Vec<((u64, u64), Pairs)> =
+            log.iter().map(|(id, f)| (*id, f.to_pairs())).collect();
+        let oracle_iter: Vec<((u64, u64), Pairs)> =
+            oracle.iter().map(|(id, p)| (*id, p.clone())).collect();
+        assert_eq!(log_iter, oracle_iter, "iter equivalence");
+        // A couple of inclusive / exclusive ranges (XRANGE / XREVRANGE).
+        let lo = (300, 0);
+        let hi = (700, 0);
+        let log_range: Vec<(u64, u64)> = log.range(lo..=hi).map(|(id, _)| *id).collect();
+        let oracle_range: Vec<(u64, u64)> =
+            oracle.range(lo..=hi).map(|(id, _)| *id).collect();
+        assert_eq!(log_range, oracle_range, "inclusive range");
+        let log_rev: Vec<(u64, u64)> = log.range(lo..=hi).rev().map(|(id, _)| *id).collect();
+        let mut oracle_rev = oracle_range.clone();
+        oracle_rev.reverse();
+        assert_eq!(log_rev, oracle_rev, "reversed range (XREVRANGE)");
+        // Arena did not leak unbounded dead bytes after all the churn.
+        assert!(log.arena.len() <= (log.dead + oracle_iter.iter().map(|(_, p)| {
+            PackedStreamFields::from_pairs(p).buf.len()
+        }).sum::<usize>()) + 1);
+    }
+
     use indexmap::{IndexMap, IndexSet};
     use proptest::prelude::*;
     use std::collections::VecDeque;
