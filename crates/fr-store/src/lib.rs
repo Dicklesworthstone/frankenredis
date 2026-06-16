@@ -2316,6 +2316,13 @@ pub enum SmembersScanEvent<'a> {
     Member(&'a [u8]),
 }
 
+/// Minimum member count before the fresh-key SADD path attempts the bulk
+/// all-non-integer build ([`SetValue::try_bulk_unique_strings`]). Below this the
+/// O(n²) listpack rebuild is negligible and not worth the O(n) pre-scan; the
+/// generic (listpack) encoding caps at 128 entries, so the quadratic cost peaks
+/// just past this threshold.
+const SET_BULK_BUILD_MIN: usize = 64;
+
 /// This is the foundational storage type for the intset memory optimisation
 /// (frankenredis-hjob8); it is verified in isolation here and wired into
 /// `Value::Set` in a follow-up.
@@ -2370,6 +2377,48 @@ impl SetValue {
             GenericSet::with_capacity_and_hasher(1, foldhash::quality::RandomState::default());
         set.insert_borrowed(member);
         SetValue::Generic(set)
+    }
+
+    /// (frankenredis-saddbulk) Fast bulk-build for a fresh-key SADD / RDB-load
+    /// whose members are all NON-integer byte strings — the common large
+    /// string-set case (an intset loads as `Int` and is already O(n); a small set
+    /// is cheap either way). When every member fails `canonical_int`, the
+    /// incremental `insert_borrowed` loop promotes the empty intset to the generic
+    /// encoding on the very first member and then appends each member in arrival
+    /// order, so the final set is exactly `GenericSet::from_unique_str_members`
+    /// over the de-duplicated members (first occurrence kept) — with no intset
+    /// sorting to reproduce and no per-insert O(n) listpack scan. Returns `None`
+    /// (caller falls back to the exact loop) when any member is a canonical integer
+    /// — where intset ordering/promotion would diverge — or the set is small enough
+    /// that the O(n) pre-scan is not worth replacing the loop. The de-dup, encoding
+    /// choice, and iteration order are byte-identical to the loop's result.
+    fn try_bulk_unique_strings<M: AsRef<[u8]>>(members: &[M]) -> Option<(SetValue, u64)> {
+        if members.len() < SET_BULK_BUILD_MIN {
+            return None;
+        }
+        if members
+            .iter()
+            .any(|m| Self::canonical_int(m.as_ref()).is_some())
+        {
+            return None;
+        }
+        let mut seen: HashSet<&[u8], foldhash::quality::RandomState> =
+            HashSet::with_capacity_and_hasher(
+                members.len(),
+                foldhash::quality::RandomState::default(),
+            );
+        let mut unique: Vec<&[u8]> = Vec::with_capacity(members.len());
+        for m in members {
+            let s = m.as_ref();
+            if seen.insert(s) {
+                unique.push(s);
+            }
+        }
+        let added = unique.len() as u64;
+        Some((
+            SetValue::Generic(GenericSet::from_unique_str_members(&unique)),
+            added,
+        ))
     }
 
     pub fn len(&self) -> usize {
@@ -11474,6 +11523,8 @@ impl Store {
                         SetValue::from_single_borrowed(member.as_ref(), max_intset_entries),
                         1,
                     )
+                } else if let Some(bulk) = SetValue::try_bulk_unique_strings(members) {
+                    bulk
                 } else {
                     let mut s = SetValue::new();
                     let mut added = 0_u64;

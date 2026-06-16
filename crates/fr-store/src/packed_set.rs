@@ -87,6 +87,16 @@ impl PackedStrSet {
         true
     }
 
+    /// Append `member` WITHOUT the duplicate-scan `insert` performs — the caller
+    /// guarantees `member` is not already present (bulk RDB/build path). O(member.len())
+    /// per call versus `insert`'s O(n) `contains` scan, so building from N unique
+    /// members is O(total bytes) instead of O(n²).
+    pub fn append(&mut self, member: &[u8]) {
+        write_varint(&mut self.buf, member.len());
+        self.buf.extend_from_slice(member);
+        self.len += 1;
+    }
+
     /// Remove `member`; returns `true` if it was present. Survivors keep their
     /// relative (insertion) order.
     pub fn remove(&mut self, member: &[u8]) -> bool {
@@ -393,6 +403,37 @@ impl GenericSet {
                     h.insert(SetMember::from_slice(member))
                 }
             }
+        }
+    }
+
+    /// Bulk-build a generic set from already-unique members (NO duplicate check),
+    /// choosing the final Packed-vs-Hash encoding once and filling it in a single
+    /// O(total bytes) pass. Byte-identical (members + iteration order + encoding)
+    /// to inserting `members` in order via [`Self::insert_borrowed`] starting from
+    /// an empty set — the loop's mid-stream Packed→Hash promotion preserves
+    /// insertion order, and the final encoding is `Hash` iff `count > PACKED_MAX_ENTRIES`
+    /// or some member exceeds `PACKED_MAX_VALUE`, the same predicate decided here.
+    /// Skips the per-insert O(n) `PackedStrSet::contains` scan, so an N-member
+    /// build is O(N) instead of O(N²). Callers must guarantee uniqueness.
+    #[must_use]
+    pub fn from_unique_str_members<M: AsRef<[u8]>>(members: &[M]) -> Self {
+        let n = members.len();
+        let packed =
+            n <= PACKED_MAX_ENTRIES && members.iter().all(|m| m.as_ref().len() <= PACKED_MAX_VALUE);
+        if packed {
+            let bytes: usize = members.iter().map(|m| m.as_ref().len() + 2).sum();
+            let mut p = PackedStrSet::with_capacity(bytes);
+            for m in members {
+                p.append(m.as_ref());
+            }
+            GenericSet::Packed(p)
+        } else {
+            let mut h: SetHashTable =
+                IndexSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
+            for m in members {
+                h.insert(SetMember::from_slice(m.as_ref()));
+            }
+            GenericSet::Hash(h)
         }
     }
 
@@ -2730,6 +2771,52 @@ mod tests {
             // Every field resolves to its value.
             for (f, v) in &pairs {
                 assert_eq!(bulk_map.get(f), Some(v.as_slice()));
+            }
+        }
+    }
+
+    #[test]
+    fn generic_set_from_unique_str_members_matches_insert_loop_saddbulk() {
+        use super::{GenericSet, PACKED_MAX_VALUE};
+        let big = vec![b'x'; PACKED_MAX_VALUE + 1];
+        let atcap = vec![b'y'; PACKED_MAX_VALUE];
+        let cases: Vec<Vec<Vec<u8>>> = vec![
+            vec![b"a".to_vec()],
+            // Packed boundary: exactly PACKED_MAX_ENTRIES stays Packed.
+            (0..PACKED_MAX_ENTRIES)
+                .map(|i| format!("m{i}").into_bytes())
+                .collect(),
+            // One past the boundary promotes to Hash.
+            (0..=PACKED_MAX_ENTRIES)
+                .map(|i| format!("m{i}").into_bytes())
+                .collect(),
+            (0..400).map(|i| format!("m{i}").into_bytes()).collect(),
+            // Member == PACKED_MAX_VALUE stays Packed; one over promotes to Hash.
+            vec![atcap.clone(), b"z".to_vec()],
+            vec![big.clone(), b"z".to_vec()],
+            // Binary members with NUL, CR/LF, high bytes.
+            vec![b"m\x00\xff".to_vec(), b"n\r\n".to_vec(), b"\xfe".to_vec()],
+        ];
+        for members in cases {
+            // Reference: incremental borrowed inserts from an empty generic set,
+            // exactly what SADD's fresh-key loop reaches once it is generic.
+            let mut loop_set = GenericSet::default();
+            for m in &members {
+                loop_set.insert_borrowed(m);
+            }
+            let bulk_set = GenericSet::from_unique_str_members(&members);
+            assert_eq!(
+                std::mem::discriminant(&loop_set),
+                std::mem::discriminant(&bulk_set),
+                "variant mismatch for {} members",
+                members.len()
+            );
+            assert_eq!(loop_set.len(), bulk_set.len());
+            let loop_iter: Vec<Vec<u8>> = loop_set.iter().map(<[u8]>::to_vec).collect();
+            let bulk_iter: Vec<Vec<u8>> = bulk_set.iter().map(<[u8]>::to_vec).collect();
+            assert_eq!(loop_iter, bulk_iter, "iteration mismatch");
+            for m in &members {
+                assert!(bulk_set.contains(m));
             }
         }
     }
