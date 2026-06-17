@@ -2427,6 +2427,34 @@ impl LzfScratch {
     }
 }
 
+/// Length of the common byte prefix of two equal-or-unequal slices (capped at
+/// the shorter). Safe SWAR: compare 8 bytes at a time as little-endian u64 and
+/// locate the first differing byte via XOR + trailing_zeros, with a byte tail.
+/// Byte-IDENTICAL to `a.iter().zip(b).take_while(|(x,y)| x==y).count()` but
+/// vectorized (LLVM does not reliably vectorize the take_while early-exit).
+/// Used for the lzf match-length tail scan. (frankenredis-g9h0v)
+#[inline]
+fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
+    let n = a.len().min(b.len());
+    let mut i = 0;
+    while i + 8 <= n {
+        let x = u64::from_le_bytes(a[i..i + 8].try_into().unwrap());
+        let y = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+        let d = x ^ y;
+        if d != 0 {
+            return i + (d.trailing_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+    while i < n {
+        if a[i] != b[i] {
+            return i;
+        }
+        i += 1;
+    }
+    n
+}
+
 fn lzf_compress_with_scratch(
     input: &[u8],
     out_budget: usize,
@@ -2547,7 +2575,7 @@ fn lzf_compress_with_scratch(
                     if len + 1 < maxlen {
                         let a = &input[r + len + 1..r + maxlen];
                         let b = &input[ip + len + 1..ip + maxlen];
-                        len += 1 + a.iter().zip(b).take_while(|(x, y)| x == y).count();
+                        len += 1 + common_prefix_len(a, b);
                     } else {
                         len += 1;
                     }
