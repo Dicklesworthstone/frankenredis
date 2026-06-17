@@ -1,0 +1,12 @@
+{
+  "bytes_per_key": 86.634496,
+  "data_dir_preserved": "/data/tmp/fr_pass226_redis_z7jhx5uy",
+  "load_seconds": 16.402577508997638,
+  "n": 1000000,
+  "pipeline": 256,
+  "port": 28602,
+  "rss_after_kb": 93236,
+  "rss_before_kb": 8632,
+  "rss_delta_kb": 84604,
+  "server_bin": "legacy_redis_code/redis/src/redis-server"
+}
