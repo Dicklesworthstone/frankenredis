@@ -13,6 +13,11 @@ use fr_store::{
     decode_db_key, glob_match, read_rss_bytes, read_total_system_memory_bytes,
     redis_score_to_string, sha1_hex_public,
 };
+use icu_collator::{
+    Collator, CollatorBorrowed, options::AlternateHandling, options::CollatorOptions,
+};
+use icu_locale_core::Locale;
+use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::io::{ErrorKind, Read, Write};
@@ -5544,7 +5549,8 @@ fn zrank_generic(
                 // store.zrank already recorded the keyspace lookup; use the
                 // no-stat zmscore for the score read so WITHSCORE does not
                 // double-count keyspace_hits (upstream looks the key up once).
-                let score = store.zmscore(&argv[1], &[argv[2].as_slice()], now_ms)?[0].unwrap_or(0.0);
+                let score =
+                    store.zmscore(&argv[1], &[argv[2].as_slice()], now_ms)?[0].unwrap_or(0.0);
                 // The score element honors the negotiated protocol: a RESP3 Double
                 // (`,<score>`) under HELLO 3, a bulk string under RESP2 — matching
                 // upstream t_zset.c zrankGenericCommand's addReplyDouble. (Was always
@@ -26980,6 +26986,71 @@ fn partial_sort_window<T>(
     v[start..end].sort_unstable_by(&mut cmp);
 }
 
+fn is_c_collation_locale(locale: &str) -> bool {
+    let locale = locale.trim();
+    locale.is_empty()
+        || locale.eq_ignore_ascii_case("C")
+        || locale.eq_ignore_ascii_case("POSIX")
+        || locale.eq_ignore_ascii_case("C.UTF-8")
+        || locale.eq_ignore_ascii_case("C.UTF8")
+}
+
+fn posix_locale_to_bcp47(locale: &str) -> Option<String> {
+    if is_c_collation_locale(locale) {
+        return None;
+    }
+    let without_encoding = locale
+        .split_once('.')
+        .map_or(locale, |(before_encoding, _)| before_encoding);
+    let without_modifier = without_encoding
+        .split_once('@')
+        .map_or(without_encoding, |(before_modifier, _)| before_modifier)
+        .trim();
+    if is_c_collation_locale(without_modifier) {
+        None
+    } else {
+        Some(without_modifier.replace('_', "-"))
+    }
+}
+
+fn active_sort_alpha_collator() -> Option<CollatorBorrowed<'static>> {
+    let locale = std::env::var("LC_ALL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("LC_COLLATE")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            std::env::var("LANG")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })?;
+    let locale = posix_locale_to_bcp47(&locale)?;
+    let locale = locale.parse::<Locale>().ok()?;
+    let mut options = CollatorOptions::default();
+    options.alternate_handling = Some(AlternateHandling::Shifted);
+    Collator::try_new(locale.into(), options).ok()
+}
+
+fn sort_alpha_compare(
+    collator: Option<&CollatorBorrowed<'_>>,
+    left: &[u8],
+    right: &[u8],
+) -> Ordering {
+    match (
+        collator,
+        std::str::from_utf8(left),
+        std::str::from_utf8(right),
+    ) {
+        (Some(collator), Ok(left), Ok(right)) if !left.contains('\0') && !right.contains('\0') => {
+            collator.compare(left, right)
+        }
+        _ => left.cmp(right),
+    }
+}
+
 fn sort_generic(
     argv: &[Vec<u8>],
     store: &mut Store,
@@ -27058,9 +27129,8 @@ fn sort_generic(
     // GET/STORE/output all run on the post-LIMIT window — so the windowed load is
     // byte-identical. Sets/zsets and the no-LIMIT case keep the full path.
     let limit_restricts = limit_offset > 0 || limit_count >= 0;
-    let windowed = dontsort
-        && limit_restricts
-        && store.value_type(key, now_ms) == Some(ValueType::List);
+    let windowed =
+        dontsort && limit_restricts && store.value_type(key, now_ms) == Some(ValueType::List);
     let mut elements = if windowed {
         let len = store.llen(key, now_ms).map_err(CommandError::Store)? as i64;
         let start = limit_offset.clamp(0, len);
@@ -27285,6 +27355,11 @@ fn sort_generic(
             elements = reordered;
         } else {
             // Alpha (lexicographic) sort
+            let collator = if store_dest.is_none() {
+                active_sort_alpha_collator()
+            } else {
+                None
+            };
             let mut indexed: Vec<(usize, &[u8])> = sort_keys
                 .iter()
                 .enumerate()
@@ -27298,7 +27373,7 @@ fn sort_generic(
             // stable ordering of equal-key rows exactly while making `cmp` a
             // strict total order for the partial sort. (frankenredis-sortlim)
             let mut cmp = |a: &(usize, &[u8]), b: &(usize, &[u8])| {
-                let base = a.1.cmp(b.1);
+                let base = sort_alpha_compare(collator.as_ref(), a.1, b.1);
                 let base = if desc { base.reverse() } else { base };
                 base.then_with(|| a.0.cmp(&b.0))
             };
@@ -27602,7 +27677,10 @@ mod tests {
     use std::net::TcpStream;
     use std::time::Instant;
 
+    use super::{posix_locale_to_bcp47, sort_alpha_compare};
     use fr_protocol::RespFrame;
+    use icu_collator::{Collator, options::AlternateHandling, options::CollatorOptions};
+    use icu_locale_core::Locale;
 
     /// command_table_index (O(1) hash) must return exactly what the previous
     /// `COMMAND_TABLE.iter().find(|n| n.eq_ignore_ascii_case(name))` linear scan
@@ -53519,11 +53597,19 @@ mod tests {
         // Field order matches upstream: suffix follows lru_seconds_idle.
         let idle = info.find("lru_seconds_idle:").expect("idle field");
         let qln = info.find("ql_nodes:").expect("ql_nodes field");
-        assert!(qln > idle, "ql_ suffix must follow lru_seconds_idle: {info}");
+        assert!(
+            qln > idle,
+            "ql_ suffix must follow lru_seconds_idle: {info}"
+        );
 
         // A small listpack-encoded list carries no quicklist suffix.
         dispatch_argv(
-            &[b"RPUSH".to_vec(), b"sl".to_vec(), b"a".to_vec(), b"b".to_vec()],
+            &[
+                b"RPUSH".to_vec(),
+                b"sl".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+            ],
             &mut store,
             0,
         )
@@ -56795,6 +56881,74 @@ mod tests {
                 RespFrame::BulkString(Some(b"bravo".to_vec())),
                 RespFrame::BulkString(Some(b"charlie".to_vec())),
             ]))
+        );
+    }
+
+    #[test]
+    fn sort_alpha_posix_locale_mapping_keeps_c_locale_binary() {
+        assert_eq!(posix_locale_to_bcp47("C"), None);
+        assert_eq!(posix_locale_to_bcp47("POSIX"), None);
+        assert_eq!(posix_locale_to_bcp47("C.UTF-8"), None);
+        assert_eq!(
+            posix_locale_to_bcp47("en_US.UTF-8"),
+            Some("en-US".to_string())
+        );
+        assert_eq!(
+            posix_locale_to_bcp47("de_DE.UTF-8@euro"),
+            Some("de-DE".to_string())
+        );
+    }
+
+    #[test]
+    fn sort_alpha_en_us_collation_matches_non_store_probe() {
+        let mut options = CollatorOptions::default();
+        options.alternate_handling = Some(AlternateHandling::Shifted);
+        let locale = "en-US".parse::<Locale>().expect("valid en-US locale");
+        let collator = Collator::try_new(locale.into(), options).expect("en-US collator");
+        let mut values = [
+            b"-2".to_vec(),
+            b"0".to_vec(),
+            b"18".to_vec(),
+            b"5".to_vec(),
+            b"6".to_vec(),
+            b"apple".to_vec(),
+            b"Banana".to_vec(),
+            b"9x".to_vec(),
+            b"3.5".to_vec(),
+            b"".to_vec(),
+        ];
+        values.sort_by(|left, right| sort_alpha_compare(Some(&collator), left, right));
+        assert_eq!(
+            values.as_slice(),
+            [
+                b"".to_vec(),
+                b"0".to_vec(),
+                b"18".to_vec(),
+                b"-2".to_vec(),
+                b"3.5".to_vec(),
+                b"5".to_vec(),
+                b"6".to_vec(),
+                b"9x".to_vec(),
+                b"apple".to_vec(),
+                b"Banana".to_vec(),
+            ]
+        );
+
+        values.sort();
+        assert_eq!(
+            values.as_slice(),
+            [
+                b"".to_vec(),
+                b"-2".to_vec(),
+                b"0".to_vec(),
+                b"18".to_vec(),
+                b"3.5".to_vec(),
+                b"5".to_vec(),
+                b"6".to_vec(),
+                b"9x".to_vec(),
+                b"Banana".to_vec(),
+                b"apple".to_vec(),
+            ]
         );
     }
 
@@ -69364,7 +69518,12 @@ mod tests {
 
         // RESP2: score is a bulk string.
         let out = dispatch_argv(
-            &[b"ZRANK".to_vec(), b"z".to_vec(), b"a".to_vec(), b"WITHSCORE".to_vec()],
+            &[
+                b"ZRANK".to_vec(),
+                b"z".to_vec(),
+                b"a".to_vec(),
+                b"WITHSCORE".to_vec(),
+            ],
             &mut store,
             0,
         )
@@ -69380,7 +69539,12 @@ mod tests {
         // RESP3: score is a Double; ZREVRANK matches.
         store.dispatch_client_ctx.resp_protocol_version = 3;
         let out = dispatch_argv(
-            &[b"ZRANK".to_vec(), b"z".to_vec(), b"a".to_vec(), b"WITHSCORE".to_vec()],
+            &[
+                b"ZRANK".to_vec(),
+                b"z".to_vec(),
+                b"a".to_vec(),
+                b"WITHSCORE".to_vec(),
+            ],
             &mut store,
             0,
         )
@@ -69393,7 +69557,12 @@ mod tests {
             ]))
         );
         let out = dispatch_argv(
-            &[b"ZREVRANK".to_vec(), b"z".to_vec(), b"b".to_vec(), b"WITHSCORE".to_vec()],
+            &[
+                b"ZREVRANK".to_vec(),
+                b"z".to_vec(),
+                b"b".to_vec(),
+                b"WITHSCORE".to_vec(),
+            ],
             &mut store,
             0,
         )
@@ -69408,7 +69577,12 @@ mod tests {
 
         // Missing member: null array (RESP3 `_`), no score frame at all.
         let out = dispatch_argv(
-            &[b"ZRANK".to_vec(), b"z".to_vec(), b"nope".to_vec(), b"WITHSCORE".to_vec()],
+            &[
+                b"ZRANK".to_vec(),
+                b"z".to_vec(),
+                b"nope".to_vec(),
+                b"WITHSCORE".to_vec(),
+            ],
             &mut store,
             0,
         )

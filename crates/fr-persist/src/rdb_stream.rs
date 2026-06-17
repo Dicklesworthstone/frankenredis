@@ -23,8 +23,8 @@ use std::collections::BTreeMap;
 
 use crate::listpack::{ListpackEntry, ListpackError, decode_listpack};
 use crate::{
-    RdbStreamConsumer, RdbStreamConsumerGroup, RdbStreamMetadata, RdbStreamPendingEntry, RdbValue,
-    StreamEntry,
+    EncodableStreamEntry, RdbStreamConsumer, RdbStreamConsumerGroup, RdbStreamMetadata,
+    RdbStreamPendingEntry, RdbValue, StreamEntry,
 };
 
 use super::{rdb_decode_length, rdb_decode_string};
@@ -88,7 +88,7 @@ impl From<ListpackError> for UpstreamStreamError {
 /// Redis stream consumer-group payload, currently when a pending entry names a
 /// consumer absent from the group's consumer list.
 pub(crate) fn encode_upstream_stream_listpacks3<F, V>(
-    entries: &[(u64, u64, Vec<(F, V)>)],
+    entries: &[EncodableStreamEntry<F, V>],
     watermark: Option<(u64, u64)>,
     groups: &[RdbStreamConsumerGroup],
     entries_added: Option<u64>,
@@ -103,8 +103,8 @@ where
     // common DUMP/RDB-save path is already sorted — avoid the `to_vec()` + sort.
     // (The DUMP caller also passes borrowed `&[u8]` field/value slices, so even
     // the fallback clone copies only slice pointers, never the field bytes.)
-    let sorted_storage: Vec<(u64, u64, Vec<(F, V)>)>;
-    let sorted_entries: &[(u64, u64, Vec<(F, V)>)] = if entries
+    let sorted_storage: Vec<EncodableStreamEntry<F, V>>;
+    let sorted_entries: &[EncodableStreamEntry<F, V>] = if entries
         .windows(2)
         .all(|w| (w[0].0, w[0].1) <= (w[1].0, w[1].1))
     {
@@ -121,7 +121,7 @@ where
     // node (subsequent entries delta+SAMEFIELDS compressed against the master).
     // This reproduces the exact node layout — and DUMP/RDB bytes — that
     // sequential XADD would have built, instead of one listpack per entry.
-    let nodes = pack_stream_nodes(&sorted_entries)?;
+    let nodes = pack_stream_nodes(sorted_entries)?;
 
     super::rdb_encode_length(&mut buf, nodes.len());
     for node in &nodes {
@@ -202,7 +202,7 @@ fn master_rest_bytes(fields: &[&[u8]]) -> Option<usize> {
 /// True when `entry`'s field names match the node master's, in order — the
 /// condition upstream uses to set `STREAM_ITEM_FLAG_SAMEFIELDS`.
 fn entry_same_fields<F: AsRef<[u8]>, V>(
-    entry: &(u64, u64, Vec<(F, V)>),
+    entry: &EncodableStreamEntry<F, V>,
     master_fields: &[&[u8]],
 ) -> bool {
     entry.2.len() == master_fields.len()
@@ -216,7 +216,7 @@ fn entry_same_fields<F: AsRef<[u8]>, V>(
 /// Append one member entry to `builder` in upstream's listpack item layout.
 fn append_member<F: AsRef<[u8]>, V: AsRef<[u8]>>(
     builder: &mut NodeBuilder,
-    entry: &(u64, u64, Vec<(F, V)>),
+    entry: &EncodableStreamEntry<F, V>,
 ) -> Option<()> {
     let numfields = entry.2.len();
     let same_fields = entry_same_fields(entry, &builder.master_fields);
@@ -296,7 +296,7 @@ fn finalize_node(builder: &NodeBuilder) -> Option<StreamNode> {
 /// Group sorted stream entries into listpack macro-nodes, reproducing upstream
 /// `streamAppendItem`'s incremental split decisions.
 fn pack_stream_nodes<F: AsRef<[u8]>, V: AsRef<[u8]>>(
-    entries: &[(u64, u64, Vec<(F, V)>)],
+    entries: &[EncodableStreamEntry<F, V>],
 ) -> Option<Vec<StreamNode>> {
     let mut nodes = Vec::new();
     let mut current: Option<NodeBuilder> = None;
@@ -318,10 +318,7 @@ fn pack_stream_nodes<F: AsRef<[u8]>, V: AsRef<[u8]>>(
                 count_scratch.clear();
                 encode_listpack_int(&mut count_scratch, i64::try_from(builder.count).ok()?);
                 let master_entry = count_scratch.len() + builder.master_rest_bytes;
-                let lp_bytes = LISTPACK_HEADER_SIZE
-                    + master_entry
-                    + builder.members.len()
-                    + 1; // EOF
+                let lp_bytes = LISTPACK_HEADER_SIZE + master_entry + builder.members.len() + 1; // EOF
                 lp_bytes.saturating_add(totelelen)
                     >= STREAM_NODE_MAX_BYTES.min(STREAM_LISTPACK_MAX_SIZE)
                     || builder.count >= STREAM_NODE_MAX_ENTRIES

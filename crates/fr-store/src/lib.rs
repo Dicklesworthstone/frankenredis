@@ -253,6 +253,8 @@ pub type StreamPendingSummary = (
 );
 pub type StreamPendingRecord = (StreamId, Vec<u8>, u64, u64);
 pub type StreamAutoClaimDeleted = Vec<StreamId>;
+type BorrowedStreamField<'a> = (&'a [u8], &'a [u8]);
+type BorrowedDumpStreamEntry<'a> = (u64, u64, Vec<BorrowedStreamField<'a>>);
 
 /// An asynchronous server message queued for delivery to a client.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21462,7 +21464,7 @@ fn encoded_length_size(len: usize) -> usize {
 /// refs feed it directly — the same zero-copy slice-ref shape the set/hash/zset
 /// DUMP encoders already use (and which keeps those types FASTER than redis).
 /// Saves ~2 allocations + a byte copy per field on every stream DUMP/BGSAVE.
-fn dump_stream_entries(entries: &StreamEntries) -> Vec<(u64, u64, Vec<(&[u8], &[u8])>)> {
+fn dump_stream_entries(entries: &StreamEntries) -> Vec<BorrowedDumpStreamEntry<'_>> {
     entries
         .iter()
         .map(|((ms, seq), fields)| (*ms, *seq, fields.iter().collect()))

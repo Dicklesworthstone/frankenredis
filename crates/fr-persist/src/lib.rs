@@ -953,7 +953,8 @@ pub struct RdbDecodeResult {
 }
 
 /// Stream entry: (ms, seq, fields).
-pub type StreamEntry = (u64, u64, Vec<(Vec<u8>, Vec<u8>)>);
+pub type StreamEntry = EncodableStreamEntry<Vec<u8>, Vec<u8>>;
+pub type EncodableStreamEntry<F, V> = (u64, u64, Vec<(F, V)>);
 
 /// A pending entry in a consumer group (PEL entry).
 #[derive(Debug, Clone, PartialEq)]
@@ -1050,7 +1051,7 @@ pub enum RdbValue {
 /// The returned bytes start after the type byte and before the DUMP trailer.
 #[must_use]
 pub fn encode_upstream_stream_listpacks3_payload<F, V>(
-    entries: &[(u64, u64, Vec<(F, V)>)],
+    entries: &[EncodableStreamEntry<F, V>],
     watermark: Option<(u64, u64)>,
     groups: &[RdbStreamConsumerGroup],
     entries_added: Option<u64>,
@@ -2536,7 +2537,7 @@ fn lzf_compress_with_scratch(
     // htab stores ip+1 (0 = unset). Epoch tags make stale slots read as unset,
     // preserving the zero-initialised C table semantics without clearing 256 KiB
     // on every compression attempt. (frankenredis-gu5nf.27)
-    let generation = scratch.begin_call(HSIZE);
+    let generation = scratch.begin_call(HSIZE, in_len);
 
     let mut ip: usize = 0;
     let mut lit: usize = 0;

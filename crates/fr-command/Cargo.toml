@@ -8,6 +8,8 @@ fr-protocol = { version = "0.1.0", path = "../fr-protocol" }
 fr-sentinel = { version = "0.1.0", path = "../fr-sentinel" }
 fr-store = { version = "0.1.0", path = "../fr-store" }
 foldhash = "0.1"
+icu_collator = "2.2.0"
+icu_locale_core = "2.2.0"
 serde_json.workspace = true
 sha2.workspace = true
 
