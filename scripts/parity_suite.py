@@ -86,6 +86,7 @@ PORT_BASED = [
     ("move_swapdb_expiry_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("multi_db_relocation_fuzz.py", [str(ORACLE_PORT), str(FR_PORT), "2", "800"]),
     ("cross_db_type_relocation_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("tracking_invalidation_lifecycle_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("watch_semantics_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("multi_exec_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("validation_order_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
