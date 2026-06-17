@@ -8953,6 +8953,13 @@ impl Store {
         self.expiry_deadline_counts.clear();
         self.hll_register_cache.clear();
         self.mem_estimate_cache.borrow_mut().clear();
+        // (cc) Reset the AGGREGATE used_memory cache too. flushdb empties `entries`
+        // but only bumps `dirty` by 1 (below estimate_memory_usage_bytes's 64-mutation
+        // recompute threshold), so without this INFO used_memory keeps returning the
+        // pre-flush peak (e.g. 53MB with 0 keys vs redis ~2MB). Forces a recompute
+        // over the now-empty keyspace on the next query.
+        self.cached_memory_usage_bytes.set(0);
+        self.cached_memory_usage_dirty.set(0);
         self.hash_field_expires.clear();
         self.running_digest = 0;
         self.digest_stale = false;
