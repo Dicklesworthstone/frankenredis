@@ -10132,10 +10132,11 @@ pub fn lua_to_resp(val: &LuaValue, resp3: bool) -> RespFrame {
             // {big_number = "..."}: upstream luaReplyToRedisReply emits a
             // RESP3 Big Number (`(<digits>\r\n`), downconverted to a bulk
             // string under RESP2 (handled in downconvert_lua_reply_to_resp2).
-            // (frankenredis-h2uga)
+            // It also maps CR/LF to spaces before writing the line-based frame.
+            // (frankenredis-h2uga, frankenredis-sg1nm)
             let bn_field = t.get(&LuaValue::Str(b"big_number".to_vec()));
             if let LuaValue::Str(s) = bn_field {
-                return RespFrame::BigNumber(String::from_utf8_lossy(&s).into_owned());
+                return RespFrame::BigNumber(lua_big_number_payload(&s));
             }
 
             // {verbatim_string = {format = "<3char>", string = "..."}}:
@@ -10175,6 +10176,17 @@ pub fn lua_to_resp(val: &LuaValue, resp3: bool) -> RespFrame {
         | LuaValue::Coroutine(_)
         | LuaValue::WrappedCoroutine(_) => RespFrame::BulkString(None),
     }
+}
+
+fn lua_big_number_payload(bytes: &[u8]) -> String {
+    let mut text = String::from_utf8_lossy(bytes).into_owned();
+    if text.as_bytes().iter().any(|&b| b == b'\r' || b == b'\n') {
+        text = text
+            .chars()
+            .map(|c| if c == '\r' || c == '\n' { ' ' } else { c })
+            .collect();
+    }
+    text
 }
 
 // ── string.format implementation ────────────────────────────────────────
@@ -14959,6 +14971,25 @@ end
             frame,
             RespFrame::BulkString(Some(b"1234567890123456789012345".to_vec()))
         );
+        let frame = eval_script(
+            b"return {big_number = '12\\r34\\n56'}",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("big_number hint with CR/LF should not error");
+        assert_eq!(frame, RespFrame::BigNumber("12 34 56".to_string()));
+        let mut store_bn_crlf_resp2 = Store::new();
+        let frame = eval_script(
+            b"return {big_number = '12\\r34\\n56'}",
+            &[],
+            &[],
+            &mut store_bn_crlf_resp2,
+            0,
+        )
+        .expect("big_number hint with CR/LF resp2 should not error");
+        assert_eq!(frame, RespFrame::BulkString(Some(b"12 34 56".to_vec())));
 
         // {verbatim_string = {format='txt', string='hi'}} → BulkString of `string`.
         let frame = eval_script(
