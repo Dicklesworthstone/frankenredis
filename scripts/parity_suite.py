@@ -24,7 +24,32 @@ import sys, os, time, socket, subprocess
 REDIS_BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "legacy_redis_code/redis/src/redis-server")
 FR_BIN = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else "/tmp/fr_rdb")
 HERE = os.path.dirname(os.path.abspath(__file__))
-ORACLE_PORT, FR_PORT = 29951, 29952
+
+
+def _free_port(preferred):
+    """Return `preferred` if no server is already listening on it, else the next
+    free port above it. Without this, a STALE server left on a fixed port by a
+    prior/killed run silently captures the suite: our own Popen'd server fails to
+    bind (EADDRINUSE) and exits, but `wait_up()` still PINGs the stale process,
+    so every port-based gate runs against the WRONG server and reports a cascade
+    of false FAILs (observed: 9/45 with the real binary, 45/45 after clearing the
+    stale server). Probe by CONNECTing (not binding — bind is unavailable under
+    the sandbox): a refused connection means the port is free for us to claim."""
+    for port in range(preferred, preferred + 400):
+        try:
+            c = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+            c.close()  # something is listening here -> occupied, try the next
+        except OSError:
+            return port  # connection refused / unreachable -> free
+    return preferred
+
+
+ORACLE_PORT, FR_PORT = _free_port(29951), _free_port(29952)
+# Self-orchestrating gates start their own server quartets; give each a base port
+# we've verified is free for the same stale-server reason.
+SO_PORTS = {name: _free_port(base) for name, base in (
+    ("rdb", 29961), ("aof", 29971), ("repl", 29981),
+    ("replf", 29991), ("aoff", 29671), ("rdbc", 29761))}
 
 
 def enc(a):
@@ -70,12 +95,12 @@ def run_gate(name, argv):
 
 
 SELF_ORCH = [
-    ("rdb_cross_compat_gate.py", [REDIS_BIN, FR_BIN, "29961"]),
-    ("aof_cross_compat_gate.py", [REDIS_BIN, FR_BIN, "29971"]),
-    ("replication_cross_compat_gate.py", [REDIS_BIN, FR_BIN, "29981"]),
-    ("replication_digest_fuzz.py", [REDIS_BIN, FR_BIN, "29991", "3", "500"]),
-    ("aof_roundtrip_digest_fuzz.py", [REDIS_BIN, FR_BIN, "29671", "2", "4"]),
-    ("rdb_changes_save_gate.py", [REDIS_BIN, FR_BIN, "29761"]),
+    ("rdb_cross_compat_gate.py", [REDIS_BIN, FR_BIN, str(SO_PORTS["rdb"])]),
+    ("aof_cross_compat_gate.py", [REDIS_BIN, FR_BIN, str(SO_PORTS["aof"])]),
+    ("replication_cross_compat_gate.py", [REDIS_BIN, FR_BIN, str(SO_PORTS["repl"])]),
+    ("replication_digest_fuzz.py", [REDIS_BIN, FR_BIN, str(SO_PORTS["replf"]), "3", "500"]),
+    ("aof_roundtrip_digest_fuzz.py", [REDIS_BIN, FR_BIN, str(SO_PORTS["aoff"]), "2", "4"]),
+    ("rdb_changes_save_gate.py", [REDIS_BIN, FR_BIN, str(SO_PORTS["rdbc"])]),
 ]
 # Gates invoked positionally: <oracle_port> <fr_port>
 PORT_BASED = [
@@ -159,6 +184,25 @@ def main():
             [FR_BIN, "--port", str(FR_PORT), "--enable-debug-command", "yes"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         pair_ok = wait_up(ORACLE_PORT) and wait_up(FR_PORT)
+        # Backstop health check: confirm the oracle we reached is a real redis
+        # 7.2.4 (a wedged/stale/wrong server answers PING but reports a tiny
+        # COMMAND COUNT). Catches any wedge cause the free-port guard misses, so
+        # the suite aborts loudly instead of mislabeling 30 gates as FAIL.
+        if pair_ok:
+            try:
+                c = socket.create_connection(("127.0.0.1", ORACLE_PORT), timeout=2)
+                c.sendall(enc(["COMMAND", "COUNT"]))
+                time.sleep(0.05)
+                reply = c.recv(64)
+                c.close()
+                n = int(reply[1:reply.index(b"\r\n")]) if reply[:1] == b":" else 0
+                if n < 200:
+                    pair_ok = False
+                    print(f"  [ABORT] oracle on :{ORACLE_PORT} reported COMMAND COUNT={n} "
+                          f"(<200) — not a healthy redis 7.2.4; skipping port-based gates")
+            except Exception as e:
+                pair_ok = False
+                print(f"  [ABORT] oracle health check on :{ORACLE_PORT} failed: {e}")
         for name, argv in PORT_BASED:
             if not os.path.exists(os.path.join(HERE, name)):
                 continue
