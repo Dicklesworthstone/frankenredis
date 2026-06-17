@@ -4450,6 +4450,12 @@ pub struct Store {
     /// Total number of successful mutations since startup.
     pub dirty: u64,
 
+    /// Snapshot of `dirty` at the last successful SAVE/BGSAVE. INFO's
+    /// `rdb_changes_since_last_save` is `dirty - dirty_at_last_save` — `dirty`
+    /// itself is monotonic (it also drives the used_memory recompute counter), so
+    /// the save baseline is tracked separately and reset in `record_save`.
+    pub dirty_at_last_save: u64,
+
     /// Unix timestamp of the last successful SAVE/BGSAVE observed by this store.
     pub last_save_time_sec: u64,
     /// Number of successful SAVE/BGSAVE operations observed by this store.
@@ -4868,6 +4874,7 @@ impl Default for Store {
             hll_sparse_max_bytes: HLL_REDIS_SPARSE_MAX_BYTES,
             rng_seed: 0xDEADBEEF_C0FFEE11,
             dirty: 0,
+            dirty_at_last_save: 0,
             // (frankenredis-30hub) Mirror upstream server.c::initServerConfig
             // line 2668 — `server.lastsave = time(NULL); /* At startup we
             // consider the DB saved. */`. Tools that scrape LASTSAVE / INFO
@@ -5162,6 +5169,11 @@ impl Store {
 
     pub fn record_save(&mut self, now_ms: u64, background: bool) {
         self.mark_saved_at(now_ms);
+        // (cc) A successful save baselines rdb_changes_since_last_save: redis resets
+        // it to 0 (then counts writes made during the save). fr was reporting the
+        // monotonic `dirty` directly, so it never reset (6 -> 6 -> 7 across SAVE vs
+        // redis 5 -> 0 -> 1). Snapshot dirty here so the INFO delta is 0 post-save.
+        self.dirty_at_last_save = self.dirty;
         self.stat_rdb_saves = self.stat_rdb_saves.saturating_add(1);
         if background {
             self.stat_rdb_last_bgsave_time_sec = Some(self.last_save_time_sec);

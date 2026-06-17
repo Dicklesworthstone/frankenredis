@@ -23704,7 +23704,10 @@ impl Runtime {
         let _ = write!(
             info,
             "rdb_changes_since_last_save:{}\r\n",
-            self.server.store.dirty
+            self.server
+                .store
+                .dirty
+                .saturating_sub(self.server.store.dirty_at_last_save)
         );
         info.push_str("rdb_bgsave_in_progress:0\r\n");
         let _ = write!(
