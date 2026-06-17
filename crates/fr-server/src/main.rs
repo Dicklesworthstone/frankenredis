@@ -1244,6 +1244,14 @@ fn main() -> ExitCode {
     let mut next_handle: usize = MAX_LISTENERS;
     let tick_budget = TickBudget::default();
     let mut last_ops_sample_ms: u64 = now_ms();
+    // (frankenredis) Last wall-clock ms the idle-timeout sweep scanned the client
+    // table. The sweep is O(connected clients); running it every event-loop wakeup
+    // (as it did) burns O(N) per iteration under a configured `timeout` — thousands
+    // of useless full scans per second on a busy server. Redis checks client
+    // timeouts in clientsCron at server.hz (~10 Hz), so throttle the sweep to the
+    // same cadence; idle detection latency stays well under the seconds-granularity
+    // timeout, so behavior is unchanged.
+    let mut last_idle_scan_ms: u64 = now_ms();
     // (frankenredis-pkdgs) Last wall-clock ms a sentinel-mode INFO/PING probe of
     // the monitored masters ran. 0 = never, so the first tick probes immediately.
     let mut last_sentinel_probe_ms: u64 = 0;
@@ -1532,8 +1540,11 @@ fn main() -> ExitCode {
         }
 
         // Disconnect clients that have exceeded the configured idle timeout.
+        // Throttled to ~10 Hz (redis clientsCron cadence): the sweep is O(connected
+        // clients), so running it every event-loop wakeup wasted O(N) per iteration.
         let client_timeout_sec = runtime.server.client_timeout_sec;
-        if client_timeout_sec > 0 {
+        if client_timeout_sec > 0 && ts.saturating_sub(last_idle_scan_ms) >= 100 {
+            last_idle_scan_ms = ts;
             let timeout_ms = client_timeout_sec * 1000;
             for (&token, conn) in clients.iter_mut() {
                 if conn.closing || conn.blocked.is_some() || conn.replication_sent_offset.is_some()
