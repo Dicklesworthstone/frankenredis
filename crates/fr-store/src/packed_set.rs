@@ -1491,6 +1491,50 @@ impl PackedStreamLog {
         }
     }
 
+    /// Bulk-build a log from entries supplied in **strictly id-ascending** order
+    /// (the RESTORE / RDB-load case — upstream serializes stream entries sorted).
+    /// Produces an arena / `field_dict` / node index byte-identical to inserting
+    /// the same entries one at a time, but in O(n): the node index is filled in
+    /// `PACKED_STREAM_NODE_MAX_ENTRIES`-sized chunks — the exact boundary
+    /// [`Self::insert_new_span`]'s append branch produces — with no per-entry
+    /// `BTreeMap` range lookup or in-node binary search (`node_key_for`, the
+    /// stream-RESTORE hot path). The caller MUST guarantee strictly-increasing
+    /// ids; verify first and fall back to per-entry [`Self::insert`] otherwise
+    /// (that path tolerates reordering and rejects duplicates).
+    #[must_use]
+    pub fn from_sorted_entries<F: AsRef<[u8]>, V: AsRef<[u8]>>(
+        entries: &[(u64, u64, Vec<(F, V)>)],
+    ) -> Self {
+        let mut log = Self::new();
+        for chunk in entries.chunks(PACKED_STREAM_NODE_MAX_ENTRIES) {
+            let mut node_entries = Vec::with_capacity(chunk.len());
+            for (ms, seq, pairs) in chunk {
+                let off = log.arena.len();
+                for (f, v) in pairs {
+                    let idx = log.intern_field(f.as_ref());
+                    write_varint(&mut log.arena, idx);
+                    write_varint(&mut log.arena, v.as_ref().len());
+                    log.arena.extend_from_slice(v.as_ref());
+                }
+                let span = FieldSpan {
+                    off,
+                    len: u32::try_from(log.arena.len() - off).unwrap_or(u32::MAX),
+                    count: u32::try_from(pairs.len()).unwrap_or(u32::MAX),
+                };
+                node_entries.push(StreamNodeEntry {
+                    id: (*ms, *seq),
+                    span,
+                });
+            }
+            if let Some(first) = node_entries.first() {
+                log.nodes
+                    .insert(first.id, StreamNode { entries: node_entries });
+            }
+        }
+        log.len = entries.len();
+        log
+    }
+
     #[must_use]
     pub fn get(&self, id: (u64, u64)) -> Option<FieldsRef<'_>> {
         let key = self.node_key_for(id)?;

@@ -20492,14 +20492,28 @@ impl Store {
                 else {
                     return Err(StoreError::InvalidDumpPayload);
                 };
-                let mut entries = StreamEntries::new();
-                for (ms, seq, fields) in stream_entries {
-                    // `insert` returns true if this id already appeared — a
-                    // duplicate in the DUMP payload is malformed.
-                    if entries.insert((ms, seq), &fields) {
-                        return Err(StoreError::InvalidDumpPayload);
+                // Upstream serializes stream entries in strictly id-ascending
+                // order, so build the node index in bulk (O(n)) instead of a
+                // BTree range lookup + in-node binary search per entry
+                // (`node_key_for`, the RESTORE hot path). Fall back to per-entry
+                // `insert` only if the payload is NOT strictly increasing — that
+                // path tolerates reordering and rejects duplicates.
+                let strictly_increasing = stream_entries
+                    .windows(2)
+                    .all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1));
+                let entries = if strictly_increasing {
+                    StreamEntries::from_sorted_entries(&stream_entries)
+                } else {
+                    let mut entries = StreamEntries::new();
+                    for (ms, seq, fields) in &stream_entries {
+                        // `insert` returns true if this id already appeared — a
+                        // duplicate in the DUMP payload is malformed.
+                        if entries.insert((*ms, *seq), fields) {
+                            return Err(StoreError::InvalidDumpPayload);
+                        }
                     }
-                }
+                    entries
+                };
                 restored_stream_last_id = watermark.or_else(|| entries.keys().next_back().copied());
                 restored_stream_entries_added = entries_added;
                 restored_stream_max_deleted_id = max_deleted;
