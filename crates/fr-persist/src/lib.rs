@@ -2512,12 +2512,21 @@ fn lzf_compress_with_scratch(
                             }
                         }
                     }
-                    // C: do len++ while (len < maxlen && ref[len] == ip[len]);
-                    loop {
+                    // C: do len++ while (len < maxlen && ref[len] == ip[len]).
+                    // Equivalent slice-based common-prefix scan over the aligned
+                    // tails, so the per-element bounds checks are hoisted out of the
+                    // variable-length match loop (the dominant lzf cost on
+                    // compressible RDB/DUMP payloads). The original loop ends at the
+                    // first position p in (len, maxlen] with p == maxlen or a
+                    // mismatch, i.e. len += 1 + (#consecutive matches at len+1..).
+                    // r+maxlen and ip+maxlen are <= in_len (maxlen <= in_len-ip-2,
+                    // r < ip), so both subslices are in bounds.
+                    if len + 1 < maxlen {
+                        let a = &input[r + len + 1..r + maxlen];
+                        let b = &input[ip + len + 1..ip + maxlen];
+                        len += 1 + a.iter().zip(b).take_while(|(x, y)| x == y).count();
+                    } else {
                         len += 1;
-                        if !(len < maxlen && input[r + len] == input[ip + len]) {
-                            break;
-                        }
                     }
                 }
                 let enc = len - 2; // len -= 2 (octets - 1)
