@@ -21455,10 +21455,17 @@ fn encoded_length_size(len: usize) -> usize {
     }
 }
 
-fn dump_stream_entries(entries: &StreamEntries) -> Vec<fr_persist::StreamEntry> {
+/// Borrowed view of a stream's entries for DUMP/RDB-save: `(ms, seq, [(field,
+/// value)…])` with the field/value bytes borrowed straight from the
+/// `PackedStreamLog` arena instead of `to_pairs()`-copied into owned `Vec`s.
+/// The upstream stream encoder is generic over `AsRef<[u8]>`, so these slice
+/// refs feed it directly — the same zero-copy slice-ref shape the set/hash/zset
+/// DUMP encoders already use (and which keeps those types FASTER than redis).
+/// Saves ~2 allocations + a byte copy per field on every stream DUMP/BGSAVE.
+fn dump_stream_entries(entries: &StreamEntries) -> Vec<(u64, u64, Vec<(&[u8], &[u8])>)> {
     entries
         .iter()
-        .map(|((ms, seq), fields)| (*ms, *seq, fields.to_pairs()))
+        .map(|((ms, seq), fields)| (*ms, *seq, fields.iter().collect()))
         .collect()
 }
 

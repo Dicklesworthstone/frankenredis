@@ -1049,13 +1049,17 @@ pub enum RdbValue {
 ///
 /// The returned bytes start after the type byte and before the DUMP trailer.
 #[must_use]
-pub fn encode_upstream_stream_listpacks3_payload(
-    entries: &[StreamEntry],
+pub fn encode_upstream_stream_listpacks3_payload<F, V>(
+    entries: &[(u64, u64, Vec<(F, V)>)],
     watermark: Option<(u64, u64)>,
     groups: &[RdbStreamConsumerGroup],
     entries_added: Option<u64>,
     max_deleted: Option<(u64, u64)>,
-) -> Option<Vec<u8>> {
+) -> Option<Vec<u8>>
+where
+    F: AsRef<[u8]> + Clone,
+    V: AsRef<[u8]> + Clone,
+{
     rdb_stream::encode_upstream_stream_listpacks3(
         entries,
         watermark,

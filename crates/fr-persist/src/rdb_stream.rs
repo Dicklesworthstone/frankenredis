@@ -87,20 +87,24 @@ impl From<ListpackError> for UpstreamStreamError {
 /// Returns `None` when the in-memory group shape cannot be represented as a
 /// Redis stream consumer-group payload, currently when a pending entry names a
 /// consumer absent from the group's consumer list.
-pub(crate) fn encode_upstream_stream_listpacks3(
-    entries: &[StreamEntry],
+pub(crate) fn encode_upstream_stream_listpacks3<F, V>(
+    entries: &[(u64, u64, Vec<(F, V)>)],
     watermark: Option<(u64, u64)>,
     groups: &[RdbStreamConsumerGroup],
     entries_added: Option<u64>,
     max_deleted: Option<(u64, u64)>,
-) -> Option<Vec<u8>> {
+) -> Option<Vec<u8>>
+where
+    F: AsRef<[u8]> + Clone,
+    V: AsRef<[u8]> + Clone,
+{
     let mut buf = Vec::new();
     // fr-store's PackedStreamLog already yields entries in id order, so the
-    // common DUMP/RDB-save path is already sorted — avoid the deep `to_vec()`
-    // (StreamEntry owns a `Vec<(Vec<u8>, Vec<u8>)>`, so cloning copies every
-    // field/value) and sort. Only an out-of-order caller pays the copy+sort.
-    let sorted_storage: Vec<StreamEntry>;
-    let sorted_entries: &[StreamEntry] = if entries
+    // common DUMP/RDB-save path is already sorted — avoid the `to_vec()` + sort.
+    // (The DUMP caller also passes borrowed `&[u8]` field/value slices, so even
+    // the fallback clone copies only slice pointers, never the field bytes.)
+    let sorted_storage: Vec<(u64, u64, Vec<(F, V)>)>;
+    let sorted_entries: &[(u64, u64, Vec<(F, V)>)] = if entries
         .windows(2)
         .all(|w| (w[0].0, w[0].1) <= (w[1].0, w[1].1))
     {
@@ -197,17 +201,23 @@ fn master_rest_bytes(fields: &[&[u8]]) -> Option<usize> {
 
 /// True when `entry`'s field names match the node master's, in order — the
 /// condition upstream uses to set `STREAM_ITEM_FLAG_SAMEFIELDS`.
-fn entry_same_fields(entry: &StreamEntry, master_fields: &[&[u8]]) -> bool {
+fn entry_same_fields<F: AsRef<[u8]>, V>(
+    entry: &(u64, u64, Vec<(F, V)>),
+    master_fields: &[&[u8]],
+) -> bool {
     entry.2.len() == master_fields.len()
         && entry
             .2
             .iter()
             .zip(master_fields)
-            .all(|((field, _), master)| field.as_slice() == *master)
+            .all(|((field, _), master)| field.as_ref() == *master)
 }
 
 /// Append one member entry to `builder` in upstream's listpack item layout.
-fn append_member(builder: &mut NodeBuilder, entry: &StreamEntry) -> Option<()> {
+fn append_member<F: AsRef<[u8]>, V: AsRef<[u8]>>(
+    builder: &mut NodeBuilder,
+    entry: &(u64, u64, Vec<(F, V)>),
+) -> Option<()> {
     let numfields = entry.2.len();
     let same_fields = entry_same_fields(entry, &builder.master_fields);
     let flags = if same_fields {
@@ -227,9 +237,9 @@ fn append_member(builder: &mut NodeBuilder, entry: &StreamEntry) -> Option<()> {
     }
     for (field, value) in &entry.2 {
         if !same_fields {
-            encode_listpack_bytes(buf, field)?;
+            encode_listpack_bytes(buf, field.as_ref())?;
         }
-        encode_listpack_bytes(buf, value)?;
+        encode_listpack_bytes(buf, value.as_ref())?;
     }
     // lp-count: number of listpack pieces composing this entry (for reverse
     // traversal). 3 fixed (flags + ms + seq) + numfields values, plus the
@@ -285,7 +295,9 @@ fn finalize_node(builder: &NodeBuilder) -> Option<StreamNode> {
 
 /// Group sorted stream entries into listpack macro-nodes, reproducing upstream
 /// `streamAppendItem`'s incremental split decisions.
-fn pack_stream_nodes(entries: &[StreamEntry]) -> Option<Vec<StreamNode>> {
+fn pack_stream_nodes<F: AsRef<[u8]>, V: AsRef<[u8]>>(
+    entries: &[(u64, u64, Vec<(F, V)>)],
+) -> Option<Vec<StreamNode>> {
     let mut nodes = Vec::new();
     let mut current: Option<NodeBuilder> = None;
     // Reused scratch for measuring the master `count` varint each split test —
@@ -297,7 +309,7 @@ fn pack_stream_nodes(entries: &[StreamEntry]) -> Option<Vec<StreamNode>> {
         let totelelen: usize = entry
             .2
             .iter()
-            .map(|(field, value)| field.len() + value.len())
+            .map(|(field, value)| field.as_ref().len() + value.as_ref().len())
             .sum();
 
         let need_new_node = match &current {
@@ -321,7 +333,7 @@ fn pack_stream_nodes(entries: &[StreamEntry]) -> Option<Vec<StreamNode>> {
                 nodes.push(finalize_node(&builder)?);
             }
             let master_fields: Vec<&[u8]> =
-                entry.2.iter().map(|(field, _)| field.as_slice()).collect();
+                entry.2.iter().map(|(field, _)| field.as_ref()).collect();
             let num_elements = master_fields.len().checked_add(4)?; // count, deleted, numfields, fields, terminator
             let master_rest_bytes = master_rest_bytes(&master_fields)?;
             current = Some(NodeBuilder {
