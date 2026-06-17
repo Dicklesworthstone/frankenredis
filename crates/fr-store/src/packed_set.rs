@@ -1498,40 +1498,56 @@ impl PackedStreamLog {
     /// `PACKED_STREAM_NODE_MAX_ENTRIES`-sized chunks — the exact boundary
     /// [`Self::insert_new_span`]'s append branch produces — with no per-entry
     /// `BTreeMap` range lookup or in-node binary search (`node_key_for`, the
-    /// stream-RESTORE hot path). The caller MUST guarantee strictly-increasing
-    /// ids; verify first and fall back to per-entry [`Self::insert`] otherwise
-    /// (that path tolerates reordering and rejects duplicates).
+    /// stream-RESTORE hot path). Shared by the RESTORE command and the RDB-file /
+    /// DEBUG RELOAD loader. The caller MUST guarantee strictly-increasing ids;
+    /// verify first and fall back to per-entry [`Self::insert`] otherwise (that
+    /// path tolerates reordering / overwrites).
     #[must_use]
-    pub fn from_sorted_entries<F: AsRef<[u8]>, V: AsRef<[u8]>>(
-        entries: &[(u64, u64, Vec<(F, V)>)],
-    ) -> Self {
+    pub fn from_sorted_entries<'a, F, V, I>(entries: I) -> Self
+    where
+        F: AsRef<[u8]> + 'a,
+        V: AsRef<[u8]> + 'a,
+        I: IntoIterator<Item = ((u64, u64), &'a [(F, V)])>,
+    {
         let mut log = Self::new();
-        for chunk in entries.chunks(PACKED_STREAM_NODE_MAX_ENTRIES) {
-            let mut node_entries = Vec::with_capacity(chunk.len());
-            for (ms, seq, pairs) in chunk {
-                let off = log.arena.len();
-                for (f, v) in pairs {
-                    let idx = log.intern_field(f.as_ref());
-                    write_varint(&mut log.arena, idx);
-                    write_varint(&mut log.arena, v.as_ref().len());
-                    log.arena.extend_from_slice(v.as_ref());
-                }
-                let span = FieldSpan {
-                    off,
-                    len: u32::try_from(log.arena.len() - off).unwrap_or(u32::MAX),
-                    count: u32::try_from(pairs.len()).unwrap_or(u32::MAX),
-                };
-                node_entries.push(StreamNodeEntry {
-                    id: (*ms, *seq),
-                    span,
-                });
+        let mut node_entries: Vec<StreamNodeEntry> =
+            Vec::with_capacity(PACKED_STREAM_NODE_MAX_ENTRIES);
+        let mut node_first: Option<(u64, u64)> = None;
+        let mut total = 0usize;
+        for (id, pairs) in entries {
+            let off = log.arena.len();
+            for (f, v) in pairs {
+                let idx = log.intern_field(f.as_ref());
+                write_varint(&mut log.arena, idx);
+                write_varint(&mut log.arena, v.as_ref().len());
+                log.arena.extend_from_slice(v.as_ref());
             }
-            if let Some(first) = node_entries.first() {
-                log.nodes
-                    .insert(first.id, StreamNode { entries: node_entries });
+            let span = FieldSpan {
+                off,
+                len: u32::try_from(log.arena.len() - off).unwrap_or(u32::MAX),
+                count: u32::try_from(pairs.len()).unwrap_or(u32::MAX),
+            };
+            node_first.get_or_insert(id);
+            node_entries.push(StreamNodeEntry { id, span });
+            total += 1;
+            if node_entries.len() == PACKED_STREAM_NODE_MAX_ENTRIES {
+                let key = node_first.take().expect("node_first set on first push");
+                let full = std::mem::replace(
+                    &mut node_entries,
+                    Vec::with_capacity(PACKED_STREAM_NODE_MAX_ENTRIES),
+                );
+                log.nodes.insert(key, StreamNode { entries: full });
             }
         }
-        log.len = entries.len();
+        if let Some(key) = node_first {
+            log.nodes.insert(
+                key,
+                StreamNode {
+                    entries: node_entries,
+                },
+            );
+        }
+        log.len = total;
         log
     }
 

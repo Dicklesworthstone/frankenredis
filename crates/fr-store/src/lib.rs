@@ -15082,10 +15082,23 @@ impl Store {
         }
         self.stream_groups.remove(key);
         self.stream_max_deleted_ids.remove(key);
-        let mut map = StreamEntries::new();
-        for (id, fields) in entries {
-            map.insert(id, &fields);
-        }
+        // RDB serializes entries strictly id-ascending, so build the node index
+        // in one O(n) pass (no per-entry BTree lookup / binary search) — the same
+        // `node_key_for` hot path the RESTORE command avoids. A non-increasing
+        // payload (malformed) falls back to the per-entry `insert` loop, whose
+        // overwrite-on-duplicate behavior matches the original `xadd`-equivalent.
+        let strictly_increasing = entries.windows(2).all(|w| w[0].0 < w[1].0);
+        let map = if strictly_increasing {
+            StreamEntries::from_sorted_entries(
+                entries.iter().map(|(id, fields)| (*id, fields.as_slice())),
+            )
+        } else {
+            let mut map = StreamEntries::new();
+            for (id, fields) in &entries {
+                map.insert(*id, fields);
+            }
+            map
+        };
         let count = map.len() as u64;
         let last_id = *map
             .keys()
@@ -20502,7 +20515,11 @@ impl Store {
                     .windows(2)
                     .all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1));
                 let entries = if strictly_increasing {
-                    StreamEntries::from_sorted_entries(&stream_entries)
+                    StreamEntries::from_sorted_entries(
+                        stream_entries
+                            .iter()
+                            .map(|(ms, seq, fields)| ((*ms, *seq), fields.as_slice())),
+                    )
                 } else {
                     let mut entries = StreamEntries::new();
                     for (ms, seq, fields) in &stream_entries {
