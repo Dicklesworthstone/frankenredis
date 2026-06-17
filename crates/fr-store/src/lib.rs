@@ -3192,7 +3192,7 @@ struct Entry {
     /// LFU access frequency counter exposed via OBJECT FREQ when LFU eviction is active.
     lfu_freq: u8,
     /// Last LFU access/decrement timestamp in whole minutes.
-    lfu_last_touch_min: u64,
+    lfu_last_touch_min: u32,
     /// Index of this key inside its db's `random_key_slots` Vec — the RANDOMKEY
     /// sampling back-index. Replaces the separate `random_key_positions`
     /// HashMap<Arc<[u8]>, (db, slot)>, which kept a full second copy of every
@@ -3213,38 +3213,10 @@ struct Entry {
     /// even if a later operation shrinks the string back below the
     /// 44-byte embstr threshold, OBJECT ENCODING continues to
     /// report 'raw'. Mirrored here as a per-entry flag.
-    /// (br-frankenredis-84bv)
-    force_raw_encoding: bool,
-    /// Skip the int-encoding shortcut even when the stored bytes
-    /// look like a canonical i64. Used by INCRBYFLOAT — upstream
-    /// stores the result via createStringObject which always
-    /// produces embstr/raw, never int. The embstr-vs-raw threshold
-    /// still applies normally. (br-frankenredis-incrfloatenc)
-    force_string_encoding: bool,
-    /// Redis set encodings are one-way promotions. Once an intset is
-    /// converted to listpack by a non-integer member, removing that
-    /// member does not downgrade the object back to intset.
-    force_set_listpack_encoding: bool,
-    /// Likewise, once a set is promoted to hashtable, later removals
-    /// do not compact it back to listpack or intset.
-    force_set_hashtable_encoding: bool,
-    /// (frankenredis-yp503) Same one-way promotion as sets: once a hash
-    /// exceeds hash-max-listpack-entries/value, the encoding sticks at
-    /// `hashtable` even if a later CONFIG SET raises the threshold above
-    /// the current size or fields are deleted.
-    force_hash_hashtable_encoding: bool,
-    /// (frankenredis-yp503) Same one-way promotion for sorted sets:
-    /// once promoted to skiplist, never demoted back to listpack.
-    force_zset_skiplist_encoding: bool,
-    /// (frankenredis-gt318) COPY duplicates a value via upstream
-    /// dupStringObject, which for an int-encoded string allocates a
-    /// FRESH private object (createObject, refcount 1) rather than the
-    /// interned shared integer — so OBJECT REFCOUNT on a COPY destination
-    /// reports 1, not INT_MAX, even for a value in [0, 10000). Set only on
-    /// the COPY destination entry; any int-producing write (SET/INCR/
-    /// INCRBY/GETSET) replaces the whole Entry and clears it, re-sharing
-    /// like upstream's createStringObjectFromLongLongForValue.
-    int_copy_not_shared: bool,
+    /// Sticky object-encoding flags and COPY refcount metadata. These used to
+    /// live as seven booleans; a packed byte preserves the exact state machine
+    /// while keeping the hot keyspace entry at Redis-like density.
+    entry_flags: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -3263,9 +3235,22 @@ struct ZIntercardCache {
 /// vendored 7.2.4 returns 5. (frankenredis-lfuinit)
 const LFU_INIT_VAL: u8 = 5;
 
+const ENTRY_FORCE_RAW_ENCODING: u8 = 1 << 0;
+const ENTRY_FORCE_STRING_ENCODING: u8 = 1 << 1;
+const ENTRY_FORCE_SET_LISTPACK_ENCODING: u8 = 1 << 2;
+const ENTRY_FORCE_SET_HASHTABLE_ENCODING: u8 = 1 << 3;
+const ENTRY_FORCE_HASH_HASHTABLE_ENCODING: u8 = 1 << 4;
+const ENTRY_FORCE_ZSET_SKIPLIST_ENCODING: u8 = 1 << 5;
+const ENTRY_INT_COPY_NOT_SHARED: u8 = 1 << 6;
+
 #[inline]
 fn lru_access_millis(now_ms: u64) -> u32 {
     now_ms as u32
+}
+
+#[inline]
+fn lfu_access_minutes(now_ms: u64) -> u32 {
+    u32::try_from(now_ms / 60_000).unwrap_or(u32::MAX)
 }
 
 impl Entry {
@@ -3274,19 +3259,29 @@ impl Entry {
             value,
             last_access_ms: lru_access_millis(now_ms),
             lfu_freq: LFU_INIT_VAL,
-            lfu_last_touch_min: now_ms / 60_000,
+            lfu_last_touch_min: lfu_access_minutes(now_ms),
             // Assigned at the `internal_entries_insert` choke point once the key
             // is placed in its db's `random_key_slots` Vec. (frankenredis-uhthd)
             random_slot: 0,
             modification_count: 0,
-            force_raw_encoding: false,
-            force_string_encoding: false,
-            force_set_listpack_encoding: false,
-            force_set_hashtable_encoding: false,
-            force_hash_hashtable_encoding: false,
-            force_zset_skiplist_encoding: false,
-            int_copy_not_shared: false,
+            entry_flags: 0,
         }
+    }
+
+    fn has_flag(&self, flag: u8) -> bool {
+        self.entry_flags & flag != 0
+    }
+
+    fn set_flag(&mut self, flag: u8, enabled: bool) {
+        if enabled {
+            self.entry_flags |= flag;
+        } else {
+            self.entry_flags &= !flag;
+        }
+    }
+
+    fn clear_entry_flags(&mut self) {
+        self.entry_flags = 0;
     }
 
     fn touch(&mut self, now_ms: u64) {
@@ -3300,8 +3295,8 @@ impl Entry {
         if decay_time == 0 {
             return self.lfu_freq;
         }
-        let now_min = now_ms / 60_000;
-        let elapsed = now_min.saturating_sub(self.lfu_last_touch_min);
+        let now_min = lfu_access_minutes(now_ms);
+        let elapsed = u64::from(now_min.saturating_sub(self.lfu_last_touch_min));
         let periods = elapsed / decay_time;
         self.lfu_freq
             .saturating_sub(u8::try_from(periods).unwrap_or(u8::MAX))
@@ -3342,7 +3337,7 @@ impl Entry {
         } else {
             self.lfu_freq = 255;
         }
-        self.lfu_last_touch_min = now_ms / 60_000;
+        self.lfu_last_touch_min = lfu_access_minutes(now_ms);
     }
 
     fn bump_mod_count(&mut self) {
@@ -3357,33 +3352,22 @@ impl Entry {
     fn refresh_db_add_metadata(&mut self, now_ms: u64) {
         self.last_access_ms = lru_access_millis(now_ms);
         self.lfu_freq = LFU_INIT_VAL;
-        self.lfu_last_touch_min = now_ms / 60_000;
+        self.lfu_last_touch_min = lfu_access_minutes(now_ms);
     }
 
     fn replace_with_integer_write(&mut self, value: i64, now_ms: u64) {
         self.value = Value::Integer(value);
         self.refresh_db_add_metadata(now_ms);
         self.bump_mod_count();
-        self.force_raw_encoding = false;
-        self.force_string_encoding = false;
-        self.force_set_listpack_encoding = false;
-        self.force_set_hashtable_encoding = false;
-        self.force_hash_hashtable_encoding = false;
-        self.force_zset_skiplist_encoding = false;
-        self.int_copy_not_shared = false;
+        self.clear_entry_flags();
     }
 
     fn duplicate_for_copy(&self, now_ms: u64) -> Self {
         let mut entry = Self::new(self.value.clone(), now_ms);
-        entry.force_raw_encoding = self.force_raw_encoding;
-        entry.force_string_encoding = self.force_string_encoding;
-        entry.force_set_listpack_encoding = self.force_set_listpack_encoding;
-        entry.force_set_hashtable_encoding = self.force_set_hashtable_encoding;
-        entry.force_hash_hashtable_encoding = self.force_hash_hashtable_encoding;
-        entry.force_zset_skiplist_encoding = self.force_zset_skiplist_encoding;
+        entry.entry_flags = self.entry_flags;
         // (frankenredis-gt318) A COPY destination is a private (non-shared)
         // duplicate — OBJECT REFCOUNT must report 1 even for a shared-range int.
-        entry.int_copy_not_shared = true;
+        entry.set_flag(ENTRY_INT_COPY_NOT_SHARED, true);
         entry
     }
 }
@@ -5761,7 +5745,7 @@ impl Store {
         let Value::Set(set) = &entry.value else {
             return;
         };
-        if entry.force_set_hashtable_encoding {
+        if entry.has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING) {
             return;
         }
         // (frankenredis-7vogx) Upstream t_set.c keeps intset until
@@ -5777,11 +5761,11 @@ impl Store {
         // ignored CONFIG SET set-max-listpack-value entirely — now
         // the configured cap is honored.
         if Self::set_fits_listpack(set, max_listpack_entries, max_listpack_value) {
-            entry.force_set_listpack_encoding = true;
+            entry.set_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING, true);
             return;
         }
-        entry.force_set_hashtable_encoding = true;
-        entry.force_set_listpack_encoding = false;
+        entry.set_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING, true);
+        entry.set_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING, false);
     }
 
     /// (frankenredis-yp503) Hash encoding promotion to hashtable is
@@ -5792,7 +5776,7 @@ impl Store {
         max_listpack_entries: usize,
         max_listpack_value: usize,
     ) {
-        if entry.force_hash_hashtable_encoding {
+        if entry.has_flag(ENTRY_FORCE_HASH_HASHTABLE_ENCODING) {
             return;
         }
         let Value::Hash(m) = &entry.value else {
@@ -5802,7 +5786,7 @@ impl Store {
             || m.iter()
                 .any(|(k, v)| k.len() > max_listpack_value || v.len() > max_listpack_value);
         if needs_hashtable {
-            entry.force_hash_hashtable_encoding = true;
+            entry.set_flag(ENTRY_FORCE_HASH_HASHTABLE_ENCODING, true);
         }
     }
 
@@ -5812,7 +5796,7 @@ impl Store {
         max_listpack_entries: usize,
         max_listpack_value: usize,
     ) {
-        if entry.force_zset_skiplist_encoding {
+        if entry.has_flag(ENTRY_FORCE_ZSET_SKIPLIST_ENCODING) {
             return;
         }
         let Value::SortedSet(zs) = &entry.value else {
@@ -5821,7 +5805,7 @@ impl Store {
         let needs_skiplist =
             zs.len() > max_listpack_entries || zs.keys().any(|k| k.len() > max_listpack_value);
         if needs_skiplist {
-            entry.force_zset_skiplist_encoding = true;
+            entry.set_flag(ENTRY_FORCE_ZSET_SKIPLIST_ENCODING, true);
         }
     }
 
@@ -5835,15 +5819,15 @@ impl Store {
     /// SINTERSTORE/SUNIONSTORE/SDIFFSTORE; one-shot `SADD` of the same content
     /// stays listpack in redis (batch-create path) and never reaches here.
     fn promote_set_algebra_intset_overflow(entry: &mut Entry, max_intset_entries: usize) {
-        if entry.force_set_hashtable_encoding {
+        if entry.has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING) {
             return;
         }
         if let Value::Set(s) = &entry.value
             && s.len() > max_intset_entries
             && s.all_integers()
         {
-            entry.force_set_hashtable_encoding = true;
-            entry.force_set_listpack_encoding = false;
+            entry.set_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING, true);
+            entry.set_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING, false);
         }
     }
 
@@ -6018,7 +6002,7 @@ impl Store {
         };
         let mut entry = Entry::new(canonical_string_value(value), now_ms);
         entry.lfu_freq = next_lfu_freq;
-        entry.lfu_last_touch_min = now_ms / 60_000;
+        entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
         self.internal_entries_insert_with_expiry(key, entry, expires_at_ms);
         self.dirty = self.dirty.saturating_add(1);
     }
@@ -6031,7 +6015,7 @@ impl Store {
             } else {
                 0
             };
-            entry.lfu_last_touch_min = now_ms / 60_000;
+            entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
             self.internal_entries_insert(key.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
             return;
@@ -6057,15 +6041,9 @@ impl Store {
             entry.value = canonical_string_value_from_slice(value);
             entry.last_access_ms = lru_access_millis(now_ms);
             entry.lfu_freq = next_lfu_freq;
-            entry.lfu_last_touch_min = now_ms / 60_000;
+            entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
             entry.modification_count = entry.modification_count.wrapping_add(1);
-            entry.force_raw_encoding = false;
-            entry.force_string_encoding = false;
-            entry.force_set_listpack_encoding = false;
-            entry.force_set_hashtable_encoding = false;
-            entry.force_hash_hashtable_encoding = false;
-            entry.force_zset_skiplist_encoding = false;
-            entry.int_copy_not_shared = false;
+            entry.clear_entry_flags();
             (old_expiry, old_was_stream)
         };
 
@@ -6096,7 +6074,7 @@ impl Store {
             } else {
                 0
             };
-            entry.lfu_last_touch_min = now_ms / 60_000;
+            entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
             self.internal_entries_insert(key, entry);
             self.dirty = self.dirty.saturating_add(1);
             return;
@@ -6122,15 +6100,9 @@ impl Store {
             entry.value = canonical_string_value(value);
             entry.last_access_ms = lru_access_millis(now_ms);
             entry.lfu_freq = next_lfu_freq;
-            entry.lfu_last_touch_min = now_ms / 60_000;
+            entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
             entry.modification_count = entry.modification_count.wrapping_add(1);
-            entry.force_raw_encoding = false;
-            entry.force_string_encoding = false;
-            entry.force_set_listpack_encoding = false;
-            entry.force_set_hashtable_encoding = false;
-            entry.force_hash_hashtable_encoding = false;
-            entry.force_zset_skiplist_encoding = false;
-            entry.int_copy_not_shared = false;
+            entry.clear_entry_flags();
             (old_expiry, old_was_stream)
         };
 
@@ -6184,7 +6156,7 @@ impl Store {
         self.stream_last_ids.remove(key.as_slice());
         let mut entry = Entry::new(canonical_string_value(value), now_ms);
         entry.lfu_freq = next_lfu_freq;
-        entry.lfu_last_touch_min = now_ms / 60_000;
+        entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
         self.internal_entries_insert_with_expiry(key, entry, expires_at_ms);
         self.dirty = self.dirty.saturating_add(1);
     }
@@ -6478,7 +6450,7 @@ impl Store {
             let len = v.len();
             entry.touch_write(now_ms);
             // (br-frankenredis-84bv)
-            entry.force_raw_encoding = true;
+            entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
             Ok(len)
         }) {
             if result.is_ok() {
@@ -6652,7 +6624,7 @@ impl Store {
         // integer (e.g. "1"), OBJECT ENCODING reports embstr.
         // (br-frankenredis-incrfloatenc)
         let mut entry = Entry::new(Value::String(next.clone().into()), now_ms);
-        entry.force_string_encoding = true;
+        entry.set_flag(ENTRY_FORCE_STRING_ENCODING, true);
         self.internal_entries_insert_with_expiry(key.to_vec(), entry, expires_at_ms);
         self.dirty = self.dirty.saturating_add(1);
         Ok(next)
@@ -6846,7 +6818,7 @@ impl Store {
             let len = v.len();
             entry.touch_write(now_ms);
             // (br-frankenredis-84bv)
-            entry.force_raw_encoding = true;
+            entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
             Ok(len)
         }) {
             Some(result) => {
@@ -6861,7 +6833,7 @@ impl Store {
                 let new_len = current.len();
                 let mut entry = Entry::new(Value::String(current.into()), now_ms);
                 // (br-frankenredis-84bv)
-                entry.force_raw_encoding = true;
+                entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
                 self.internal_entries_insert(key.to_vec(), entry);
                 self.dirty = self.dirty.saturating_add(1);
                 Ok(new_len)
@@ -6912,7 +6884,7 @@ impl Store {
             // dbUnshareStringValue which always converts the
             // value to raw, regardless of length.
             // (br-frankenredis-setbitenc)
-            entry.force_raw_encoding = true;
+            entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
             Ok((old_bit, changed))
         }) {
             Some(result) => {
@@ -6931,7 +6903,7 @@ impl Store {
                 let mut entry = Entry::new(Value::String(v.into()), now_ms);
                 // (br-frankenredis-setbitenc) — newly-created keys
                 // also use raw encoding via dbAdd in upstream.
-                entry.force_raw_encoding = true;
+                entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
                 self.internal_entries_insert(key.to_vec(), entry);
                 self.dirty = self.dirty.saturating_add(1);
                 Ok(old_bit)
@@ -7072,10 +7044,10 @@ impl Store {
             }
             entry.last_access_ms = lru_access_millis(now_ms);
             entry.lfu_freq = LFU_INIT_VAL;
-            entry.lfu_last_touch_min = now_ms / 60_000;
+            entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
             entry.modification_count = entry.modification_count.wrapping_add(1);
-            entry.force_raw_encoding = true;
-            entry.force_string_encoding = false;
+            entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+            entry.set_flag(ENTRY_FORCE_STRING_ENCODING, false);
             Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
             if grew {
                 self.dirty = self.dirty.saturating_add(1);
@@ -7083,7 +7055,7 @@ impl Store {
             return Ok(());
         }
         let mut entry = Entry::new(Value::String(vec![0u8; needed_bytes].into()), now_ms);
-        entry.force_raw_encoding = true;
+        entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
         self.internal_entries_insert(key.to_vec(), entry);
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
@@ -7128,14 +7100,10 @@ impl Store {
 
             entry.last_access_ms = lru_access_millis(now_ms);
             entry.lfu_freq = LFU_INIT_VAL;
-            entry.lfu_last_touch_min = now_ms / 60_000;
+            entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
             entry.modification_count = entry.modification_count.wrapping_add(1);
-            entry.force_raw_encoding = true;
-            entry.force_string_encoding = false;
-            entry.force_set_listpack_encoding = false;
-            entry.force_set_hashtable_encoding = false;
-            entry.force_hash_hashtable_encoding = false;
-            entry.force_zset_skiplist_encoding = false;
+            entry.clear_entry_flags();
+            entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
             Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
             if had_expiry {
                 let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
@@ -7162,7 +7130,7 @@ impl Store {
         // Upstream bitops.c::bitfieldGeneric routes SET/INCRBY through
         // dbUnshareStringValue / dbAdd which always store values with raw
         // encoding. (br-frankenredis-bitfieldenc)
-        entry.force_raw_encoding = true;
+        entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
         self.internal_entries_insert(key.to_vec(), entry);
         if changed {
             self.dirty = self.dirty.saturating_add(1);
@@ -7633,14 +7601,14 @@ impl Store {
             Value::String(v) => {
                 // Redis returns "int" for strings that are the canonical
                 // representation of an i64 (round-trip: parse then format must match)
-                if !entry.force_raw_encoding
-                    && !entry.force_string_encoding
+                if !entry.has_flag(ENTRY_FORCE_RAW_ENCODING)
+                    && !entry.has_flag(ENTRY_FORCE_STRING_ENCODING)
                     && let Ok(s) = std::str::from_utf8(v)
                     && let Ok(n) = s.parse::<i64>()
                     && n.to_string() == s
                 {
                     "int"
-                } else if !entry.force_raw_encoding && v.len() <= 44 {
+                } else if !entry.has_flag(ENTRY_FORCE_RAW_ENCODING) && v.len() <= 44 {
                     "embstr"
                 } else {
                     "raw"
@@ -7665,7 +7633,7 @@ impl Store {
                 // after a bare CONFIG SET hash-max-listpack-* lowering with no
                 // intervening write (upstream only converts on the next write).
                 let _ = m;
-                let fits_listpack = !entry.force_hash_hashtable_encoding;
+                let fits_listpack = !entry.has_flag(ENTRY_FORCE_HASH_HASHTABLE_ENCODING);
                 match (fits_listpack, hash_has_field_ttl) {
                     (true, false) => "listpack",
                     (false, false) => "hashtable",
@@ -7735,9 +7703,9 @@ impl Store {
                 // the intrinsic variant, do NOT re-derive against the CURRENT
                 // config (which wrongly converted on a bare CONFIG SET
                 // set-max-{intset,listpack}-* lowering with no intervening write).
-                if entry.force_set_hashtable_encoding {
+                if entry.has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING) {
                     "hashtable"
-                } else if entry.force_set_listpack_encoding {
+                } else if entry.has_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING) {
                     "listpack"
                 } else if s.is_intset() {
                     "intset"
@@ -7755,7 +7723,7 @@ impl Store {
                 // size wrongly flipped a never-crossed listpack zset to
                 // `skiplist` after a bare CONFIG SET zset-max-listpack-* lowering.
                 let _ = zs;
-                if !entry.force_zset_skiplist_encoding {
+                if !entry.has_flag(ENTRY_FORCE_ZSET_SKIPLIST_ENCODING) {
                     "listpack"
                 } else {
                     "skiplist"
@@ -7810,13 +7778,13 @@ impl Store {
             return None;
         }
         let entry = self.entries.get(key)?;
-        if entry.force_raw_encoding || entry.force_string_encoding {
+        if entry.has_flag(ENTRY_FORCE_RAW_ENCODING) || entry.has_flag(ENTRY_FORCE_STRING_ENCODING) {
             return Some(1);
         }
         // (frankenredis-gt318) A COPY destination is a private dupStringObject
         // copy (refcount 1), never the interned shared integer — so it never
         // reports INT_MAX even for an int-encoded value in [0, 10000).
-        if entry.int_copy_not_shared {
+        if entry.has_flag(ENTRY_INT_COPY_NOT_SHARED) {
             return Some(1);
         }
         let n = match &entry.value {
@@ -11533,8 +11501,8 @@ impl Store {
             let Value::Set(s) = &entry.value else {
                 return false;
             };
-            entry.force_set_hashtable_encoding
-                || (!entry.force_set_listpack_encoding
+            entry.has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING)
+                || (!entry.has_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING)
                     && !Self::set_fits_intset(s, self.set_max_intset_entries)
                     && !Self::set_fits_listpack(
                         s,
@@ -11554,7 +11522,8 @@ impl Store {
     /// same flag `object_encoding` reads after the a0p5p forward-only fix).
     pub fn hash_is_hashtable_encoded(&self, key: &[u8]) -> bool {
         self.entries.get(key).is_some_and(|entry| {
-            matches!(entry.value, Value::Hash(_)) && entry.force_hash_hashtable_encoding
+            matches!(entry.value, Value::Hash(_))
+                && entry.has_flag(ENTRY_FORCE_HASH_HASHTABLE_ENCODING)
         })
     }
 
@@ -11566,8 +11535,8 @@ impl Store {
         if let Some(entry) = self.entries.get_mut(key)
             && matches!(entry.value, Value::Set(_))
         {
-            entry.force_set_hashtable_encoding = true;
-            entry.force_set_listpack_encoding = false;
+            entry.set_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING, true);
+            entry.set_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING, false);
         }
     }
 
@@ -11600,13 +11569,15 @@ impl Store {
                 // calls signalModifiedKey (which aborts WATCHers) inside `if (added)`,
                 // so a duplicate SADD that adds nothing must NOT abort a WATCH.
                 entry.touch(now_ms);
+                let had_set_listpack_encoding = entry.has_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING);
+                let had_set_hashtable_encoding = entry.has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING);
                 match &mut entry.value {
                     Value::Set(s) => {
                         // (gauntlet B2) Was this set intset-encoded *before* the
                         // add? Mirrors vendored t_set.c maybeConvertIntset, which
                         // only fires when an integer is added to an existing intset.
-                        let was_intset_encoded = !entry.force_set_listpack_encoding
-                            && !entry.force_set_hashtable_encoding
+                        let was_intset_encoded = !had_set_listpack_encoding
+                            && !had_set_hashtable_encoding
                             && Self::set_fits_intset(s, max_intset_entries);
                         let mut added = 0_u64;
                         for m in members {
@@ -11628,8 +11599,8 @@ impl Store {
                                 &mut self.digest_mutations,
                             );
                             if intset_int_overflow {
-                                entry.force_set_hashtable_encoding = true;
-                                entry.force_set_listpack_encoding = false;
+                                entry.set_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING, true);
+                                entry.set_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING, false);
                             }
                             Self::refresh_set_encoding_flags(
                                 entry,
@@ -13636,7 +13607,7 @@ impl Store {
         // naturally (handled by the live OBJECT ENCODING derivation). Mirror the
         // forced-skiplist sizing here so OBJECT ENCODING matches byte-for-byte.
         if force_skiplist {
-            entry.force_zset_skiplist_encoding = true;
+            entry.set_flag(ENTRY_FORCE_ZSET_SKIPLIST_ENCODING, true);
         } else {
             // (frankenredis-v4ba8) Rank-mode ZRANGESTORE: re-derive listpack vs
             // skiplist from the result content. Post-a0p5p OBJECT ENCODING reads
@@ -16703,7 +16674,7 @@ impl Store {
             // createObject(OBJ_STRING,…), so OBJECT ENCODING reports `raw`
             // regardless of the payload size — a low-cardinality sparse HLL
             // is well under the 44-byte embstr threshold. (br-frankenredis-bitopenc)
-            entry.force_raw_encoding = true;
+            entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
             entry.touch_write(now_ms);
             self.internal_entries_insert_with_expiry(key.to_vec(), entry, expires_at);
             self.hll_register_cache_store(key, registers);
@@ -16882,7 +16853,7 @@ impl Store {
         let data = hll_encode(&merged, dest_encoding);
         let mut entry = Entry::new(Value::String(data.into()), now_ms);
         // PFMERGE's destination is a raw-encoded HLL string, same as pfadd.
-        entry.force_raw_encoding = true;
+        entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
         entry.touch_write(now_ms);
         self.internal_entries_insert_with_expiry(dest.to_vec(), entry, existing_ttl);
         self.hll_register_cache_store(dest, merged);
@@ -17566,7 +17537,7 @@ impl Store {
             // raw encoding regardless of length.
             // (br-frankenredis-bitopenc)
             let mut entry = Entry::new(Value::String(result.into()), now_ms);
-            entry.force_raw_encoding = true;
+            entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
             self.internal_entries_insert(dest.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
         }
@@ -18456,7 +18427,8 @@ impl Store {
                         // collection in one shot with cursor=0,
                         // regardless of cursor/COUNT. Only the
                         // hashtable-encoded path honors them.
-                        let is_listpack_or_intset = !entry.force_set_hashtable_encoding
+                        let is_listpack_or_intset = !entry
+                            .has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING)
                             && (Self::set_fits_intset(s, max_intset_entries)
                                 || Self::set_fits_listpack(
                                     s,
@@ -18758,7 +18730,7 @@ impl Store {
                     // a SORT diverged (listpack vs skiplist). Mirror the one-way
                     // promotion here (encoding metadata only — no value/digest/
                     // dirty change). (frankenredis-sortzsetenc)
-                    entry.force_zset_skiplist_encoding = true;
+                    entry.set_flag(ENTRY_FORCE_ZSET_SKIPLIST_ENCODING, true);
                     Ok(result)
                 }
                 _ => Err(StoreError::WrongType),
@@ -20146,13 +20118,13 @@ impl Store {
                     .iter()
                     .map(|member| parse_i64(member.as_ref()).ok())
                     .collect();
-                if entry.force_set_hashtable_encoding {
+                if entry.has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING) {
                     buf.push(RDB_TYPE_SET);
                     encode_length(&mut buf, s.len());
                     for member in s.iter() {
                         encode_rdb_string(&mut buf, member.as_ref());
                     }
-                } else if entry.force_set_listpack_encoding {
+                } else if entry.has_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING) {
                     buf.push(RDB_TYPE_SET_LISTPACK);
                     let members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
                     let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
@@ -20621,8 +20593,14 @@ impl Store {
         self.stream_entries_added.remove(key);
         self.stream_max_deleted_ids.remove(key);
         let mut entry = Entry::new(value, now_ms);
-        entry.force_set_listpack_encoding = force_set_listpack_encoding;
-        entry.force_set_hashtable_encoding = force_set_hashtable_encoding;
+        entry.set_flag(
+            ENTRY_FORCE_SET_LISTPACK_ENCODING,
+            force_set_listpack_encoding,
+        );
+        entry.set_flag(
+            ENTRY_FORCE_SET_HASHTABLE_ENCODING,
+            force_set_hashtable_encoding,
+        );
         // (frankenredis-nom8d) RESTORE re-derives HASH/ZSET encoding from the
         // loaded content under the CURRENT config, matching redis rdbLoadObject
         // (which converts a listpack hash/zset whose length exceeds the current
@@ -22490,9 +22468,12 @@ fn value_estimate_is_expensive(value: &Value) -> bool {
 }
 
 fn estimate_string_value_memory_usage_bytes(bytes: &[u8], entry: &Entry) -> usize {
-    if !entry.force_raw_encoding && !entry.force_string_encoding && is_int_encoded_string(bytes) {
+    if !entry.has_flag(ENTRY_FORCE_RAW_ENCODING)
+        && !entry.has_flag(ENTRY_FORCE_STRING_ENCODING)
+        && is_int_encoded_string(bytes)
+    {
         REDIS_OBJECT_OVERHEAD_BYTES
-    } else if !entry.force_raw_encoding && bytes.len() <= 44 {
+    } else if !entry.has_flag(ENTRY_FORCE_RAW_ENCODING) && bytes.len() <= 44 {
         redis_allocation_size(
             bytes
                 .len()
@@ -26002,13 +25983,13 @@ mod tests {
                 entry.lfu_freq = 200;
                 entry.lfu_last_touch_min = 55;
                 entry.modification_count = 41;
-                entry.force_raw_encoding = true;
-                entry.force_string_encoding = true;
-                entry.force_set_listpack_encoding = true;
-                entry.force_set_hashtable_encoding = true;
-                entry.force_hash_hashtable_encoding = true;
-                entry.force_zset_skiplist_encoding = true;
-                entry.int_copy_not_shared = true;
+                entry.entry_flags = super::ENTRY_FORCE_RAW_ENCODING
+                    | super::ENTRY_FORCE_STRING_ENCODING
+                    | super::ENTRY_FORCE_SET_LISTPACK_ENCODING
+                    | super::ENTRY_FORCE_SET_HASHTABLE_ENCODING
+                    | super::ENTRY_FORCE_HASH_HASHTABLE_ENCODING
+                    | super::ENTRY_FORCE_ZSET_SKIPLIST_ENCODING
+                    | super::ENTRY_INT_COPY_NOT_SHARED;
                 entry.modification_count
             };
             store.hll_register_cache.insert(
@@ -26067,13 +26048,13 @@ mod tests {
             entry.lfu_freq = 200;
             entry.lfu_last_touch_min = 55;
             entry.modification_count = 41;
-            entry.force_raw_encoding = true;
-            entry.force_string_encoding = true;
-            entry.force_set_listpack_encoding = true;
-            entry.force_set_hashtable_encoding = true;
-            entry.force_hash_hashtable_encoding = true;
-            entry.force_zset_skiplist_encoding = true;
-            entry.int_copy_not_shared = true;
+            entry.entry_flags = super::ENTRY_FORCE_RAW_ENCODING
+                | super::ENTRY_FORCE_STRING_ENCODING
+                | super::ENTRY_FORCE_SET_LISTPACK_ENCODING
+                | super::ENTRY_FORCE_SET_HASHTABLE_ENCODING
+                | super::ENTRY_FORCE_HASH_HASHTABLE_ENCODING
+                | super::ENTRY_FORCE_ZSET_SKIPLIST_ENCODING
+                | super::ENTRY_INT_COPY_NOT_SHARED;
             entry.modification_count
         };
         store.hll_register_cache.insert(
@@ -38253,15 +38234,15 @@ mod tests {
         );
         // Cumulative Entry-shrink vs the original inline-fat-Value layout
         // (Value=120, Entry=168): boxing the fat variants, niche-packing expiry,
-        // and storing LRU at Redis's second granularity keep the hot keyspace
-        // entry compact even with the RANDOMKEY back-index in `random_slot`.
+        // storing LRU/LFU clocks compactly, and packing sticky encoding flags keep
+        // the hot keyspace entry compact even with the RANDOMKEY back-index.
         assert!(
             value_sz <= 32,
             "Value should be <=32B (boxed fat variants), got {value_sz}"
         );
         assert!(
-            entry_sz <= 64,
-            "Entry should be <=64B (boxed variants + second-granular LRU + RANDOMKEY slot), got {entry_sz}"
+            entry_sz <= 48,
+            "Entry should be <=48B (boxed variants + packed clocks/flags + RANDOMKEY slot), got {entry_sz}"
         );
     }
 

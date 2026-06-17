@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/coralox-pass220-uhthd-lfu-min-u32/keyspace_load_once.py --server-bin target-coralox-pass224-final/release-perf/frankenredis --port 28453 --n 300000 --pipeline 256",
+      "mean": 6.0193641738,
+      "stddev": 0.8099537264189033,
+      "median": 5.7245964054,
+      "user": 3.0214452599999992,
+      "system": 3.0990812599999997,
+      "min": 5.1634497054,
+      "max": 7.2618600044,
+      "times": [
+        5.1634497054,
+        5.6152592584,
+        5.7245964054,
+        6.3316554954,
+        7.2618600044
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "python3 artifacts/optimization/coralox-pass220-uhthd-lfu-min-u32/keyspace_load_once.py --server-bin target-coralox-pass225/release-perf/frankenredis --port 28454 --n 300000 --pipeline 256",
+      "mean": 5.1035673604000005,
+      "stddev": 0.06010206528515196,
+      "median": 5.0996168634,
+      "user": 2.4650106599999995,
+      "system": 2.7551070599999994,
+      "min": 5.0375280324,
+      "max": 5.1939256904,
+      "times": [
+        5.0642269084,
+        5.0996168634,
+        5.0375280324,
+        5.1939256904,
+        5.1225393074
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

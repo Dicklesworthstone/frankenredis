@@ -1,0 +1,11 @@
+{
+  "bytes_per_key": 241.54112,
+  "load_seconds": 18.073121597990394,
+  "n": 1000000,
+  "pipeline": 256,
+  "port": 28451,
+  "rss_after_kb": 241188,
+  "rss_before_kb": 5308,
+  "rss_delta_kb": 235880,
+  "server_bin": "target-coralox-pass224-final/release-perf/frankenredis"
+}
