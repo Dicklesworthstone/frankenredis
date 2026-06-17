@@ -156,14 +156,22 @@ struct NodeBuilder<'a> {
     count: u64,
     /// Running listpack element count, for the 16-bit header `num-elements`.
     num_elements: usize,
+    /// Cached byte length of the master-entry header EXCEPT its leading `count`
+    /// varint: `[deleted=0][numfields][field…][terminator=0]`. The master fields
+    /// are fixed once the node opens, so this is computed once at node creation
+    /// instead of re-encoding every field on every entry's split test (the old
+    /// per-entry `master_entry_bytes` allocated a temp Vec and re-encoded all
+    /// fields — O(entries×fields) for nothing). Only the `count` varint, which
+    /// grows with each member, is re-measured per entry.
+    master_rest_bytes: usize,
 }
 
-/// Byte length of the master-entry header for `fields` and the given live
-/// `count` (deleted is always 0). Used to evaluate upstream's
-/// `lpBytes(lp) + totelelen >= node_max_bytes` split test exactly.
-fn master_entry_bytes(fields: &[&[u8]], count: u64) -> Option<usize> {
+/// Byte length of `[deleted=0][numfields][field…][terminator=0]` — the
+/// constant tail of the master-entry header (everything after its leading
+/// `count` varint). Computed once per node; the per-entry split test adds only
+/// the current `count` varint length on top.
+fn master_rest_bytes(fields: &[&[u8]]) -> Option<usize> {
     let mut tmp = Vec::new();
-    encode_listpack_int(&mut tmp, i64::try_from(count).ok()?);
     encode_listpack_int(&mut tmp, 0); // deleted
     encode_listpack_int(&mut tmp, i64::try_from(fields.len()).ok()?);
     for field in fields {
@@ -266,6 +274,10 @@ fn finalize_node(builder: &NodeBuilder) -> Option<StreamNode> {
 fn pack_stream_nodes(entries: &[StreamEntry]) -> Option<Vec<StreamNode>> {
     let mut nodes = Vec::new();
     let mut current: Option<NodeBuilder> = None;
+    // Reused scratch for measuring the master `count` varint each split test —
+    // avoids a per-entry allocation while keeping `encode_listpack_int` as the
+    // single source of truth for the byte length (no reimplemented length rule).
+    let mut count_scratch: Vec<u8> = Vec::with_capacity(8);
 
     for entry in entries {
         let totelelen: usize = entry
@@ -277,8 +289,11 @@ fn pack_stream_nodes(entries: &[StreamEntry]) -> Option<Vec<StreamNode>> {
         let need_new_node = match &current {
             None => true,
             Some(builder) => {
+                count_scratch.clear();
+                encode_listpack_int(&mut count_scratch, i64::try_from(builder.count).ok()?);
+                let master_entry = count_scratch.len() + builder.master_rest_bytes;
                 let lp_bytes = LISTPACK_HEADER_SIZE
-                    + master_entry_bytes(&builder.master_fields, builder.count)?
+                    + master_entry
                     + builder.members.len()
                     + 1; // EOF
                 lp_bytes.saturating_add(totelelen)
@@ -294,12 +309,14 @@ fn pack_stream_nodes(entries: &[StreamEntry]) -> Option<Vec<StreamNode>> {
             let master_fields: Vec<&[u8]> =
                 entry.2.iter().map(|(field, _)| field.as_slice()).collect();
             let num_elements = master_fields.len().checked_add(4)?; // count, deleted, numfields, fields, terminator
+            let master_rest_bytes = master_rest_bytes(&master_fields)?;
             current = Some(NodeBuilder {
                 master: (entry.0, entry.1),
                 master_fields,
                 members: Vec::new(),
                 count: 0,
                 num_elements,
+                master_rest_bytes,
             });
         }
 
