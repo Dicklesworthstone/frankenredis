@@ -2509,12 +2509,31 @@ fn lzf_compress_with_scratch(
                 // are in bounds because maxlen > 16 => ip[18] < in_end.
                 'matchloop: {
                     if maxlen > 16 {
-                        for _ in 0..16 {
-                            len += 1;
-                            if input[r + len] != input[ip + len] {
-                                break 'matchloop;
-                            }
+                        // SWAR the 16-byte unchecked fast path (compare offsets
+                        // 3..=18) as 2x u64 and locate the first differing byte via
+                        // XOR + trailing_zeros. Byte-IDENTICAL to the scalar
+                        // `len += 1; if ref[len] != ip[len] break` loop — first
+                        // mismatch at offset o gives len=o; all 16 equal gives
+                        // len=18 (then the bounded tail scan below continues) — but
+                        // with one bounds check per 8 bytes instead of two per byte.
+                        // In bounds: maxlen>16 => in_len-ip-2>16 => ip+18<in_len, and
+                        // r<ip => r+18<in_len, so both 16-byte windows are valid.
+                        // (frankenredis-g9h0v: lzf is 79% of list/value DUMP CPU.)
+                        let r0 = u64::from_le_bytes(input[r + 3..r + 11].try_into().unwrap());
+                        let i0 = u64::from_le_bytes(input[ip + 3..ip + 11].try_into().unwrap());
+                        let d0 = r0 ^ i0;
+                        if d0 != 0 {
+                            len = 3 + (d0.trailing_zeros() / 8) as usize;
+                            break 'matchloop;
                         }
+                        let r1 = u64::from_le_bytes(input[r + 11..r + 19].try_into().unwrap());
+                        let i1 = u64::from_le_bytes(input[ip + 11..ip + 19].try_into().unwrap());
+                        let d1 = r1 ^ i1;
+                        if d1 != 0 {
+                            len = 11 + (d1.trailing_zeros() / 8) as usize;
+                            break 'matchloop;
+                        }
+                        len = 18;
                     }
                     // C: do len++ while (len < maxlen && ref[len] == ip[len]).
                     // Equivalent slice-based common-prefix scan over the aligned
