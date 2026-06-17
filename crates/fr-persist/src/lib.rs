@@ -2153,9 +2153,20 @@ fn parse_listpack_integer(entry: &[u8]) -> Option<i64> {
     if !listpack_int_bytes_are_canonical(entry) {
         return None;
     }
-    // Bytes are ASCII (optional '-' then digits), so from_utf8 cannot fail;
-    // parse still rejects out-of-i64-range values (e.g. "9223372036854775808").
-    std::str::from_utf8(entry).ok()?.parse::<i64>().ok()
+    // Bytes are already verified canonical ASCII `[-]?[0-9]+`, so skip the
+    // redundant `from_utf8` validation pass (it showed up at ~19% of listpack RDB
+    // encode on integer-heavy collections) and accumulate the i64 directly. Build
+    // in the NEGATIVE direction so i64::MIN fits; `checked_*` rejects out-of-range
+    // exactly as `str::parse::<i64>()` did (e.g. "9223372036854775808" -> None).
+    let (neg, digits): (bool, &[u8]) = match entry.first() {
+        Some(b'-') => (true, &entry[1..]),
+        _ => (false, entry),
+    };
+    let mut acc: i64 = 0;
+    for &b in digits {
+        acc = acc.checked_mul(10)?.checked_sub((b - b'0') as i64)?;
+    }
+    if neg { Some(acc) } else { acc.checked_neg() }
 }
 
 /// True iff `entry` is the canonical base-10 text of some integer — i.e. equal to
