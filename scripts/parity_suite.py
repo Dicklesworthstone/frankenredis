@@ -73,6 +73,7 @@ SELF_ORCH = [
     ("rdb_cross_compat_gate.py", [REDIS_BIN, FR_BIN, "29961"]),
     ("aof_cross_compat_gate.py", [REDIS_BIN, FR_BIN, "29971"]),
     ("replication_cross_compat_gate.py", [REDIS_BIN, FR_BIN, "29981"]),
+    ("replication_digest_fuzz.py", [REDIS_BIN, FR_BIN, "29991", "3", "500"]),
 ]
 # Gates invoked positionally: <oracle_port> <fr_port>
 PORT_BASED = [
