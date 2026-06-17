@@ -112,6 +112,11 @@ PORT_BASED = [
     # grouped stream index (rax-of-listpacks, p8wd1 74a926418): node-boundary
     # reads + RDB round-trip.
     ("stream_node_grouping_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    # adversarial stream DUMP/RESTORE/RELOAD byte-exactness across node
+    # boundaries + schemas + XDEL/XTRIM/XSETID + groups/PEL — guards the
+    # bulk-build (879cce121/a3b513b40) + DUMP encode (1aae17b9f/3fb6584f3) paths
+    # and the tombstone round-trip invariant (vbacn).
+    ("stream_dump_reload_fuzz.py", [str(ORACLE_PORT), str(FR_PORT), "40"]),
     # sealed quicklist chunks (Owned->Listpack, 99fwc 8c2421045): sealed reads +
     # LSET/LINSERT/LREM re-materialization + DUMP->RESTORE cross-impl.
     ("list_chunk_seal_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
