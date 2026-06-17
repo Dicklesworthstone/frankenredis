@@ -2380,6 +2380,16 @@ impl SetValue {
         SetValue::Int(Vec::new())
     }
 
+    /// The raw sorted-ascending i64 members when intset-encoded; `None` for the
+    /// generic encoding. Lets hot paths (e.g. DUMP) consume the integers directly
+    /// instead of round-tripping each through `set_int_to_bytes` + `parse_i64`.
+    pub(crate) fn as_int_slice(&self) -> Option<&[i64]> {
+        match self {
+            SetValue::Int(v) => Some(v),
+            SetValue::Generic(_) => None,
+        }
+    }
+
     fn from_single_borrowed(member: &[u8], max_intset_entries: usize) -> Self {
         if max_intset_entries > 0
             && let Some(n) = Self::canonical_int(member)
@@ -20139,10 +20149,19 @@ impl Store {
                 encode_dump_quicklist2(&mut buf, l, self.list_max_listpack_size)?;
             }
             Value::Set(s) => {
-                let integer_members: Option<Vec<i64>> = s
-                    .iter()
-                    .map(|member| parse_i64(member.as_ref()).ok())
-                    .collect();
+                // An intset-encoded set already stores sorted i64s, and SetValueIter
+                // would format each through set_int_to_bytes only for parse_i64 to
+                // re-parse it here — a per-member alloc+format+parse round-trip that
+                // dominated DUMP of integer sets. Take the i64s directly; identical
+                // result since parse_i64(set_int_to_bytes(n)) == n. The generic
+                // (string-member) encoding still parses each member as before.
+                let integer_members: Option<Vec<i64>> = match s.as_int_slice() {
+                    Some(ints) => Some(ints.to_vec()),
+                    None => s
+                        .iter()
+                        .map(|member| parse_i64(member.as_ref()).ok())
+                        .collect(),
+                };
                 if entry.has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING) {
                     buf.push(RDB_TYPE_SET);
                     encode_length(&mut buf, s.len());
