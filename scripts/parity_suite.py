@@ -151,6 +151,10 @@ PORT_BASED = [
     # RESP3 (HELLO 3) reply-TYPE markers (maps/sets/doubles/nulls) across the
     # collection + introspection commands that change shape under RESP3.
     ("resp3_reply_type_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    # adversarial random fuzz of the UNDER-tested ("untrodden") command surface —
+    # the commands the type-specific differs don't exhaustively cover. Guards the
+    # least-exercised paths against silent regression (60k-iter clean as of now).
+    ("fuzz_untrodden_differ.py", [str(ORACLE_PORT), str(FR_PORT), "--seed", "9001", "--iters", "1200"]),
 ]
 
 # Older differs use argparse flags: --oracle <port> --fr <port>
