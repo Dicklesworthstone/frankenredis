@@ -5487,6 +5487,18 @@ impl Runtime {
             .contains_key(&client_id)
     }
 
+    /// True if any replica is currently attached to this primary. The replica
+    /// registry is the authoritative set: a connection's
+    /// `replication_sent_offset` is set only when `is_replica` is true (set
+    /// together at PSYNC), and a replica leaves the registry only by
+    /// disconnecting, so registry-empty ⟺ no connection needs replication
+    /// propagation. Lets the event loop skip the O(connected-clients)
+    /// propagate sweep when there are no replicas (the common case).
+    #[must_use]
+    pub fn has_connected_replicas(&self) -> bool {
+        !self.server.replication_runtime_state.replicas.is_empty()
+    }
+
     /// The client-output-buffer-limit HARD limit (in bytes) that applies to the
     /// connection `client_id`, by its redis client class (slave / pubsub /
     /// normal). A hard limit of 0 means "unlimited" in redis, returned here as

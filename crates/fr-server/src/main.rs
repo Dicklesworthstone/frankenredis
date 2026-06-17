@@ -6480,6 +6480,16 @@ fn propagate_writes_to_replicas(
     closing_tokens: &mut HashSet<Token>,
     writer_pool: Option<&WriterPool>,
 ) {
+    // Skip the O(connected-clients) sweep entirely when no replica is attached
+    // (the common case). A connection's `replication_sent_offset` is only ever
+    // Some while `runtime.is_replica` holds — set together at PSYNC, and a replica
+    // leaves the registry only by disconnecting — so an empty replica registry
+    // means no connection in the loop below could match. This call ran every
+    // event-loop iteration, scanning the whole client table for replicas that
+    // usually don't exist. (frankenredis-1tz5n)
+    if !runtime.has_connected_replicas() {
+        return;
+    }
     let primary_offset = runtime.replication_primary_offset();
     let aof_base = runtime.aof_base_offset();
     let mut encoded_stream: Option<Vec<u8>> = None;
