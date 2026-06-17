@@ -324,6 +324,14 @@ struct ClientConnection {
     large_set_read: Option<LargeSetReadState>,
     owned_plain_sets: VecDeque<OwnedPlainSetCommand>,
     write_buf: Vec<u8>,
+    /// Bytes at the FRONT of `write_buf` already written to the socket but not
+    /// yet reclaimed. `try_flush` sends from `write_buf[write_pos..]` and, on a
+    /// full flush, clears the buffer (resetting this to 0) — so a partial socket
+    /// write no longer memmoves the unsent remainder to the front every flush
+    /// (frankenredis-d5nez: that drain was ~30% of pipelined-write CPU). The
+    /// writer-pool offload carries the whole buffer plus this offset, so the
+    /// remainder is moved, not copied.
+    write_pos: usize,
     main_writable_armed: bool,
     /// True if the client sent QUIT or must be disconnected.
     closing: bool,
@@ -409,6 +417,7 @@ impl ClientConnection {
             large_set_read: None,
             owned_plain_sets: VecDeque::new(),
             write_buf: Vec::new(),
+            write_pos: 0,
             main_writable_armed: false,
             closing: false,
             blocked: None,
@@ -423,6 +432,7 @@ impl ClientConnection {
     fn pending_output_bytes(&self) -> usize {
         self.write_buf
             .len()
+            .saturating_sub(self.write_pos)
             .saturating_add(self.writer_in_flight_bytes)
     }
 
@@ -437,16 +447,15 @@ impl ClientConnection {
     /// Try to flush the write buffer. Returns true if the buffer is fully
     /// drained (or was already empty).
     fn try_flush(&mut self) -> io::Result<bool> {
-        let mut total_written = 0;
         let mut result = Ok(true);
-        while total_written < self.write_buf.len() {
-            match self.stream.write(&self.write_buf[total_written..]) {
+        while self.write_pos < self.write_buf.len() {
+            match self.stream.write(&self.write_buf[self.write_pos..]) {
                 Ok(0) => {
                     result = Err(io::Error::new(ErrorKind::WriteZero, "write zero"));
                     break;
                 }
                 Ok(n) => {
-                    total_written += n;
+                    self.write_pos += n;
                 }
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
                     result = Ok(false);
@@ -459,8 +468,15 @@ impl ClientConnection {
                 }
             }
         }
-        if total_written > 0 {
-            self.write_buf.drain(..total_written);
+        // Full flush (the overwhelmingly common small-reply case): clear and reset
+        // the cursor — no memmove. A partial write leaves `write_pos` advanced so
+        // the next attempt resumes from there; the unsent suffix is never shifted
+        // to the front (the old `drain(..total_written)`, ~30% of pipelined-write
+        // CPU). The partial buffer is reclaimed either by the next full flush
+        // (clear) or by the writer-pool offload, which moves it whole + the offset.
+        if self.write_pos >= self.write_buf.len() {
+            self.write_buf.clear();
+            self.write_pos = 0;
         }
         result
     }
@@ -470,6 +486,11 @@ struct WriterJob {
     token: Token,
     stream: StdTcpStream,
     bytes: Vec<u8>,
+    /// Offset into `bytes` to start sending from: the leading `start` bytes were
+    /// already written by the main loop's inline `try_flush` and must not be
+    /// re-sent. Lets the offload move the whole buffer + cursor instead of
+    /// memmoving the unsent suffix to the front. (frankenredis-d5nez)
+    start: usize,
 }
 
 struct WriterCompletion {
@@ -534,11 +555,13 @@ impl WriterPool {
         token: Token,
         stream: StdTcpStream,
         bytes: Vec<u8>,
+        start: usize,
     ) -> Result<(), mpsc::TrySendError<WriterJob>> {
         self.jobs.try_send(WriterJob {
             token,
             stream,
             bytes,
+            start,
         })
     }
 
@@ -552,8 +575,10 @@ fn flush_writer_job(job: WriterJob) -> WriterCompletion {
         token,
         mut stream,
         mut bytes,
+        start,
     } = job;
-    let mut total_written = 0usize;
+    // The leading `start` bytes were already sent by the main loop; resume there.
+    let mut total_written = start;
     let mut status = WriterCompletionStatus::Drained;
 
     while total_written < bytes.len() {
@@ -2430,7 +2455,9 @@ fn process_buffered_frames(
             break;
         }
 
-        if processed_frames > 0 && conn.write_buf.len() >= MAX_REPLY_BYTES_PER_CLIENT_TICK {
+        if processed_frames > 0
+            && conn.write_buf.len().saturating_sub(conn.write_pos) >= MAX_REPLY_BYTES_PER_CLIENT_TICK
+        {
             budget_exhausted = true;
             break;
         }
@@ -6775,11 +6802,16 @@ fn drive_client_output(
     if let Some(pool) = ctx.writer_pool
         && let Some(writer_stream) = conn.writer_stream.take()
     {
+        // Move the whole buffer + the already-sent offset to the pool (zero-copy:
+        // the leading `start` bytes are skipped by `flush_writer_job`, never
+        // re-sent). The bytes actually still in flight are `len - start`.
+        let start = conn.write_pos;
         let bytes = std::mem::take(&mut conn.write_buf);
-        let byte_len = bytes.len();
-        match pool.try_enqueue(token, writer_stream, bytes) {
+        conn.write_pos = 0;
+        let pending_len = bytes.len().saturating_sub(start);
+        match pool.try_enqueue(token, writer_stream, bytes, start) {
             Ok(()) => {
-                conn.writer_in_flight_bytes = byte_len;
+                conn.writer_in_flight_bytes = pending_len;
                 conn.session.output_buffer_bytes = conn.pending_output_bytes();
                 ctx.write_tokens.insert(token);
                 ensure_main_writable_disarmed(token, conn, ctx.poll);
@@ -6788,6 +6820,7 @@ fn drive_client_output(
             Err(mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job)) => {
                 conn.writer_stream = Some(job.stream);
                 conn.write_buf = job.bytes;
+                conn.write_pos = job.start;
             }
         }
     }
