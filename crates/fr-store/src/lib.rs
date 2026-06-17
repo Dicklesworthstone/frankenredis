@@ -9060,11 +9060,16 @@ impl Store {
         // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
         // resume points.
         self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
+        self.scan_cache.clear();
+        self.db_scan_cache.clear();
         self.volatile_keys.clear();
         self.volatile_keys_dirty = false;
         self.expiry_deadline_counts.clear();
         self.hll_register_cache.clear();
-        self.mem_estimate_cache.borrow_mut().clear();
+        {
+            let mut mem_estimate_cache = self.mem_estimate_cache.borrow_mut();
+            mem_estimate_cache.clear();
+        }
         // (cc) Reset the AGGREGATE used_memory cache too. flushdb empties `entries`
         // but only bumps `dirty` by 1 (below estimate_memory_usage_bytes's 64-mutation
         // recompute threshold), so without this INFO used_memory keeps returning the
@@ -9081,7 +9086,28 @@ impl Store {
         for keys in &mut self.random_key_slots {
             keys.clear();
         }
+        self.release_empty_keyspace_capacity();
         self.dirty = self.dirty.saturating_add(1);
+    }
+
+    fn release_empty_keyspace_capacity(&mut self) {
+        debug_assert!(self.entries.is_empty());
+        self.entries.shrink_to_fit();
+        self.stream_groups.shrink_to_fit();
+        self.stream_pel_summary_cache.shrink_to_fit();
+        self.stream_last_ids.shrink_to_fit();
+        self.stream_entries_added.shrink_to_fit();
+        self.stream_max_deleted_ids.shrink_to_fit();
+        self.expiry_deadlines.shrink_to_fit();
+        self.scan_cache.clear();
+        self.scan_cache.shrink_to_fit();
+        self.db_scan_cache.clear();
+        self.db_scan_cache.shrink_to_fit();
+        self.hll_register_cache.shrink_to_fit();
+        self.mem_estimate_cache.borrow_mut().shrink_to_fit();
+        for keys in &mut self.random_key_slots {
+            keys.shrink_to_fit();
+        }
     }
 
     pub fn flush_prefix(&mut self, prefix: &[u8]) -> u64 {
@@ -9098,6 +9124,9 @@ impl Store {
             self.stream_last_ids.remove(key.as_slice());
             self.stream_entries_added.remove(key.as_slice());
             self.stream_max_deleted_ids.remove(key.as_slice());
+        }
+        if self.entries.is_empty() {
+            self.release_empty_keyspace_capacity();
         }
         self.dirty = self.dirty.saturating_add(removed.max(1));
         removed
@@ -9121,6 +9150,13 @@ impl Store {
             self.stream_last_ids.remove(key.as_slice());
             self.stream_entries_added.remove(key.as_slice());
             self.stream_max_deleted_ids.remove(key.as_slice());
+        }
+        if self.entries.is_empty() {
+            self.release_empty_keyspace_capacity();
+        } else if let Some(keys) = self.random_key_slots.get_mut(db)
+            && keys.is_empty()
+        {
+            keys.shrink_to_fit();
         }
         self.dirty = self.dirty.saturating_add(removed.max(1));
         removed
@@ -28931,6 +28967,57 @@ mod tests {
         store.set(b"b".to_vec(), b"2".to_vec(), None, 0);
         store.flushdb();
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn flushdb_releases_keyspace_index_capacity_nf1er() {
+        let mut store = Store::new();
+        for i in 0..4096_u32 {
+            let key = format!("key:{i:04}").into_bytes();
+            let expires_at = if i % 2 == 0 { Some(60_000) } else { None };
+            store.set(key, b"value".to_vec(), expires_at, 0);
+        }
+
+        let (_cursor, _batch) = store.scan(0, None, 10, 0);
+        let before_entries = store.entries.capacity();
+        let before_expiry_deadlines = store.expiry_deadlines.capacity();
+        let before_random_slots = store.random_key_slots[0].capacity();
+        let before_scan_cache = store.scan_cache.capacity();
+        assert!(before_entries > 0);
+        assert!(before_expiry_deadlines > 0);
+        assert!(before_random_slots > 0);
+        assert!(before_scan_cache > 0);
+
+        store.flushdb();
+
+        assert!(store.is_empty());
+        assert_eq!(store.entries.capacity(), 0);
+        assert_eq!(store.expiry_deadlines.capacity(), 0);
+        assert_eq!(store.random_key_slots[0].capacity(), 0);
+        assert_eq!(store.scan_cache.capacity(), 0);
+    }
+
+    #[test]
+    fn flush_database_releases_keyspace_index_capacity_when_empty_nf1er() {
+        let mut store = Store::new();
+        for i in 0..4096_u32 {
+            let key = encode_db_key(3, format!("key:{i:04}").as_bytes());
+            store.set(key, b"value".to_vec(), Some(60_000), 0);
+        }
+
+        let before_entries = store.entries.capacity();
+        let before_expiry_deadlines = store.expiry_deadlines.capacity();
+        let before_random_slots = store.random_key_slots[3].capacity();
+        assert!(before_entries > 0);
+        assert!(before_expiry_deadlines > 0);
+        assert!(before_random_slots > 0);
+
+        assert_eq!(store.flush_database(3), 4096);
+
+        assert!(store.is_empty());
+        assert_eq!(store.entries.capacity(), 0);
+        assert_eq!(store.expiry_deadlines.capacity(), 0);
+        assert_eq!(store.random_key_slots[3].capacity(), 0);
     }
 
     #[test]
