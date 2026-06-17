@@ -51,6 +51,7 @@ KEYS = [f"k{i}" for i in range(8)]
 SVAL = ["a", "bb", "10", "-7", "hello", "x"*30, "3.14"]
 MEMB = ["m0","m1","m2","alpha","beta","42","99"]
 LTTL = ["100000", "250000", "500000"]   # long enough to never expire mid-run
+SID  = ["1-1","2-1","3-1","5-5","10-1","100-0"]   # explicit stream IDs (deterministic)
 
 def gen(rnd):
     k=lambda: rnd.choice(KEYS)
@@ -67,12 +68,17 @@ def gen(rnd):
         lambda:["getset",k(),rnd.choice(SVAL)], lambda:["getdel",k()],
         lambda:["setbit",k(),str(rnd.randint(0,40)),str(rnd.randint(0,1))],
         lambda:["bitfield",k(),"SET","u8",str(rnd.randint(0,3)*8),str(rnd.randint(0,255))],
+        lambda:["incrbyfloat",k(),rnd.choice(["1.5","-0.25","3.0"])],
+        lambda:["getex",k(),"PERSIST"], lambda:["getex",k(),"EX",rnd.choice(LTTL)],
+        lambda:["bitop",rnd.choice(["AND","OR","XOR"]),k(),k(),k()],
+        lambda:["bitop","NOT",k(),k()],
         # lists
         lambda:["rpush",k(),m(),m()], lambda:["lpush",k(),m()],
         lambda:["lpop",k()], lambda:["rpop",k()],
         lambda:["lset",k(),"0",m()], lambda:["linsert",k(),"BEFORE",m(),m()],
         lambda:["lrem",k(),"0",m()], lambda:["ltrim",k(),"0",str(rnd.randint(0,4))],
         lambda:["rpoplpush",k(),k()],
+        lambda:["lmove",k(),k(),rnd.choice(["LEFT","RIGHT"]),rnd.choice(["LEFT","RIGHT"])],
         # sets
         lambda:["sadd",k(),m(),m()], lambda:["srem",k(),m()],
         lambda:["smove",k(),k(),m()],
@@ -81,17 +87,25 @@ def gen(rnd):
         # hashes
         lambda:["hset",k(),m(),rnd.choice(SVAL)], lambda:["hdel",k(),m()],
         lambda:["hincrby",k(),m(),str(rnd.randint(-3,3))], lambda:["hsetnx",k(),m(),rnd.choice(SVAL)],
+        lambda:["hincrbyfloat",k(),m(),rnd.choice(["1.5","-0.25"])],
         # zsets
         lambda:["zadd",k(),str(rnd.randint(-5,5)),m()], lambda:["zrem",k(),m()],
+        lambda:["zadd",k(),rnd.choice(["GT","LT","NX","XX"]),str(rnd.randint(-5,5)),m()],
         lambda:["zincrby",k(),str(rnd.randint(-3,3)),m()],
         lambda:["zpopmin",k()], lambda:["zpopmax",k()],
-        lambda:["zremrangebyrank",k(),"0","0"],
+        lambda:["zremrangebyrank",k(),"0","0"], lambda:["zremrangebyscore",k(),"-1","1"],
         lambda:["zrangestore",k(),k(),"0","-1"],
+        lambda:["zunionstore",k(),"2",k(),k()], lambda:["zdiffstore",k(),"2",k(),k()],
+        # streams (explicit IDs -> deterministic; auto-id uses wall-clock, excluded)
+        lambda:["xadd",k(),rnd.choice(SID),"f",rnd.choice(SVAL)],
+        lambda:["xdel",k(),rnd.choice(SID)], lambda:["xsetid",k(),"500-0"],
+        lambda:["xtrim",k(),"MAXLEN",str(rnd.randint(0,3))],
         # key-space / expiry / relocation (deterministic)
         lambda:["del",k()], lambda:["unlink",k()],
         lambda:["expire",k(),rnd.choice(LTTL)], lambda:["persist",k()],
         lambda:["pexpire",k(),"200000000"],
         lambda:["copy",k(),k(),"REPLACE"], lambda:["rename",k(),k()],
+        lambda:["renamenx",k(),k()],
         lambda:["move",k(),str(rnd.randint(0,2))],
     ])
     return [str(x) for x in op()]
