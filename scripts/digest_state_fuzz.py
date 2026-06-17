@@ -21,7 +21,10 @@ Design constraints that keep the digest deterministically comparable:
 On a digest mismatch the last `window` commands are printed for triage.
 
 Usage: digest_state_fuzz.py <oracle_port> <fr_port> [seeds] [iters]
-       default 6 seeds x 1500 cmds, digest every 25.  Exit 0=parity,1=divergence.
+       default 6 seeds x 1500 cmds, digest every 25.
+       Exit 0=parity, 1=divergence, 2=setup error.
+       BOTH servers must be launched with --enable-debug-command yes (this fuzzer's
+       only signal is DEBUG DIGEST equality); a preflight check catches the asymmetry.
 """
 import socket, sys, random
 
@@ -148,6 +151,19 @@ def main():
     od=R(int(sys.argv[1])); fr=R(int(sys.argv[2]))
     seeds=int(sys.argv[3]) if len(sys.argv)>3 else 6
     iters=int(sys.argv[4]) if len(sys.argv)>4 else 1500
+    # Preflight: this fuzzer's entire signal is DEBUG DIGEST equality, so a
+    # server that REJECTS DEBUG DIGEST (e.g. started without
+    # --enable-debug-command) would surface as a phantom "STATE DIGEST DIVERGE"
+    # against the other server's real digest. Detect that config asymmetry up
+    # front and exit(2) with a clear setup message, distinct from the exit(1)
+    # genuine-divergence path. A valid digest is a '+'-prefixed simple string.
+    for label, idx, srv in (("oracle", 1, od), ("fr", 2, fr)):
+        rep = digest(srv)
+        if not (isinstance(rep, str) and rep.startswith("+")):
+            print(f"SETUP ERROR: {label} (port {sys.argv[idx]}) DEBUG DIGEST unavailable: {rep!r}")
+            print("  This fuzzer compares whole-keyspace DEBUG DIGEST, so BOTH servers must allow it.")
+            print("  Launch each with --enable-debug-command yes (redis AND fr).")
+            sys.exit(2)
     for sd in range(seeds):
         if run_seed(od, fr, 4000+sd, iters): print("\nFAIL: state digest divergence"); sys.exit(1)
     print(f"OK: {seeds} seed(s) x {iters} cmds — whole-keyspace DEBUG DIGEST converged at every checkpoint vs redis 7.2.4")
