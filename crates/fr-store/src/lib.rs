@@ -18924,7 +18924,13 @@ impl Store {
     /// cost changes (O(n)→O(1) on a cache hit). Small/scalar/list values are
     /// never cached — they estimate cheaply (lists already O(1)). (frankenredis-c3he2)
     fn cached_entry_memory_usage_bytes(&self, key: &[u8], entry: &Entry) -> usize {
-        let fixed = estimate_key_memory_usage_bytes(key)
+        // MEMORY USAGE models redis's per-key size, which counts the LOGICAL key.
+        // fr stores keys DB-namespaced (encode_db_key), so a non-zero-DB key would
+        // otherwise over-report by the \0frdb\0+dbid prefix (e.g. db2 "s" = 80 vs
+        // redis 64). Strip the namespace for the key-length term; db 0 is raw so
+        // logical == physical (isomorphic). (frankenredis-b5hst)
+        let logical_key = decode_db_key(key).map_or(key, |(_, logical)| logical);
+        let fixed = estimate_key_memory_usage_bytes(logical_key)
             .saturating_add(estimate_expiry_memory_usage_bytes(self.key_has_expiry(key)));
         if !value_estimate_is_expensive(&entry.value) {
             return fixed.saturating_add(estimate_value_memory_usage_bytes(entry));

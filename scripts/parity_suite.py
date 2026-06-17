@@ -79,6 +79,7 @@ PORT_BASED = [
     ("dump_byte_equality_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("introspection_semantics_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("debug_multidb_key_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("memory_usage_multidb_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("rare_write_state_gate.py", ["7", "1500"]),  # uses ORACLE_PORT/FR_PORT env
     ("keyspace_accounting_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("cmdstat_keyspace_parity_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
