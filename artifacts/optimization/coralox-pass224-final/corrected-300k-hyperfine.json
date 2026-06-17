@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "command": "python3 artifacts/optimization/coralox-pass220-uhthd-lfu-min-u32/keyspace_load_once.py --server-bin target-coralox-pass224-final/release-perf/frankenredis --port 28446 --n 300000 --pipeline 256",
+      "mean": 5.14999062054,
+      "stddev": 0.2036200778332975,
+      "median": 5.07734714094,
+      "user": 2.50668794,
+      "system": 2.76341338,
+      "min": 4.97919385494,
+      "max": 5.50214167194,
+      "times": [
+        5.0684639879399995,
+        4.97919385494,
+        5.07734714094,
+        5.122806446939999,
+        5.50214167194
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

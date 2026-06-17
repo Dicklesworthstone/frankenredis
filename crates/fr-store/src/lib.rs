@@ -3185,12 +3185,6 @@ fn i64_text_len(value: i64) -> usize {
 #[derive(Debug, Clone, PartialEq)]
 struct Entry {
     value: Value,
-    /// Absolute expiry deadline in ms, or `None` for no TTL. Stored as
-    /// `Option<NonZeroU64>` (8B, niche-packed) rather than `Option<u64>` (16B,
-    /// no niche) — expiry timestamps are always `now_ms + ttl > 0`, so the
-    /// non-zero invariant never excludes a real deadline. Shaves 8B off EVERY
-    /// keyspace `Entry`. Read via `expiry_ms()`. (frankenredis-w2t01)
-    expires_at_ms: Option<std::num::NonZeroU64>,
     /// Last access timestamp in milliseconds, stored in the low 32 bits.
     /// This keeps OBJECT IDLETIME's elapsed-second floor behavior while avoiding
     /// a per-key u64 for the hot keyspace entry.
@@ -3275,24 +3269,9 @@ fn lru_access_millis(now_ms: u64) -> u32 {
 }
 
 impl Entry {
-    /// The absolute expiry deadline (ms), if any. Read accessor over the
-    /// niche-packed `Option<NonZeroU64>` storage. (frankenredis-w2t01)
-    #[inline]
-    fn expiry_ms(&self) -> Option<u64> {
-        self.expires_at_ms.map(std::num::NonZeroU64::get)
-    }
-
-    /// Set the expiry deadline from an `Option<u64>`. A `Some(0)` is impossible
-    /// for a real deadline (now_ms+ttl>0) and would mean "no TTL". (w2t01)
-    #[inline]
-    fn set_expiry_ms(&mut self, ms: Option<u64>) {
-        self.expires_at_ms = ms.and_then(std::num::NonZeroU64::new);
-    }
-
-    fn new(value: Value, expires_at_ms: Option<u64>, now_ms: u64) -> Self {
+    fn new(value: Value, now_ms: u64) -> Self {
         Self {
             value,
-            expires_at_ms: expires_at_ms.and_then(std::num::NonZeroU64::new),
             last_access_ms: lru_access_millis(now_ms),
             lfu_freq: LFU_INIT_VAL,
             lfu_last_touch_min: now_ms / 60_000,
@@ -3395,7 +3374,7 @@ impl Entry {
     }
 
     fn duplicate_for_copy(&self, now_ms: u64) -> Self {
-        let mut entry = Self::new(self.value.clone(), self.expiry_ms(), now_ms);
+        let mut entry = Self::new(self.value.clone(), now_ms);
         entry.force_raw_encoding = self.force_raw_encoding;
         entry.force_string_encoding = self.force_string_encoding;
         entry.force_set_listpack_encoding = self.force_set_listpack_encoding;
@@ -4352,6 +4331,11 @@ pub struct Store {
     // recovered from the key's db-encoded prefix, so removal stays O(1) with
     // zero extra keyspace table.
     random_key_slots: Vec<Vec<std::sync::Arc<[u8]>>>,
+    /// Absolute expiry deadlines for keys that currently carry a TTL. This is
+    /// Redis's `db->expires` shape: persistent keys pay zero bytes in `Entry`,
+    /// while volatile keys share the same canonical key Arc as `entries`.
+    expiry_deadlines:
+        HashMap<std::sync::Arc<[u8]>, std::num::NonZeroU64, foldhash::quality::RandomState>,
     /// Db-encoded keys that currently carry a TTL (a subset of `ordered_keys`).
     /// The active-expire cycle samples from this set instead of every key, so
     /// it finds expirable keys as efficiently as upstream's `activeExpireCycle`
@@ -4848,6 +4832,7 @@ impl Default for Store {
             scan_cache: Vec::new(),
             db_scan_cache: Vec::new(),
             random_key_slots: vec![Vec::new(); DEFAULT_NUM_DATABASES],
+            expiry_deadlines: HashMap::default(),
             volatile_keys: BTreeSet::new(),
             volatile_keys_dirty: false,
             expiry_deadline_counts: BTreeMap::new(),
@@ -5862,9 +5847,9 @@ impl Store {
         }
     }
 
-    fn set_entry(&self, set: GenericSet, expires_at_ms: Option<u64>, now_ms: u64) -> Entry {
+    fn set_entry(&self, set: GenericSet, now_ms: u64) -> Entry {
         let set = SetValue::from_index_set(set, self.set_max_intset_entries);
-        let mut entry = Entry::new(Value::Set(Box::new(set)), expires_at_ms, now_ms);
+        let mut entry = Entry::new(Value::Set(Box::new(set)), now_ms);
         Self::refresh_set_encoding_flags(
             &mut entry,
             self.set_max_intset_entries,
@@ -5882,12 +5867,12 @@ impl Store {
     /// `from_index_set` so a generic-but-all-int-small union collapses to `Int`
     /// just like the prior `Vec -> GenericSet -> from_index_set` path — but
     /// without the intermediate sorted Vec or the extra re-hash pass.
-    fn set_value_entry(&self, value: SetValue, expires_at_ms: Option<u64>, now_ms: u64) -> Entry {
+    fn set_value_entry(&self, value: SetValue, now_ms: u64) -> Entry {
         let normalized = match value {
             SetValue::Int(_) => value,
             SetValue::Generic(g) => SetValue::from_index_set(g, self.set_max_intset_entries),
         };
-        let mut entry = Entry::new(Value::Set(Box::new(normalized)), expires_at_ms, now_ms);
+        let mut entry = Entry::new(Value::Set(Box::new(normalized)), now_ms);
         Self::refresh_set_encoding_flags(
             &mut entry,
             self.set_max_intset_entries,
@@ -5907,7 +5892,7 @@ impl Store {
     /// reported `listpack` where redis (whose dest is rebuilt member-by-member)
     /// reports `skiplist`.
     fn zset_dest_entry(&self, zs: SortedSet, now_ms: u64) -> Entry {
-        let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms);
+        let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
         Self::refresh_zset_encoding_flag(
             &mut entry,
             self.zset_max_listpack_entries,
@@ -6031,16 +6016,16 @@ impl Store {
         } else {
             0
         };
-        let mut entry = Entry::new(canonical_string_value(value), expires_at_ms, now_ms);
+        let mut entry = Entry::new(canonical_string_value(value), now_ms);
         entry.lfu_freq = next_lfu_freq;
         entry.lfu_last_touch_min = now_ms / 60_000;
-        self.internal_entries_insert(key, entry);
+        self.internal_entries_insert_with_expiry(key, entry, expires_at_ms);
         self.dirty = self.dirty.saturating_add(1);
     }
 
     pub fn set_plain_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) {
         if !self.drop_if_expired(key, now_ms) {
-            let mut entry = Entry::new(canonical_string_value_from_slice(value), None, now_ms);
+            let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
             entry.lfu_freq = if self.lfu_tracking_enabled() {
                 LFU_INIT_VAL
             } else {
@@ -6055,12 +6040,12 @@ impl Store {
         let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay_time = self.lfu_decay_time;
+        let old_expiry = self.expiry_ms(key);
         let (old_expiry, old_was_stream) = {
             let Some(entry) = self.entries.get_mut(key) else {
                 self.set(key.to_vec(), value.to_vec(), None, now_ms);
                 return;
             };
-            let old_expiry = entry.expiry_ms();
             let old_was_stream = matches!(&entry.value, Value::Stream(_));
             let next_lfu_freq = if lfu_tracking_enabled {
                 entry
@@ -6070,7 +6055,6 @@ impl Store {
                 0
             };
             entry.value = canonical_string_value_from_slice(value);
-            entry.set_expiry_ms(None);
             entry.last_access_ms = lru_access_millis(now_ms);
             entry.lfu_freq = next_lfu_freq;
             entry.lfu_last_touch_min = now_ms / 60_000;
@@ -6085,6 +6069,7 @@ impl Store {
             (old_expiry, old_was_stream)
         };
 
+        self.set_existing_expiry_ms(key, None);
         self.forget_volatile_key(key);
         self.update_expiry_deadline(old_expiry, None);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
@@ -6105,7 +6090,7 @@ impl Store {
 
     pub fn set_plain_owned(&mut self, key: Vec<u8>, value: Vec<u8>, now_ms: u64) {
         if !self.drop_if_expired(key.as_slice(), now_ms) {
-            let mut entry = Entry::new(canonical_string_value(value), None, now_ms);
+            let mut entry = Entry::new(canonical_string_value(value), now_ms);
             entry.lfu_freq = if self.lfu_tracking_enabled() {
                 LFU_INIT_VAL
             } else {
@@ -6120,12 +6105,12 @@ impl Store {
         let db = decode_db_key(key.as_slice()).map(|(db, _)| db).unwrap_or(0);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay_time = self.lfu_decay_time;
+        let old_expiry = self.expiry_ms(key.as_slice());
         let (old_expiry, old_was_stream) = {
             let Some(entry) = self.entries.get_mut(key.as_slice()) else {
                 self.set(key, value, None, now_ms);
                 return;
             };
-            let old_expiry = entry.expiry_ms();
             let old_was_stream = matches!(&entry.value, Value::Stream(_));
             let next_lfu_freq = if lfu_tracking_enabled {
                 entry
@@ -6135,7 +6120,6 @@ impl Store {
                 0
             };
             entry.value = canonical_string_value(value);
-            entry.set_expiry_ms(None);
             entry.last_access_ms = lru_access_millis(now_ms);
             entry.lfu_freq = next_lfu_freq;
             entry.lfu_last_touch_min = now_ms / 60_000;
@@ -6150,6 +6134,7 @@ impl Store {
             (old_expiry, old_was_stream)
         };
 
+        self.set_existing_expiry_ms(key.as_slice(), None);
         self.forget_volatile_key(key.as_slice());
         self.update_expiry_deadline(old_expiry, None);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
@@ -6197,17 +6182,17 @@ impl Store {
         };
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
-        let mut entry = Entry::new(canonical_string_value(value), expires_at_ms, now_ms);
+        let mut entry = Entry::new(canonical_string_value(value), now_ms);
         entry.lfu_freq = next_lfu_freq;
         entry.lfu_last_touch_min = now_ms / 60_000;
-        self.internal_entries_insert(key, entry);
+        self.internal_entries_insert_with_expiry(key, entry, expires_at_ms);
         self.dirty = self.dirty.saturating_add(1);
     }
 
     /// Returns the current absolute expiry timestamp for a key, if any.
     pub fn get_expires_at_ms(&mut self, key: &[u8], now_ms: u64) -> Option<u64> {
         self.drop_if_expired(key, now_ms);
-        self.entries.get(key).and_then(|entry| entry.expiry_ms())
+        self.expiry_ms(key)
     }
 
     pub fn expiretime_value(&mut self, key: &[u8], now_ms: u64) -> ExpireTimeValue {
@@ -6217,7 +6202,7 @@ impl Store {
         // (frankenredis-ttlnotouch) EXPIRETIME/PEXPIRETIME are metadata queries
         // that do NOT update access time. Differential probe vs vendored 7.2.4
         // confirmed OBJECT IDLETIME remains unchanged after these commands.
-        match self.entries.get(key).and_then(|entry| entry.expiry_ms()) {
+        match self.expiry_ms(key) {
             Some(expires_at_ms) => ExpireTimeValue::ExpiresAt(expires_at_ms),
             None => ExpireTimeValue::NoExpiry,
         }
@@ -6308,6 +6293,7 @@ impl Store {
     ) -> Result<i64, StoreError> {
         self.drop_if_expired(key, now_ms);
 
+        let has_existing_expiry = self.key_has_expiry(key);
         let (next, has_expiry) = match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::String(v) => {
@@ -6315,14 +6301,14 @@ impl Store {
                         .checked_add(delta)
                         .ok_or(StoreError::IntegerOverflow)?;
                     entry.replace_with_integer_write(next, now_ms);
-                    (next, entry.expiry_ms().is_some())
+                    (next, has_existing_expiry)
                 }
                 Value::Integer(value) => {
                     let next = value
                         .checked_add(delta)
                         .ok_or(StoreError::IntegerOverflow)?;
                     entry.replace_with_integer_write(next, now_ms);
-                    (next, entry.expiry_ms().is_some())
+                    (next, has_existing_expiry)
                 }
                 _ => return Err(StoreError::WrongType),
             },
@@ -6332,7 +6318,7 @@ impl Store {
                     .ok_or(StoreError::IntegerOverflow)?;
                 self.internal_entries_insert(
                     key.to_vec(),
-                    Entry::new(Value::Integer(next), None, now_ms),
+                    Entry::new(Value::Integer(next), now_ms),
                 );
                 self.dirty = self.dirty.saturating_add(1);
                 return Ok(next);
@@ -6383,15 +6369,10 @@ impl Store {
 
         let ttl_ms = u64::try_from(milliseconds).unwrap_or(u64::MAX);
         let expires_at_ms = now_ms.saturating_add(ttl_ms);
-        let old_expiry = self.entries.get(key).and_then(Entry::expiry_ms);
-        let mut added_expiry = false;
-        if self
-            .with_mutated_entry(key, |entry| {
-                added_expiry = entry.expires_at_ms.is_none();
-                entry.set_expiry_ms(Some(expires_at_ms));
-            })
-            .is_some()
-        {
+        let old_expiry = self.expiry_ms(key);
+        let added_expiry = old_expiry.is_none();
+        if self.with_mutated_entry(key, |_| {}).is_some() {
+            self.set_existing_expiry_ms(key, Some(expires_at_ms));
             if added_expiry {
                 self.expires_count = self.expires_count.saturating_add(1);
                 let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
@@ -6436,15 +6417,10 @@ impl Store {
         }
 
         let expires_at_ms = u64::try_from(when_ms).unwrap_or(u64::MAX);
-        let old_expiry = self.entries.get(key).and_then(Entry::expiry_ms);
-        let mut added_expiry = false;
-        if self
-            .with_mutated_entry(key, |entry| {
-                added_expiry = entry.expires_at_ms.is_none();
-                entry.set_expiry_ms(Some(expires_at_ms));
-            })
-            .is_some()
-        {
+        let old_expiry = self.expiry_ms(key);
+        let added_expiry = old_expiry.is_none();
+        if self.with_mutated_entry(key, |_| {}).is_some() {
+            self.set_existing_expiry_ms(key, Some(expires_at_ms));
             if added_expiry {
                 self.expires_count = self.expires_count.saturating_add(1);
                 let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
@@ -6470,10 +6446,10 @@ impl Store {
         // (frankenredis-ttlnotouch) TTL/PTTL are metadata queries that do NOT
         // update access time. Differential probe vs vendored 7.2.4 confirmed
         // OBJECT IDLETIME remains unchanged after TTL/PTTL.
-        let Some(entry) = self.entries.get(key) else {
+        let Some(_entry) = self.entries.get(key) else {
             return PttlValue::KeyMissing;
         };
-        let decision = evaluate_expiry(now_ms, entry.expiry_ms());
+        let decision = evaluate_expiry(now_ms, self.expiry_ms(key));
         if decision.remaining_ms == -1 {
             PttlValue::NoExpiry
         } else {
@@ -6513,7 +6489,7 @@ impl Store {
             let len = value.len();
             self.internal_entries_insert(
                 key.to_vec(),
-                Entry::new(Value::String(value.to_vec().into()), None, now_ms),
+                Entry::new(Value::String(value.to_vec().into()), now_ms),
             );
             self.dirty = self.dirty.saturating_add(1);
             Ok(len)
@@ -6593,7 +6569,7 @@ impl Store {
         // via a throwaway clone. Byte-identical to the prior owned path.
         self.internal_entries_insert(
             key.to_vec(),
-            Entry::new(canonical_string_value_from_slice(value), None, now_ms),
+            Entry::new(canonical_string_value_from_slice(value), now_ms),
         );
         self.dirty = self.dirty.saturating_add(1);
         true
@@ -6630,7 +6606,7 @@ impl Store {
             }
             None => (None, None),
         };
-        let mut new_entry = Entry::new(canonical_string_value_from_slice(value), None, now_ms);
+        let mut new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
         if let Some((freq, last_touch)) = lfu_state {
             new_entry.lfu_freq = freq;
             new_entry.lfu_last_touch_min = last_touch;
@@ -6658,13 +6634,13 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<u8>, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let existing_expiry = self.expiry_ms(key);
         let (current, expires_at_ms) = match self.entries.get(key) {
             Some(entry) => match &entry.value {
-                Value::String(v) => (Cow::Borrowed(v.as_slice()), entry.expiry_ms()),
-                Value::Integer(value) => (
-                    Cow::Owned(value.to_string().into_bytes()),
-                    entry.expiry_ms(),
-                ),
+                Value::String(v) => (Cow::Borrowed(v.as_slice()), existing_expiry),
+                Value::Integer(value) => {
+                    (Cow::Owned(value.to_string().into_bytes()), existing_expiry)
+                }
                 _ => return Err(StoreError::WrongType),
             },
             None => (Cow::Borrowed(b"0".as_slice()), None),
@@ -6675,9 +6651,9 @@ impl Store {
         // never int. Even when the result text round-trips as an
         // integer (e.g. "1"), OBJECT ENCODING reports embstr.
         // (br-frankenredis-incrfloatenc)
-        let mut entry = Entry::new(Value::String(next.clone().into()), expires_at_ms, now_ms);
+        let mut entry = Entry::new(Value::String(next.clone().into()), now_ms);
         entry.force_string_encoding = true;
-        self.internal_entries_insert(key.to_vec(), entry);
+        self.internal_entries_insert_with_expiry(key.to_vec(), entry, expires_at_ms);
         self.dirty = self.dirty.saturating_add(1);
         Ok(next)
     }
@@ -6883,7 +6859,7 @@ impl Store {
                 let mut current = vec![0; needed];
                 current[offset..offset + value.len()].copy_from_slice(value);
                 let new_len = current.len();
-                let mut entry = Entry::new(Value::String(current.into()), None, now_ms);
+                let mut entry = Entry::new(Value::String(current.into()), now_ms);
                 // (br-frankenredis-84bv)
                 entry.force_raw_encoding = true;
                 self.internal_entries_insert(key.to_vec(), entry);
@@ -6952,7 +6928,7 @@ impl Store {
                 if value {
                     v[byte_idx] |= 1 << bit_idx;
                 }
-                let mut entry = Entry::new(Value::String(v.into()), None, now_ms);
+                let mut entry = Entry::new(Value::String(v.into()), now_ms);
                 // (br-frankenredis-setbitenc) — newly-created keys
                 // also use raw encoding via dbAdd in upstream.
                 entry.force_raw_encoding = true;
@@ -7106,7 +7082,7 @@ impl Store {
             }
             return Ok(());
         }
-        let mut entry = Entry::new(Value::String(vec![0u8; needed_bytes].into()), None, now_ms);
+        let mut entry = Entry::new(Value::String(vec![0u8; needed_bytes].into()), now_ms);
         entry.force_raw_encoding = true;
         self.internal_entries_insert(key.to_vec(), entry);
         self.dirty = self.dirty.saturating_add(1);
@@ -7136,6 +7112,7 @@ impl Store {
             ));
         }
 
+        let had_expiry = self.key_has_expiry(key);
         if let Some(entry) = self.entries.get_mut(key) {
             let Some(bytes) = entry.value.materialize_string() else {
                 return Err(StoreError::WrongType);
@@ -7149,7 +7126,6 @@ impl Store {
             let changed = old_len != bytes.len()
                 || old_value != bitfield_read(bytes, bit_offset, bits, false);
 
-            let had_expiry = entry.expires_at_ms.is_some();
             entry.last_access_ms = lru_access_millis(now_ms);
             entry.lfu_freq = LFU_INIT_VAL;
             entry.lfu_last_touch_min = now_ms / 60_000;
@@ -7182,7 +7158,7 @@ impl Store {
         bitfield_write(&mut bytes, bit_offset, bits, value);
         let changed =
             !bytes.is_empty() || old_value != bitfield_read(&bytes, bit_offset, bits, false);
-        let mut entry = Entry::new(Value::String(bytes.into()), None, now_ms);
+        let mut entry = Entry::new(Value::String(bytes.into()), now_ms);
         // Upstream bitops.c::bitfieldGeneric routes SET/INCRBY through
         // dbUnshareStringValue / dbAdd which always store values with raw
         // encoding. (br-frankenredis-bitfieldenc)
@@ -7495,12 +7471,11 @@ impl Store {
 
     pub fn persist(&mut self, key: &[u8], now_ms: u64) -> bool {
         self.drop_if_expired(key, now_ms);
-        let Some(old_expiry) = self.entries.get(key).and_then(Entry::expiry_ms) else {
+        let Some(old_expiry) = self.expiry_ms(key) else {
             return false;
         };
-        self.with_mutated_entry(key, |entry| {
-            entry.expires_at_ms = None;
-        });
+        self.with_mutated_entry(key, |_| {});
+        self.set_existing_expiry_ms(key, None);
         self.forget_volatile_key(key);
         self.update_expiry_deadline(Some(old_expiry), None);
         self.expires_count = self.expires_count.saturating_sub(1);
@@ -7565,7 +7540,10 @@ impl Store {
     #[must_use]
     pub fn peek_value_type(&self, key: &[u8], now_ms: u64) -> Option<ValueType> {
         let entry = self.entries.get(key)?;
-        if entry.expiry_ms().is_some_and(|deadline| now_ms > deadline) {
+        if self
+            .expiry_ms(key)
+            .is_some_and(|deadline| now_ms > deadline)
+        {
             return None;
         }
         Some(match &entry.value {
@@ -7587,7 +7565,10 @@ impl Store {
         let Some(entry) = self.entries.get(key) else {
             return Ok(0);
         };
-        if entry.expiry_ms().is_some_and(|deadline| now_ms > deadline) {
+        if self
+            .expiry_ms(key)
+            .is_some_and(|deadline| now_ms > deadline)
+        {
             return Ok(0);
         }
         entry.value.string_len().ok_or(StoreError::WrongType)
@@ -7600,7 +7581,10 @@ impl Store {
     #[must_use]
     pub fn set_cardinality_no_stats(&self, key: &[u8], now_ms: u64) -> Option<usize> {
         let entry = self.entries.get(key)?;
-        if entry.expiry_ms().is_some_and(|deadline| now_ms > deadline) {
+        if self
+            .expiry_ms(key)
+            .is_some_and(|deadline| now_ms > deadline)
+        {
             return None;
         }
         match &entry.value {
@@ -7613,13 +7597,16 @@ impl Store {
     /// keyspace_hits/misses. For write-command TTL prechecks (EXPIRE NX/XX/GT/LT
     /// remaining-TTL comparison) that mirror lookupKeyWrite. (frankenredis-934ax)
     pub fn pttl_no_stats(&self, key: &[u8], now_ms: u64) -> PttlValue {
-        let Some(entry) = self.entries.get(key) else {
+        let Some(_entry) = self.entries.get(key) else {
             return PttlValue::KeyMissing;
         };
-        if entry.expiry_ms().is_some_and(|deadline| now_ms > deadline) {
+        if self
+            .expiry_ms(key)
+            .is_some_and(|deadline| now_ms > deadline)
+        {
             return PttlValue::KeyMissing;
         }
-        let decision = evaluate_expiry(now_ms, entry.expiry_ms());
+        let decision = evaluate_expiry(now_ms, self.expiry_ms(key));
         if decision.remaining_ms == -1 {
             PttlValue::NoExpiry
         } else {
@@ -7900,6 +7887,7 @@ impl Store {
         }
         let moved_entries_added = self.stream_entries_added.remove(key);
         let moved_max_deleted_id = self.stream_max_deleted_ids.remove(key);
+        let moved_expiry = self.expiry_ms(key);
         let Some(mut entry) = self.internal_entries_remove(key) else {
             return Err(StoreError::KeyNotFound);
         };
@@ -7911,7 +7899,7 @@ impl Store {
         self.stream_last_ids.remove(newkey);
         self.stream_entries_added.remove(newkey);
         self.stream_max_deleted_ids.remove(newkey);
-        self.internal_entries_insert(newkey.to_vec(), entry);
+        self.internal_entries_insert_with_expiry(newkey.to_vec(), entry, moved_expiry);
         if let Some(groups) = moved_groups {
             self.stream_groups.insert(newkey.to_vec(), groups);
         }
@@ -7941,13 +7929,14 @@ impl Store {
         }
         let moved_entries_added = self.stream_entries_added.remove(key);
         let moved_max_deleted_id = self.stream_max_deleted_ids.remove(key);
+        let moved_expiry = self.expiry_ms(key);
         let Some(mut entry) = self.internal_entries_remove(key) else {
             return Err(StoreError::KeyNotFound);
         };
         entry.refresh_db_add_metadata(now_ms);
         let moved_groups = self.stream_groups.remove(key);
         let moved_last_id = self.stream_last_ids.remove(key);
-        self.internal_entries_insert(newkey.to_vec(), entry);
+        self.internal_entries_insert_with_expiry(newkey.to_vec(), entry, moved_expiry);
         if let Some(groups) = moved_groups {
             self.stream_groups.insert(newkey.to_vec(), groups);
         }
@@ -8187,7 +8176,7 @@ impl Store {
         now_ms: u64,
     ) -> &mut Entry {
         if !self.entries.contains_key(key) {
-            self.internal_entries_insert(key.to_vec(), Entry::new(default_value(), None, now_ms));
+            self.internal_entries_insert(key.to_vec(), Entry::new(default_value(), now_ms));
         }
         self.entries
             .get_mut(key)
@@ -8226,13 +8215,16 @@ impl Store {
         let Some(entry) = self.entries.get(key) else {
             return;
         };
-        self.update_digest_hashes(Some(old_hash), Some(Self::entry_state_digest(key, entry)));
+        self.update_digest_hashes(
+            Some(old_hash),
+            Some(Self::entry_state_digest(key, entry, self.expiry_ms(key))),
+        );
     }
 
     fn current_entry_digest(&self, key: &[u8]) -> Option<u64> {
         self.entries
             .get(key)
-            .map(|entry| Self::entry_state_digest(key, entry))
+            .map(|entry| Self::entry_state_digest(key, entry, self.expiry_ms(key)))
     }
 
     fn with_mutated_entry<R>(
@@ -8269,7 +8261,7 @@ impl Store {
 
     fn state_digest_full_scan(&self) -> u64 {
         self.entries.iter().fold(0_u64, |digest, (key, entry)| {
-            digest ^ Self::entry_state_digest(key, entry)
+            digest ^ Self::entry_state_digest(key, entry, self.expiry_ms(key))
         })
     }
 
@@ -8327,6 +8319,33 @@ impl Store {
         self.volatile_keys_dirty = true;
     }
 
+    #[inline]
+    fn expiry_ms(&self, key: &[u8]) -> Option<u64> {
+        self.expiry_deadlines
+            .get(key)
+            .map(|deadline| deadline.get())
+    }
+
+    #[inline]
+    fn key_has_expiry(&self, key: &[u8]) -> bool {
+        self.expiry_deadlines.contains_key(key)
+    }
+
+    fn set_existing_expiry_ms(&mut self, key: &[u8], expires_at_ms: Option<u64>) {
+        let Some((canonical_key, _)) = self.entries.get_key_value(key) else {
+            return;
+        };
+        match expires_at_ms.and_then(std::num::NonZeroU64::new) {
+            Some(deadline) => {
+                self.expiry_deadlines
+                    .insert(std::sync::Arc::clone(canonical_key), deadline);
+            }
+            None => {
+                self.expiry_deadlines.remove(key);
+            }
+        }
+    }
+
     fn forget_volatile_key(&mut self, key: &[u8]) {
         if self.volatile_keys_dirty {
             return;
@@ -8339,12 +8358,8 @@ impl Store {
             return;
         }
         self.volatile_keys.clear();
-        self.volatile_keys.extend(
-            self.entries
-                .iter()
-                .filter(|(_, entry)| entry.expiry_ms().is_some())
-                .map(|(key, _)| std::sync::Arc::clone(key)),
-        );
+        self.volatile_keys
+            .extend(self.expiry_deadlines.keys().map(std::sync::Arc::clone));
         self.volatile_keys_dirty = false;
     }
 
@@ -8418,17 +8433,26 @@ impl Store {
         }
     }
 
-    fn internal_entries_insert(&mut self, key: Vec<u8>, mut entry: Entry) -> Option<Entry> {
+    fn internal_entries_insert(&mut self, key: Vec<u8>, entry: Entry) -> Option<Entry> {
+        self.internal_entries_insert_with_expiry(key, entry, None)
+    }
+
+    fn internal_entries_insert_with_expiry(
+        &mut self,
+        key: Vec<u8>,
+        mut entry: Entry,
+        expires_at_ms: Option<u64>,
+    ) -> Option<Entry> {
         let db = decode_db_key(&key).map(|(db, _)| db).unwrap_or(0);
         let is_new_key = !self.entries.contains_key(key.as_slice());
-        let old_expiry = self.entries.get(key.as_slice()).and_then(Entry::expiry_ms);
-        let new_expiry = entry.expiry_ms();
+        let old_expiry = self.expiry_ms(key.as_slice());
+        let new_expiry = expires_at_ms.and_then(std::num::NonZeroU64::new);
         let new_is_stream = matches!(&entry.value, Value::Stream(_));
         if let Some(old_entry) = self.entries.get(key.as_slice()) {
             entry.modification_count = old_entry.modification_count.wrapping_add(1);
         }
 
-        let new_has_expiry = entry.expires_at_ms.is_some();
+        let new_has_expiry = new_expiry.is_some();
         if new_has_expiry {
             self.expires_count = self.expires_count.saturating_add(1);
             if db < self.database_count {
@@ -8453,6 +8477,14 @@ impl Store {
         } else {
             None
         };
+        let expiry_key = shared.as_ref().map_or_else(
+            || {
+                self.entries
+                    .get_key_value(key.as_slice())
+                    .map(|(key, _)| std::sync::Arc::clone(key))
+            },
+            |shared| Some(std::sync::Arc::clone(shared)),
+        );
         // Keep the volatile-key sampling set in sync lazily: deadline counts
         // remain exact, and the sorted key view is rebuilt only when a due
         // expiry consumer needs key-order iteration. (frankenredis-yvg7h)
@@ -8477,7 +8509,14 @@ impl Store {
                 std::mem::replace(slot, entry)
             }),
         };
-        self.update_expiry_deadline(old_expiry, new_expiry);
+        if let Some(expiry_key) = expiry_key {
+            if let Some(deadline) = new_expiry {
+                self.expiry_deadlines.insert(expiry_key, deadline);
+            } else {
+                self.expiry_deadlines.remove(key.as_slice());
+            }
+        }
+        self.update_expiry_deadline(old_expiry, new_expiry.map(std::num::NonZeroU64::get));
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         if let Some(old) = old_entry {
             if matches!(&old.value, Value::Stream(_)) && !new_is_stream {
@@ -8486,7 +8525,7 @@ impl Store {
                 self.stream_entries_added.remove(&key);
                 self.stream_max_deleted_ids.remove(&key);
             }
-            if old.expires_at_ms.is_some() {
+            if old_expiry.is_some() {
                 self.expires_count = self.expires_count.saturating_sub(1);
                 if db < self.database_count {
                     self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
@@ -8502,10 +8541,12 @@ impl Store {
     }
 
     fn internal_entries_remove(&mut self, key: &[u8]) -> Option<Entry> {
+        let old_expiry = self.expiry_ms(key);
         if let Some(entry) = self.entries.remove(key) {
             self.hll_register_cache.remove(key);
             self.mem_estimate_cache.borrow_mut().remove(key);
             self.ordered_keys.remove(key);
+            self.expiry_deadlines.remove(key);
             // (frankenredis-uhthd) The RANDOMKEY back-index lives on the removed
             // entry now, and its db comes from the db-encoded key — no separate
             // `random_key_positions` lookup. Compute db once here and reuse it
@@ -8516,11 +8557,11 @@ impl Store {
             // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
             // resume points.
             self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
-            self.update_expiry_deadline(entry.expiry_ms(), None);
+            self.update_expiry_deadline(old_expiry, None);
             if db < self.database_count {
                 self.db_key_counts[db] = self.db_key_counts[db].saturating_sub(1);
             }
-            if entry.expires_at_ms.is_some() {
+            if old_expiry.is_some() {
                 self.expires_count = self.expires_count.saturating_sub(1);
                 if db < self.database_count {
                     self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
@@ -8532,7 +8573,10 @@ impl Store {
             if self.digest_stale {
                 self.bump_digest_mutations();
             } else {
-                self.update_digest_hashes(Some(Self::entry_state_digest(key, &entry)), None);
+                self.update_digest_hashes(
+                    Some(Self::entry_state_digest(key, &entry, old_expiry)),
+                    None,
+                );
             }
             // Whole-key removal drops any per-field hash TTL entries so the
             // field_expires map doesn't accumulate orphan rows.
@@ -8881,13 +8925,7 @@ impl Store {
         let mut evicted_keys = 0usize;
         let mut evicted_db_keys: Vec<Vec<u8>> = Vec::new();
         for key in &keys_to_check {
-            let should_evict = evaluate_expiry(
-                now_ms,
-                self.entries
-                    .get(key.as_slice())
-                    .and_then(|entry| entry.expiry_ms()),
-            )
-            .should_evict;
+            let should_evict = evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict;
             if should_evict {
                 // Emit expired notification before removal (use logical key)
                 let (db, logical_key) = match decode_db_key(key) {
@@ -8938,6 +8976,7 @@ impl Store {
         // similarly survived as orphan TTLs without their parent
         // hashes, breaking HTTL/HEXPIRETIME on subsequent re-creates.
         self.ordered_keys.clear();
+        self.expiry_deadlines.clear();
         // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
         // resume points.
         self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
@@ -9034,6 +9073,7 @@ impl Store {
         let mut left_entries = Vec::with_capacity(left_count);
         for key in left_keys {
             let max_deleted_id = self.stream_max_deleted_ids.remove(key.as_slice());
+            let expires_at_ms = self.expiry_ms(key.as_slice());
             // Harvest per-field hash TTLs before removing the entry —
             // internal_entries_remove drops them via hash_field_ttl_clear_for_key.
             // (frankenredis-sdmwz)
@@ -9056,6 +9096,7 @@ impl Store {
                 last_id,
                 entries_added,
                 max_deleted_id,
+                expires_at_ms,
                 field_ttls,
             ));
         }
@@ -9063,6 +9104,7 @@ impl Store {
         let mut right_entries = Vec::with_capacity(right_count);
         for key in right_keys {
             let max_deleted_id = self.stream_max_deleted_ids.remove(key.as_slice());
+            let expires_at_ms = self.expiry_ms(key.as_slice());
             let field_ttls: Vec<(Vec<u8>, u64)> = self
                 .hash_field_expires
                 .range((key.clone(), Vec::new())..)
@@ -9082,18 +9124,28 @@ impl Store {
                 last_id,
                 entries_added,
                 max_deleted_id,
+                expires_at_ms,
                 field_ttls,
             ));
         }
 
-        for (key, entry, groups, last_id, entries_added, max_deleted_id, field_ttls) in left_entries
+        for (
+            key,
+            entry,
+            groups,
+            last_id,
+            entries_added,
+            max_deleted_id,
+            expires_at_ms,
+            field_ttls,
+        ) in left_entries
         {
             let mut swapped = Vec::with_capacity(
                 right_prefix.len() + key.len().saturating_sub(left_prefix.len()),
             );
             swapped.extend_from_slice(right_prefix);
             swapped.extend_from_slice(&key[left_prefix.len()..]);
-            self.internal_entries_insert(swapped.clone(), entry);
+            self.internal_entries_insert_with_expiry(swapped.clone(), entry, expires_at_ms);
             if let Some(groups) = groups {
                 self.stream_groups.insert(swapped.clone(), groups);
             }
@@ -9116,15 +9168,23 @@ impl Store {
             }
         }
 
-        for (key, entry, groups, last_id, entries_added, max_deleted_id, field_ttls) in
-            right_entries
+        for (
+            key,
+            entry,
+            groups,
+            last_id,
+            entries_added,
+            max_deleted_id,
+            expires_at_ms,
+            field_ttls,
+        ) in right_entries
         {
             let mut swapped = Vec::with_capacity(
                 left_prefix.len() + key.len().saturating_sub(right_prefix.len()),
             );
             swapped.extend_from_slice(left_prefix);
             swapped.extend_from_slice(&key[right_prefix.len()..]);
-            self.internal_entries_insert(swapped.clone(), entry);
+            self.internal_entries_insert_with_expiry(swapped.clone(), entry, expires_at_ms);
             if let Some(groups) = groups {
                 self.stream_groups.insert(swapped.clone(), groups);
             }
@@ -9173,6 +9233,7 @@ impl Store {
         let mut left_entries = Vec::with_capacity(left_count);
         for key in left_keys {
             let max_deleted_id = self.stream_max_deleted_ids.remove(key.as_slice());
+            let expires_at_ms = self.expiry_ms(key.as_slice());
             let Some(entry) = self.internal_entries_remove(&key) else {
                 continue;
             };
@@ -9189,12 +9250,14 @@ impl Store {
                 last_id,
                 entries_added,
                 max_deleted_id,
+                expires_at_ms,
             ));
         }
 
         let mut right_entries = Vec::with_capacity(right_count);
         for key in right_keys {
             let max_deleted_id = self.stream_max_deleted_ids.remove(key.as_slice());
+            let expires_at_ms = self.expiry_ms(key.as_slice());
             let Some(entry) = self.internal_entries_remove(&key) else {
                 continue;
             };
@@ -9211,12 +9274,15 @@ impl Store {
                 last_id,
                 entries_added,
                 max_deleted_id,
+                expires_at_ms,
             ));
         }
 
-        for (logical, entry, groups, last_id, entries_added, max_deleted_id) in left_entries {
+        for (logical, entry, groups, last_id, entries_added, max_deleted_id, expires_at_ms) in
+            left_entries
+        {
             let swapped = encode_db_key(right_db, &logical);
-            self.internal_entries_insert(swapped.clone(), entry);
+            self.internal_entries_insert_with_expiry(swapped.clone(), entry, expires_at_ms);
             if let Some(groups) = groups {
                 self.stream_groups.insert(swapped.clone(), groups);
             }
@@ -9232,9 +9298,11 @@ impl Store {
             }
         }
 
-        for (logical, entry, groups, last_id, entries_added, max_deleted_id) in right_entries {
+        for (logical, entry, groups, last_id, entries_added, max_deleted_id, expires_at_ms) in
+            right_entries
+        {
             let swapped = encode_db_key(left_db, &logical);
-            self.internal_entries_insert(swapped.clone(), entry);
+            self.internal_entries_insert_with_expiry(swapped.clone(), entry, expires_at_ms);
             if let Some(groups) = groups {
                 self.stream_groups.insert(swapped.clone(), groups);
             }
@@ -10182,7 +10250,7 @@ impl Store {
                 let len = l.len();
                 self.internal_entries_insert(
                     key.to_vec(),
-                    Entry::new(Value::List(Box::new(l)), None, now_ms),
+                    Entry::new(Value::List(Box::new(l)), now_ms),
                 );
                 self.dirty = self.dirty.saturating_add(values.len() as u64);
                 Ok(len)
@@ -10252,7 +10320,7 @@ impl Store {
                 let len = l.len();
                 self.internal_entries_insert(
                     key.to_vec(),
-                    Entry::new(Value::List(Box::new(l)), None, now_ms),
+                    Entry::new(Value::List(Box::new(l)), now_ms),
                 );
                 self.dirty = self.dirty.saturating_add(values.len() as u64);
                 Ok(len)
@@ -11089,10 +11157,8 @@ impl Store {
         };
 
         let mut source_ttl = None;
-        if source == destination
-            && let Some(entry) = self.entries.get(source)
-        {
-            source_ttl = entry.expiry_ms();
+        if source == destination {
+            source_ttl = self.expiry_ms(source);
         }
 
         // Clean up empty source.
@@ -11128,9 +11194,10 @@ impl Store {
                     val.len() as u64,
                     self.list_max_listpack_size,
                 );
-                self.internal_entries_insert(
+                self.internal_entries_insert_with_expiry(
                     destination.to_vec(),
-                    Entry::new(Value::List(Box::new(l)), source_ttl, now_ms),
+                    Entry::new(Value::List(Box::new(l)), now_ms),
+                    source_ttl,
                 );
             }
         }
@@ -11388,10 +11455,8 @@ impl Store {
         };
 
         let mut source_ttl = None;
-        if source == destination
-            && let Some(entry) = self.entries.get(source)
-        {
-            source_ttl = entry.expiry_ms();
+        if source == destination {
+            source_ttl = self.expiry_ms(source);
         }
 
         // Clean up empty source.
@@ -11444,9 +11509,10 @@ impl Store {
                     val.len() as u64,
                     self.list_max_listpack_size,
                 );
-                self.internal_entries_insert(
+                self.internal_entries_insert_with_expiry(
                     destination.to_vec(),
-                    Entry::new(Value::List(Box::new(l)), source_ttl, now_ms),
+                    Entry::new(Value::List(Box::new(l)), now_ms),
+                    source_ttl,
                 );
             }
         }
@@ -11598,7 +11664,7 @@ impl Store {
                     }
                     (s, added)
                 };
-                let mut entry = Entry::new(Value::Set(Box::new(s)), None, now_ms);
+                let mut entry = Entry::new(Value::Set(Box::new(s)), now_ms);
                 Self::refresh_set_encoding_flags(
                     &mut entry,
                     max_intset_entries,
@@ -12658,7 +12724,7 @@ impl Store {
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
             let set: GenericSet = result.into_iter().collect();
-            let entry = self.set_entry(set, None, now_ms);
+            let entry = self.set_entry(set, now_ms);
             self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
@@ -12683,7 +12749,7 @@ impl Store {
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
         if let Some(value) = value.filter(|v| !v.is_empty()) {
-            let entry = self.set_value_entry(value, None, now_ms);
+            let entry = self.set_value_entry(value, now_ms);
             self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
@@ -12721,7 +12787,7 @@ impl Store {
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
             let set: GenericSet = result.into_iter().collect();
-            let entry = self.set_entry(set, None, now_ms);
+            let entry = self.set_entry(set, now_ms);
             self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
@@ -12770,7 +12836,7 @@ impl Store {
                 zset_max_entries,
                 zset_max_value,
             );
-            let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms);
+            let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
             entry.touch_write(now_ms);
             Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
             self.internal_entries_insert(key.to_vec(), entry);
@@ -13560,7 +13626,7 @@ impl Store {
         let zs = SortedSet::from_unique_pairs_with_limits(pairs, zset_max_entries, zset_max_value);
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
-        let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), None, now_ms);
+        let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
         // (frankenredis-t8rma) Upstream ZRANGESTORE pre-creates the destination
         // via zsetTypeCreate(length, 0). For BYSCORE / BYLEX the result count is
         // unknown so upstream passes length = -1, which as size_t is SIZE_MAX and
@@ -14954,7 +15020,7 @@ impl Store {
                 self.stream_entries_added.insert(key.to_vec(), 1);
                 self.internal_entries_insert(
                     key.to_vec(),
-                    Entry::new(Value::Stream(Box::new(entries)), None, now_ms),
+                    Entry::new(Value::Stream(Box::new(entries)), now_ms),
                 );
                 self.dirty = self.dirty.saturating_add(1);
                 Ok(())
@@ -14999,7 +15065,7 @@ impl Store {
         self.stream_entries_added.insert(key.to_vec(), count);
         self.internal_entries_insert(
             key.to_vec(),
-            Entry::new(Value::Stream(Box::new(map)), None, now_ms),
+            Entry::new(Value::Stream(Box::new(map)), now_ms),
         );
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(count);
@@ -16155,7 +16221,7 @@ impl Store {
             self.stream_entries_added.insert(key.to_vec(), 0);
             self.internal_entries_insert(
                 key.to_vec(),
-                Entry::new(Value::Stream(Box::new(StreamEntries::new())), None, now_ms),
+                Entry::new(Value::Stream(Box::new(StreamEntries::new())), now_ms),
             );
         }
 
@@ -16620,7 +16686,7 @@ impl Store {
         let created = !existed;
         let modified = register_updates > 0;
         if created || modified {
-            let expires_at = self.entries.get(key).and_then(Entry::expiry_ms);
+            let expires_at = self.expiry_ms(key);
             let encoding = match encoding {
                 HllEncoding::Dense => HllEncoding::Dense,
                 HllEncoding::Sparse => {
@@ -16632,14 +16698,14 @@ impl Store {
                 }
             };
             let data = hll_encode(&registers, encoding);
-            let mut entry = Entry::new(Value::String(data.into()), expires_at, now_ms);
+            let mut entry = Entry::new(Value::String(data.into()), now_ms);
             // Upstream hyperloglog.c builds the HLL via createHLLObject /
             // createObject(OBJ_STRING,…), so OBJECT ENCODING reports `raw`
             // regardless of the payload size — a low-cardinality sparse HLL
             // is well under the 44-byte embstr threshold. (br-frankenredis-bitopenc)
             entry.force_raw_encoding = true;
             entry.touch_write(now_ms);
-            self.internal_entries_insert(key.to_vec(), entry);
+            self.internal_entries_insert_with_expiry(key.to_vec(), entry, expires_at);
             self.hll_register_cache_store(key, registers);
             let updated = u64::from(created).saturating_add(register_updates);
             self.dirty = self.dirty.saturating_add(updated);
@@ -16782,7 +16848,7 @@ impl Store {
 
         // Include dest if it already holds an HLL, and preserve its TTL
         self.drop_if_expired(dest, now_ms);
-        let existing_ttl = self.entries.get(dest).and_then(Entry::expiry_ms);
+        let existing_ttl = self.expiry_ms(dest);
         if let Some(entry) = self.entries.get(dest) {
             let Some(data) = entry.value.string_bytes() else {
                 return Err(StoreError::WrongType);
@@ -16814,11 +16880,11 @@ impl Store {
                 HllEncoding::Sparse
             };
         let data = hll_encode(&merged, dest_encoding);
-        let mut entry = Entry::new(Value::String(data.into()), existing_ttl, now_ms);
+        let mut entry = Entry::new(Value::String(data.into()), now_ms);
         // PFMERGE's destination is a raw-encoded HLL string, same as pfadd.
         entry.force_raw_encoding = true;
         entry.touch_write(now_ms);
-        self.internal_entries_insert(dest.to_vec(), entry);
+        self.internal_entries_insert_with_expiry(dest.to_vec(), entry, existing_ttl);
         self.hll_register_cache_store(dest, merged);
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
@@ -16970,8 +17036,7 @@ impl Store {
     fn drop_if_expired(&mut self, key: &[u8], now_ms: u64) -> bool {
         let entry = self.entries.get(key);
         let exists = entry.is_some();
-        let should_evict =
-            evaluate_expiry(now_ms, entry.and_then(|entry| entry.expiry_ms())).should_evict;
+        let should_evict = evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict;
         if should_evict && self.internal_entries_remove(key).is_some() {
             self.stream_groups.remove(key);
             self.stream_last_ids.remove(key);
@@ -17303,7 +17368,7 @@ impl Store {
                 Some((db, lk)) => (db, lk.to_vec()),
                 None => (0, key.to_vec()),
             };
-            let old_expiry = self.entries.get(key).and_then(Entry::expiry_ms);
+            let old_expiry = self.expiry_ms(key);
             match exp {
                 Some(deadline) if deadline <= now_ms => {
                     self.notify_keyspace_event(NOTIFY_GENERIC, "del", &logical_key, db);
@@ -17313,11 +17378,9 @@ impl Store {
                     self.dirty = self.dirty.saturating_add(1);
                 }
                 Some(deadline) => {
-                    let mut added_expiry = false;
-                    self.with_mutated_entry(key, |entry| {
-                        added_expiry = entry.expires_at_ms.is_none();
-                        entry.set_expiry_ms(Some(deadline));
-                    });
+                    let added_expiry = old_expiry.is_none();
+                    self.with_mutated_entry(key, |_| {});
+                    self.set_existing_expiry_ms(key, Some(deadline));
                     if added_expiry {
                         self.expires_count = self.expires_count.saturating_add(1);
                         if db < self.database_count {
@@ -17332,9 +17395,8 @@ impl Store {
                 }
                 None => {
                     if old_expiry.is_some() {
-                        self.with_mutated_entry(key, |entry| {
-                            entry.expires_at_ms = None;
-                        });
+                        self.with_mutated_entry(key, |_| {});
+                        self.set_existing_expiry_ms(key, None);
                         self.forget_volatile_key(key);
                         self.update_expiry_deadline(old_expiry, None);
                         self.expires_count = self.expires_count.saturating_sub(1);
@@ -17503,7 +17565,7 @@ impl Store {
             // Upstream creates the destination via dbAdd which uses
             // raw encoding regardless of length.
             // (br-frankenredis-bitopenc)
-            let mut entry = Entry::new(Value::String(result.into()), None, now_ms);
+            let mut entry = Entry::new(Value::String(result.into()), now_ms);
             entry.force_raw_encoding = true;
             self.internal_entries_insert(dest.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
@@ -17835,8 +17897,8 @@ impl Store {
         // This handles cases where many keys are expired but not yet reaped.
         let mut expired_keys = Vec::new();
         let mut result = None;
-        for (key, entry) in &self.entries {
-            if evaluate_expiry(now_ms, entry.expiry_ms()).should_evict {
+        for key in self.entries.keys() {
+            if evaluate_expiry(now_ms, self.expiry_ms(key.as_ref())).should_evict {
                 expired_keys.push(key.to_vec());
             } else {
                 result = Some(key.to_vec());
@@ -17903,8 +17965,9 @@ impl Store {
     pub fn keys_in_slot(&mut self, slot: u16, count: usize, now_ms: u64) -> Vec<Vec<u8>> {
         self.entries
             .iter()
-            .filter(|(k, e)| {
-                crc16_slot(k) == slot && !evaluate_expiry(now_ms, e.expiry_ms()).should_evict
+            .filter(|(k, _)| {
+                crc16_slot(k) == slot
+                    && !evaluate_expiry(now_ms, self.expiry_ms(k.as_ref())).should_evict
             })
             .take(count)
             .map(|(k, _)| k.to_vec())
@@ -17916,8 +17979,9 @@ impl Store {
     pub fn count_keys_in_slot(&mut self, slot: u16, now_ms: u64) -> usize {
         self.entries
             .iter()
-            .filter(|(k, e)| {
-                crc16_slot(k) == slot && !evaluate_expiry(now_ms, e.expiry_ms()).should_evict
+            .filter(|(k, _)| {
+                crc16_slot(k) == slot
+                    && !evaluate_expiry(now_ms, self.expiry_ms(k.as_ref())).should_evict
             })
             .count()
     }
@@ -18229,13 +18293,13 @@ impl Store {
         let mut result = Vec::new();
         let mut last_examined: Option<&'a std::sync::Arc<[u8]>> = None;
         for key in keys {
-            let Some(entry) = self.entries.get(key.as_ref()) else {
+            let Some(_entry) = self.entries.get(key.as_ref()) else {
                 continue;
             };
             pos += 1;
             processed += 1;
             last_examined = Some(key);
-            if evaluate_expiry(now_ms, entry.expiry_ms()).should_evict {
+            if evaluate_expiry(now_ms, self.expiry_ms(key.as_ref())).should_evict {
                 if processed >= batch_size {
                     break;
                 }
@@ -18619,6 +18683,7 @@ impl Store {
         } else {
             0
         };
+        let source_expiry = self.expiry_ms(source);
 
         let entry = match self.entries.get_mut(source) {
             Some(source_entry) => {
@@ -18656,7 +18721,7 @@ impl Store {
             self.stream_max_deleted_ids
                 .insert(destination.to_vec(), max_deleted_id);
         }
-        self.internal_entries_insert(destination.to_vec(), entry);
+        self.internal_entries_insert_with_expiry(destination.to_vec(), entry, source_expiry);
         self.dirty = self.dirty.saturating_add(1);
         Ok(true)
     }
@@ -18715,11 +18780,7 @@ impl Store {
         let stored = elements.len() as u64;
         self.internal_entries_insert(
             key,
-            Entry::new(
-                Value::List(Box::new(elements.into_iter().collect())),
-                None,
-                0,
-            ),
+            Entry::new(Value::List(Box::new(elements.into_iter().collect())), 0),
         );
         self.dirty = self.dirty.saturating_add(stored.max(1));
     }
@@ -18733,15 +18794,15 @@ impl Store {
             Some(e) => e,
             None => return 0,
         };
-        if let Some(exp) = entry.expiry_ms()
+        if let Some(exp) = self.expiry_ms(key)
             && now_ms > exp
         {
             return 0;
         }
-        Self::entry_state_digest(key, entry)
+        Self::entry_state_digest(key, entry, self.expiry_ms(key))
     }
 
-    fn entry_state_digest(key: &[u8], entry: &Entry) -> u64 {
+    fn entry_state_digest(key: &[u8], entry: &Entry, expiry_ms: Option<u64>) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
         hash = fnv1a_update(hash, key);
         match &entry.value {
@@ -18794,7 +18855,7 @@ impl Store {
                 }
             }
         }
-        let expiry_bytes = entry.expiry_ms().unwrap_or(0).to_le_bytes();
+        let expiry_bytes = expiry_ms.unwrap_or(0).to_le_bytes();
         hash = fnv1a_update(hash, &expiry_bytes);
         hash
     }
@@ -18803,7 +18864,7 @@ impl Store {
     pub fn key_modification_count(&self, key: &[u8], now_ms: u64) -> u64 {
         match self.entries.get(key) {
             Some(entry) => {
-                if let Some(exp) = entry.expiry_ms()
+                if let Some(exp) = self.expiry_ms(key)
                     && now_ms > exp
                 {
                     return 0;
@@ -18892,7 +18953,7 @@ impl Store {
     /// never cached — they estimate cheaply (lists already O(1)). (frankenredis-c3he2)
     fn cached_entry_memory_usage_bytes(&self, key: &[u8], entry: &Entry) -> usize {
         let fixed = estimate_key_memory_usage_bytes(key)
-            .saturating_add(estimate_expiry_memory_usage_bytes(entry));
+            .saturating_add(estimate_expiry_memory_usage_bytes(self.key_has_expiry(key)));
         if !value_estimate_is_expensive(&entry.value) {
             return fixed.saturating_add(estimate_value_memory_usage_bytes(entry));
         }
@@ -18984,7 +19045,7 @@ impl Store {
         if cached_dirty.saturating_add(1) != mutations {
             return;
         }
-        let removed_bytes = estimate_entry_memory_usage_bytes(key, entry);
+        let removed_bytes = estimate_entry_memory_usage_bytes(key, entry, self.key_has_expiry(key));
         self.cached_memory_usage_bytes
             .set(cached_bytes.saturating_sub(removed_bytes));
         self.cached_memory_usage_dirty.set(mutations);
@@ -19004,8 +19065,8 @@ impl Store {
         // clone ONLY the up-to-`sample_limit` sampled keys in a single pass.
         let eligible_len = self
             .entries
-            .values()
-            .filter(|entry| !volatile_only || entry.expires_at_ms.is_some())
+            .keys()
+            .filter(|key| !volatile_only || self.key_has_expiry(key.as_ref()))
             .count();
 
         let sample_limit = sample_limit.max(1);
@@ -19014,7 +19075,7 @@ impl Store {
             return self
                 .entries
                 .iter()
-                .filter(|(_, entry)| !volatile_only || entry.expires_at_ms.is_some())
+                .filter(|(key, _)| !volatile_only || self.key_has_expiry(key.as_ref()))
                 .map(|(key, _)| key.to_vec())
                 .collect();
         }
@@ -19035,7 +19096,7 @@ impl Store {
         for (eligible_idx, (key, _entry)) in self
             .entries
             .iter()
-            .filter(|(_, entry)| !volatile_only || entry.expires_at_ms.is_some())
+            .filter(|(key, _)| !volatile_only || self.key_has_expiry(key.as_ref()))
             .enumerate()
         {
             if selected_indices.contains(&eligible_idx) {
@@ -19094,10 +19155,10 @@ impl Store {
         let mut best_key: Option<Vec<u8>> = None;
         let mut best_ttl = u64::MAX;
         for key in keys {
-            let Some(entry) = self.entries.get(key.as_slice()) else {
+            if !self.entries.contains_key(key.as_slice()) {
                 continue;
-            };
-            if let Some(expires_at_ms) = entry.expiry_ms()
+            }
+            if let Some(expires_at_ms) = self.expiry_ms(key)
                 && (expires_at_ms < best_ttl
                     || (expires_at_ms == best_ttl
                         && best_key.as_ref().is_none_or(|best| key < best)))
@@ -19151,8 +19212,8 @@ impl Store {
             MaxmemoryPolicy::VolatileRandom => {
                 let n = self
                     .entries
-                    .values()
-                    .filter(|e| e.expires_at_ms.is_some())
+                    .keys()
+                    .filter(|key| self.key_has_expiry(key.as_ref()))
                     .count();
                 if n == 0 {
                     return None;
@@ -19161,7 +19222,7 @@ impl Store {
                 let idx = rand_val as usize % n;
                 self.entries
                     .iter()
-                    .filter(|(_, e)| e.expires_at_ms.is_some())
+                    .filter(|(key, _)| self.key_has_expiry(key.as_ref()))
                     .nth(idx)
                     .map(|(k, _)| k.to_vec())
             }
@@ -20559,7 +20620,7 @@ impl Store {
         self.stream_last_ids.remove(key);
         self.stream_entries_added.remove(key);
         self.stream_max_deleted_ids.remove(key);
-        let mut entry = Entry::new(value, expires_at_ms, now_ms);
+        let mut entry = Entry::new(value, now_ms);
         entry.force_set_listpack_encoding = force_set_listpack_encoding;
         entry.force_set_hashtable_encoding = force_set_hashtable_encoding;
         // (frankenredis-nom8d) RESTORE re-derives HASH/ZSET encoding from the
@@ -20584,7 +20645,7 @@ impl Store {
             ),
             _ => {}
         }
-        self.internal_entries_insert(key.to_vec(), entry);
+        self.internal_entries_insert_with_expiry(key.to_vec(), entry, expires_at_ms);
         if let Some(last_id) = restored_stream_last_id {
             self.stream_last_ids.insert(key.to_vec(), last_id);
         }
@@ -20647,7 +20708,7 @@ impl Store {
     pub fn get_value_and_expiry(&self, key: &[u8]) -> Option<(&Value, Option<u64>)> {
         self.entries
             .get(key)
-            .map(|entry| (&entry.value, entry.expiry_ms()))
+            .map(|entry| (&entry.value, self.expiry_ms(key)))
     }
 
     /// and encoded/replayed to reconstruct the database from scratch.
@@ -20877,7 +20938,7 @@ impl Store {
             }
 
             // Emit PEXPIREAT if the key has an expiry timestamp.
-            if let Some(exp_ms) = entry.expiry_ms() {
+            if let Some(exp_ms) = self.expiry_ms(physical_key.as_slice()) {
                 commands.push(vec![
                     b"PEXPIREAT".to_vec(),
                     logical_key.clone(),
@@ -22381,9 +22442,9 @@ const REDIS_STREAM_NODE_MAX_ENTRIES: usize = 100;
 
 const REDIS_STREAM_ENTRY_ID_BYTES: usize = 16;
 
-fn estimate_entry_memory_usage_bytes(key: &[u8], entry: &Entry) -> usize {
+fn estimate_entry_memory_usage_bytes(key: &[u8], entry: &Entry, has_expiry: bool) -> usize {
     estimate_key_memory_usage_bytes(key)
-        .saturating_add(estimate_expiry_memory_usage_bytes(entry))
+        .saturating_add(estimate_expiry_memory_usage_bytes(has_expiry))
         .saturating_add(estimate_value_memory_usage_bytes(entry))
 }
 
@@ -22391,8 +22452,8 @@ fn estimate_key_memory_usage_bytes(key: &[u8]) -> usize {
     REDIS_DICT_ENTRY_BYTES.saturating_add(estimate_sds_allocation_bytes(key.len()))
 }
 
-fn estimate_expiry_memory_usage_bytes(entry: &Entry) -> usize {
-    if entry.expires_at_ms.is_some() {
+fn estimate_expiry_memory_usage_bytes(has_expiry: bool) -> usize {
+    if has_expiry {
         REDIS_DICT_ENTRY_BYTES
     } else {
         0
@@ -25964,13 +26025,11 @@ mod tests {
         seed(&mut expected);
         seed(&mut actual);
 
-        let expires_at_ms = expected
-            .entries
-            .get(b"n".as_slice())
-            .and_then(Entry::expiry_ms);
-        expected.internal_entries_insert(
+        let expires_at_ms = expected.expiry_ms(b"n");
+        expected.internal_entries_insert_with_expiry(
             b"n".to_vec(),
-            Entry::new(Value::Integer(42), expires_at_ms, 2_000),
+            Entry::new(Value::Integer(42), 2_000),
+            expires_at_ms,
         );
         expected.dirty = expected.dirty.saturating_add(1);
 
@@ -31708,7 +31767,7 @@ mod tests {
             let candidates: Vec<Vec<u8>> = store
                 .entries
                 .iter()
-                .filter(|(_, e)| !volatile_only || e.expires_at_ms.is_some())
+                .filter(|(k, _)| !volatile_only || store.key_has_expiry(k.as_ref()))
                 .map(|(k, _)| k.to_vec())
                 .collect();
             let sample_limit = sample_limit.max(1);
@@ -38031,7 +38090,7 @@ mod tests {
         let mut sink = 0u64;
         for _ in 0..reps {
             for _ in 0..4 {
-                sink ^= Store::entry_state_digest(&key, entry);
+                sink ^= Store::entry_state_digest(&key, entry, store.expiry_ms(&key));
             }
         }
         let eliminated_ns = t1.elapsed().as_nanos().max(1);
@@ -44960,7 +45019,7 @@ mod tests {
                         AofKeySnapshot {
                             db,
                             key: logical_key.to_vec(),
-                            expires_at_ms: entry.expiry_ms(),
+                            expires_at_ms: store.expiry_ms(physical_key.as_slice()),
                             value,
                         }
                     })
