@@ -95,8 +95,22 @@ pub(crate) fn encode_upstream_stream_listpacks3(
     max_deleted: Option<(u64, u64)>,
 ) -> Option<Vec<u8>> {
     let mut buf = Vec::new();
-    let mut sorted_entries = entries.to_vec();
-    sorted_entries.sort_by_key(|entry| (entry.0, entry.1));
+    // fr-store's PackedStreamLog already yields entries in id order, so the
+    // common DUMP/RDB-save path is already sorted — avoid the deep `to_vec()`
+    // (StreamEntry owns a `Vec<(Vec<u8>, Vec<u8>)>`, so cloning copies every
+    // field/value) and sort. Only an out-of-order caller pays the copy+sort.
+    let sorted_storage: Vec<StreamEntry>;
+    let sorted_entries: &[StreamEntry] = if entries
+        .windows(2)
+        .all(|w| (w[0].0, w[0].1) <= (w[1].0, w[1].1))
+    {
+        entries
+    } else {
+        let mut owned = entries.to_vec();
+        owned.sort_by_key(|entry| (entry.0, entry.1));
+        sorted_storage = owned;
+        &sorted_storage
+    };
 
     // Group entries into listpack macro-nodes mirroring upstream
     // `streamAppendItem`'s split rules, then emit one master-entry listpack per
