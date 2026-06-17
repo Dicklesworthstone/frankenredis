@@ -24233,7 +24233,12 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             // for 'OBJECT'. Try DEBUG HELP." (br-frankenredis-1pe7)
             return Err(debug_subcommand_envelope_error(sub));
         }
-        let key = &argv[2];
+        // DEBUG <sub> <key> must resolve the key in the client's SELECTed DB.
+        // fr stores keys DB-namespaced (encode_db_key); the raw arg only matches
+        // db 0, so without this a non-zero-DB key reads db 0's same-named object
+        // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
+        let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
+        let key = key_buf.as_slice();
         let Some(encoding) = store.object_encoding(key, now_ms) else {
             return Ok(RespFrame::Error("ERR no such key".to_string()));
         };
@@ -24801,7 +24806,12 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         if argv.len() != 3 {
             return Err(debug_subcommand_envelope_error(sub));
         }
-        let key = &argv[2];
+        // DEBUG <sub> <key> must resolve the key in the client's SELECTed DB.
+        // fr stores keys DB-namespaced (encode_db_key); the raw arg only matches
+        // db 0, so without this a non-zero-DB key reads db 0's same-named object
+        // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
+        let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
+        let key = key_buf.as_slice();
         let Some(encoding) = store.object_encoding(key, now_ms) else {
             return Ok(RespFrame::Error("ERR no such key".to_string()));
         };
@@ -24810,7 +24820,9 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                 "ERR Not an sds encoded string.".to_string(),
             ));
         }
-        let key_len = key.len();
+        // key_sds_len reports the LOGICAL key the client passed (matching redis's
+        // per-DB sds key), not the DB-namespaced physical key used for the lookup.
+        let key_len = argv[2].len();
         let val_len = store.strlen(key, now_ms).unwrap_or(0);
         let key_header = sds_key_header_size(key_len);
         let val_header = sds_value_header_size(val_len);
@@ -24860,7 +24872,12 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         if argv.len() != 3 {
             return Err(debug_subcommand_envelope_error(sub));
         }
-        let key = &argv[2];
+        // DEBUG <sub> <key> must resolve the key in the client's SELECTed DB.
+        // fr stores keys DB-namespaced (encode_db_key); the raw arg only matches
+        // db 0, so without this a non-zero-DB key reads db 0's same-named object
+        // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
+        let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
+        let key = key_buf.as_slice();
         let Some(encoding) = store.object_encoding(key, now_ms) else {
             return Ok(RespFrame::Error("ERR no such key".to_string()));
         };
@@ -24882,7 +24899,12 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         if argv.len() != 3 && argv.len() != 4 {
             return Err(debug_subcommand_envelope_error(sub));
         }
-        let key = &argv[2];
+        // DEBUG <sub> <key> must resolve the key in the client's SELECTed DB.
+        // fr stores keys DB-namespaced (encode_db_key); the raw arg only matches
+        // db 0, so without this a non-zero-DB key reads db 0's same-named object
+        // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
+        let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
+        let key = key_buf.as_slice();
         let Some(encoding) = store.object_encoding(key, now_ms) else {
             return Ok(RespFrame::Error("ERR no such key".to_string()));
         };
@@ -24982,7 +25004,12 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         if argv.len() < 3 || argv.len() > 4 {
             return Err(debug_subcommand_envelope_error(sub));
         }
-        let key = &argv[2];
+        // DEBUG <sub> <key> must resolve the key in the client's SELECTed DB.
+        // fr stores keys DB-namespaced (encode_db_key); the raw arg only matches
+        // db 0, so without this a non-zero-DB key reads db 0's same-named object
+        // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
+        let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
+        let key = key_buf.as_slice();
         let Some(encoding) = store.object_encoding(key, now_ms) else {
             return Ok(RespFrame::Error("ERR no such key".to_string()));
         };
