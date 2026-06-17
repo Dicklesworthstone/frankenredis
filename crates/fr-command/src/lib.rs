@@ -25197,17 +25197,40 @@ fn compute_debug_digest(store: &mut Store, now_ms: u64, keys: Option<&[&[u8]]>) 
         return digest_to_hex(&digest);
     }
 
-    let keys_to_process = store.all_keys();
-    if !keys_to_process.is_empty() {
-        mix_digest(&mut digest, &0_u32.to_be_bytes());
+    // Redis's computeDatasetDigest walks DBs in ascending order and, for every
+    // NON-EMPTY DB, mixes htonl(dbid) into the running digest *before* XOR-ing
+    // that DB's per-key digests in — so "the same dataset moved to another DB"
+    // yields a different digest. Each per-key digest mixes the LOGICAL key name.
+    // fr stores keys DB-namespaced (encode_db_key), so the old code mixed a single
+    // htonl(0) plus the *physical* (namespaced) key name: byte-identical to redis
+    // for db 0 but divergent for every key in a non-zero DB. Group by decoded DB
+    // index and mix htonl(dbid) + the de-namespaced name to match redis across DBs.
+    let mut keys_by_db: std::collections::BTreeMap<usize, Vec<Vec<u8>>> =
+        std::collections::BTreeMap::new();
+    for key in store.all_keys() {
+        let db = fr_store::decode_db_key(&key).map_or(0, |(db, _)| db);
+        keys_by_db.entry(db).or_default().push(key);
     }
 
-    for key in &keys_to_process {
-        store.expire_key_if_stale(key, now_ms);
-        if store.get_value_and_expiry(key).is_some() {
+    for (db, phys_keys) in &keys_by_db {
+        // Resolve survivors first (lazy-expiry mutates the store); only a DB that
+        // still holds at least one live key contributes its htonl(dbid) header.
+        let mut survivors: Vec<&[u8]> = Vec::new();
+        for pk in phys_keys {
+            store.expire_key_if_stale(pk, now_ms);
+            if store.get_value_and_expiry(pk).is_some() {
+                survivors.push(pk.as_slice());
+            }
+        }
+        if survivors.is_empty() {
+            continue;
+        }
+        mix_digest(&mut digest, &(*db as u32).to_be_bytes());
+        for pk in survivors {
+            let logical = fr_store::decode_db_key(pk).map_or(pk, |(_, lk)| lk);
             let mut key_value_digest = [0u8; 20];
-            mix_digest(&mut key_value_digest, key);
-            mix_debug_object_digest(store, key, now_ms, &mut key_value_digest);
+            mix_digest(&mut key_value_digest, logical);
+            mix_debug_object_digest(store, pk, now_ms, &mut key_value_digest);
             xor_digest(&mut digest, &key_value_digest);
         }
     }
