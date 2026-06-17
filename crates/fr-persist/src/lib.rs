@@ -2385,6 +2385,18 @@ struct LzfHashSlot {
 struct LzfScratch {
     generation: u32,
     htab: Vec<LzfHashSlot>,
+    // (frankenredis-g9h0v) Packed half-size table for inputs < 16 MiB (the
+    // overwhelming majority): one u32 per slot = `(gen8 << 24) | pos_plus_one`
+    // instead of the 8-byte {generation, pos} pair. Halves the table footprint
+    // (512 KiB -> 256 KiB), which fits a typical L2 — the lzf hash probes are
+    // cache-cold for low-compressibility data (mostly-literal payloads), where
+    // lzf is ~79% of DUMP CPU. Keeps the epoch trick (stale slots read as unset
+    // via the generation tag) so there is no per-call memset; the 8-bit
+    // generation simply wraps — and clears — every 256 calls instead of 2^32.
+    // Inputs >= 16 MiB can't pack pos into 24 bits, so they keep `htab`.
+    packed: Vec<u32>,
+    packed_generation: u8,
+    use_packed: bool,
 }
 
 impl LzfScratch {
@@ -2392,10 +2404,30 @@ impl LzfScratch {
         Self {
             generation: 0,
             htab: Vec::new(),
+            packed: Vec::new(),
+            packed_generation: 0,
+            use_packed: false,
         }
     }
 
-    fn begin_call(&mut self, hsize: usize) -> u32 {
+    /// Returns the active generation tag (u32 for the wide path; the packed path
+    /// ignores the return and uses `packed_generation` internally).
+    fn begin_call(&mut self, hsize: usize, in_len: usize) -> u32 {
+        // pos_plus_one is ip+1 <= in_len, so a 24-bit field holds it iff in_len
+        // < 2^24. Above that, fall back to the 8-byte epoch table.
+        self.use_packed = in_len < (1 << 24);
+        if self.use_packed {
+            if self.packed.len() != hsize {
+                self.packed.resize(hsize, 0);
+                self.packed_generation = 0;
+            }
+            self.packed_generation = self.packed_generation.wrapping_add(1);
+            if self.packed_generation == 0 {
+                self.packed.fill(0);
+                self.packed_generation = 1;
+            }
+            return u32::from(self.packed_generation);
+        }
         if self.htab.len() != hsize {
             self.htab.resize(hsize, LzfHashSlot::default());
             self.generation = 0;
@@ -2410,20 +2442,36 @@ impl LzfScratch {
 
     #[inline]
     fn get(&self, index: usize, generation: u32) -> u32 {
-        let slot = self.htab[index];
-        if slot.generation == generation {
-            slot.pos_plus_one
+        if self.use_packed {
+            let slot = self.packed[index];
+            // High byte is the generation tag; low 24 bits are pos_plus_one.
+            if (slot >> 24) == (generation & 0xFF) {
+                slot & 0x00FF_FFFF
+            } else {
+                0
+            }
         } else {
-            0
+            let slot = self.htab[index];
+            if slot.generation == generation {
+                slot.pos_plus_one
+            } else {
+                0
+            }
         }
     }
 
     #[inline]
     fn set(&mut self, index: usize, generation: u32, pos_plus_one: u32) {
-        self.htab[index] = LzfHashSlot {
-            generation,
-            pos_plus_one,
-        };
+        if self.use_packed {
+            // pos_plus_one < 2^24 is guaranteed by the use_packed gate (in_len
+            // < 2^24). Pack the 8-bit generation tag into the high byte.
+            self.packed[index] = ((generation & 0xFF) << 24) | (pos_plus_one & 0x00FF_FFFF);
+        } else {
+            self.htab[index] = LzfHashSlot {
+                generation,
+                pos_plus_one,
+            };
+        }
     }
 }
 
