@@ -4468,6 +4468,18 @@ pub struct Runtime {
     dispatch_acl_snapshot_generation: u64,
     dispatch_peer_addr_cache: String,
     dispatch_peer_addr_cache_source: Option<std::net::SocketAddr>,
+    /// (frankenredis-7grsy) Chained command-timing clock. Holds the monotonic
+    /// `Instant` at which the previous timed fast-path command finished, paired
+    /// with the `stat_total_commands_processed` value at that moment. A timed
+    /// fast-path command reuses this instant as its OWN start when the counters
+    /// are adjacent (`prev_seq + 1 == this_seq`), so a run of N consecutive
+    /// pipelined fast-path commands reads the clock N+1 times instead of 2N
+    /// (each command's end-read doubles as the next command's start-read).
+    /// Adjacency breaks automatically across any intervening generic command
+    /// (it bumps the counter via `execute_dispatch` without updating this), and
+    /// the server resets it to `None` at the start of each buffered-frame batch
+    /// so an idle gap between batches never inflates a command's measured time.
+    last_command_end: Option<(Instant, u64)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4730,7 +4742,49 @@ impl Runtime {
             dispatch_acl_snapshot_generation: 0,
             dispatch_peer_addr_cache: "127.0.0.1:0".to_string(),
             dispatch_peer_addr_cache_source: None,
+            last_command_end: None,
         }
+    }
+
+    /// (frankenredis-7grsy) Start-of-command monotonic instant for a timed
+    /// fast-path handler. Reuses the previous fast-path command's end-instant
+    /// when the global command counter is adjacent (the previous command was
+    /// the one that recorded it), otherwise reads the clock fresh. Must be
+    /// called AFTER this command has incremented `stat_total_commands_processed`
+    /// and paired with `finish_chained_command` at the end of the same handler.
+    #[inline]
+    fn chained_command_start(&self) -> Instant {
+        let seq = self.server.store.stat_total_commands_processed;
+        match self.last_command_end {
+            Some((inst, prev_seq)) if prev_seq.wrapping_add(1) == seq => inst,
+            _ => Instant::now(),
+        }
+    }
+
+    /// (frankenredis-7grsy) End-of-command monotonic read for a timed fast-path
+    /// handler. Records the end-instant so the next adjacent fast-path command
+    /// can chain off it, and returns the elapsed microseconds for this command
+    /// (slowlog / latency-tracker / command-histogram / time-budget accounting).
+    #[inline]
+    fn finish_chained_command(&mut self, start: Instant) -> u64 {
+        let end = Instant::now();
+        self.finish_chained_command_at(start, end)
+    }
+
+    #[inline]
+    fn finish_chained_command_at(&mut self, start: Instant, end: Instant) -> u64 {
+        let elapsed_us = end.saturating_duration_since(start).as_micros() as u64;
+        self.last_command_end = Some((end, self.server.store.stat_total_commands_processed));
+        elapsed_us
+    }
+
+    /// (frankenredis-7grsy) Reset the chained command-timing clock. The server
+    /// calls this at the start of each buffered-frame batch so the first command
+    /// in a fresh batch reads the clock anew (an idle gap since the previous
+    /// batch must not be counted as command-execution time).
+    #[inline]
+    pub fn reset_command_timing_chain(&mut self) {
+        self.last_command_end = None;
     }
 
     /// Set the AOF persistence file path. When set, SAVE/BGSAVE will write
@@ -6922,9 +6976,9 @@ impl Runtime {
         self.server.last_eviction_loop = None;
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         self.server.store.set_plain_borrowed(key, value, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
 
         self.record_plain_set_borrowed_metrics(key, value, elapsed_us, now_ms, packet_id);
 
@@ -6975,9 +7029,9 @@ impl Runtime {
         let value_len = value.len();
         let value_prefix = value[..value.len().min(SLOWLOG_ENTRY_MAX_STRING)].to_vec();
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         self.server.store.set_plain_owned(key, value, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
 
         self.record_plain_set_owned_metrics(
             &key_for_metrics,
@@ -7027,11 +7081,11 @@ impl Runtime {
         self.server.last_eviction_loop = None;
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         for (key, value) in pairs {
             self.server.store.set_plain_borrowed(key, value, now_ms);
         }
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
 
         self.record_plain_mset_borrowed_metrics(pairs, elapsed_us, now_ms, packet_id);
 
@@ -7199,9 +7253,9 @@ impl Runtime {
         self.server.last_eviction_loop = None;
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.incr(key, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(value) => RespFrame::Integer(value),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -7326,9 +7380,9 @@ impl Runtime {
         self.server.last_eviction_loop = None;
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.getdel(key, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(Some(value)) => RespFrame::BulkString(Some(value)),
             Ok(None) => RespFrame::BulkString(None),
@@ -7451,9 +7505,9 @@ impl Runtime {
         self.server.last_eviction_loop = None;
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.incrby(key, -1, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(value) => RespFrame::Integer(value),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -7591,9 +7645,9 @@ impl Runtime {
         self.server.last_eviction_loop = None;
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.incrby(key, neg_delta, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(value) => RespFrame::Integer(value),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -7724,7 +7778,7 @@ impl Runtime {
         self.server.last_eviction_loop = None;
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         // Mirror the generic `append` handler exactly: no-stat length read (which
         // surfaces WRONGTYPE for a non-string key), then the checkStringLength
         // guard, then the append. (frankenredis-ga4j1 string-length cap = 512MiB)
@@ -7745,7 +7799,7 @@ impl Runtime {
             }
             Err(err) => CommandError::Store(err).to_resp(),
         };
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_append_borrowed_metrics(
@@ -7889,9 +7943,9 @@ impl Runtime {
         self.server.last_eviction_loop = None;
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.setrange(key, offset_usize, value, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(new_len) => RespFrame::Integer(i64::try_from(new_len).unwrap_or(i64::MAX)),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -8038,7 +8092,7 @@ impl Runtime {
         // Pass borrowed values straight through so the store copies each member
         // once directly into its container. The old code first collected an
         // intermediate Vec<Vec<u8>> here, then had the store clone out of it.
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let store_result = match cmd {
             PlainKeyedValuesCmd::Sadd => self
                 .server
@@ -8056,7 +8110,7 @@ impl Runtime {
                 .rpush(key, values, now_ms)
                 .map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
         };
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match store_result {
             Ok(n) => RespFrame::Integer(n),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -8202,7 +8256,7 @@ impl Runtime {
         self.server.last_eviction_loop = None;
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let mut added = 0_usize;
         let mut error: Option<RespFrame> = None;
         for pair in pairs.chunks_exact(2) {
@@ -8219,7 +8273,7 @@ impl Runtime {
                 }
             }
         }
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply =
             error.unwrap_or_else(|| RespFrame::Integer(i64::try_from(added).unwrap_or(i64::MAX)));
         let failed = matches!(reply, RespFrame::Error(_));
@@ -8363,7 +8417,7 @@ impl Runtime {
         self.server.last_eviction_loop = None;
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let reply = match self.server.store.zadd_with_options(
             key,
             members,
@@ -8379,7 +8433,7 @@ impl Runtime {
             Ok((count, _changed)) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
             Err(err) => CommandError::Store(err).to_resp(),
         };
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_zadd_borrowed_metrics(key, pairs, elapsed_us, now_ms, packet_id, failed);
@@ -8515,7 +8569,7 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let resp3 = self.session.resp_protocol_version == 3;
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let reply = match self
             .server
             .store
@@ -8536,7 +8590,7 @@ impl Runtime {
             }
             Err(err) => CommandError::Store(err).to_resp(),
         };
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_zincrby_borrowed_metrics(
@@ -8675,7 +8729,7 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let resp3 = self.session.resp_protocol_version == 3;
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let reply = match cmd {
             PlainKeyedPopCmd::Lpop => match self.server.store.lpop(key, now_ms) {
                 Ok(value) => RespFrame::BulkString(value),
@@ -8701,7 +8755,7 @@ impl Runtime {
                 plain_zpop_reply(self.server.store.zpopmax(key, now_ms), resp3)
             }
         };
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_keyed_pop_borrowed_metrics(
@@ -8835,9 +8889,9 @@ impl Runtime {
         let suppress_reply = self.suppress_current_network_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.get_string_bytes(key, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let end = Instant::now();
         let mut error_reply = None;
         match result {
             Ok(value) => {
@@ -8857,6 +8911,7 @@ impl Runtime {
                 error_reply = Some(reply);
             }
         }
+        let elapsed_us = self.finish_chained_command_at(start, end);
         let failed = error_reply.is_some();
 
         self.record_plain_get_borrowed_metrics(key, elapsed_us, now_ms, packet_id, failed);
@@ -8918,7 +8973,7 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let suppress_reply = self.suppress_current_network_reply();
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         if !suppress_reply {
             match msg {
                 // `PING` -> simple string `+PONG` (protocol-invariant RESP2/RESP3).
@@ -8927,7 +8982,7 @@ impl Runtime {
                 Some(m) => encode_bulk_string_slice(Some(m), resp3, out),
             }
         }
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
 
         self.record_plain_ping_borrowed_metrics(msg, elapsed_us, now_ms, packet_id);
 
@@ -9021,11 +9076,11 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let suppress_reply = self.suppress_current_network_reply();
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         if !suppress_reply {
             encode_bulk_string_slice(Some(msg), resp3, out);
         }
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
 
         self.record_plain_echo_borrowed_metrics(msg, elapsed_us, now_ms, packet_id);
 
@@ -9124,7 +9179,7 @@ impl Runtime {
         let suppress_reply = self.suppress_current_network_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.smembers_borrow_scan(key, now_ms, |ev| {
             if suppress_reply {
                 return;
@@ -9138,7 +9193,7 @@ impl Runtime {
                 }
             }
         });
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let mut error_reply = None;
         if let Err(err) = result {
             let reply = CommandError::Store(err).to_resp();
@@ -9215,7 +9270,7 @@ impl Runtime {
         let suppress_reply = self.suppress_current_network_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self
             .server
             .store
@@ -9232,7 +9287,7 @@ impl Runtime {
                     }
                 }
             });
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let mut error_reply = None;
         if let Err(err) = result {
             let reply = CommandError::Store(err).to_resp();
@@ -9305,7 +9360,7 @@ impl Runtime {
         let suppress_reply = self.suppress_current_network_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.hgetall_borrow_scan(key, now_ms, |ev| {
             if suppress_reply {
                 return;
@@ -9319,7 +9374,7 @@ impl Runtime {
                 }
             }
         });
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let mut error_reply = None;
         if let Err(err) = result {
             let reply = CommandError::Store(err).to_resp();
@@ -9399,7 +9454,7 @@ impl Runtime {
         let suppress_reply = self.suppress_current_network_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start_t = Instant::now();
+        let start_t = self.chained_command_start();
         let result = self
             .server
             .store
@@ -9416,7 +9471,7 @@ impl Runtime {
                     }
                 }
             });
-        let elapsed_us = start_t.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start_t);
         let mut error_reply = None;
         if let Err(err) = result {
             let reply = CommandError::Store(err).to_resp();
@@ -9478,9 +9533,9 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.get(key, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(value) => RespFrame::BulkString(value),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -9619,9 +9674,9 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.hget(key, field, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(value) => RespFrame::BulkString(value),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -9763,7 +9818,7 @@ impl Runtime {
         let suppress_reply = self.suppress_current_network_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         if !suppress_reply {
             fr_protocol::encode_aggregate_header(keys.len(), false, out);
         }
@@ -9777,7 +9832,7 @@ impl Runtime {
                 }
             }
         }
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
 
         self.record_plain_mget_borrowed_metrics(keys, elapsed_us, now_ms, packet_id);
 
@@ -9883,14 +9938,14 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let mut count = 0_i64;
         for key in keys {
             if self.server.store.exists_no_touch(key, now_ms) {
                 count = count.saturating_add(1);
             }
         }
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = RespFrame::Integer(count);
 
         self.record_plain_exists_borrowed_metrics(keys, elapsed_us, now_ms, packet_id);
@@ -9989,9 +10044,9 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.strlen(key, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(len) => RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -10367,13 +10422,13 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         // Mirror record_source_key_lookups(store, keys): one exists_no_touch per key.
         for key in keys {
             let _ = self.server.store.exists_no_touch(key, now_ms);
         }
         let result = self.server.store.sintercard(keys, 0, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -10512,11 +10567,11 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let resp3 = self.session.resp_protocol_version == 3;
-        let start = Instant::now();
+        let start = self.chained_command_start();
         // Mirror record_source_key_lookups(store, &[key]) then store.zmscore.
         let _ = self.server.store.exists_no_touch(key, now_ms);
         let result = self.server.store.zmscore(key, members, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(scores) => RespFrame::Array(Some(
                 scores
@@ -10671,9 +10726,9 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.smismember(key, members, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(flags) => RespFrame::Array(Some(
                 flags
@@ -10820,9 +10875,9 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.hmget(key, fields, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(values) => RespFrame::Array(Some(
                 values.into_iter().map(RespFrame::BulkString).collect(),
@@ -10958,9 +11013,9 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.sismember(key, member, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(is_member) => RespFrame::Integer(i64::from(is_member)),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -11096,9 +11151,9 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.getbit(key, offset as usize, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(bit) => RespFrame::Integer(i64::from(bit)),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -11249,9 +11304,9 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let usage = self.server.store.memory_usage_for_key(key, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match usage {
             Some(bytes) => RespFrame::Integer(i64::try_from(bytes).unwrap_or(i64::MAX)),
             None => RespFrame::BulkString(None),
@@ -11352,9 +11407,9 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let encoding = self.server.store.object_encoding(key, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match encoding {
             Some(enc) => RespFrame::BulkString(Some(enc.as_bytes().to_vec())),
             None => RespFrame::BulkString(None),
@@ -11448,9 +11503,9 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let refcount = self.server.store.object_refcount(key, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match refcount {
             Some(n) => RespFrame::Integer(n),
             None => RespFrame::BulkString(None),
@@ -11564,7 +11619,7 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let reply = if !self.server.store.exists_no_touch(key, now_ms) {
             RespFrame::BulkString(None)
         } else {
@@ -11592,7 +11647,7 @@ impl Runtime {
                 },
             }
         };
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_object_stat_borrowed_metrics(
@@ -11719,7 +11774,7 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         // Call the SAME store.lpos_full the generic no-option path uses (rank 1,
         // no COUNT, no MAXLEN) so keyspace-stat accounting is byte-identical —
         // store.lpos records a keyspace hit but lpos_full does not, so they must
@@ -11728,7 +11783,7 @@ impl Runtime {
             .server
             .store
             .lpos_full(key, element, 1, None, 0, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(positions) => match positions.first() {
                 Some(&pos) => RespFrame::Integer(i64::try_from(pos).unwrap_or(i64::MAX)),
@@ -11812,12 +11867,12 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self
             .server
             .store
             .lpos_full(key, element, rank, None, 0, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(positions) => match positions.first() {
                 Some(&pos) => RespFrame::Integer(i64::try_from(pos).unwrap_or(i64::MAX)),
@@ -11948,9 +12003,9 @@ impl Runtime {
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let reply = RespFrame::Integer(fr_command::visible_command_count(&self.server.store));
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
 
         self.record_plain_command_count_borrowed_metrics(elapsed_us, now_ms, packet_id);
 
@@ -12041,9 +12096,9 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let size = self.server.store.dbsize_in_db(0);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = RespFrame::Integer(i64::try_from(size).unwrap_or(i64::MAX));
 
         self.record_plain_dbsize_borrowed_metrics(elapsed_us, now_ms, packet_id);
@@ -12186,7 +12241,7 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let reply = match self.server.store.key_type(key, now_ms) {
             None => RespFrame::Integer(if bit { -1 } else { 0 }),
             Some("string") => {
@@ -12201,7 +12256,7 @@ impl Runtime {
             }
             Some(_) => CommandError::Store(fr_store::StoreError::WrongType).to_resp(),
         };
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_bitpos_borrowed_metrics(
@@ -12374,7 +12429,7 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let reply = match self.server.store.key_type(key, now_ms) {
             None => RespFrame::Integer(0),
             Some("string") if early_zero => RespFrame::Integer(0),
@@ -12390,7 +12445,7 @@ impl Runtime {
             }
             Some(_) => CommandError::Store(fr_store::StoreError::WrongType).to_resp(),
         };
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_bitcount_borrowed_metrics(
@@ -12534,7 +12589,7 @@ impl Runtime {
         self.server.last_eviction_loop = None;
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         // Mirror apply_expiry_with_options with no NX/XX/GT/LT options.
         let applied = match self.server.store.pttl_no_stats(key, now_ms) {
             fr_store::PttlValue::KeyMissing => false,
@@ -12544,7 +12599,7 @@ impl Runtime {
                 now_ms,
             ),
         };
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = RespFrame::Integer(i64::from(applied));
 
         self.record_plain_expire_borrowed_metrics(key, seconds_arg, elapsed_us, now_ms, packet_id);
@@ -12652,9 +12707,9 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.hstrlen(key, field, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(len) => RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -12789,9 +12844,9 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.hexists(key, field, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(exists) => RespFrame::Integer(i64::from(exists)),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -12915,9 +12970,9 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.llen(key, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(len) => RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -13048,7 +13103,7 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let reply = match cmd {
             PlainKeyMetaCmd::Ttl => RespFrame::Integer(match self.server.store.pttl(key, now_ms) {
                 fr_store::PttlValue::KeyMissing => -2,
@@ -13086,7 +13141,7 @@ impl Runtime {
                 })
             }
         };
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
 
         self.record_plain_keymeta_borrowed_metrics(cmd, key, elapsed_us, now_ms, packet_id);
 
@@ -13197,13 +13252,13 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = match cmd {
             PlainCardinalityCmd::Zcard => self.server.store.zcard(key, now_ms),
             PlainCardinalityCmd::Hlen => self.server.store.hlen(key, now_ms),
             PlainCardinalityCmd::Xlen => self.server.store.xlen(key, now_ms),
         };
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(len) => RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -13345,7 +13400,7 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = match cmd {
             // store.srandmember records its own keyspace lookup (record_keyspace_lookup).
             PlainRandMemberCmd::Srandmember => self.server.store.srandmember(key, now_ms),
@@ -13360,7 +13415,7 @@ impl Runtime {
                 self.server.store.zrandmember(key, now_ms)
             }
         };
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(Some(member)) => RespFrame::BulkString(Some(member)),
             Ok(None) => RespFrame::BulkString(None),
@@ -13440,7 +13495,7 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let reply = match cmd {
             PlainRandMemberCmd::Srandmember => {
                 match self.server.store.srandmember_count(key, count, now_ms) {
@@ -13478,7 +13533,7 @@ impl Runtime {
                 }
             }
         };
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_rand_member_borrowed_metrics(
@@ -13626,12 +13681,12 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = match cmd {
             PlainRankCmd::Zrank => self.server.store.zrank(key, member, now_ms),
             PlainRankCmd::Zrevrank => self.server.store.zrevrank(key, member, now_ms),
         };
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(Some(rank)) => RespFrame::Integer(i64::try_from(rank).unwrap_or(i64::MAX)),
             Ok(None) => RespFrame::BulkString(None),
@@ -13761,9 +13816,9 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.scard(key, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(len) => RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -13899,7 +13954,7 @@ impl Runtime {
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         // Mirror generic lindex order: key_type check before lindex.
         let reply = match self.server.store.key_type(key, now_ms) {
             None => RespFrame::BulkString(None),
@@ -13909,7 +13964,7 @@ impl Runtime {
             },
             Some(_) => CommandError::Store(fr_store::StoreError::WrongType).to_resp(),
         };
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_lindex_borrowed_metrics(
@@ -14043,9 +14098,9 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let resp3 = self.session.resp_protocol_version == 3;
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.zscore(key, member, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(Some(score)) => {
                 if resp3 {
@@ -14339,9 +14394,9 @@ impl Runtime {
         self.server.last_eviction_loop = None;
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
-        let start = Instant::now();
+        let start = self.chained_command_start();
         let result = self.server.store.incrby(key, delta, now_ms);
-        let elapsed_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(value) => RespFrame::Integer(value),
             Err(err) => CommandError::Store(err).to_resp(),
