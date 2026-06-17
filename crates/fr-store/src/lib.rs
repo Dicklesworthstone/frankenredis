@@ -20627,17 +20627,32 @@ impl Store {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
                 let members = decode_listpack_strings(&listpack)?;
-                let mut set = GenericSet::default();
-                for member in members {
-                    if !set.insert(member) {
-                        return Err(StoreError::InvalidDumpPayload);
-                    }
-                }
-                if set.is_empty() {
+                if members.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
+                // Dedup-check then BULK-build. The per-member GenericSet::insert
+                // ran a lookup (PackedStrSet probe is O(n)) before each append =>
+                // O(n^2), which dominated RESTORE of a listpack set (perf:
+                // PackedStrSet::insert 50%). from_unique_str_members appends each
+                // member with no lookup (O(n)); insertion order — the only
+                // observable order for a listpack set — is unchanged. RESTORE still
+                // rejects a duplicate member, which insert detected via its false
+                // return.
+                {
+                    let mut seen = HashSet::with_capacity_and_hasher(
+                        members.len(),
+                        foldhash::quality::RandomState::default(),
+                    );
+                    for member in &members {
+                        if !seen.insert(member.as_slice()) {
+                            return Err(StoreError::InvalidDumpPayload);
+                        }
+                    }
+                }
                 force_set_listpack_encoding = true;
-                Value::Set(Box::new(SetValue::Generic(set)))
+                Value::Set(Box::new(SetValue::Generic(
+                    GenericSet::from_unique_str_members(&members),
+                )))
             }
             RDB_TYPE_ZSET_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
