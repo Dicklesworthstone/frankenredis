@@ -21910,7 +21910,15 @@ fn zset_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<SortedSet, StoreError
     if !chunks.remainder().is_empty() {
         return Err(StoreError::InvalidDumpPayload);
     }
-    let mut zs = SortedSet::new();
+    // Collect (member, score) once, then BULK-build the zset rather than calling
+    // SortedSet::insert per pair. The per-member path runs a PackedZSet::locate +
+    // ordered insert for every element (O(n) locate each => O(n^2)) and dominated
+    // RESTORE / RDB-load of a listpack zset (perf: insert_with_limits 60% +
+    // PackedZSet::locate 46%). SortedSet::from_unique_pairs_with_limits builds the
+    // dict + score order in one pass and is documented byte-identical to inserting
+    // the pairs one at a time; SortedSet::insert uses the SAME default packed
+    // limits, so the chosen encoding (packed vs full) is unchanged.
+    let mut pairs: Vec<(Vec<u8>, f64)> = Vec::with_capacity(entries.len() / 2);
     for pair in &mut chunks {
         let score = std::str::from_utf8(&pair[1])
             .ok()
@@ -21919,11 +21927,26 @@ fn zset_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<SortedSet, StoreError
         if score.is_nan() {
             return Err(StoreError::InvalidDumpPayload);
         }
-        if !zs.insert(pair[0].clone(), score) {
-            return Err(StoreError::InvalidDumpPayload);
+        pairs.push((pair[0].clone(), score));
+    }
+    // RESTORE rejects a duplicate member (the per-member insert returned false for
+    // an already-present member); from_unique_pairs_with_limits requires uniqueness.
+    {
+        let mut seen = HashSet::with_capacity_and_hasher(
+            pairs.len(),
+            foldhash::quality::RandomState::default(),
+        );
+        for (member, _) in &pairs {
+            if !seen.insert(member.as_slice()) {
+                return Err(StoreError::InvalidDumpPayload);
+            }
         }
     }
-    Ok(zs)
+    Ok(SortedSet::from_unique_pairs_with_limits(
+        pairs,
+        SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES,
+        SORTED_SET_PACKED_DEFAULT_MAX_VALUE,
+    ))
 }
 
 fn decode_zipmap_pairs(data: &[u8]) -> Result<HashFieldMap, StoreError> {
