@@ -73574,6 +73574,50 @@ mod tests {
     }
 
     #[test]
+    fn object_idletime_reinterprets_stale_lfu_bits_after_policy_switch() {
+        let mut store = Store::new();
+
+        dispatch_argv(
+            &[
+                b"CONFIG".to_vec(),
+                b"SET".to_vec(),
+                b"maxmemory-policy".to_vec(),
+                b"allkeys-lfu".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("enable lfu");
+        dispatch_argv(
+            &[b"SET".to_vec(), b"obj".to_vec(), b"v".to_vec()],
+            &mut store,
+            1,
+        )
+        .expect("seed key under lfu");
+        dispatch_argv(&[b"GET".to_vec(), b"obj".to_vec()], &mut store, 2)
+            .expect("touch key under lfu");
+        dispatch_argv(
+            &[
+                b"CONFIG".to_vec(),
+                b"SET".to_vec(),
+                b"maxmemory-policy".to_vec(),
+                b"noeviction".to_vec(),
+            ],
+            &mut store,
+            3,
+        )
+        .expect("disable lfu");
+
+        let reply = dispatch_argv(
+            &[b"OBJECT".to_vec(), b"IDLETIME".to_vec(), b"obj".to_vec()],
+            &mut store,
+            4,
+        )
+        .expect("idletime after lfu switch");
+        assert_eq!(reply, RespFrame::Integer(16_777_209));
+    }
+
+    #[test]
     fn object_unknown_subcommand_matches_redis_error() {
         let mut store = Store::new();
         let err = dispatch_argv(

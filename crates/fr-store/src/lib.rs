@@ -3280,10 +3280,18 @@ const ENTRY_FORCE_SET_HASHTABLE_ENCODING: u8 = 1 << 3;
 const ENTRY_FORCE_HASH_HASHTABLE_ENCODING: u8 = 1 << 4;
 const ENTRY_FORCE_ZSET_SKIPLIST_ENCODING: u8 = 1 << 5;
 const ENTRY_INT_COPY_NOT_SHARED: u8 = 1 << 6;
+const ENTRY_REDIS_LFU_CLOCK_FIELD: u8 = 1 << 7;
+
+const REDIS_LRU_CLOCK_MAX: u32 = (1 << 24) - 1;
 
 #[inline]
 fn lru_access_millis(now_ms: u64) -> u32 {
     now_ms as u32
+}
+
+#[inline]
+fn redis_lru_clock(now_ms: u64) -> u32 {
+    ((now_ms / 1000) as u32) & REDIS_LRU_CLOCK_MAX
 }
 
 #[inline]
@@ -3320,6 +3328,32 @@ impl Entry {
 
     fn clear_entry_flags(&mut self) {
         self.entry_flags = 0;
+    }
+
+    fn mark_redis_lfu_clock_field(&mut self) {
+        self.set_flag(ENTRY_REDIS_LFU_CLOCK_FIELD, true);
+    }
+
+    fn clear_redis_lfu_clock_field(&mut self) {
+        self.set_flag(ENTRY_REDIS_LFU_CLOCK_FIELD, false);
+    }
+
+    fn redis_lfu_clock_field_active(&self) -> bool {
+        self.has_flag(ENTRY_REDIS_LFU_CLOCK_FIELD)
+    }
+
+    fn redis_lfu_clock_field(&self) -> u32 {
+        ((self.lfu_last_touch_min & 0xFFFF) << 8) | u32::from(self.lfu_freq)
+    }
+
+    fn redis_lfu_as_idle_seconds(&self, now_ms: u64) -> u64 {
+        let now_clock = redis_lru_clock(now_ms);
+        let object_clock = self.redis_lfu_clock_field() & REDIS_LRU_CLOCK_MAX;
+        if now_clock >= object_clock {
+            u64::from(now_clock - object_clock)
+        } else {
+            u64::from(now_clock + (REDIS_LRU_CLOCK_MAX - object_clock))
+        }
     }
 
     fn touch(&mut self, now_ms: u64) {
@@ -3376,6 +3410,7 @@ impl Entry {
             self.lfu_freq = 255;
         }
         self.lfu_last_touch_min = lfu_access_minutes(now_ms);
+        self.mark_redis_lfu_clock_field();
     }
 
     fn bump_mod_count(&mut self) {
@@ -3391,6 +3426,7 @@ impl Entry {
         self.last_access_ms = lru_access_millis(now_ms);
         self.lfu_freq = LFU_INIT_VAL;
         self.lfu_last_touch_min = lfu_access_minutes(now_ms);
+        self.clear_redis_lfu_clock_field();
     }
 
     fn replace_with_integer_write(&mut self, value: i64, now_ms: u64) {
@@ -6039,7 +6075,8 @@ impl Store {
         // existing key under LFU bumps the existing counter by 1. fr's
         // fresh-key branch was returning 0 instead of LFU_INIT_VAL,
         // surfacing as `OBJECT FREQ` reading 0 immediately after a SET.
-        let next_lfu_freq = if self.lfu_tracking_enabled() {
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let next_lfu_freq = if lfu_tracking_enabled {
             self.entries
                 .get(key.as_slice())
                 .map_or(LFU_INIT_VAL, |entry| {
@@ -6053,6 +6090,9 @@ impl Store {
         let mut entry = Entry::new(canonical_string_value(value), now_ms);
         entry.lfu_freq = next_lfu_freq;
         entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+        if lfu_tracking_enabled {
+            entry.mark_redis_lfu_clock_field();
+        }
         self.internal_entries_insert_with_expiry(key, entry, expires_at_ms);
         self.dirty = self.dirty.saturating_add(1);
     }
@@ -6060,12 +6100,16 @@ impl Store {
     pub fn set_plain_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) {
         if !self.drop_if_expired(key, now_ms) {
             let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
-            entry.lfu_freq = if self.lfu_tracking_enabled() {
+            let lfu_tracking_enabled = self.lfu_tracking_enabled();
+            entry.lfu_freq = if lfu_tracking_enabled {
                 LFU_INIT_VAL
             } else {
                 0
             };
             entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+            if lfu_tracking_enabled {
+                entry.mark_redis_lfu_clock_field();
+            }
             self.internal_entries_insert(key.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
             return;
@@ -6094,6 +6138,9 @@ impl Store {
             entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
             entry.modification_count = entry.modification_count.wrapping_add(1);
             entry.clear_entry_flags();
+            if lfu_tracking_enabled {
+                entry.mark_redis_lfu_clock_field();
+            }
             (old_expiry, old_was_stream)
         };
 
@@ -6119,12 +6166,16 @@ impl Store {
     pub fn set_plain_owned(&mut self, key: Vec<u8>, value: Vec<u8>, now_ms: u64) {
         if !self.drop_if_expired(key.as_slice(), now_ms) {
             let mut entry = Entry::new(canonical_string_value(value), now_ms);
-            entry.lfu_freq = if self.lfu_tracking_enabled() {
+            let lfu_tracking_enabled = self.lfu_tracking_enabled();
+            entry.lfu_freq = if lfu_tracking_enabled {
                 LFU_INIT_VAL
             } else {
                 0
             };
             entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+            if lfu_tracking_enabled {
+                entry.mark_redis_lfu_clock_field();
+            }
             self.internal_entries_insert(key, entry);
             self.dirty = self.dirty.saturating_add(1);
             return;
@@ -6153,6 +6204,9 @@ impl Store {
             entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
             entry.modification_count = entry.modification_count.wrapping_add(1);
             entry.clear_entry_flags();
+            if lfu_tracking_enabled {
+                entry.mark_redis_lfu_clock_field();
+            }
             (old_expiry, old_was_stream)
         };
 
@@ -6191,7 +6245,8 @@ impl Store {
         // existing key under LFU bumps the existing counter by 1. fr's
         // fresh-key branch was returning 0 instead of LFU_INIT_VAL,
         // surfacing as `OBJECT FREQ` reading 0 immediately after a SET.
-        let next_lfu_freq = if self.lfu_tracking_enabled() {
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let next_lfu_freq = if lfu_tracking_enabled {
             self.entries
                 .get(key.as_slice())
                 .map_or(LFU_INIT_VAL, |entry| {
@@ -6207,6 +6262,9 @@ impl Store {
         let mut entry = Entry::new(canonical_string_value(value), now_ms);
         entry.lfu_freq = next_lfu_freq;
         entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+        if lfu_tracking_enabled {
+            entry.mark_redis_lfu_clock_field();
+        }
         self.internal_entries_insert_with_expiry(key, entry, expires_at_ms);
         self.dirty = self.dirty.saturating_add(1);
     }
@@ -7793,7 +7851,11 @@ impl Store {
             return None;
         }
         self.entries.get(key).map(|entry| {
-            u64::from(lru_access_millis(now_ms).wrapping_sub(entry.last_access_ms)) / 1000
+            if entry.redis_lfu_clock_field_active() {
+                entry.redis_lfu_as_idle_seconds(now_ms)
+            } else {
+                u64::from(lru_access_millis(now_ms).wrapping_sub(entry.last_access_ms)) / 1000
+            }
         })
     }
 
