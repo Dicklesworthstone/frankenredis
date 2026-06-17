@@ -2444,6 +2444,32 @@ impl SetValue {
         ))
     }
 
+    /// Bulk-build the intset encoding when every member is a canonical i64 and the
+    /// set still fits the intset encoding (count <= max_intset_entries). Collect +
+    /// sort + dedup is O(n log n); the incremental `insert_borrowed` path instead
+    /// does a sorted-Vec insert per member (O(n) shift each => O(n^2) total), which
+    /// dominated RESTORE / large bulk SADD of an integer set (the decoded i64s were
+    /// re-inserted one at a time). Byte-identical to the loop's result: `SetValue::
+    /// Int` holds the sorted unique i64s, and `added` is the de-duplicated count.
+    /// Above `max_intset_entries` the loop's int->hashtable promotion applies, so we
+    /// bail and let the existing path handle it.
+    fn try_bulk_unique_ints<M: AsRef<[u8]>>(
+        members: &[M],
+        max_intset_entries: usize,
+    ) -> Option<(SetValue, u64)> {
+        if members.len() < SET_BULK_BUILD_MIN || members.len() > max_intset_entries {
+            return None;
+        }
+        let mut ints: Vec<i64> = Vec::with_capacity(members.len());
+        for m in members {
+            ints.push(Self::canonical_int(m.as_ref())?);
+        }
+        ints.sort_unstable();
+        ints.dedup();
+        let added = ints.len() as u64;
+        Some((SetValue::Int(ints), added))
+    }
+
     pub fn len(&self) -> usize {
         match self {
             SetValue::Int(v) => v.len(),
@@ -11652,6 +11678,10 @@ impl Store {
                         SetValue::from_single_borrowed(member.as_ref(), max_intset_entries),
                         1,
                     )
+                } else if let Some(bulk) =
+                    SetValue::try_bulk_unique_ints(members, max_intset_entries)
+                {
+                    bulk
                 } else if let Some(bulk) = SetValue::try_bulk_unique_strings(members) {
                     bulk
                 } else {
@@ -20572,16 +20602,26 @@ impl Store {
             RDB_TYPE_SET_INTSET => {
                 let (intset, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                let mut set = GenericSet::default();
-                for member in decode_intset_members(&intset)? {
-                    set.insert(member);
-                }
-                if set.is_empty() {
+                // The members are canonical i64 decimal strings, so parse + sort +
+                // dedup straight into SetValue::Int instead of hash-inserting each
+                // into a GenericSet and re-deriving via from_index_set (the
+                // GenericSet build + conversion dominated RESTORE of an integer set
+                // -- O(n) hash inserts + a re-parse/sort pass). De-dup matches the
+                // GenericSet path (it silently drops duplicate ints), and the sort
+                // matches Int's canonical order; from_index_set on an all-int set
+                // produces this exact sorted-unique Int. A loaded intset stays
+                // intset-encoded regardless of set-max-intset-entries.
+                let members = decode_intset_members(&intset)?;
+                if members.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                // A loaded intset stays intset-encoded regardless of the current
-                // set-max-intset-entries limit (the limit governs new adds only).
-                Value::Set(Box::new(SetValue::from_index_set(set, usize::MAX)))
+                let mut ints: Vec<i64> = Vec::with_capacity(members.len());
+                for member in &members {
+                    ints.push(parse_i64(member).map_err(|_| StoreError::InvalidDumpPayload)?);
+                }
+                ints.sort_unstable();
+                ints.dedup();
+                Value::Set(Box::new(SetValue::Int(ints)))
             }
             RDB_TYPE_SET_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
