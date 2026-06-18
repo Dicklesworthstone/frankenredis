@@ -15,14 +15,13 @@ the legacy-form and new-form replies, and error-class parity for malformed
 invocations — all of which are independent of how many stale sockets the kernel
 has not yet reaped.
 
-KNOWN ISSUE (frankenredis-2n10q): CLIENT KILL LADDR currently returns 0 on fr
-(the kill filter short-circuits LADDR) even though CLIENT INFO/LIST report a
-uniform laddr. The gate checks the LADDR invariant (CLIENT LIST count on a laddr
-== CLIENT KILL LADDR ... SKIPME no kill count) and, if fr diverges ONLY there,
-prints a KNOWN-ISSUE line and still exits 0; any OTHER divergence fails the gate.
+Previously-known frankenredis-2n10q is fixed: CLIENT KILL LADDR must now match
+the same uniform laddr reported by CLIENT INFO/LIST. The gate checks the LADDR
+invariant (CLIENT LIST count on a laddr == CLIENT KILL LADDR ... SKIPME no kill
+count) as a hard failure.
 
 Usage: client_kill_differ.py [--oracle 16399] [--fr 16400]
-Exit 0 if fr matches redis (modulo the documented LADDR known-issue), else 1.
+Exit 0 if fr matches redis, else 1.
 """
 import argparse
 import socket
@@ -185,15 +184,10 @@ def main():
 
     # LADDR consistency invariant
     rl, fl = rg.laddr_invariant(), fg.laddr_invariant()
-    laddr_known_issue = False
     # redis must be self-consistent: list count == kill count == victims dead.
     if not (rl[0] == rl[1] and rl[1] - 0 >= rl[2] >= 0):
         failures.append(f"oracle LADDR self-inconsistent: {rl}")
-    if fl == rl:
-        pass  # fr matches — bug fixed
-    elif fl[1] == 0 and fl[2] == 0 and fl[0] == rl[0]:
-        laddr_known_issue = True  # exactly the documented 2n10q symptom
-    else:
+    if fl != rl:
         failures.append(f"LADDR: redis(list,kill,dead)={rl} fr={fl}")
 
     if failures:
@@ -201,9 +195,6 @@ def main():
         for f in failures:
             print(f"  - {f}")
         sys.exit(1)
-    if laddr_known_issue:
-        print("KNOWN-ISSUE frankenredis-2n10q: CLIENT KILL LADDR returns 0 on fr "
-              f"(redis (list,kill,dead)={rl}, fr={fl}); all other filters match.")
     print("OK: CLIENT KILL filter matrix matches redis 7.2.4 "
           "(ID/ADDR/SKIPME/legacy-form/error-class parity)")
 
