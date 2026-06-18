@@ -93,7 +93,23 @@ def main():
     # add a different type, re-scan full
     cmd(s, "RPUSH", "alist", "x")
     cmd(s, "HSET", "ahash", "f", "v")
-    check("after_mixed_add", scan_all(s, 17), remaining | {"alist", "ahash"})
+    full = remaining | {"alist", "ahash"}
+    check("after_mixed_add", scan_all(s, 17), full)
+    # (frankenredis-uhthd presized KeyDict build) DEBUG RELOAD rebuilds the keyspace dict
+    # via the PRESIZED bulk build; the SCAN invariant + DBSIZE must survive it. Conditional:
+    # skip cleanly if DEBUG is disabled on this server (so the gate is portable).
+    reload_reply = cmd(s, "DEBUG", "RELOAD")
+    if reload_reply.startswith(b"+OK"):
+        db = cmd(s, "DBSIZE")
+        try:
+            n = int(db.split(b"\r\n")[0][1:])
+        except ValueError:
+            n = -1
+        if n != len(full):
+            fails.append(f"after_reload: DBSIZE {n} != {len(full)}")
+        check("after_reload", scan_all(s, 13), full)
+    elif b"DEBUG command not allowed" not in reload_reply and b"unknown" not in reload_reply.lower():
+        fails.append(f"after_reload: unexpected DEBUG RELOAD reply {reload_reply[:40]!r}")
 
     if fails:
         print(f"FAIL — {len(fails)} SCAN-invariant violation(s):")
@@ -101,7 +117,7 @@ def main():
             print(f"  {x}")
         sys.exit(1)
     print("PASS — keyspace SCAN invariant holds (complete + no-dup + sorted across "
-          "COUNT 1..5000, MATCH/TYPE filters, post-delete, mixed types) [guards uhthd KeyDict]")
+          "COUNT 1..5000, MATCH/TYPE filters, post-delete, mixed types, post-DEBUG-RELOAD presized rebuild) [guards uhthd KeyDict]")
 
 
 if __name__ == "__main__":
