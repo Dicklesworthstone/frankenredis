@@ -7,11 +7,11 @@ inside write commands (hashTypeTryConversion / *TypeTryConversion), and
 listpack/intset key keeps its encoding after the threshold is lowered, until the
 NEXT write to that key triggers a conversion check under the new limit.
 
-fr instead RE-DERIVES the encoding from the CURRENT config + CURRENT size on
+A regressed fr re-derives the encoding from the CURRENT config + CURRENT size on
 every OBJECT ENCODING read (Store::object_encoding: `len <= max_listpack_*`),
-with sticky force-flags only for the already-converted direction. So lowering
-the threshold makes fr report the converted encoding with NO write — a divergence
-from redis's stored, write-time-only conversion model.
+with sticky force-flags only for the already-converted direction. That makes fr
+report the converted encoding with NO write after lowering the threshold — a
+divergence from redis's stored, write-time-only conversion model.
 
 This probe builds each collection UNDER the default threshold (so no write ever
 crosses it → encoding stays listpack/intset on both servers), then LOWERS the
@@ -19,7 +19,7 @@ threshold below the current size and reads OBJECT ENCODING again WITHOUT writing
 Redis: unchanged. fr (buggy): converted.
 
 Run both servers on COMPILED defaults; pass <oracle_port> <fr_port>.
-Exit 0 = parity (bug fixed); 1 = divergence (bug present).  (frankenredis-a0p5p)
+Exit 0 = parity; 1 = divergence.  (closed: frankenredis-a0p5p)
 """
 import socket, sys, time
 
@@ -85,33 +85,22 @@ def main():
     op = int(sys.argv[1]) if len(sys.argv) > 1 else 16801
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16800
     od, fr = conn(op), conn(fp)
-    # hash/zset/set fixed by the a0p5p object_encoding flags-only change. The
-    # `list` case (non-default list-max-listpack-size byte budget) is the tracked
-    # remainder: its sticky forced_quicklist/forced_for_fill machinery needs to
-    # seed the live fill on bulk loads before the read-time re-derivation can be
-    # dropped (the default -2 budget is already correct).
-    KNOWN_REMAINING = {"list"}
     div = 0
-    known = 0
     print(f"{'case':14} {'oracle before->after':28} {'fr before->after':28}")
     for label, build, param, high, low in CASES:
         ob, oa = run_case(od, build, param, high, low)
         fb, fa = run_case(fr, build, param, high, low)
         if (ob, oa) == (fb, fa):
             flag = ""
-        elif label in KNOWN_REMAINING:
-            flag = "  <== KNOWN-REMAINING (a0p5p list facet)"
-            known += 1
         else:
             flag = "  <== DIVERGE"
             div += 1
         print(f"{label:14} {ob+' -> '+str(oa):28} {fb+' -> '+str(fa):28}{flag}")
     print("-" * 60)
     if div:
-        print(f"FAIL — {div} NEW divergence(s): fr converts on CONFIG-lower without a write")
+        print(f"FAIL — {div} divergence(s): fr converts on CONFIG-lower without a write")
         return 1
-    print(f"PASS — hash/zset/set sticky across threshold-lower until next write "
-          f"({known} known-remaining: list non-default budget)")
+    print("PASS — all collection encodings stay sticky across threshold-lower until next write")
     return 0
 
 if __name__ == "__main__":
