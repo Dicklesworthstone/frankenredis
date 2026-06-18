@@ -5,10 +5,17 @@ When a collection grows past its threshold (-> hashtable/skiplist/quicklist) the
 shrinks, redis keeps the upgraded encoding in memory (sticky); but on DUMP+RESTORE
 (or RDB reload) redis RE-DERIVES the optimal encoding for the now-small content
 (listpack/intset). fr does this correctly for HASH, ZSET, and LIST; this gate locks
-that. SET is the documented exception (frankenredis-bbyfz: RDB_TYPE_SET loads as
-hashtable, not re-derived to listpack/intset) — the set cases are checked here as a
-KNOWN-divergence report (not asserted) so the gate stays green and flips to a real
-assertion once bbyfz is fixed.
+that. SET is the documented exception (frankenredis-bbyfz: a RESTORE'd small
+RDB_TYPE_SET stays hashtable on fr vs listpack/intset on redis) — the set cases are
+checked here as a KNOWN-divergence report (not asserted) so the gate stays green and
+flips to a real assertion once bbyfz is fixed.
+
+bbyfz is DUAL-PATH: the fr-runtime RDB-file-load path (apply_rdb_entries,
+RdbValue::SetHashtable) was fixed by nom8d (re-derives; forces hashtable only when
+len > set-max-intset-entries), but the RESTORE command's fr-store deserialize path
+(fr-store/src/lib.rs:20694) still UNCONDITIONALLY force_set_hashtable_encoding=true
+for RDB_TYPE_SET. This gate (DUMP+RESTORE) exercises the still-buggy path; a
+DEBUG-RELOAD-based gate would exercise the already-fixed one.
 
 Usage: restore_reoptimize_encoding_differ.py <oracle_port> <fr_port>
        Exit 0 = hash/zset/list re-optimization byte-exact, 1 = divergence.
