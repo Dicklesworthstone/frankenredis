@@ -60,7 +60,9 @@ def main():
     cmp("restore_replace_then_nonutf8",[b"RESTORE",b"g",b"0",pl,b"REPLACE",NUTF],False)
     cmp("zadd_flag_nonutf8",[b"ZADD",b"z",NUTF,b"1",b"m"],False)
     cmp("lpos_opt_nonutf8",[b"LPOS",b"l",b"a",NUTF,b"1"],False)
-    cmp("scan_opt_nonutf8",[b"SCAN",b"0",NUTF],False)
+    cmp("scan_opt_nonutf8",[b"SCAN",b"0",NUTF],True)  # FIXED e3abc7c13 (44iva scan-family)
+    cmp("hscan_opt_nonutf8",[b"HSCAN",b"h",b"0",NUTF],True)  # FIXED e3abc7c13
+    cmp("sscan_opt_nonutf8",[b"SSCAN",b"st",b"0",NUTF],True)  # FIXED e3abc7c13
     cmp("zrangebyscore_opt_nonutf8",[b"ZRANGEBYSCORE",b"z",b"0",b"1",NUTF],False)
     cmp("sort_opt_nonutf8",[b"SORT",b"l",NUTF],False)
     cmp("expire_flag_nonutf8_echo",[b"EXPIRE",b"src",b"100",NUTF],False)  # redis ECHOES bytes
