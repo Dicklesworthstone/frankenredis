@@ -3979,7 +3979,7 @@ fn append(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         // (frankenredis-ga4j1) Upstream t_string.c::checkStringLength
         // line 48 names the *config knob* (proto_max_bulk_len), not a
         // fixed byte size. Matches SETRANGE wording at line 9422 above.
-        return Ok(RespFrame::Error(
+        return Err(CommandError::Custom(
             "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
         ));
     }
@@ -5414,7 +5414,7 @@ fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     }
     // GT/LT/NX combinations share the same Redis error wording.
     if (nx && (gt || lt)) || (gt && lt) {
-        return Ok(RespFrame::Error(
+        return Err(CommandError::Custom(
             "ERR GT, LT, and/or NX options at the same time are not compatible".to_string(),
         ));
     }
@@ -12694,7 +12694,7 @@ fn setrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     if offset_u64.saturating_add(added_len as u64) > store.proto_max_bulk_len as u64 {
         // Upstream reply: "string exceeds maximum allowed size
         // (proto-max-bulk-len)" (br-frankenredis-68ql).
-        return Ok(RespFrame::Error(
+        return Err(CommandError::Custom(
             "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
         ));
     }
@@ -13318,7 +13318,7 @@ fn lpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             // never matches anything).
             rank = parse_i64_arg_long_range(&argv[i])?;
             if rank == 0 {
-                return Ok(RespFrame::Error(
+                return Err(CommandError::Custom(
                     "ERR RANK can't be zero: use 1 to start from the first match, 2 from the second ... or use negative to start from the end of the list"
                         .to_string(),
                 ));
@@ -27793,7 +27793,7 @@ fn copy_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     // REPLACE. See legacy_redis_code/redis/src/cluster.c::copyCommand.
     // (br-frankenredis-ao1i)
     if destination_db == source_db && argv[1] == argv[2] {
-        return Ok(RespFrame::Error(
+        return Err(CommandError::Custom(
             "ERR source and destination objects are the same".to_string(),
         ));
     }
