@@ -35,6 +35,12 @@ class R:
         s.s.sendall(o); return s.read()
 def main():
     od=R(int(sys.argv[1])); fr=R(int(sys.argv[2])); div=0
+    def cleanup():
+        for s in (od,fr):
+            try:
+                s.cmd("select","0"); s.cmd("config","set","hash-max-listpack-entries","512"); s.cmd("flushall")
+            except Exception:
+                pass
     def chk(label,*cmds):
         nonlocal div
         ao=[od.cmd(*c) for c in cmds]; af=[fr.cmd(*c) for c in cmds]
@@ -68,6 +74,7 @@ def main():
         s.cmd("config","set","hash-max-listpack-entries","128")
     chk("encoding-after-config-lower(a0p5p)",["object","encoding","bh"],["copy","bh","bh2"],["object","encoding","bh2"])
     print("-"*60)
+    cleanup()
     if div: print(f"FAIL — {div} divergence(s)"); return 1
     print("PASS — COPY byte-exact vs redis 7.2.4 (incl encoding/TTL preservation + a0p5p case)"); return 0
 if __name__=="__main__": sys.exit(main())
