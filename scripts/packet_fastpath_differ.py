@@ -49,7 +49,8 @@ def call(s, *args):
 
 def setup(s):
     call(s, "FLUSHALL")
-    call(s, "SET", "sk", "12345")           # int encoding
+    call(s, "SET", "sk", "12345")           # int encoding (> 9999, not shared)
+    call(s, "SET", "shint", "100")          # shared-integer pool (0..9999)
     call(s, "SET", "str", "hello world")
     call(s, "RPUSH", "lst", "a", "b", "c")
     call(s, "HSET", "h", "f1", "v1", "f2", "v2")
@@ -108,6 +109,8 @@ CASES = [
     ["OBJECT", "ENCODING", "lst"],
     ["OBJECT", "ENCODING", "si"],
     ["OBJECT", "REFCOUNT", "str"],
+    ["OBJECT", "REFCOUNT", "shint"],   # shared int 0..9999 -> INT_MAX refcount
+    ["OBJECT", "REFCOUNT", "sk"],      # int > 9999 -> refcount 1
     ["HGET", "h", "f1"],
     ["HMGET", "h", "f1", "f2"],
     ["HMGET", "h", "f1", "nope"],
