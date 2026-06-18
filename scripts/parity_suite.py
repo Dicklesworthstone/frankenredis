@@ -143,6 +143,7 @@ PORT_BASED = [
     ("store_dest_aliasing_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("mpop_family_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("keyed_write_packet_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("config_size_limit_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("eval_semantics_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("bitfield_differ.py", [str(ORACLE_PORT), str(FR_PORT), "1", "1200"]),
     # self-heals encoding thresholds on both servers before comparing, so it is
