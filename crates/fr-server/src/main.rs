@@ -3057,6 +3057,25 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_exists_three_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_exists_borrowed(&packet.keys, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_exists_four_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_exists_borrowed(&packet.keys, ts)
@@ -4780,6 +4799,36 @@ fn parse_borrowed_plain_exists_two_packet<'a>(
     Some(BorrowedPlainExistsTwoPacket {
         consumed,
         keys: [first_key, second_key],
+    })
+}
+
+struct BorrowedPlainExistsThreePacket<'a> {
+    consumed: usize,
+    keys: [&'a [u8]; 3],
+}
+
+fn parse_borrowed_plain_exists_three_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainExistsThreePacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"EXISTS".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$6\r\n").and_then(|rest| {
+        rest.get(..6)
+            .filter(|command| command.eq_ignore_ascii_case(b"EXISTS"))
+            .map(|_| input.len() - rest.len() + 6)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (first_key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (second_key, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (third_key, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainExistsThreePacket {
+        consumed,
+        keys: [first_key, second_key, third_key],
     })
 }
 
@@ -9378,6 +9427,71 @@ mod tests {
         assert!(
             crate::parse_borrowed_plain_exists_two_packet(
                 b"*3\r\n$6\r\nEXISTS\r\n$2\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_exists_three_packet_parser_accepts_canonical_three_key_exists() {
+        let input = b"*4\r\n$6\r\neXiStS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\na\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_exists_three_packet(input, &ParserConfig::default())
+                .expect("canonical three-key EXISTS packet should parse");
+
+        assert_eq!(
+            parsed.keys,
+            [b"a".as_slice(), b"b".as_slice(), b"a".as_slice()]
+        );
+        assert_eq!(
+            parsed.consumed,
+            b"*4\r\n$6\r\neXiStS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\na\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_exists_three_packet_parser_defers_other_shapes_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_exists_three_packet(
+                b"*04\r\n$6\r\nEXISTS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_exists_three_packet(
+                b"*3\r\n$6\r\nEXISTS\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "two-key EXISTS stays on the existing exact parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_exists_three_packet(
+                b"*5\r\n$6\r\nEXISTS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n",
+                &cfg
+            )
+            .is_none(),
+            "larger EXISTS packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_exists_three_packet(
+                b"*4\r\n$6\r\nEXISTS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n",
+                &ParserConfig {
+                    max_array_len: 3,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_exists_three_packet(
+                b"*4\r\n$6\r\nEXISTS\r\n$2\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n",
                 &cfg
             )
             .is_none(),
