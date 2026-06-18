@@ -7,6 +7,7 @@ bugs and is touched by ongoing perf work:
   * default / OPTIN / OPTOUT tracking + CLIENT CACHING YES|NO
   * BCAST + PREFIX (match / non-match / multi-key batching)
   * NOLOOP (self-modify suppression) + REDIRECT-less RESP3 push delivery
+  * REDIRECT target validation for missing client IDs
   * FLUSHALL/FLUSHDB null-invalidation (frankenredis-o90ga)
   * per-key invalidation: one push PER key for non-BCAST, batched for BCAST
     (frankenredis-8ypwc)
@@ -213,6 +214,16 @@ def run(port):
     R["noloop_self"] = norm_push(t.drain_push())
     w = Conn(port); w.cmd_read("SET", "kx", "3"); w.close()  # foreign
     R["noloop_foreign"] = norm_push(t.drain_push())
+    t.close()
+
+    # ── REDIRECT validates the target ID on both ON and OFF ──
+    fresh()
+    t = tracker()
+    R["redirect_missing_on"] = t.cmd_read("CLIENT", "TRACKING", "ON", "REDIRECT", "999999")
+    t.close()
+    fresh()
+    t = tracker()
+    R["redirect_missing_off"] = t.cmd_read("CLIENT", "TRACKING", "OFF", "REDIRECT", "999999")
     t.close()
 
     # ── BCAST: prefix match, non-match, multi-key batch ──
