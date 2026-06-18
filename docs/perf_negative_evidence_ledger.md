@@ -155,5 +155,14 @@ turns). Keep claims honest — mark which.
   decodes integer/string/null-byte field-value pairs. Retry condition if
   rejected: only revisit with a fresh compact-hash DUMP/RDB profile naming
   listpack construction, not as generic vector-elision cleanup.
+- frankenredis-set-intset-canonical-noalloc-acetq / cod-a: `fr-persist`
+  compact set intset selection now reuses the shared allocation-free canonical
+  decimal parser instead of validating each parsed member by allocating
+  `value.to_string()` and comparing bytes — CODED (reasoned; batch benchmark
+  pending). Guard compares intset selection against the old parse+to_string
+  round-trip oracle across canonical, noncanonical, overflow, whitespace, and
+  invalid-UTF8 members. Retry condition if rejected: only revisit with a fresh
+  integer-heavy compact-set DUMP/RDB profile naming intset canonicalization, not
+  as generic decimal-format cleanup.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.

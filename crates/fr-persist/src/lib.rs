@@ -1684,14 +1684,11 @@ fn encode_compact_set_intset(
     }
     // Every member must parse as an i64 with a canonical decimal
     // representation matching itself (rejects "+1", "01", " 1", etc.
-    // which upstream's intset path also refuses).
+    // which upstream's intset path also refuses). Use the shared allocation-free
+    // canonical parser instead of formatting a String per candidate member.
     let mut values = Vec::with_capacity(members.len());
     for raw in members {
-        let s = std::str::from_utf8(raw).ok()?;
-        let value: i64 = s.parse().ok()?;
-        if value.to_string().as_bytes() != raw.as_slice() {
-            return None;
-        }
+        let value = parse_listpack_integer(raw)?;
         values.push(value);
     }
     let blob = encode_intset_blob(&values)?;
@@ -4623,9 +4620,10 @@ mod tests {
         RDB_TYPE_STRING, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RdbEncodeOptions, RdbEntry,
         RdbStreamConsumer, RdbStreamConsumerGroup, RdbStreamMetadata, RdbStreamPendingEntry,
         RdbValue, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, crc64_redis, decode_intset_members,
-        decode_rdb, decode_rdb_prefix, encode_hash_listpack_blob, encode_listpack_strings_blob,
-        encode_rdb, encode_rdb_with_functions, encode_rdb_with_options, lzf_compress,
-        lzf_decompress, rdb_decode_string, rdb_encode_length, rdb_encode_string,
+        decode_rdb, decode_rdb_prefix, encode_compact_set_intset, encode_hash_listpack_blob,
+        encode_listpack_strings_blob, encode_rdb, encode_rdb_with_functions,
+        encode_rdb_with_options, lzf_compress, lzf_decompress, rdb_decode_string,
+        rdb_encode_length, rdb_encode_string,
     };
 
     fn append_rdb_checksum(encoded: &mut Vec<u8>) {
@@ -6295,6 +6293,51 @@ mod tests {
                 Some(RDB_TYPE_SET_INTSET),
                 "non-canonical integer member {:?} must NOT trigger intset encoding",
                 non_canonical,
+            );
+        }
+    }
+
+    #[test]
+    fn compact_set_intset_noalloc_canonical_check_matches_roundtrip_oracle() {
+        fn old_roundtrip_accepts(raw: &[u8]) -> bool {
+            let Ok(s) = std::str::from_utf8(raw) else {
+                return false;
+            };
+            let Ok(value) = s.parse::<i64>() else {
+                return false;
+            };
+            value.to_string().as_bytes() == raw
+        }
+
+        let thresholds = CompactRdbThresholds::default();
+        let cases: Vec<Vec<Vec<u8>>> = vec![
+            vec![
+                b"0".to_vec(),
+                b"1".to_vec(),
+                b"-2".to_vec(),
+                b"9223372036854775807".to_vec(),
+            ],
+            vec![
+                b"-9223372036854775808".to_vec(),
+                b"42".to_vec(),
+                b"-4096".to_vec(),
+            ],
+            vec![b"+1".to_vec(), b"2".to_vec()],
+            vec![b"01".to_vec(), b"2".to_vec()],
+            vec![b"-0".to_vec(), b"2".to_vec()],
+            vec![b" 1".to_vec(), b"2".to_vec()],
+            vec![b"1 ".to_vec(), b"2".to_vec()],
+            vec![b"9223372036854775808".to_vec(), b"2".to_vec()],
+            vec![b"-9223372036854775809".to_vec(), b"2".to_vec()],
+            vec![b"\xff".to_vec(), b"2".to_vec()],
+        ];
+
+        for members in cases {
+            let expected = members.iter().all(|raw| old_roundtrip_accepts(raw));
+            assert_eq!(
+                encode_compact_set_intset(&members, &thresholds).is_some(),
+                expected,
+                "compact intset selection drift for {members:?}"
             );
         }
     }
