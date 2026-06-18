@@ -6634,23 +6634,19 @@ impl<'a> LuaState<'a> {
             "unpack" => {
                 let inv = self.current_invocation_name.as_deref();
                 let t = lua_table_arg(inv, 1, args.first())?;
-                let start = lua_optional_integer_arg(inv, 2, args.get(1), 1)? as usize;
+                let start = lua_optional_integer_arg(inv, 2, args.get(1), 1)?;
                 let end = lua_optional_integer_arg(
                     inv,
                     3,
                     args.get(2),
                     t.inner.borrow().array.len() as i64,
-                )? as usize;
+                )?;
                 if start <= end && end.saturating_sub(start) >= 8000 {
                     return Err("too many results to unpack".to_string());
                 }
                 let mut results = Vec::new();
                 for i in start..=end {
-                    if i >= 1 && i <= t.inner.borrow().array.len() {
-                        results.push(t.inner.borrow().array[i - 1].clone());
-                    } else {
-                        results.push(LuaValue::Nil);
-                    }
+                    results.push(t.get(&LuaValue::Number(i as f64)));
                 }
                 Ok(results)
             }
@@ -16197,6 +16193,24 @@ end
         let result = eval_script(b"return unpack({10, 20}, 1, 'x')", &[], &[], &mut store, 0);
 
         assert!(matches!(result, Err(ref err) if err.contains("bad argument #3 to 'unpack'")));
+    }
+
+    #[test]
+    fn unpack_reads_raw_integer_keys_across_signed_range_53i6p() {
+        let mut store = Store::new();
+        let frame = eval_script(
+            b"local t = {10}; t[-1] = 'neg'; t[0] = 'zero'; t[3] = 'three'; local a,b,c,d,e = unpack(t, -1, 3); return tostring(a)..':'..tostring(b)..':'..tostring(c)..':'..tostring(d)..':'..tostring(e)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"neg:zero:10:nil:three".to_vec()))
+        );
     }
 
     #[test]
