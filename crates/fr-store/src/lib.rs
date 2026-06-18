@@ -3257,6 +3257,12 @@ struct Entry {
     entry_flags: u8,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RestoreMetadata {
+    pub idletime_secs: Option<u64>,
+    pub lfu_freq: Option<u8>,
+}
+
 #[derive(Clone, Debug)]
 struct ZIntercardCache {
     dirty: u64,
@@ -3455,6 +3461,23 @@ impl Entry {
         self.lfu_freq = LFU_INIT_VAL;
         self.lfu_last_touch_min = lfu_access_minutes(now_ms);
         self.clear_redis_lfu_clock_field();
+    }
+
+    fn apply_restore_metadata(&mut self, metadata: RestoreMetadata, now_ms: u64) {
+        debug_assert!(
+            metadata.idletime_secs.is_none() || metadata.lfu_freq.is_none(),
+            "RESTORE metadata is mutually exclusive"
+        );
+        if let Some(idletime_secs) = metadata.idletime_secs {
+            self.last_access_ms =
+                lru_access_millis(now_ms.saturating_sub(idletime_secs.saturating_mul(1000)));
+            self.clear_redis_lfu_clock_field();
+        }
+        if let Some(lfu_freq) = metadata.lfu_freq {
+            self.lfu_freq = lfu_freq;
+            self.lfu_last_touch_min = lfu_access_minutes(now_ms);
+            self.mark_redis_lfu_clock_field();
+        }
     }
 
     fn replace_with_integer_write(&mut self, value: i64, now_ms: u64) {
@@ -20517,6 +20540,26 @@ impl Store {
         replace: bool,
         now_ms: u64,
     ) -> Result<(), StoreError> {
+        self.restore_key_with_metadata(
+            key,
+            ttl_ms,
+            payload,
+            replace,
+            RestoreMetadata::default(),
+            now_ms,
+        )
+    }
+
+    /// Restore a key from a DUMP payload and seed optional access metadata.
+    pub fn restore_key_with_metadata(
+        &mut self,
+        key: &[u8],
+        ttl_ms: u64,
+        payload: &[u8],
+        replace: bool,
+        metadata: RestoreMetadata,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
         // Check if key exists first (before payload validation) to match Redis behavior.
         // Redis returns BUSYKEY if the key exists and REPLACE is not specified, even
         // if the payload is malformed.
@@ -20913,6 +20956,7 @@ impl Store {
             ENTRY_FORCE_SET_HASHTABLE_ENCODING,
             force_set_hashtable_encoding,
         );
+        entry.apply_restore_metadata(metadata, now_ms);
         // (frankenredis-nom8d) RESTORE re-derives HASH/ZSET encoding from the
         // loaded content under the CURRENT config, matching redis rdbLoadObject
         // (which converts a listpack hash/zset whose length exceeds the current
@@ -42162,6 +42206,46 @@ mod tests {
         assert_eq!(store2.get(b"k", 100).unwrap(), Some(b"val".to_vec()));
         // After 50ms the key should be expired
         assert_eq!(store2.get(b"k", 151).unwrap(), None);
+    }
+
+    #[test]
+    fn dump_restore_applies_access_metadata() {
+        let mut source = Store::new();
+        source.set(b"src".to_vec(), b"val".to_vec(), None, 100);
+        let payload = source.dump_key(b"src", 100).unwrap();
+
+        let mut idle_store = Store::new();
+        idle_store
+            .restore_key_with_metadata(
+                b"idle",
+                0,
+                &payload,
+                false,
+                RestoreMetadata {
+                    idletime_secs: Some(100),
+                    lfu_freq: None,
+                },
+                200_000,
+            )
+            .unwrap();
+        assert_eq!(idle_store.object_idletime(b"idle", 201_000), Some(101));
+
+        let mut freq_store = Store::new();
+        freq_store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        freq_store
+            .restore_key_with_metadata(
+                b"freq",
+                0,
+                &payload,
+                false,
+                RestoreMetadata {
+                    idletime_secs: None,
+                    lfu_freq: Some(7),
+                },
+                200_000,
+            )
+            .unwrap();
+        assert_eq!(freq_store.object_freq(b"freq", 200_000), Some(7));
     }
 
     #[test]

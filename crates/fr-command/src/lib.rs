@@ -7,7 +7,7 @@ use fr_protocol::RespFrame;
 use fr_store::{
     BitRangeUnit, ClientReplyState, ClientTrackingState, DispatchAclLogContext,
     DispatchAclPermissionReason, DispatchAclPermissions, ExpireTimeValue, MaxmemoryPolicy,
-    PendingAclLogEvent, PttlValue, PubSubMessage, ScoreBound, Store, StoreError,
+    PendingAclLogEvent, PttlValue, PubSubMessage, RestoreMetadata, ScoreBound, Store, StoreError,
     StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
     StreamGroupReadCursor, StreamGroupReadOptions, StreamId, StreamPendingRecord, Value, ValueType,
     decode_db_key, glob_match, read_rss_bytes, read_total_system_memory_bytes,
@@ -26868,8 +26868,8 @@ fn restore_cmd(
     // (br-frankenredis-restoreorder)
     let mut replace = false;
     let mut absttl = false;
-    let mut idletime_seen = false;
-    let mut freq_seen = false;
+    let mut idletime_secs = None;
+    let mut lfu_freq = None;
     let mut i = 4;
     while i < argv.len() {
         let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -26883,7 +26883,7 @@ fn restore_cmd(
             // Upstream requires an additional arg AND that FREQ
             // hasn't been seen yet; without those, falls through
             // to the catch-all 'syntax error'.
-            if freq_seen || i + 1 >= argv.len() {
+            if lfu_freq.is_some() || i + 1 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
             let v = parse_i64_arg(&argv[i + 1])?;
@@ -26892,10 +26892,15 @@ fn restore_cmd(
                     "ERR Invalid IDLETIME value, must be >= 0".to_string(),
                 ));
             }
-            idletime_seen = true;
+            let Ok(v) = u64::try_from(v) else {
+                return Ok(RespFrame::Error(
+                    "ERR Invalid IDLETIME value, must be >= 0".to_string(),
+                ));
+            };
+            idletime_secs = Some(v);
             i += 2;
         } else if opt.eq_ignore_ascii_case("FREQ") {
-            if idletime_seen || i + 1 >= argv.len() {
+            if idletime_secs.is_some() || i + 1 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
             let v = parse_i64_arg(&argv[i + 1])?;
@@ -26904,7 +26909,12 @@ fn restore_cmd(
                     "ERR Invalid FREQ value, must be >= 0 and <= 255".to_string(),
                 ));
             }
-            freq_seen = true;
+            let Ok(v) = u8::try_from(v) else {
+                return Ok(RespFrame::Error(
+                    "ERR Invalid FREQ value, must be >= 0 and <= 255".to_string(),
+                ));
+            };
+            lfu_freq = Some(v);
             i += 2;
         } else {
             return Err(CommandError::SyntaxError);
@@ -26941,7 +26951,11 @@ fn restore_cmd(
     } else {
         ttl_ms
     };
-    match store.restore_key(key, effective_ttl, payload, replace, now_ms) {
+    let metadata = RestoreMetadata {
+        idletime_secs,
+        lfu_freq,
+    };
+    match store.restore_key_with_metadata(key, effective_ttl, payload, replace, metadata, now_ms) {
         Ok(()) => Ok(RespFrame::SimpleString("OK".to_string())),
         Err(StoreError::BusyKey) => Ok(RespFrame::Error(
             "BUSYKEY Target key name already exists.".to_string(),
@@ -73466,6 +73480,76 @@ mod tests {
                 "ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.".to_string()
             )
         );
+    }
+
+    #[test]
+    fn restore_applies_idletime_and_freq_values() {
+        let mut source = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"src".to_vec(), b"hello".to_vec()],
+            &mut source,
+            100,
+        )
+        .expect("seed source");
+        let payload = source.dump_key(b"src", 100).expect("dump source");
+
+        let mut store = Store::new();
+        let reply = dispatch_argv(
+            &[
+                b"RESTORE".to_vec(),
+                b"idle".to_vec(),
+                b"0".to_vec(),
+                payload.clone(),
+                b"IDLETIME".to_vec(),
+                b"100".to_vec(),
+            ],
+            &mut store,
+            200_000,
+        )
+        .expect("restore idle key");
+        assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+
+        let reply = dispatch_argv(
+            &[b"OBJECT".to_vec(), b"IDLETIME".to_vec(), b"idle".to_vec()],
+            &mut store,
+            201_000,
+        )
+        .expect("idletime after restore");
+        assert_eq!(reply, RespFrame::Integer(101));
+
+        dispatch_argv(
+            &[
+                b"CONFIG".to_vec(),
+                b"SET".to_vec(),
+                b"maxmemory-policy".to_vec(),
+                b"allkeys-lfu".to_vec(),
+            ],
+            &mut store,
+            202_000,
+        )
+        .expect("enable lfu");
+        let reply = dispatch_argv(
+            &[
+                b"RESTORE".to_vec(),
+                b"freq".to_vec(),
+                b"0".to_vec(),
+                payload,
+                b"FREQ".to_vec(),
+                b"7".to_vec(),
+            ],
+            &mut store,
+            202_000,
+        )
+        .expect("restore freq key");
+        assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+
+        let reply = dispatch_argv(
+            &[b"OBJECT".to_vec(), b"FREQ".to_vec(), b"freq".to_vec()],
+            &mut store,
+            202_001,
+        )
+        .expect("freq after restore");
+        assert_eq!(reply, RespFrame::Integer(7));
     }
 
     #[test]
