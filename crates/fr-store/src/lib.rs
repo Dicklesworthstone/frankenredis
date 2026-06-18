@@ -20463,19 +20463,6 @@ impl Store {
                 encode_dump_quicklist2(&mut buf, l, self.list_max_listpack_size)?;
             }
             Value::Set(s) => {
-                // An intset-encoded set already stores sorted i64s, and SetValueIter
-                // would format each through set_int_to_bytes only for parse_i64 to
-                // re-parse it here — a per-member alloc+format+parse round-trip that
-                // dominated DUMP of integer sets. Take the i64s directly; identical
-                // result since parse_i64(set_int_to_bytes(n)) == n. The generic
-                // (string-member) encoding still parses each member as before.
-                let integer_members: Option<Vec<i64>> = match s.as_int_slice() {
-                    Some(ints) => Some(ints.to_vec()),
-                    None => s
-                        .iter()
-                        .map(|member| parse_i64(member.as_ref()).ok())
-                        .collect(),
-                };
                 if entry.has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING) {
                     buf.push(RDB_TYPE_SET);
                     encode_length(&mut buf, s.len());
@@ -20486,6 +20473,17 @@ impl Store {
                     buf.push(RDB_TYPE_SET_LISTPACK);
                     encode_rdb_string(&mut buf, &encode_set_listpack_dump(s)?);
                 } else if s.len() <= self.set_max_intset_entries {
+                    // Build the integer view LAZILY — only this (intset) branch uses it, so the
+                    // FORCE-flagged branches above and the >max_intset branches below no longer
+                    // pay an unused to_vec()/parse-collect of every member (wasted on a large
+                    // all-int hashtable set, or any FORCE-flagged set). An intset-encoded set
+                    // stores sorted i64s directly (avoiding a set_int_to_bytes→parse_i64 round
+                    // trip); string sets parse each member as before — identical result either
+                    // way. (frankenredis perf: lazy intset-view in set DUMP, code-first batch-test pending)
+                    let integer_members: Option<Vec<i64>> = match s.as_int_slice() {
+                        Some(ints) => Some(ints.to_vec()),
+                        None => s.iter().map(|m| parse_i64(m.as_ref()).ok()).collect(),
+                    };
                     if let Some(mut integers) = integer_members {
                         integers.sort_unstable();
                         buf.push(RDB_TYPE_SET_INTSET);
