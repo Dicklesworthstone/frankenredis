@@ -50,5 +50,9 @@ turns). Keep claims honest — mark which.
 
 ## Open clean levers (unclaimed, reasoned-promising)
 - decimal_*_len branchless ilog10 — DONE (e4fu8, reasoned; criterion A/B pending batch).
+- 17-value LPUSH/RPUSH/SADD exact borrowed packet parser — CODED in `fr-server`
+  under `frankenredis-ohsk5` (reasoned; batch benchmark pending). Retry condition:
+  keep only if the next release A/B for keyed-values packets shows a stable win;
+  otherwise move this row to rejected and stop extending exact arities.
 - (add here as found) — prefer clean crates (fr-protocol, fr-persist non-LZF) not under a
   peer's active reservation; bench A/B in release before claiming a win.
