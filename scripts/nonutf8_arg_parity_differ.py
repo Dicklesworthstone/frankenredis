@@ -56,8 +56,8 @@ def main():
     for s in (od,fr): cmd(s,"ZADD","z","1","a"); cmd(s,"RPUSH","l","a","b","c")
     cmp("set_opt_nonutf8",[b"SET",b"e",b"v",NUTF],True)  # FIXED
     cmp("set_after_valid_opt",[b"SET",b"e",b"v",b"EX",b"100",NUTF],True)  # FIXED
-    cmp("restore_trailing_nonutf8",[b"RESTORE",b"f",b"0",pl,NUTF],False)
-    cmp("restore_replace_then_nonutf8",[b"RESTORE",b"g",b"0",pl,b"REPLACE",NUTF],False)
+    cmp("restore_trailing_nonutf8",[b"RESTORE",b"f",b"0",pl,NUTF],True)  # FIXED
+    cmp("restore_replace_then_nonutf8",[b"RESTORE",b"g",b"0",pl,b"REPLACE",NUTF],True)  # FIXED
     cmp("zadd_flag_nonutf8",[b"ZADD",b"z",NUTF,b"1",b"m"],True)  # FIXED 1d8233a9e
     cmp("lpos_opt_nonutf8",[b"LPOS",b"l",b"a",NUTF,b"1"],True)  # FIXED 1d8233a9e
     cmp("scan_opt_nonutf8",[b"SCAN",b"0",NUTF],True)  # FIXED e3abc7c13 (44iva scan-family)
