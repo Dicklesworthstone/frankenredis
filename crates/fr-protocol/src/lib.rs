@@ -1663,6 +1663,95 @@ mod tests {
         parse_command_frame_borrowed, parse_frame, parse_frame_with_config, push_i64, push_usize,
     };
 
+    // (frankenredis-432l0) Golden contract for how `parse_frame` NORMALIZES the
+    // RESP3 reply wire types into the RESP2-shaped `RespFrame` the rest of fr
+    // consumes. This is a reply-NORMALIZER, not a symmetric codec: the RESP3
+    // scalar types collapse to their RESP2-equivalent carrier, and the
+    // aggregate-ish types fold per upstream client semantics. Pinning each one
+    // here guards the HELLO-3 reply path (frankenredis-ozcx) against regressions
+    // that the request-side fuzzers never exercise. Each case is a COMPLETE
+    // frame, so `consumed` must equal the encoded length.
+    #[test]
+    fn resp3_reply_parse_normalization_golden_432l0() {
+        let cases: &[(&str, &[u8], RespFrame)] = &[
+            // Double (`,`) -> BulkString carrying the numeric string verbatim.
+            ("double", b",3.14\r\n", RespFrame::BulkString(Some(b"3.14".to_vec()))),
+            ("double_neg", b",-1.5\r\n", RespFrame::BulkString(Some(b"-1.5".to_vec()))),
+            ("double_inf", b",inf\r\n", RespFrame::BulkString(Some(b"inf".to_vec()))),
+            // Big number (`(`) -> BulkString carrying the base-10 integer string.
+            (
+                "bignumber",
+                b"(12345678901234567890\r\n",
+                RespFrame::BulkString(Some(b"12345678901234567890".to_vec())),
+            ),
+            ("bignumber_neg", b"(-31337\r\n", RespFrame::BulkString(Some(b"-31337".to_vec()))),
+            // Boolean (`#`) -> Integer 1/0 (upstream addReplyBool under RESP2).
+            ("bool_true", b"#t\r\n", RespFrame::Integer(1)),
+            ("bool_false", b"#f\r\n", RespFrame::Integer(0)),
+            // Null (`_`) -> the canonical null bulk string.
+            ("null", b"_\r\n", RespFrame::BulkString(None)),
+            // Verbatim (`=`) -> BulkString of the payload AFTER the 4-char
+            // `<3-type>:` prefix is stripped.
+            (
+                "verbatim_txt",
+                b"=15\r\ntxt:Some string\r\n",
+                RespFrame::BulkString(Some(b"Some string".to_vec())),
+            ),
+            // Map (`%`) -> flat Array of 2N field/value frames (recursively
+            // normalized), matching upstream RESP3->RESP2 map downgrade.
+            (
+                "map_flattened",
+                b"%2\r\n+a\r\n:1\r\n$1\r\nb\r\n:2\r\n",
+                RespFrame::Array(Some(vec![
+                    RespFrame::SimpleString("a".to_string()),
+                    RespFrame::Integer(1),
+                    RespFrame::BulkString(Some(b"b".to_vec())),
+                    RespFrame::Integer(2),
+                ])),
+            ),
+            // Set (`~`) -> folds to Array (fr has no distinct Set reply carrier).
+            (
+                "set_as_array",
+                b"~2\r\n:1\r\n:2\r\n",
+                RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(2)])),
+            ),
+            // Push (`>`) -> folds to Array.
+            (
+                "push_as_array",
+                b">2\r\n+pubsub\r\n+msg\r\n",
+                RespFrame::Array(Some(vec![
+                    RespFrame::SimpleString("pubsub".to_string()),
+                    RespFrame::SimpleString("msg".to_string()),
+                ])),
+            ),
+            // Attribute (`|`) -> the metadata map is parsed and DISCARDED; the
+            // following real frame is returned, and `consumed` spans both.
+            ("attribute_discarded", b"|1\r\n+k\r\n+v\r\n:42\r\n", RespFrame::Integer(42)),
+            // Blob error (`!`) -> Error carrying the body text.
+            (
+                "blob_error",
+                b"!21\r\nSYNTAX invalid syntax\r\n",
+                RespFrame::Error("SYNTAX invalid syntax".to_string()),
+            ),
+        ];
+        // RESP3 reply parsing is opt-in (the default fail-closed config rejects
+        // these prefixes); trusted reply readers flip `allow_resp3`.
+        let config = ParserConfig {
+            allow_resp3: true,
+            ..ParserConfig::default()
+        };
+        for (name, wire, expected) in cases {
+            let parsed = parse_frame_with_config(wire, &config)
+                .expect("RESP3 golden reply case must parse under allow_resp3");
+            assert_eq!(&parsed.frame, expected, "{name}: normalized frame mismatch");
+            assert_eq!(
+                parsed.consumed,
+                wire.len(),
+                "{name}: must consume the whole frame"
+            );
+        }
+    }
+
     // (frankenredis-itoa2) Two-digit-LUT integer formatter: isomorphism vs the
     // std `to_string()` reference (the ground truth) over exhaustive small
     // values, every power-of-ten / carry boundary, and i64 extremes; plus an
