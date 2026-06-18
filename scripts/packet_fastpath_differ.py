@@ -123,6 +123,16 @@ CASES = [
     ["LRANGE", "lst", "5", "1"],
     ["LRANGE", "nope", "0", "-1"],
     ["LRANGE", "str", "0", "-1"],
+    # HGETALL/SMEMBERS: small listpack/intset collections preserve insertion/
+    # sorted order, so byte-exact vs redis (large hashtable/set order is a
+    # separate dict-order WONTFIX, not exercised here).
+    ["HGETALL", "h"],
+    ["HGETALL", "nope"],
+    ["HGETALL", "str"],
+    ["SMEMBERS", "s"],
+    ["SMEMBERS", "si"],
+    ["SMEMBERS", "nope"],
+    ["SMEMBERS", "str"],
     # wrong-type / error shapes through the fast path
     ["STRLEN", "lst"],
     ["HGET", "str", "f"],
