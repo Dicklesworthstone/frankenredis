@@ -93,6 +93,14 @@ def main():
     od = R(int(sys.argv[1]))
     fr = R(int(sys.argv[2]))
     div = 0
+
+    def cleanup():
+        for c in (od, fr):
+            try:
+                c.cmd("flushall")
+            except Exception:
+                pass
+
     for label, cmds in CASES:
         od.cmd("flushall")
         fr.cmd("flushall")
@@ -103,6 +111,7 @@ def main():
                 div += 1
                 print(f"DIVERGE {label} [{' '.join(c)}]\n  oracle: {ro}\n  fr    : {rf}")
     print("-" * 60)
+    cleanup()
     if div:
         print(f"FAIL — {div} divergence(s)")
         return 1

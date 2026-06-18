@@ -121,6 +121,7 @@ PORT_BASED = [
     ("cross_db_type_relocation_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("copy_command_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("lpos_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("multikey_pop_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("tracking_invalidation_lifecycle_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("client_tracking_differential_probe.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("digest_state_fuzz.py", [str(ORACLE_PORT), str(FR_PORT), "4", "1200"]),
