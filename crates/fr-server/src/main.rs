@@ -3753,6 +3753,26 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_lpos_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_lpos_borrowed(packet.key, packet.member, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(consumed) =
                     parse_borrowed_plain_command_count_packet(unparsed, &parser_config)
                 {
@@ -6702,6 +6722,33 @@ fn parse_borrowed_plain_lindex_packet<'a>(
         rest.get(..6)
             .filter(|command| command.eq_ignore_ascii_case(b"LINDEX"))
             .map(|_| input.len() - rest.len() + 6)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyMemberPacket {
+        consumed,
+        key,
+        member,
+    })
+}
+
+// (frankenredis-d8otd) Byte-prefix fast path for `LPOS key element`.
+// RANK/COUNT/MAXLEN option forms remain on generic borrowed dispatch.
+fn parse_borrowed_plain_lpos_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyMemberPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"LPOS".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"LPOS"))
+            .map(|_| input.len() - rest.len() + 4)
     })?;
     if input.get(cursor..cursor + 2)? != b"\r\n" {
         return None;
@@ -15503,6 +15550,60 @@ mod tests {
         assert!(
             crate::parse_borrowed_plain_zrange_packet(
                 b"*4\r\n$6\r\nZRANGE\r\n$2\r\nz\r\n$1\r\n0\r\n$2\r\n-1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_lpos_packet_parser_accepts_canonical_plain_lpos() {
+        let input = b"*3\r\n$4\r\nlPoS\r\n$3\r\nkey\r\n$5\r\nvalue\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed = crate::parse_borrowed_plain_lpos_packet(input, &ParserConfig::default())
+            .expect("canonical LPOS key element packet should parse");
+
+        assert_eq!(parsed.key, b"key");
+        assert_eq!(parsed.member, b"value");
+        assert_eq!(
+            parsed.consumed,
+            b"*3\r\n$4\r\nlPoS\r\n$3\r\nkey\r\n$5\r\nvalue\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_lpos_packet_parser_defers_options_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_lpos_packet(
+                b"*03\r\n$4\r\nLPOS\r\n$1\r\nl\r\n$1\r\nx\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lpos_packet(
+                b"*5\r\n$4\r\nLPOS\r\n$1\r\nl\r\n$1\r\nx\r\n$4\r\nRANK\r\n$1\r\n2\r\n",
+                &cfg
+            )
+            .is_none(),
+            "option-bearing LPOS stays on the generic borrowed parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lpos_packet(
+                b"*3\r\n$4\r\nLPOS\r\n$1\r\nl\r\n$1\r\nx\r\n",
+                &ParserConfig {
+                    max_array_len: 2,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lpos_packet(
+                b"*3\r\n$4\r\nLPOS\r\n$2\r\nl\r\n$1\r\nx\r\n",
                 &cfg
             )
             .is_none(),
