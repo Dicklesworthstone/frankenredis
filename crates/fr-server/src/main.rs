@@ -3074,6 +3074,60 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_strlen_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_strlen_borrowed(packet.key, ts) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_llen_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_llen_borrowed(packet.key, ts) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_getdel_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_getdel_borrowed(packet.key, ts) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_exists_two_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_exists_borrowed(&packet.keys, ts)
@@ -4310,6 +4364,87 @@ fn parse_borrowed_plain_decr_packet<'a>(
     cursor += 2;
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainDecrPacket { consumed, key })
+}
+
+struct BorrowedPlainStrlenPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+// (frankenredis-45wpc) Byte-prefix fast path for single-key STRLEN, mirroring the
+// GET packet; reuses the verified live execute_plain_strlen_borrowed.
+fn parse_borrowed_plain_strlen_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainStrlenPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"STRLEN".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$6\r\n").and_then(|rest| {
+        rest.get(..6)
+            .filter(|command| command.eq_ignore_ascii_case(b"STRLEN"))
+            .map(|_| input.len() - rest.len() + 6)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainStrlenPacket { consumed, key })
+}
+
+struct BorrowedPlainLlenPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+// (frankenredis-45wpc) Byte-prefix fast path for single-key LLEN.
+fn parse_borrowed_plain_llen_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainLlenPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"LLEN".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"LLEN"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainLlenPacket { consumed, key })
+}
+
+struct BorrowedPlainGetdelPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+// (frankenredis-45wpc) Byte-prefix fast path for single-key GETDEL (write path);
+// reuses the verified live execute_plain_getdel_borrowed (delete + events +
+// propagation handled there), so only the parse is faster.
+fn parse_borrowed_plain_getdel_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainGetdelPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"GETDEL".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$6\r\n").and_then(|rest| {
+        rest.get(..6)
+            .filter(|command| command.eq_ignore_ascii_case(b"GETDEL"))
+            .map(|_| input.len() - rest.len() + 6)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainGetdelPacket { consumed, key })
 }
 
 struct BorrowedPlainSetPacket<'a> {
