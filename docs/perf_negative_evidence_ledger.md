@@ -264,6 +264,20 @@ turns). Keep claims honest — mark which.
   DUMP-command) for collection listpacks, quicklist nodes, and intset. Remaining same-class
   candidates would need a measured hot-spot (release profile) to justify, not blind extension.
 
+## cc session 2026-06-18 (cod-walled; cc-carries) — REALISTIC-HOT RESP paths ALREADY alloc-optimal
+- The GET/SET/command HOT path (request parse + reply) is NOT a clean-win target — audited and
+  found already allocation-optimal (do NOT re-examine):
+  - **Request argv parse**: parse_command_frame (owned) pre-sizes `Vec::with_capacity(count.min(1024))`;
+    parse_command_args_borrowed_into_inner (the borrowed hot path, ohsk5) reserves
+    `count.min(1024)` into the caller-reused argv buffer (1278-1281). Both cap at 1024 to bound a
+    malicious huge `*N`. Borrowed path reuses the per-conn buffer (no per-command alloc).
+  - **Reply encode**: fr-protocol `encode_into(out)` writes into the REUSED per-connection output
+    buffer (no fresh Vec/reply); `to_bytes` pre-sizes via `encoded_len_hint`.
+  CONSEQUENCE: the only clean-win vein cc found this session was the RDB-save/DUMP/MIGRATE encode
+  path (7 levers, see manifest); the realistic GET/SET hot path is already optimized AND
+  un-benchable under cargo-check-only. Headline-workload gains now need a release/rch profile to
+  find a real hot spot, or are structural (CoralOx fr-store RAM). Do not blind-optimize the hot path.
+
 ## cc session 2026-06-18 (cod-walled; cc-carries) — DEAD-ENDS + CONVERGENCE (Reasoned)
 - **DEBUG-build A/B is INVALID under cargo-check-only.** cc can build only debug binaries
   (no `--release`, no rch per directive); a debug-fr-server vs release-redis bench is
