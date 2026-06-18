@@ -8070,27 +8070,22 @@ impl<'a> LuaState<'a> {
                 let mut result: Vec<u8> = Vec::new();
                 if start <= end {
                     let mut first = true;
-                    let array = &t.inner.borrow().array;
                     for i in start..=end {
-                        let val: Option<&LuaValue> = if i >= 1 && (i as usize) <= array.len() {
-                            Some(&array[(i - 1) as usize])
-                        } else {
-                            None
-                        };
+                        let val = t.get(&LuaValue::Number(i as f64));
                         let bytes = match val {
-                            Some(LuaValue::Str(b)) => b.clone(),
-                            Some(LuaValue::Number(n)) => {
-                                if *n == (*n as i64) as f64 && n.is_finite() {
-                                    format!("{}", *n as i64).into_bytes()
+                            LuaValue::Str(b) => b,
+                            LuaValue::Number(n) => {
+                                if n == (n as i64) as f64 && n.is_finite() {
+                                    format!("{}", n as i64).into_bytes()
                                 } else {
-                                    lua_number_to_string(*n).into_bytes()
+                                    lua_number_to_string(n).into_bytes()
                                 }
                             }
-                            Some(other) => {
-                                return Err(invalid_value(i, other.type_name()));
-                            }
-                            None => {
+                            LuaValue::Nil => {
                                 return Err(invalid_value(i, "nil"));
+                            }
+                            other => {
+                                return Err(invalid_value(i, other.type_name()));
                             }
                         };
                         if !first {
@@ -16169,6 +16164,21 @@ end
         );
 
         assert!(matches!(result, Err(ref err) if err.contains("bad argument #4 to 'concat'")));
+    }
+
+    #[test]
+    fn table_concat_reads_raw_signed_integer_keys_ozc36() {
+        let mut store = Store::new();
+        let frame = eval_script(
+            b"local t = {'one'}; t[-1] = 'neg'; t[0] = 'zero'; return table.concat(t, ',', -1, 1)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(frame, RespFrame::BulkString(Some(b"neg,zero,one".to_vec())));
     }
 
     #[test]
