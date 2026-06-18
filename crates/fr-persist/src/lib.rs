@@ -1860,9 +1860,16 @@ fn encode_compact_list_quicklist2(
             *packed_count = 0;
             Some(())
         };
+    const QUICKLIST_PACKED_THRESHOLD: usize = 1 << 30;
     for item in items {
-        if item.len() > budget {
-            // Over-budget single element → its own PLAIN node.
+        if item.len() >= QUICKLIST_PACKED_THRESHOLD {
+            // (frankenredis-1z4ba) Upstream marks a node PLAIN only when
+            // isLargeElement(sz) = sz >= packed_threshold (1<<30, 1 GiB). A merely
+            // over-budget element (>budget but <1 GiB) is NOT plain — it becomes its OWN
+            // 1-element PACKED listpack node (handled by the budget-flush in the packing
+            // path below; node_count counts an over-budget element as its own node either
+            // way, so the count stays consistent). Previously `item.len() > budget` made
+            // any >8 KiB element a PLAIN node, diverging from redis's DUMP bytes.
             flush(&mut packed_encoded, &mut packed_count, &mut buf)?;
             packed_bytes = LISTPACK_BLOB_OVERHEAD;
             rdb_encode_length(&mut buf, 1); // PLAIN

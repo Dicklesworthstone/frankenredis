@@ -21745,9 +21745,19 @@ fn quicklist_packed_node_accepts(
     trial_bytes <= max_bytes
 }
 
-fn quicklist_plain_node_required(item: &[u8], list_max_listpack_size: i64) -> bool {
-    list_max_listpack_size < 0
-        && !quicklist_packed_node_fits(&[item], list_max_listpack_size).unwrap_or(false)
+fn quicklist_plain_node_required(item: &[u8], _list_max_listpack_size: i64) -> bool {
+    // (frankenredis-1z4ba) Upstream quicklist.c: `isLargeElement(sz) = sz >= packed_threshold`
+    // with `packed_threshold = 1<<30` (1 GiB), INDEPENDENT of the fill. An element that merely
+    // exceeds the per-node listpack budget (e.g. >8 KiB under fill=-2) is NOT a PLAIN node — it
+    // becomes its OWN 1-element PACKED listpack node (RDB container 0x02); the encode loop's
+    // budget-flush already gives it that node. Only a >=1 GiB element is PLAIN (container 0x01).
+    // The previous `!packed_node_fits` test made any >8 KiB element PLAIN, so a DUMP of a list
+    // with an 8 KiB..1 GiB element diverged from redis byte-for-byte (container 0x01 vs 0x02),
+    // breaking MIGRATE/payload interchange. node-count stays in sync: this helper gates both the
+    // encode loop and quicklist_fallback_node_count, and an over-budget element is "its own node"
+    // either way (PLAIN raw vs PACKED 1-element listpack).
+    const QUICKLIST_PACKED_THRESHOLD: usize = 1 << 30;
+    item.len() >= QUICKLIST_PACKED_THRESHOLD
 }
 
 fn quicklist_packed_node_fits(entries: &[&[u8]], list_max_listpack_size: i64) -> Option<bool> {
