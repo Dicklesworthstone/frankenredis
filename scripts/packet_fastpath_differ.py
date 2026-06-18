@@ -126,17 +126,28 @@ CASES = [
 ]
 
 
-def main():
-    op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
-    fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
-    od, fr = conn(op), conn(fp)
+def run_pass(od, fr, proto):
+    """Run every CASE once after a fresh deterministic setup; returns failures.
+    proto=3 issues HELLO 3 first so RESP3-specific reply types (e.g. ZSCORE
+    Double, nil) are exercised through the byte-prefix fast paths."""
+    if proto == 3:
+        call(od, "HELLO", "3")
+        call(fr, "HELLO", "3")
     setup(od)
     setup(fr)
     fails = []
     for args in CASES:
         ro, rf = call(od, *args), call(fr, *args)
         if ro != rf:
-            fails.append(f"{' '.join(args)}: redis={ro!r} fr={rf!r}")
+            fails.append(f"[RESP{proto}] {' '.join(args)}: redis={ro!r} fr={rf!r}")
+    return fails
+
+
+def main():
+    op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
+    fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
+    od, fr = conn(op), conn(fp)
+    fails = run_pass(od, fr, 2) + run_pass(od, fr, 3)
     print("=" * 60)
     if fails:
         print(f"FAIL — {len(fails)} fast-path packet divergence(s) vs redis 7.2.4:")
@@ -144,7 +155,8 @@ def main():
             print(f"  {x}")
         sys.exit(1)
     print(
-        f"PASS — all {len(CASES)} byte-prefix fast-path packets byte-exact vs redis 7.2.4"
+        f"PASS — all {len(CASES)} byte-prefix fast-path packets byte-exact vs "
+        "redis 7.2.4 under both RESP2 and RESP3"
     )
 
 
