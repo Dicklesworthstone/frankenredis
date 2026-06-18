@@ -49,6 +49,8 @@ def main():
     cmp("sintercard_opt_nonutf8",[b"SINTERCARD",b"2",b"s1",b"s2",NUTF],True)
     for s in (od,fr): cmd(s,"RPUSH","ll","a")
     cmp("lmpop_opt_nonutf8",[b"LMPOP",b"1",b"ll",NUTF],True)
+    # (frankenredis-re7sp) SCAN TYPE filter VALUE byte-compared (Lua/fr-command path): non-UTF8 type -> empty, not error
+    cmp("eval_scan_type_nonutf8",[b"EVAL",b"return redis.call('SCAN','0','TYPE',ARGV[1])",b"0",NUTF],True)
     # known divergence (44iva) — reported, not asserted. fr's option loops do
     # str::from_utf8(token) before the match/syntax check, surfacing "invalid UTF-8
     # argument"; redis matches bytes and emits a syntax/option error (sometimes
