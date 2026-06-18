@@ -3634,6 +3634,51 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_hkeys_packet(unparsed, &parser_config)
+                {
+                    if runtime
+                        .execute_plain_hcoll_borrowed_into(
+                            packet.key,
+                            ts,
+                            false,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_hvals_packet(unparsed, &parser_config)
+                {
+                    if runtime
+                        .execute_plain_hcoll_borrowed_into(packet.key, ts, true, &mut conn.write_buf)
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_hgetall_packet(unparsed, &parser_config)
                 {
                     // (frankenredis-j5anm) HGETALL encodes its reply (RESP3 Map /
@@ -5710,6 +5755,48 @@ fn parse_borrowed_plain_decrby_packet<'a>(
         key,
         member,
     })
+}
+
+// (frankenredis-p0qbd) single-key HKEYS; reuses execute_plain_hcoll_borrowed_into(false).
+fn parse_borrowed_plain_hkeys_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainGetPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"HKEYS".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$5\r\n").and_then(|rest| {
+        rest.get(..5)
+            .filter(|command| command.eq_ignore_ascii_case(b"HKEYS"))
+            .map(|_| input.len() - rest.len() + 5)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainGetPacket { consumed, key })
+}
+
+// (frankenredis-p0qbd) single-key HVALS; reuses execute_plain_hcoll_borrowed_into(true).
+fn parse_borrowed_plain_hvals_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainGetPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"HVALS".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$5\r\n").and_then(|rest| {
+        rest.get(..5)
+            .filter(|command| command.eq_ignore_ascii_case(b"HVALS"))
+            .map(|_| input.len() - rest.len() + 5)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainGetPacket { consumed, key })
 }
 
 // (frankenredis-j5anm) single-key HGETALL; reuses execute_plain_hgetall_borrowed_into.
