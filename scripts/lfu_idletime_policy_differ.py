@@ -85,6 +85,17 @@ def reset(policy):
         d.cmd("flushall")
 
 
+def cleanup():
+    for d in (od, fr):
+        if d is None:
+            continue
+        try:
+            d.cmd("config", "set", "maxmemory-policy", "noeviction")
+            d.cmd("flushall")
+        except Exception:
+            pass
+
+
 def as_int(x):
     # RESP integer replies arrive as ":<n>"; tolerate a leading ':'/'+'.
     if isinstance(x, str):
@@ -193,4 +204,5 @@ with socket.create_connection(("127.0.0.1", OR), timeout=10) as od_sock, socket.
             "PASS — OBJECT IDLETIME/FREQ policy-switch behavior matches redis 7.2.4 "
             "(hard checks A-H)"
         )
+    cleanup()
     sys.exit(exit_code)
