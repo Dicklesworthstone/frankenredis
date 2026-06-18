@@ -71,6 +71,7 @@ CASES = [
     ("SMOVE", "src", "dst", "m"),
     ("COPY", "src", "dst"), ("COPY", "src", "dst", "REPLACE"),
     ("COPY", "src", "dst", "DB", "1"), ("COPY", "src", "dst", "DB", "1", "REPLACE"),
+    ("MOVE", "src", "1"),
     ("RENAME", "src", "dst"), ("RENAMENX", "src", "dst"),
     ("PFCOUNT", "h1", "h2"), ("PFADD", "h", "a"), ("PFMERGE", "dst", "h1", "h2"),
     ("MIGRATE", "host", "6379", "", "0", "1000", "KEYS", "k1", "k2"),

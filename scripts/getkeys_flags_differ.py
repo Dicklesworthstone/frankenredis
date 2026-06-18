@@ -76,6 +76,7 @@ PROBES = [
     ["mset", "k1", "v1", "k2", "v2"], ["mget", "k1", "k2", "k3"],
     ["expire", "k", "100"], ["copy", "src", "dst"], ["copy", "src", "dst", "REPLACE"],
     ["copy", "src", "dst", "DB", "1"], ["copy", "src", "dst", "DB", "1", "REPLACE"],
+    ["move", "src", "1"],
     ["rename", "a", "b"], ["smove", "s", "d", "m"],
     ["lmpop", "2", "k1", "k2", "LEFT"], ["zmpop", "2", "z1", "z2", "MIN"],
     ["blmpop", "0", "2", "k1", "k2", "LEFT"], ["bzmpop", "0", "2", "z1", "z2", "MIN"],
