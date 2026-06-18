@@ -10395,10 +10395,25 @@ fn cluster_parse_port_arg(arg: &[u8]) -> Option<i64> {
     s.parse::<i64>().ok()
 }
 
-fn cluster_collect_explicit_slots(argv: &[Vec<u8>]) -> Result<BTreeSet<u16>, CommandError> {
-    let mut slots = BTreeSet::new();
+fn cluster_collect_explicit_slots_for_update(
+    argv: &[Vec<u8>],
+    assigned_slots: &BTreeSet<u16>,
+    deleting: bool,
+) -> Result<BTreeSet<u16>, CommandError> {
+    let mut parsed = Vec::with_capacity(argv.len());
     for slot_arg in argv {
         let slot = parse_cluster_slot_arg(slot_arg)?;
+        parsed.push(slot);
+    }
+
+    let mut slots = BTreeSet::new();
+    for slot in parsed {
+        if deleting && !assigned_slots.contains(&slot) {
+            return Err(cluster_slot_unassigned_error(slot));
+        }
+        if !deleting && assigned_slots.contains(&slot) {
+            return Err(cluster_slot_busy_error(slot));
+        }
         if !slots.insert(slot) {
             return Err(cluster_slot_specified_multiple_times_error(slot));
         }
@@ -10406,7 +10421,11 @@ fn cluster_collect_explicit_slots(argv: &[Vec<u8>]) -> Result<BTreeSet<u16>, Com
     Ok(slots)
 }
 
-fn cluster_collect_slot_ranges(argv: &[Vec<u8>]) -> Result<BTreeSet<u16>, CommandError> {
+fn cluster_collect_slot_ranges_for_update(
+    argv: &[Vec<u8>],
+    assigned_slots: &BTreeSet<u16>,
+    deleting: bool,
+) -> Result<BTreeSet<u16>, CommandError> {
     let mut slots = BTreeSet::new();
     let mut i = 0;
     while i + 1 < argv.len() {
@@ -10418,6 +10437,12 @@ fn cluster_collect_slot_ranges(argv: &[Vec<u8>]) -> Result<BTreeSet<u16>, Comman
             )));
         }
         for slot in start..=end {
+            if deleting && !assigned_slots.contains(&slot) {
+                return Err(cluster_slot_unassigned_error(slot));
+            }
+            if !deleting && assigned_slots.contains(&slot) {
+                return Err(cluster_slot_busy_error(slot));
+            }
             if !slots.insert(slot) {
                 return Err(cluster_slot_specified_multiple_times_error(slot));
             }
@@ -10975,22 +11000,21 @@ fn cluster_cmd(
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
         }
-        let slots = cluster_collect_explicit_slots(&argv[2..])?;
         if sub.eq_ignore_ascii_case("ADDSLOTS") {
-            for slot in &slots {
-                if store.cluster_assigned_slots.contains(slot) {
-                    return Err(cluster_slot_busy_error(*slot));
-                }
-            }
+            let slots = cluster_collect_explicit_slots_for_update(
+                &argv[2..],
+                &store.cluster_assigned_slots,
+                false,
+            )?;
             for slot in slots {
                 store.cluster_assigned_slots.insert(slot);
             }
         } else {
-            for slot in &slots {
-                if !store.cluster_assigned_slots.contains(slot) {
-                    return Err(cluster_slot_unassigned_error(*slot));
-                }
-            }
+            let slots = cluster_collect_explicit_slots_for_update(
+                &argv[2..],
+                &store.cluster_assigned_slots,
+                true,
+            )?;
             for slot in slots {
                 store.cluster_assigned_slots.remove(&slot);
             }
@@ -11013,22 +11037,21 @@ fn cluster_cmd(
         if !argv.len().is_multiple_of(2) {
             return Err(cluster_wrong_subcommand_arity(sub));
         }
-        let slots = cluster_collect_slot_ranges(&argv[2..])?;
         if sub.eq_ignore_ascii_case("ADDSLOTSRANGE") {
-            for slot in &slots {
-                if store.cluster_assigned_slots.contains(slot) {
-                    return Err(cluster_slot_busy_error(*slot));
-                }
-            }
+            let slots = cluster_collect_slot_ranges_for_update(
+                &argv[2..],
+                &store.cluster_assigned_slots,
+                false,
+            )?;
             for slot in slots {
                 store.cluster_assigned_slots.insert(slot);
             }
         } else {
-            for slot in &slots {
-                if !store.cluster_assigned_slots.contains(slot) {
-                    return Err(cluster_slot_unassigned_error(*slot));
-                }
-            }
+            let slots = cluster_collect_slot_ranges_for_update(
+                &argv[2..],
+                &store.cluster_assigned_slots,
+                true,
+            )?;
             for slot in slots {
                 store.cluster_assigned_slots.remove(&slot);
             }
@@ -60678,6 +60701,20 @@ mod tests {
                 &[
                     b"CLUSTER".to_vec(),
                     b"ADDSLOTS".to_vec(),
+                    b"0".to_vec(),
+                    b"0".to_vec()
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR Slot 0 is already busy".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"ADDSLOTS".to_vec(),
                     b"1".to_vec(),
                     b"1".to_vec()
                 ],
@@ -60737,6 +60774,22 @@ mod tests {
                     b"ADDSLOTSRANGE".to_vec(),
                     b"10".to_vec(),
                     b"11".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR Slot 10 is already busy".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"ADDSLOTSRANGE".to_vec(),
+                    b"10".to_vec(),
+                    b"10".to_vec(),
+                    b"10".to_vec(),
+                    b"10".to_vec(),
                 ],
                 &mut store,
                 0,
