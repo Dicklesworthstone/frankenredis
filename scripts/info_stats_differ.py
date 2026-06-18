@@ -10,12 +10,8 @@ last-id / existence via a recording lookup, spuriously bumping keyspace_hits/mis
 on a write path. Upstream resolves them via lookupKeyWrite, where LOOKUP_WRITE
 suppresses the stat. fr now uses no-stat variants (Store::xlast_id_no_stat).
 
-Known divergences (frankenredis-ljtdo BUG2), tracked not new — the gate passes
-while ONLY these differ and fails on any NEW divergence:
-  * total_reads_processed  — redis counts event-loop read/write EVENTS; fr counts
-  * total_writes_processed   read- vs write-classified COMMANDS in fr-runtime.
-                             Matching needs per-socket-event counting in the
-                             fr-server event loop (and is pipelining-dependent).
+Previously-known total_reads_processed / total_writes_processed gaps are fixed;
+every checked logical stat now hard-fails on Redis-vs-fr drift.
 
 Excluded entirely: rdb_changes_since_last_save (cumulative since last SAVE, not
 reset by RESETSTAT, so the absolute baselines differ between servers — not a
@@ -71,15 +67,6 @@ FIELDS = [
     "watching_clients", "tracking_clients", "total_forks", "evicted_keys",
 ]
 
-# keyspace_misses FIXED (ljtdo BUG1): XADD/XDEL/XGROUP now resolve last-id via
-# no-stat lookups (upstream lookupKeyWrite suppresses keyspace hits/misses).
-# total_reads_processed / total_writes_processed FIXED (ljtdo BUG2 / k96mc): the
-# fr-server event loop now counts one read event per readable drain and one write
-# event per flush of pending output, matching upstream readQueryFromClient /
-# writeToClient (and so pipelining/MULTI/EVAL batch correctly). No known divergences.
-KNOWN_DIVERGENCES = set()
-
-
 def workload(c):
     c.cmd("FLUSHALL")
     c.cmd("CONFIG", "RESETSTAT")
@@ -106,18 +93,12 @@ def main():
     io, iff = info(o), info(f)
     divs = [(k, io.get(k, "<absent>"), iff.get(k, "<absent>"))
             for k in FIELDS if io.get(k, "<absent>") != iff.get(k, "<absent>")]
-    new = [d for d in divs if d[0] not in KNOWN_DIVERGENCES]
-    fixed = KNOWN_DIVERGENCES - {d[0] for d in divs}
     for k, a, b in divs:
-        tag = "NEW" if k not in KNOWN_DIVERGENCES else "known(ljtdo)"
-        print(f"  [{tag}] {k:28s} redis={a!r} fr={b!r}")
-    if fixed:
-        print(f"NOTE: {sorted(fixed)} now MATCH — prune KNOWN_DIVERGENCES")
-    if new:
-        print(f"FAIL — {len(new)} NEW INFO-stat divergence(s) vs redis 7.2.4")
+        print(f"  {k:28s} redis={a!r} fr={b!r}")
+    if divs:
+        print(f"FAIL — {len(divs)} INFO-stat divergence(s) vs redis 7.2.4")
         return 1
-    print(f"PASS — INFO logical stats match redis 7.2.4 "
-          f"({len(divs)} known ljtdo divergences tracked)")
+    print("PASS — INFO logical stats match redis 7.2.4")
     return 0
 
 
