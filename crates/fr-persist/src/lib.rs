@@ -1723,7 +1723,13 @@ fn encode_compact_set_listpack(
 }
 
 fn encode_set_listpack_blob(members: &[Vec<u8>]) -> Option<Vec<u8>> {
-    let mut encoded = Vec::new();
+    // Pre-size to a safe upper bound (each listpack string entry is <= len + ~10 of
+    // type-header + backlen; int-encoded entries are shorter) so the blob is built in ONE
+    // allocation instead of growing from empty (≈log2(size) realloc+copies per key on the
+    // bulk RDB-save path). Under-estimates are harmless (Vec just grows); output is
+    // byte-identical. (frankenredis perf: presize listpack blob, code-first batch-test pending)
+    let cap = LISTPACK_BLOB_OVERHEAD + members.iter().map(|m| m.len() + 11).sum::<usize>();
+    let mut encoded = Vec::with_capacity(cap);
     for member in members {
         encode_listpack_entry(&mut encoded, member);
     }
@@ -1754,7 +1760,12 @@ fn encode_compact_hash_listpack(
 }
 
 fn encode_hash_listpack_blob(fields: &[(Vec<u8>, Vec<u8>)]) -> Option<Vec<u8>> {
-    let mut encoded = Vec::new();
+    // Pre-size to a safe upper bound (two entries per field, each <= len + ~10) so the blob
+    // is built in one allocation. Under-estimates are harmless; output byte-identical.
+    // (frankenredis perf: presize listpack blob, code-first batch-test pending)
+    let cap = LISTPACK_BLOB_OVERHEAD
+        + fields.iter().map(|(f, v)| f.len() + v.len() + 22).sum::<usize>();
+    let mut encoded = Vec::with_capacity(cap);
     for (field, value) in fields {
         encode_listpack_entry(&mut encoded, field);
         encode_listpack_entry(&mut encoded, value);
@@ -1804,7 +1815,13 @@ fn encode_compact_zset_listpack(
 }
 
 fn encode_zset_score_listpack_blob(sorted_members: &[(&[u8], f64)]) -> Option<Vec<u8>> {
-    let mut encoded = Vec::new();
+    // Pre-size to a safe upper bound: per member, the member entry (<= len + ~10) plus the
+    // score entry (a d2string/i64 decimal, always <= ~21 chars + ~10 header => budget 32) so
+    // the blob is built in one allocation. Under-estimates are harmless; output byte-identical.
+    // (frankenredis perf: presize listpack blob, code-first batch-test pending)
+    let cap = LISTPACK_BLOB_OVERHEAD
+        + sorted_members.iter().map(|(m, _)| m.len() + 11 + 32).sum::<usize>();
+    let mut encoded = Vec::with_capacity(cap);
     for (member, score) in sorted_members {
         encode_listpack_entry(&mut encoded, member);
         if let Some(score) = zset_listpack_integer_score(*score) {
