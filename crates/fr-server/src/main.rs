@@ -3496,6 +3496,46 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_incrby_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_incrby_borrowed(packet.key, packet.member, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_decrby_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_decrby_borrowed(packet.key, packet.member, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_hgetall_packet(unparsed, &parser_config)
                 {
                     // (frankenredis-j5anm) HGETALL encodes its reply (RESP3 Map /
@@ -5313,6 +5353,59 @@ struct BorrowedPlainKeyRangePacket<'a> {
     key: &'a [u8],
     start: &'a [u8],
     end: &'a [u8],
+}
+
+// (frankenredis-5w5kb) key+delta write INCRBY (`INCRBY key delta`); delta bulk
+// passed as bytes — execute_plain_incrby_borrowed parses/validates it.
+fn parse_borrowed_plain_incrby_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyMemberPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"INCRBY".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$6\r\n").and_then(|rest| {
+        rest.get(..6)
+            .filter(|command| command.eq_ignore_ascii_case(b"INCRBY"))
+            .map(|_| input.len() - rest.len() + 6)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyMemberPacket {
+        consumed,
+        key,
+        member,
+    })
+}
+
+// (frankenredis-5w5kb) key+delta write DECRBY (`DECRBY key delta`).
+fn parse_borrowed_plain_decrby_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyMemberPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"DECRBY".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$6\r\n").and_then(|rest| {
+        rest.get(..6)
+            .filter(|command| command.eq_ignore_ascii_case(b"DECRBY"))
+            .map(|_| input.len() - rest.len() + 6)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyMemberPacket {
+        consumed,
+        key,
+        member,
+    })
 }
 
 // (frankenredis-j5anm) single-key HGETALL; reuses execute_plain_hgetall_borrowed_into.
