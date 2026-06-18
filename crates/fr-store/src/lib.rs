@@ -25602,6 +25602,17 @@ fn prefix_range_end(prefix: &[u8]) -> Option<Vec<u8>> {
 }
 
 pub fn glob_match(pattern: &[u8], string: &[u8]) -> bool {
+    // (frankenredis-z9dc3) redis stringmatchlen never enters its match loop for an
+    // empty string, so an empty string matches ONLY an empty pattern. A single `*`
+    // matches the empty key via the KEYS/SCAN `allkeys` shortcut (is_star), NOT via
+    // this matcher — so `**`/`***`/`?`/etc. must NOT match the empty string here
+    // (else KEYS/SCAN/HSCAN `**` wrongly include the empty key/field, and PSUBSCRIBE
+    // `*` wrongly matches an empty channel). The previous code consumed all trailing
+    // stars, making `**` match "". Non-empty strings (incl. mid-match `a**` vs `a`)
+    // are unaffected.
+    if string.is_empty() {
+        return pattern.is_empty();
+    }
     glob_match_inner(pattern, string, 0, 0)
 }
 
@@ -29644,6 +29655,18 @@ mod tests {
         assert!(!glob_match(b"[literal", b"[literal"));
         assert!(!glob_match(b"[a-", b"[a-"));
         assert!(!glob_match(b"[literal", b"literal"));
+        // (frankenredis-z9dc3) empty string matches ONLY the empty pattern; a single
+        // `*` matches the empty key via the KEYS/SCAN allkeys shortcut, not here, so
+        // `*`/`**`/`?` must all be non-matches against "" (mirrors stringmatchlen).
+        assert!(glob_match(b"", b""));
+        assert!(!glob_match(b"*", b""));
+        assert!(!glob_match(b"**", b""));
+        assert!(!glob_match(b"***", b""));
+        assert!(!glob_match(b"?", b""));
+        assert!(!glob_match(b"a*", b""));
+        // mid-match exhaustion is unaffected: trailing stars still match.
+        assert!(glob_match(b"a**", b"a"));
+        assert!(glob_match(b"a*", b"a"));
     }
 
     // ── Hash operation tests ────────────────────────────────
