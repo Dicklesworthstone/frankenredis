@@ -26,7 +26,7 @@ including CONFIG SET port (MODIFIABLE_CONFIG with a live listener rebind,
 frankenredis-zyx9q).
 
 Usage: config_set_validation_differ.py [--bin PATH] [--redis-bin PATH] [-v]
-Exit 0 if validation matches (modulo known-issues), else 1.
+Exit 0 if validation matches exactly, else 1.
 """
 import argparse
 import os
@@ -106,11 +106,6 @@ class Conn:
             return rest.decode("latin1")
         raise IOError("unexpected element type %r" % t)
 
-
-# Parameters whose validation is host/runtime/format specific or otherwise out
-# of the value-range validation surface this gate covers. (Empty: port is now
-# MODIFIABLE with byte-exact range validation + live rebind, frankenredis-zyx9q.)
-KNOWN_ISSUES: "dict[str, str]" = {}
 
 # String/enum/free-form params where an arbitrary token is legitimately accepted
 # by both (or rejected by both with server-specific wording we don't pin here).
@@ -203,7 +198,7 @@ def main():
         names = oc.parse(["CONFIG", "GET", "*"])
         params = names[0::2]
 
-        accept_gaps, reject_gaps, wording, known = [], [], [], []
+        accept_gaps, reject_gaps, wording = [], [], []
         for p in sorted(params):
             if p in SKIP:
                 continue
@@ -213,9 +208,7 @@ def main():
                 if ob == fb:
                     continue
                 rec = (p, v, ob.decode("latin1"), fb.decode("latin1"))
-                if p in KNOWN_ISSUES:
-                    known.append(rec)
-                elif fb == b"+OK" and ob.startswith(b"-"):
+                if fb == b"+OK" and ob.startswith(b"-"):
                     accept_gaps.append(rec)
                 elif ob == b"+OK" and fb.startswith(b"-"):
                     reject_gaps.append(rec)
@@ -236,12 +229,9 @@ def main():
         show("ACCEPT-GAPs (fr accepts what redis rejects)", accept_gaps)
         show("REJECT-GAPs (fr rejects what redis accepts)", reject_gaps)
         show("WORDING divergences", wording)
-        if known:
-            show("KNOWN ISSUES (allowlisted)", known)
 
         total = len(accept_gaps) + len(reject_gaps) + len(wording)
-        print(f"\n{len(params)} params swept; {total} unexpected divergences; "
-              f"{len(known)} known-issue cases.")
+        print(f"\n{len(params)} params swept; {total} divergences.")
         if total == 0:
             print("PASS: CONFIG SET validation byte-exact vs redis 7.2.4.")
             sys.exit(0)
