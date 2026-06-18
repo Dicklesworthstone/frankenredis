@@ -154,6 +154,7 @@ CASES = [
     ["MSET", "ma", "1", "mb", "2"],
     ["MGET", "ma", "mb", "nope"],
     ["DBSIZE"],
+    ["COMMAND", "COUNT"],
     ["ECHO", "hello"],
     ["ECHO", ""],
 ]
