@@ -59,7 +59,7 @@ def main():
     fails = []
     for s in (o, f):
         cmd(s, "FLUSHALL")
-        for cfg in (("hash-max-listpack-entries", "128"), ("hash-max-listpack-value", "64")):
+        for cfg in (("hash-max-listpack-entries", "512"), ("hash-max-listpack-value", "64")):
             cmd(s, "CONFIG", "SET", *cfg)
 
     def chk(label, ro, rf):
