@@ -35,6 +35,14 @@ class R:
         s.s.sendall(o); return s.read()
 OR=int(sys.argv[1]); FRp=int(sys.argv[2])
 od=R(OR); fd=R(FRp)
+# Preflight: this gate compares DEBUG DIGEST-VALUE per key; a server launched
+# without --enable-debug-command rejects DEBUG, which would surface as a phantom
+# encoding/digest DIVERGE. Fail fast with a clear setup message (exit 2) instead.
+for _nm,_p,_d in (("oracle",OR,od),("fr",FRp,fd)):
+    _pf=_d.cmd("debug","digest")
+    if isinstance(_pf,str) and _pf.startswith("ERR:"):
+        print(f"SETUP ERROR: {_nm} (port {_p}) DEBUG DIGEST unavailable: {_pf}")
+        print("  Launch both redis and fr with --enable-debug-command yes."); sys.exit(2)
 DIV=[]
 # Open frankenredis-v4ba8 set facet: set-algebra rebuild of an ALL-INT result
 # whose cardinality overflows set-max-intset-entries must become hashtable

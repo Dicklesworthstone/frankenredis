@@ -78,6 +78,15 @@ BUILDS = [
 
 def main():
     R, F = Conn(ORACLE), Conn(FR)
+    # Preflight: this gate's content oracle is DEBUG DIGEST, so a server launched
+    # without --enable-debug-command rejects it and would surface as a phantom
+    # byte/digest mismatch. Fail fast with a clear setup message (exit 2) instead.
+    for nm, p, c in (("oracle", ORACLE, R), ("fr", FR, F)):
+        rep = c.cmd(["DEBUG", "DIGEST"])
+        if not (isinstance(rep, (bytes, bytearray)) and rep.startswith(b"+")):
+            print(f"SETUP ERROR: {nm} (port {p}) DEBUG DIGEST unavailable: {rep!r}")
+            print("  Launch both redis and fr with --enable-debug-command yes.")
+            sys.exit(2)
     for c in (R, F):
         c.cmd(["FLUSHALL"])
         for _, build in BUILDS:
