@@ -468,6 +468,21 @@ fn info_keyspace_with_data() {
     );
 }
 
+#[test]
+fn info_keyspace_reports_avg_ttl_for_volatile_keys() {
+    let mut rt = Runtime::default_strict();
+    rt.execute_frame(command(&[b"SET", b"persist", b"v"]), 100);
+    rt.execute_frame(command(&[b"SET", b"soon", b"v", b"PX", b"1000"]), 100);
+    rt.execute_frame(command(&[b"SET", b"later", b"v", b"PX", b"3000"]), 100);
+
+    let info = rt.execute_frame(command(&[b"INFO", b"keyspace"]), 600);
+    let text = extract_bulk(&info);
+    assert!(
+        text.contains("db0:keys=3,expires=2,avg_ttl=1500\r\n"),
+        "INFO keyspace should report current volatile TTL mean, got {text:?}"
+    );
+}
+
 // ── ROLE ────────────────────────────────────────────
 
 #[test]

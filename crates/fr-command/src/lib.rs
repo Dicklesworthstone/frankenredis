@@ -16275,7 +16275,11 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             let keys = store.dbsize_in_db(db);
             if keys > 0 {
                 let expires = store.expires_in_db(db);
-                let _ = write!(info, "db{db}:keys={keys},expires={expires},avg_ttl=0\r\n");
+                let avg_ttl = store.avg_ttl_in_db(db, now_ms);
+                let _ = write!(
+                    info,
+                    "db{db}:keys={keys},expires={expires},avg_ttl={avg_ttl}\r\n"
+                );
             }
         }
         info.push_str("\r\n");

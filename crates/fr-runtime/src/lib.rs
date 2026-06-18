@@ -23687,13 +23687,17 @@ impl Runtime {
         }
     }
 
-    fn handle_info_keyspace_section(&mut self, _now_ms: u64) -> RespFrame {
+    fn handle_info_keyspace_section(&mut self, now_ms: u64) -> RespFrame {
         let mut info = String::from("# Keyspace\r\n");
         for db in 0..self.server.store.database_count {
             let keys = self.server.store.dbsize_in_db(db);
             if keys > 0 {
                 let expires = self.server.store.expires_in_db(db);
-                let _ = write!(info, "db{db}:keys={keys},expires={expires},avg_ttl=0\r\n");
+                let avg_ttl = self.server.store.avg_ttl_in_db(db, now_ms);
+                let _ = write!(
+                    info,
+                    "db{db}:keys={keys},expires={expires},avg_ttl={avg_ttl}\r\n"
+                );
             }
         }
         info.push_str("\r\n");

@@ -8238,6 +8238,29 @@ impl Store {
     }
 
     #[must_use]
+    pub fn avg_ttl_in_db(&self, db: usize, now_ms: u64) -> u64 {
+        if db >= self.database_count || self.db_expires_counts[db] == 0 {
+            return 0;
+        }
+
+        let mut ttl_sum = 0u128;
+        let mut ttl_count = 0u128;
+        for (key, deadline_ms) in &self.expiry_deadlines {
+            let key_db = decode_db_key(key).map(|(key_db, _)| key_db).unwrap_or(0);
+            if key_db != db {
+                continue;
+            }
+
+            ttl_sum = ttl_sum.saturating_add(u128::from(deadline_ms.get().saturating_sub(now_ms)));
+            ttl_count += 1;
+        }
+
+        ttl_sum
+            .checked_div(ttl_count)
+            .map_or(0, |avg| u64::try_from(avg).unwrap_or(u64::MAX))
+    }
+
+    #[must_use]
     pub fn count_expiring_keys(&self) -> usize {
         self.expires_count
     }
@@ -27337,6 +27360,23 @@ mod tests {
         store.flushdb();
         assert!(store.volatile_keys.is_empty());
         assert!(store.expiry_deadline_counts.is_empty());
+    }
+
+    #[test]
+    fn avg_ttl_in_db_reports_exact_volatile_mean() {
+        // (frankenredis-xn7xr) INFO keyspace cannot reproduce Redis's sampled,
+        // decaying avg_ttl byte-for-byte, but it should report a meaningful
+        // current volatile-key TTL instead of the old hard-coded zero.
+        let mut store = Store::new();
+        store.set(b"persistent".to_vec(), b"v".to_vec(), None, 1_000);
+        store.set(b"a".to_vec(), b"v".to_vec(), Some(1_000), 1_000);
+        store.set(b"b".to_vec(), b"v".to_vec(), Some(3_000), 1_000);
+        store.set(encode_db_key(1, b"c"), b"v".to_vec(), Some(5_000), 1_000);
+
+        assert_eq!(store.expires_in_db(0), 2);
+        assert_eq!(store.avg_ttl_in_db(0, 1_500), 1_500);
+        assert_eq!(store.avg_ttl_in_db(1, 1_500), 4_500);
+        assert_eq!(store.avg_ttl_in_db(0, 5_000), 0);
     }
 
     #[test]
