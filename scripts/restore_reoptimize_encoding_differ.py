@@ -61,10 +61,8 @@ def main():
         ro,rf=enc(od,"R"),enc(fr,"R")
         if ro!=rf:
             (fails if assert_it else known).append(f"{kind}: redis={ro.decode()} fr={rf.decode()}")
-    for kind in ("hash","zset","list"):
-        check(kind, True)
-    for kind in ("set","intset"):
-        check(kind, False)   # bbyfz known divergence — reported, not asserted
+    for kind in ("hash","zset","list","set","intset"):
+        check(kind, True)   # set/intset HARD-asserted since bbyfz fix (fc0fe5212)
     print("="*60)
     if known:
         print("KNOWN (frankenredis-bbyfz, not asserted): " + "; ".join(known))
@@ -72,5 +70,5 @@ def main():
         print(f"FAIL — {len(fails)} restore re-optimization divergence(s) vs redis 7.2.4:")
         for x in fails[:8]: print(f"  {x}")
         sys.exit(1)
-    print("PASS — hash/zset/list RESTORE encoding re-optimization byte-exact vs redis 7.2.4 (SET pending bbyfz)")
+    print("PASS — hash/zset/list/SET/intset RESTORE encoding re-optimization byte-exact vs redis 7.2.4 (set/intset hard-asserted post-bbyfz fix)")
 if __name__=="__main__": main()
