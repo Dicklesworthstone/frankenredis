@@ -240,8 +240,12 @@ turns). Keep claims honest — mark which.
   (fr-persist encode_compact_list_quicklist2 RDB-save + fr-store encode_dump_quicklist2 DUMP) to
   the per-node byte budget (cap 8 KiB = SIZE_SAFETY_LIMIT). Helps the common 1-2 node quicklist.
   Byte-identical (list_quicklist_dump_differ PASS + multinode/large-elem DUMP exact pre+post RELOAD).
-- **ALREADY-OPTIMAL (do NOT re-examine):** (a) encode_intset_blob already `with_capacity(8+len*width)`
-  + encode_compact_set_intset pre-sizes values/out; (b) the RESP reply path is NOT a fresh-Vec-per-
+- **intset encode now fully alloc-lean:** blob was already `with_capacity(8+len*width)` and the
+  caller pre-sizes values/out, BUT a later re-examination found encode_intset_blob did a separate
+  `values.to_vec()` before sorting — FIXED 78fff02e8 (sort owned values in place; sole caller
+  discards them; byte-identical, intset gate PASS). Lesson: "pre-sized" != "alloc-free" — check for
+  to_vec/clone copies too. Now genuinely optimal; do not re-examine.
+- **ALREADY-OPTIMAL (do NOT re-examine):** the RESP reply path is NOT a fresh-Vec-per-
   reply churn target — fr-protocol `encode_into(out)` writes into the REUSED per-connection output
   buffer, and `to_bytes` uses `encoded_len_hint` to pre-size. Reply encoding is already allocation-lean.
 - **DEAD-END (do NOT retry):** pre-sizing the OUTER multi-node accumulator `buf` in the quicklist
