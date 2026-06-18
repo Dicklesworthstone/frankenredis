@@ -217,6 +217,7 @@ PORT_BASED = [
     ("scan_resume_keyset_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("reload_edge_value_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("xclaim_flags_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("restore_reoptimize_encoding_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # zset total-order under heavy equal-score ties + binary members — guards the
     # FullSortedSet member-storage/index rewrites (peni2 Arc sharing, uybhq follow-up).
     ("zset_tiebreak_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
