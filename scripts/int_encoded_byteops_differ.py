@@ -30,6 +30,10 @@ def main():
         ro,rf=cmd(od,*c),cmd(fr,*c)
         if ro!=rf: fails.append(f"{label}: redis={ro[:60]!r} fr={rf[:60]!r}")
     def ri(key="k",val="12345"): each("DEL",key); each("SET",key,val)
+    def cleanup():
+        for s in (od,fr):
+            try: cmd(s,"FLUSHALL")
+            except Exception: pass
     each("FLUSHALL")
     ri(); chk("enc_int","OBJECT","ENCODING","k")
     chk("getrange","GETRANGE","k","0","2"); chk("getrange_neg","GETRANGE","k","-2","-1")
@@ -49,6 +53,8 @@ def main():
     if fails:
         print(f"FAIL — {len(fails)} int-encoded byte-op divergence(s) vs redis 7.2.4:")
         for x in fails[:12]: print(f"  {x}")
+        cleanup()
         sys.exit(1)
+    cleanup()
     print("PASS — integer-encoded byte ops byte-exact vs redis 7.2.4 (reads keep int+materialize, writes->raw exact, empty-setrange no-op, getex keeps int)")
 if __name__=="__main__": main()

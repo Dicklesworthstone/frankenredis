@@ -188,6 +188,7 @@ PORT_BASED = [
     ("substr_getrange_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("zset_score_range_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("string_encoding_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("int_encoded_byteops_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("float_input_acceptance_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("smove_edge_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("lmove_rpoplpush_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
