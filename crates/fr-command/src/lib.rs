@@ -11611,51 +11611,32 @@ fn function_cmd(
         if store.script_nesting_level >= 1 {
             return Err(script_noscript_command_error());
         }
+        // (frankenredis-5qhz7 / mbyoe / sg7b4) Upstream functions.c validates the
+        // library metadata header, then COMPILES the whole body, then registers
+        // — so a Lua syntax error ANYWHERE surfaces "Error compiling function:
+        // user_function:<line>: <msg>" before any store mutation, but AFTER
+        // metadata-header validation. fr-store text-scans for register_function
+        // and never compiles, so it (a) reported "No functions registered" for a
+        // syntax-error body with no scannable register_function, and (b) accepted
+        // a library whose register_function was scannable but whose body had a
+        // syntax error elsewhere. Pre-compile here: on failure let a metadata
+        // error win (precedence), else surface the compile error WITHOUT
+        // mutating the store — which preserves REPLACE atomicity (the existing
+        // library is left untouched, exactly as upstream does on a failed
+        // recompile). lua_execution_source blanks the shebang to a same-width
+        // space run, so compile_error_line reports the true file line.
+        if lua_eval::compile_check(&argv[code_idx]).is_err() {
+            store
+                .function_validate_metadata(&argv[code_idx])
+                .map_err(CommandError::Store)?;
+            return Err(CommandError::Custom(format!(
+                "ERR Error compiling function: user_function:{}",
+                lua_eval::compile_error_line(&argv[code_idx])
+            )));
+        }
         match store.function_load(&argv[code_idx], replace) {
-            Ok(name) => {
-                // (frankenredis-sg7b4) Upstream compiles the WHOLE body before
-                // registering, so a library that has a scannable
-                // register_function but a syntax error ELSEWHERE is rejected
-                // with "Error compiling function". fr text-scans and registers
-                // without compiling, so it accepted such libraries. Compile-
-                // check the just-registered library and, on failure, roll it
-                // back + surface the compile error. Gated on !replace: a
-                // successful non-REPLACE load means the library was NEW (an
-                // existing name would have errored), so function_delete fully
-                // undoes it. The REPLACE-overwrote-an-existing-lib variant
-                // can't be restored here without a pre-snapshot and remains a
-                // documented residual of frankenredis-sg7b4.
-                if !replace && lua_eval::compile_check(&argv[code_idx]).is_err() {
-                    let _ = store.function_delete(&name);
-                    return Err(CommandError::Custom(format!(
-                        "ERR Error compiling function: user_function:{}",
-                        lua_eval::compile_error_line(&argv[code_idx])
-                    )));
-                }
-                Ok(RespFrame::BulkString(Some(name.into_bytes())))
-            }
-            Err(e) => {
-                // (frankenredis-mbyoe) Upstream functions.c compiles the library
-                // body as a Lua chunk; a syntax error surfaces as "Error
-                // compiling function: user_function:<line>: <msg>" BEFORE the
-                // empty-body "No functions registered" check. fr text-scans for
-                // register_function and never compiles, so a syntax-error body
-                // with no scannable register_function wrongly reported "No
-                // functions registered". Override ONLY that case, and ONLY when
-                // the body actually fails to compile (empty/valid bodies keep
-                // the no-functions error). lua_execution_source blanks the
-                // shebang to a same-width space run, so compile_error_line
-                // reports the true file line (shebang = line 1).
-                if matches!(&e, StoreError::GenericError(m) if m == "ERR No functions registered")
-                    && lua_eval::compile_check(&argv[code_idx]).is_err()
-                {
-                    return Err(CommandError::Custom(format!(
-                        "ERR Error compiling function: user_function:{}",
-                        lua_eval::compile_error_line(&argv[code_idx])
-                    )));
-                }
-                Err(CommandError::Store(e))
-            }
+            Ok(name) => Ok(RespFrame::BulkString(Some(name.into_bytes()))),
+            Err(e) => Err(CommandError::Store(e)),
         }
     } else if sub.eq_ignore_ascii_case("LIST") {
         // FUNCTION LIST [LIBRARYNAME pattern] [WITHCODE]

@@ -19584,10 +19584,12 @@ impl Store {
 
     /// Load a function library. Parses the library code to extract metadata.
     /// Returns the library name on success.
-    pub fn function_load(&mut self, code: &[u8], replace: bool) -> Result<String, StoreError> {
-        // Parse the library header: #!<engine> name=<name>
-        let code_str = std::str::from_utf8(code).map_err(|_| StoreError::WrongType)?;
-
+    /// Validate a function library's metadata header (`#!<engine> name=<name>`)
+    /// WITHOUT registering anything, returning the library name. Split out so
+    /// fr-command can honour upstream's "metadata errors precede compile errors"
+    /// precedence when it pre-compiles the body before mutating the store.
+    /// (frankenredis-sg7b4)
+    fn extract_lib_metadata(code_str: &str) -> Result<(String, String), StoreError> {
         if !code_str.starts_with("#!") {
             return Err(StoreError::GenericError(
                 "ERR Missing library metadata".to_string(),
@@ -19689,6 +19691,22 @@ impl Store {
                     .to_string(),
             ));
         }
+        Ok((lib_name, engine))
+    }
+
+    /// Non-mutating metadata-only validation for the FUNCTION LOAD pre-compile
+    /// check (frankenredis-sg7b4): fr-command calls this when a body fails to
+    /// compile, to decide whether a shebang-metadata error should take
+    /// precedence over the compile error (matching upstream's order).
+    pub fn function_validate_metadata(&self, code: &[u8]) -> Result<(), StoreError> {
+        let code_str = std::str::from_utf8(code).map_err(|_| StoreError::WrongType)?;
+        Self::extract_lib_metadata(code_str).map(|_| ())
+    }
+
+    pub fn function_load(&mut self, code: &[u8], replace: bool) -> Result<String, StoreError> {
+        // Parse + validate the library header: #!<engine> name=<name>
+        let code_str = std::str::from_utf8(code).map_err(|_| StoreError::WrongType)?;
+        let (lib_name, engine) = Self::extract_lib_metadata(code_str)?;
 
         if !replace && self.function_libraries.contains_key(&lib_name) {
             return Err(StoreError::GenericError(format!(

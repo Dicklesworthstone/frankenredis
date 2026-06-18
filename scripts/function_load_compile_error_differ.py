@@ -50,6 +50,15 @@ CASES = [
     ("valid_lib", ("FUNCTION", "LOAD", GOOD)),
     ("valid_replace", ("FUNCTION", "LOAD", "REPLACE", GOOD)),
     ("fcall_valid", ("FCALL", "gf", "0", "hello")),
+    # (frankenredis-sg7b4) REPLACE atomicity: a REPLACE whose new body fails to
+    # compile must be rejected WITHOUT destroying the existing library (upstream
+    # compiles before swapping). These run in order (no FLUSH between cases).
+    ("repl_atom_setup",
+     ("FUNCTION", "LOAD", "#!lua name=ratom\nredis.register_function('rf',function() return 1 end)")),
+    ("repl_atom_bad",
+     ("FUNCTION", "LOAD", "REPLACE",
+      "#!lua name=ratom\nredis.register_function('rf',function() return 1 end)\n)syntaxerr")),
+    ("repl_atom_old_preserved", ("FCALL", "rf", "0")),
 ]
 
 
