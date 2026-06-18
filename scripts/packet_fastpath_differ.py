@@ -227,6 +227,12 @@ CASES = [
     ["GETRANGE", BINKEY, "0", "3"],
     ["HGET", "bh", BINFIELD],
     ["HEXISTS", "bh", BINFIELD],
+    # simple ZADD (fresh key) + the NX-form generic fall-through
+    ["ZADD", "pzk", "1.5", "m"],
+    ["ZADD", "pzk", "2.5", "m"],
+    ["ZSCORE", "pzk", "m"],
+    ["ZADD", "pzk", "nan", "bad"],
+    ["ZADD", "pzk", "NX", "m"],
 ]
 
 
