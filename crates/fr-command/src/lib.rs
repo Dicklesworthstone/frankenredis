@@ -21513,7 +21513,7 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         let mut skipme = legacy_addr.is_none();
         let mut filter_id: Option<u64> = None;
         let mut filter_type: Option<String> = None;
-        let mut filter_user: Option<Vec<u8>> = None;
+        let mut filter_user: Option<&[u8]> = None;
         let mut filter_addr = legacy_addr.map(str::to_owned);
         let mut filter_laddr: Option<String> = None;
 
@@ -21550,7 +21550,16 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                     filter_type = Some(kind);
                     i += 2;
                 } else if opt.eq_ignore_ascii_case("USER") && i + 1 < argv.len() {
-                    filter_user = Some(argv[i + 1].clone());
+                    let user_arg = &argv[i + 1];
+                    if user_arg.as_slice() != b"default"
+                        && user_arg != &store.dispatch_client_ctx.authenticated_user
+                    {
+                        return Err(CommandError::Custom(format!(
+                            "ERR No such user '{}'",
+                            String::from_utf8_lossy(user_arg)
+                        )));
+                    }
+                    filter_user = Some(user_arg);
                     i += 2;
                 } else if opt.eq_ignore_ascii_case("ADDR") && i + 1 < argv.len() {
                     let addr = std::str::from_utf8(&argv[i + 1])
@@ -21598,9 +21607,9 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                 };
                 current_kind.eq_ignore_ascii_case(kind)
             })
-            && filter_user
-                .as_ref()
-                .is_none_or(|user| &store.dispatch_client_ctx.authenticated_user == user)
+            && filter_user.is_none_or(|user| {
+                store.dispatch_client_ctx.authenticated_user.as_slice() == user
+            })
             && filter_addr
                 .as_ref()
                 .is_none_or(|addr| &store.dispatch_client_ctx.peer_addr == addr)
@@ -60966,6 +60975,53 @@ mod tests {
         .unwrap();
         assert_eq!(out, RespFrame::Integer(1));
 
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"USER".to_vec(),
+                b"default".to_vec(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let err = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"USER".to_vec(),
+                b"ghost".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR No such user 'ghost'".to_string())
+        );
+
+        store.dispatch_client_ctx.authenticated_user = b"alice".to_vec();
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"USER".to_vec(),
+                b"alice".to_vec(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(1));
+
         let current_laddr = format!("127.0.0.1:{}", store.server_port).into_bytes();
         let out = dispatch_argv(
             &[
@@ -61001,6 +61057,75 @@ mod tests {
                 b"KILL".to_vec(),
                 b"LADDR".to_vec(),
                 b"127.0.0.1:1".to_vec(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(0));
+    }
+
+    #[test]
+    fn client_kill_user_validates_known_direct_dispatch_users() {
+        let mut store = Store::new();
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"USER".to_vec(),
+                b"default".to_vec(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let err = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"USER".to_vec(),
+                b"alice".to_vec(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR No such user 'alice'".to_string())
+        );
+
+        store.dispatch_client_ctx.authenticated_user = b"alice".to_vec();
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"USER".to_vec(),
+                b"alice".to_vec(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"USER".to_vec(),
+                b"default".to_vec(),
                 b"SKIPME".to_vec(),
                 b"no".to_vec(),
             ],
