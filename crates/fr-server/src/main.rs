@@ -2947,6 +2947,32 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_mget_seven_packet(unparsed, &parser_config)
+                {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_mget_borrowed_into(
+                            &packet.keys,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else {
                     parse_borrowed_multibulk_action(
                         unparsed,
@@ -4414,6 +4440,48 @@ fn parse_borrowed_plain_mget_six_packet<'a>(
         consumed,
         keys: [
             first_key, second_key, third_key, fourth_key, fifth_key, sixth_key,
+        ],
+    })
+}
+
+struct BorrowedPlainMgetSevenPacket<'a> {
+    consumed: usize,
+    keys: [&'a [u8]; 7],
+}
+
+fn parse_borrowed_plain_mget_seven_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainMgetSevenPacket<'a>> {
+    if config.max_array_len < 8 || config.max_bulk_len < b"MGET".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*8\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"MGET"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (first_key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (second_key, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (third_key, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (fourth_key, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (fifth_key, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (sixth_key, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (seventh_key, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainMgetSevenPacket {
+        consumed,
+        keys: [
+            first_key,
+            second_key,
+            third_key,
+            fourth_key,
+            fifth_key,
+            sixth_key,
+            seventh_key,
         ],
     })
 }
@@ -8573,6 +8641,82 @@ mod tests {
         assert!(
             crate::parse_borrowed_plain_mget_six_packet(
                 b"*7\r\n$4\r\nMGET\r\n$2\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_mget_seven_packet_parser_accepts_canonical_seven_key_mget() {
+        let input =
+            b"*8\r\n$4\r\nmGeT\r\n$2\r\nk1\r\n$2\r\nk2\r\n$2\r\nk3\r\n$2\r\nk4\r\n$2\r\nk5\r\n$2\r\nk6\r\n$2\r\nk7\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed = crate::parse_borrowed_plain_mget_seven_packet(
+            input,
+            &ParserConfig::default(),
+        )
+        .expect("canonical seven-key MGET packet should parse");
+
+        assert_eq!(
+            parsed.keys,
+            [
+                b"k1".as_slice(),
+                b"k2".as_slice(),
+                b"k3".as_slice(),
+                b"k4".as_slice(),
+                b"k5".as_slice(),
+                b"k6".as_slice(),
+                b"k7".as_slice(),
+            ]
+        );
+        assert_eq!(
+            parsed.consumed,
+            b"*8\r\n$4\r\nmGeT\r\n$2\r\nk1\r\n$2\r\nk2\r\n$2\r\nk3\r\n$2\r\nk4\r\n$2\r\nk5\r\n$2\r\nk6\r\n$2\r\nk7\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_mget_seven_packet_parser_defers_other_shapes_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_mget_seven_packet(
+                b"*08\r\n$4\r\nMGET\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_mget_seven_packet(
+                b"*7\r\n$4\r\nMGET\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n",
+                &cfg
+            )
+            .is_none(),
+            "six-key MGET stays on the existing exact parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_mget_seven_packet(
+                b"*9\r\n$4\r\nMGET\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n",
+                &cfg
+            )
+            .is_none(),
+            "larger MGET packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_mget_seven_packet(
+                b"*8\r\n$4\r\nMGET\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n",
+                &ParserConfig {
+                    max_array_len: 7,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_mget_seven_packet(
+                b"*8\r\n$4\r\nMGET\r\n$2\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n",
                 &cfg
             )
             .is_none(),
