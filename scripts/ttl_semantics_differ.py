@@ -23,17 +23,25 @@ class R:
         if t in (b'*',b'~',b'%'):
             n=int(l[1:]); return None if n<0 else [s.read() for _ in range(n*2 if t==b'%' else n)]
         return l.decode()
-    def cmd(s,*a):
+    def _send(s,*a):
         o=b"*%d\r\n"%len(a)
         for x in a:
             x=x.encode() if isinstance(x,str) else (str(x).encode() if not isinstance(x,bytes) else x)
             o+=b"$%d\r\n%s\r\n"%(len(x),x)
-        s.s.sendall(o); return s.read()
+        s.s.sendall(o)
+    def cmd(s,*a):
+        s._send(*a); return s.read()
+    def bulk(s,*a):
+        s._send(*a)
+        l=s._l()
+        if l[:1] != b"$": return None
+        n=int(l[1:])
+        return None if n<0 else s._n(n)
 OR=int(sys.argv[1]); FRp=int(sys.argv[2]); od=R(OR); fd=R(FRp); DIV=[]
 def ttl_bucket(d,k):
     v=d.cmd("pttl",k)
     try: v=int(v)
-    except: return ("err",v)
+    except (TypeError, ValueError): return ("err",v)
     if v==-2: return "missing"
     if v==-1: return "no-ttl"
     return "has-ttl"  # magnitude ignored (drift)
@@ -78,6 +86,39 @@ R2("copy-no-ttl-src", [("set","k","x"),("copy","k","d")], key="d")
 R2("rename-keeps-ttl", [("set","k","x","EX","100"),("rename","k","d")], key="d")
 # RENAME onto existing: target gets source's ttl
 R2("rename-onto-existing", [("set","k","x","EX","100"),("set","d","y","EX","500"),("rename","k","d")], key="d")
+
+def restore_payload(d, tag):
+    d.cmd("flushall")
+    if d.cmd("set", "src", "restore-value") != "OK":
+        DIV.append(f"{tag}: SET source failed")
+        return None
+    payload = d.bulk("dump", "src")
+    if payload is None:
+        DIV.append(f"{tag}: DUMP source did not return a bulk payload")
+    return payload
+
+def RRESTORE(tag, ttl, opts=(), pre=()):
+    op = restore_payload(od, tag)
+    fp = restore_payload(fd, tag)
+    for d, payload, who in ((od, op, "redis"), (fd, fp, "fr")):
+        d.cmd("flushall")
+        if payload is None:
+            continue
+        for c in pre:
+            a = d.cmd(*c)
+            if a is None or (isinstance(a, str) and a.startswith("ERR:")):
+                DIV.append(f"{tag}: {who} setup {c} reply={a!r}")
+        r = d.cmd("restore", "k", ttl, payload, *opts)
+        if r != "OK":
+            DIV.append(f"{tag}: {who} RESTORE reply={r!r}")
+    check(tag, "k")
+
+# RESTORE: ttl=0 creates a persistent key; positive relative and ABSTTL create
+# volatile keys. DUMP payloads are binary, so the gate must round-trip raw bulk.
+RRESTORE("restore-ttl-zero-no-ttl", "0")
+RRESTORE("restore-relative-ttl", "100000")
+RRESTORE("restore-absttl-future", "9999999999999", ("ABSTTL",))
+RRESTORE("restore-replace-clears-dest-ttl", "0", ("REPLACE",), (("set", "k", "old", "EX", "500"),))
 # *STORE destinations have NO ttl (even if dest pre-existed with one)
 R2("sinterstore-no-ttl", [("sadd","a","1","2"),("sadd","b","2","3"),("sinterstore","d","a","b")], key="d")
 R2("sinterstore-clears-dest-ttl", [("set","d","old","EX","500"),("sadd","a","1","2"),("sadd","b","2","3"),("sinterstore","d","a","b")], key="d")
