@@ -189,6 +189,16 @@ PORT_BASED = [
     ("version_ceiling_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("restore_corrupt_payload_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("restore_corruption_fuzz.py", [str(ORACLE_PORT), str(FR_PORT), "2500"]),
+    # orphaned-but-passing gates CI-registered 2026-06-18 (cc): standard <oracle> <fr>,
+    # deterministic + fast, verified PASS (quicklist_dump_boundary excluded — known gap).
+    ("resp_protocol_probe.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("eval_compile_error_line_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("function_load_compile_error_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("mget_mset_fastpath_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("store_encoding_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("strlist_encoding_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("keyspace_stats_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("info_stats_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # zset total-order under heavy equal-score ties + binary members — guards the
     # FullSortedSet member-storage/index rewrites (peni2 Arc sharing, uybhq follow-up).
     ("zset_tiebreak_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
