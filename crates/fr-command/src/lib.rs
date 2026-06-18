@@ -5372,18 +5372,20 @@ fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
 
     // Parse option flags
     while i < argv.len() {
-        let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if opt.eq_ignore_ascii_case("NX") {
+        // (frankenredis-44iva) Match flags on raw bytes; a non-UTF8 token is not a
+        // flag, so it falls through to the score-member parse (redis: byte-based).
+        let opt = &argv[i];
+        if opt.eq_ignore_ascii_case(b"NX") {
             nx = true;
-        } else if opt.eq_ignore_ascii_case("XX") {
+        } else if opt.eq_ignore_ascii_case(b"XX") {
             xx = true;
-        } else if opt.eq_ignore_ascii_case("GT") {
+        } else if opt.eq_ignore_ascii_case(b"GT") {
             gt = true;
-        } else if opt.eq_ignore_ascii_case("LT") {
+        } else if opt.eq_ignore_ascii_case(b"LT") {
             lt = true;
-        } else if opt.eq_ignore_ascii_case("CH") {
+        } else if opt.eq_ignore_ascii_case(b"CH") {
             ch = true;
-        } else if opt.eq_ignore_ascii_case("INCR") {
+        } else if opt.eq_ignore_ascii_case(b"INCR") {
             incr = true;
         } else {
             break; // Start of score-member pairs
@@ -13302,8 +13304,8 @@ fn lpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     let mut maxlen: usize = 0;
     let mut i = 3;
     while i < argv.len() {
-        let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if opt.eq_ignore_ascii_case("RANK") {
+        let opt = &argv[i]; // (frankenredis-44iva) byte-match: non-UTF8 -> syntax error
+        if opt.eq_ignore_ascii_case(b"RANK") {
             i += 1;
             if i >= argv.len() {
                 return Err(CommandError::SyntaxError);
@@ -13320,7 +13322,7 @@ fn lpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
                         .to_string(),
                 ));
             }
-        } else if opt.eq_ignore_ascii_case("COUNT") {
+        } else if opt.eq_ignore_ascii_case(b"COUNT") {
             i += 1;
             if i >= argv.len() {
                 return Err(CommandError::SyntaxError);
@@ -13336,7 +13338,7 @@ fn lpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
                 return Err(bad());
             }
             count = Some(c as u64);
-        } else if opt.eq_ignore_ascii_case("MAXLEN") {
+        } else if opt.eq_ignore_ascii_case(b"MAXLEN") {
             i += 1;
             if i >= argv.len() {
                 return Err(CommandError::SyntaxError);
