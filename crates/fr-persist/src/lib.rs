@@ -1861,13 +1861,14 @@ fn encode_compact_list_quicklist2(
     }
     let budget = thresholds.list_max_listpack_size;
     let mut buf = Vec::new();
-    let mut node_payloads: Vec<(u8, Vec<u8>)> = Vec::new(); // (container, payload)
+    rdb_encode_length(&mut buf, quicklist2_node_count(items, budget));
     let mut packed: Vec<&[u8]> = Vec::new();
     let mut packed_bytes = LISTPACK_BLOB_OVERHEAD;
-    let flush = |packed: &mut Vec<&[u8]>, node_payloads: &mut Vec<(u8, Vec<u8>)>| -> Option<()> {
+    let flush = |packed: &mut Vec<&[u8]>, buf: &mut Vec<u8>| -> Option<()> {
         if !packed.is_empty() {
             let lp = encode_listpack_strings_blob(packed)?;
-            node_payloads.push((2, lp)); // PACKED
+            rdb_encode_length(buf, 2); // PACKED
+            rdb_encode_string(buf, &lp);
             packed.clear();
         }
         Some(())
@@ -1875,28 +1876,50 @@ fn encode_compact_list_quicklist2(
     for item in items {
         if item.len() > budget {
             // Over-budget single element → its own PLAIN node.
-            flush(&mut packed, &mut node_payloads)?;
+            flush(&mut packed, &mut buf)?;
             packed_bytes = LISTPACK_BLOB_OVERHEAD;
-            node_payloads.push((1, item.clone())); // PLAIN (raw bytes)
+            rdb_encode_length(&mut buf, 1); // PLAIN
+            rdb_encode_string(&mut buf, item);
             continue;
         }
         let entry_bytes = listpack_entry_encoded_len(item);
         if !packed.is_empty() && packed_bytes + entry_bytes > budget {
-            flush(&mut packed, &mut node_payloads)?;
+            flush(&mut packed, &mut buf)?;
             packed_bytes = LISTPACK_BLOB_OVERHEAD;
         }
         packed.push(item.as_slice());
         packed_bytes += entry_bytes;
     }
-    flush(&mut packed, &mut node_payloads)?;
-
-    rdb_encode_length(&mut buf, node_payloads.len());
-    for (container, payload) in &node_payloads {
-        rdb_encode_length(&mut buf, *container as usize);
-        // rdbSaveRawString → LZF-aware (frankenredis listpack DUMP LZF parity)
-        rdb_encode_string(&mut buf, payload);
-    }
+    flush(&mut packed, &mut buf)?;
     Some(buf)
+}
+
+fn quicklist2_node_count(items: &[Vec<u8>], budget: usize) -> usize {
+    let mut node_count = 0;
+    let mut packed_has_items = false;
+    let mut packed_bytes = LISTPACK_BLOB_OVERHEAD;
+    for item in items {
+        if item.len() > budget {
+            if packed_has_items {
+                node_count += 1;
+                packed_has_items = false;
+                packed_bytes = LISTPACK_BLOB_OVERHEAD;
+            }
+            node_count += 1;
+            continue;
+        }
+        let entry_bytes = listpack_entry_encoded_len(item);
+        if packed_has_items && packed_bytes + entry_bytes > budget {
+            node_count += 1;
+            packed_bytes = LISTPACK_BLOB_OVERHEAD;
+        }
+        packed_has_items = true;
+        packed_bytes += entry_bytes;
+    }
+    if packed_has_items {
+        node_count += 1;
+    }
+    node_count
 }
 
 fn listpack_blob_header_matches(blob: &[u8]) -> bool {
@@ -4961,6 +4984,56 @@ mod tests {
             encode_compact_list_quicklist2(&[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], &th)
                 .expect("small list encodes");
         assert_eq!(rdb_decode_length(&small).unwrap().0, 1);
+
+        let mixed_thresholds = CompactRdbThresholds {
+            list_max_listpack_size: 13,
+            ..CompactRdbThresholds::default()
+        };
+        let plain = b"plain-payload!".to_vec();
+        let mixed = encode_compact_list_quicklist2(
+            &[
+                b"a".to_vec(),
+                b"b".to_vec(),
+                plain.clone(),
+                b"c".to_vec(),
+            ],
+            &mixed_thresholds,
+        )
+        .expect("mixed quicklist2 encodes");
+        let (node_count, mut cursor) = rdb_decode_length(&mixed).expect("mixed node count");
+        assert_eq!(node_count, 3);
+        let (first_container, consumed) =
+            rdb_decode_length(&mixed[cursor..]).expect("first container");
+        cursor += consumed;
+        assert_eq!(first_container, 2);
+        let (first_node, consumed) = rdb_decode_string(&mixed[cursor..]).expect("first node");
+        cursor += consumed;
+        assert_eq!(
+            crate::listpack::decode_listpack(&first_node).expect("first packed node"),
+            vec![
+                crate::listpack::ListpackEntry::String(b"a".to_vec()),
+                crate::listpack::ListpackEntry::String(b"b".to_vec()),
+            ]
+        );
+        let (plain_container, consumed) =
+            rdb_decode_length(&mixed[cursor..]).expect("plain container");
+        cursor += consumed;
+        assert_eq!(plain_container, 1);
+        let (plain_node, consumed) = rdb_decode_string(&mixed[cursor..]).expect("plain node");
+        cursor += consumed;
+        assert_eq!(plain_node, plain);
+        let (last_container, consumed) =
+            rdb_decode_length(&mixed[cursor..]).expect("last container");
+        cursor += consumed;
+        assert_eq!(last_container, 2);
+        let (last_node, consumed) = rdb_decode_string(&mixed[cursor..]).expect("last node");
+        cursor += consumed;
+        assert_eq!(
+            crate::listpack::decode_listpack(&last_node).expect("last packed node"),
+            vec![crate::listpack::ListpackEntry::String(b"c".to_vec())]
+        );
+        assert_eq!(cursor, mixed.len());
+
         // Full RDB round-trip through the canonical QUICKLIST_2 path is byte-faithful.
         let entries = vec![RdbEntry {
             db: 0,
