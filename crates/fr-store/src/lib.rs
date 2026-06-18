@@ -3363,6 +3363,30 @@ impl Entry {
         self.last_access_ms = lru_access_millis(now_ms);
     }
 
+    fn touch_lru(&mut self, now_ms: u64) {
+        if touch_disabled() {
+            return;
+        }
+        self.last_access_ms = lru_access_millis(now_ms);
+        self.clear_redis_lfu_clock_field();
+    }
+
+    fn touch_access(
+        &mut self,
+        now_ms: u64,
+        lfu_tracking_enabled: bool,
+        lfu_decay_time: u64,
+        lfu_log_factor: u64,
+        rand_sample: u64,
+    ) {
+        if lfu_tracking_enabled {
+            self.bump_lfu_freq(now_ms, lfu_decay_time, lfu_log_factor, rand_sample);
+            self.touch(now_ms);
+        } else {
+            self.touch_lru(now_ms);
+        }
+    }
+
     fn current_lfu_freq(&self, now_ms: u64, decay_time: u64) -> u8 {
         if decay_time == 0 {
             return self.lfu_freq;
@@ -6004,10 +6028,13 @@ impl Store {
                     // maps that to None == a missing weight (0).
                     return SortWeight::Missing;
                 }
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
-                entry.touch(now_ms);
+                entry.touch_access(
+                    now_ms,
+                    lfu_tracking_enabled,
+                    lfu_decay,
+                    lfu_log_factor,
+                    rand_sample,
+                );
                 match &entry.value {
                     Value::Integer(n) => SortWeight::Number(*n as f64),
                     Value::String(b) => match std::str::from_utf8(b) {
@@ -6051,10 +6078,13 @@ impl Store {
                 if !entry.value.is_string_like() {
                     return Err(StoreError::WrongType);
                 }
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
-                entry.touch(now_ms);
+                entry.touch_access(
+                    now_ms,
+                    lfu_tracking_enabled,
+                    lfu_decay,
+                    lfu_log_factor,
+                    rand_sample,
+                );
                 let value = entry
                     .value
                     .string_bytes()
@@ -6327,10 +6357,13 @@ impl Store {
             0
         };
         if let Some(entry) = self.entries.get_mut(key) {
-            if lfu_tracking_enabled {
-                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-            }
-            entry.touch(now_ms);
+            entry.touch_access(
+                now_ms,
+                lfu_tracking_enabled,
+                lfu_decay,
+                lfu_log_factor,
+                rand_sample,
+            );
             true
         } else {
             false
@@ -6590,13 +6623,16 @@ impl Store {
         };
         match self.entries.get_mut(key) {
             Some(entry) => {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
                 let Some(len) = entry.value.string_len() else {
                     return Err(StoreError::WrongType);
                 };
-                entry.touch(now_ms);
+                entry.touch_access(
+                    now_ms,
+                    lfu_tracking_enabled,
+                    lfu_decay,
+                    lfu_log_factor,
+                    rand_sample,
+                );
                 Ok(len)
             }
             None => Ok(0),
@@ -7947,10 +7983,13 @@ impl Store {
             0
         };
         if let Some(entry) = self.entries.get_mut(key) {
-            if lfu_tracking_enabled {
-                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-            }
-            entry.touch(now_ms);
+            entry.touch_access(
+                now_ms,
+                lfu_tracking_enabled,
+                lfu_decay,
+                lfu_log_factor,
+                rand_sample,
+            );
             true
         } else {
             false
@@ -28470,6 +28509,54 @@ mod tests {
         assert_eq!(store.stat_keyspace_hits, 1);
         assert!(!store.exists_no_touch(b"missing", 2_100));
         assert_eq!(store.stat_keyspace_misses, 1);
+    }
+
+    #[test]
+    fn lru_read_after_lfu_policy_switch_clears_stale_lfu_clock_marker_97wc2() {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_decay_time = 0;
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
+
+        assert_eq!(store.get(b"k", 60_000).unwrap(), Some(b"v".to_vec()));
+        assert!(
+            store
+                .entries
+                .get(b"k".as_ref())
+                .expect("lfu-touched entry")
+                .redis_lfu_clock_field_active(),
+            "LFU access should preserve Redis LFU clock marker"
+        );
+
+        store.maxmemory_policy = MaxmemoryPolicy::Noeviction;
+        let stale_idle = store
+            .object_idletime(b"k", 120_000)
+            .expect("idletime before LRU reaccess");
+        assert!(
+            stale_idle > 1,
+            "without a re-access, stale LFU bits are still interpreted as Redis LRU clock"
+        );
+
+        super::with_touch_disabled(true, || {
+            assert_eq!(store.get(b"k", 120_000).unwrap(), Some(b"v".to_vec()));
+        });
+        assert!(
+            store
+                .entries
+                .get(b"k".as_ref())
+                .expect("no-touch entry")
+                .redis_lfu_clock_field_active(),
+            "NO-TOUCH reads must not clear the stale LFU marker"
+        );
+
+        assert_eq!(store.get(b"k", 120_000).unwrap(), Some(b"v".to_vec()));
+        let entry = store.entries.get(b"k".as_ref()).expect("re-accessed entry");
+        assert!(
+            !entry.redis_lfu_clock_field_active(),
+            "non-LFU read must overwrite stale LFU clock metadata with LRU access time"
+        );
+        assert_eq!(entry.last_access_ms, super::lru_access_millis(120_000));
+        assert_eq!(store.object_idletime(b"k", 120_500), Some(0));
     }
 
     #[test]
