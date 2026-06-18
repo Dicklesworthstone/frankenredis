@@ -2639,7 +2639,33 @@ fn process_buffered_frames(
             let borrowed_parse_result = {
                 let unparsed = &conn.read_buf[consumed_total..];
                 let parser_config = runtime.parser_config();
-                if let Some(packet) = parse_borrowed_plain_get_packet(unparsed, &parser_config) {
+                if let Some(packet) = parse_borrowed_plain_ping_packet(unparsed, &parser_config) {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_ping_borrowed_into(
+                            packet.message,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_get_packet(unparsed, &parser_config)
+                {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     let default_read_allowed = *plain_get_read_gate_cache
                         .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
@@ -3681,6 +3707,51 @@ enum BorrowedMultibulkAction {
 struct BorrowedPlainGetPacket<'a> {
     consumed: usize,
     key: &'a [u8],
+}
+
+struct BorrowedPlainPingPacket<'a> {
+    consumed: usize,
+    message: Option<&'a [u8]>,
+}
+
+fn parse_borrowed_plain_ping_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainPingPacket<'a>> {
+    if config.max_array_len < 1 || config.max_bulk_len < b"PING".len() {
+        return None;
+    }
+    if let Some(cursor) = input.strip_prefix(b"*1\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"PING"))
+            .map(|_| input.len() - rest.len() + 4)
+    }) {
+        if input.get(cursor..cursor + 2)? == b"\r\n" {
+            return Some(BorrowedPlainPingPacket {
+                consumed: cursor + 2,
+                message: None,
+            });
+        }
+        return None;
+    }
+
+    if config.max_array_len < 2 {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"PING"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (message, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainPingPacket {
+        consumed,
+        message: Some(message),
+    })
 }
 
 fn parse_borrowed_plain_get_packet<'a>(
@@ -7216,6 +7287,50 @@ mod tests {
         assert!(
             crate::parse_borrowed_plain_hset_packet(
                 b"*4\r\n$4\r\nHSET\r\n$2\r\nk\r\n$1\r\nf\r\n$1\r\nv\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_ping_packet_parser_accepts_canonical_ping_forms() {
+        let no_arg = b"*1\r\n$4\r\npInG\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed = crate::parse_borrowed_plain_ping_packet(no_arg, &ParserConfig::default())
+            .expect("canonical no-arg PING packet should parse");
+        assert_eq!(parsed.message, None);
+        assert_eq!(parsed.consumed, b"*1\r\n$4\r\npInG\r\n".len());
+
+        let with_message = b"*2\r\n$4\r\nPING\r\n$5\r\nhello\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_ping_packet(with_message, &ParserConfig::default())
+                .expect("canonical PING message packet should parse");
+        assert_eq!(parsed.message, Some(b"hello".as_slice()));
+        assert_eq!(parsed.consumed, b"*2\r\n$4\r\nPING\r\n$5\r\nhello\r\n".len());
+    }
+
+    #[test]
+    fn borrowed_plain_ping_packet_parser_defers_noncanonical_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_ping_packet(b"*01\r\n$4\r\nPING\r\n", &cfg).is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_ping_packet(
+                b"*2\r\n$4\r\nPING\r\n$1\r\nx\r\n",
+                &ParserConfig {
+                    max_array_len: 1,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_ping_packet(
+                b"*2\r\n$4\r\nPING\r\n$2\r\nx\r\n",
                 &cfg
             )
             .is_none(),
