@@ -302,12 +302,51 @@ def run_multi_exec(od, fr, proto):
     return fails
 
 
+# OBJECT IDLETIME / OBJECT FREQ byte-prefix packets (frankenredis-2jasb). The
+# IDLETIME numeric value is timing-relative (non-deterministic across a 1s wall-clock
+# boundary), so only the deterministic forms are pinned: the missing-key / policy
+# errors, and — under a freshly-set allkeys-lfu policy — a fresh key's initial FREQ
+# counter and the "idletime under LFU" error. Policy is restored afterward so the
+# shared server is left clean (suite-safe).
+def run_object_stat(od, fr, proto):
+    if proto == 3:
+        call(od, "HELLO", "3")
+        call(fr, "HELLO", "3")
+    fails = []
+
+    def chk(*args):
+        ro, rf = call(od, *args), call(fr, *args)
+        if ro != rf:
+            fails.append(f"[RESP{proto} OBJ] {' '.join(args)}: redis={ro!r} fr={rf!r}")
+
+    # default (non-LFU) policy: IDLETIME missing-key error + FREQ policy error.
+    for s in (od, fr):
+        call(s, "CONFIG", "SET", "maxmemory-policy", "noeviction")
+        call(s, "FLUSHALL")
+        call(s, "SET", "ok", "v")
+    chk("OBJECT", "IDLETIME", "nope")  # no-such-key error
+    chk("OBJECT", "FREQ", "ok")        # ERR LFU policy not selected
+    chk("OBJECT", "FREQ", "nope")
+    # allkeys-lfu: fresh key initial FREQ counter (deterministic) + IDLETIME error.
+    for s in (od, fr):
+        call(s, "CONFIG", "SET", "maxmemory-policy", "allkeys-lfu")
+        call(s, "SET", "lk", "v")
+    chk("OBJECT", "FREQ", "lk")        # LFU_INIT_VAL (5) on a fresh key
+    chk("OBJECT", "IDLETIME", "lk")    # ERR LRU/idletime not available under LFU
+    chk("OBJECT", "FREQ", "nope")
+    # restore so a suite run leaves the shared server unpolluted.
+    for s in (od, fr):
+        call(s, "CONFIG", "SET", "maxmemory-policy", "noeviction")
+    return fails
+
+
 def main():
     op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
     od, fr = conn(op), conn(fp)
     fails = run_pass(od, fr, 2) + run_pass(od, fr, 3)
     fails += run_multi_exec(od, fr, 2) + run_multi_exec(od, fr, 3)
+    fails += run_object_stat(od, fr, 2) + run_object_stat(od, fr, 3)
     print("=" * 60)
     if fails:
         print(f"FAIL — {len(fails)} fast-path packet divergence(s) vs redis 7.2.4:")
@@ -316,7 +355,7 @@ def main():
         sys.exit(1)
     print(
         f"PASS — all {len(CASES)} byte-prefix fast-path packets byte-exact vs "
-        "redis 7.2.4 under both RESP2 and RESP3 (+ MULTI/EXEC queueing)"
+        "redis 7.2.4 under both RESP2 and RESP3 (+ MULTI/EXEC queueing + OBJECT IDLETIME/FREQ)"
     )
 
 
