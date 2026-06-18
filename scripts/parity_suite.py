@@ -133,6 +133,7 @@ PORT_BASED = [
     ("multidb_namespace_leak_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # feature-completeness: every redis 7.2.4 command + container subcommand is wired up.
     ("command_coverage_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("acl_cat_membership_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     # borrowed byte-prefix fast-path packets (EXISTS/MGET/MSET/INCR/.../LPUSH/LPOP/
     # ZPOPMIN/...) byte-exact under RESP2+RESP3 — guards the whole fast-path surface
     # so a dispatch-chain regression is caught in the suite.
