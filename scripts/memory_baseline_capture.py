@@ -63,18 +63,22 @@ class Client:
     def pipe(self, cmds):
         buf = b"".join(_enc(c) for c in cmds)
         self.s.sendall(buf)
-        # drain roughly one reply per command
-        time.sleep(0.05)
-        got = b""
-        self.s.settimeout(5)
+        time.sleep(0.02)  # let the batch's replies land so the drain below clears them
+        # Best-effort NON-BLOCKING drain: we only need the commands executed (data
+        # loaded), not the replies. Counting CRLFs is wrong — a bulk reply (e.g. the
+        # XADD id "$15\r\n...\r\n") carries 2 CRLFs, so a count-based drain under-reads
+        # for the stream type, the reply buffer fills across batches, and the server
+        # back-pressures our sends into a deadlock. Drain whatever is available without
+        # parsing; the server self-paces and we discard the rest when the conn drops.
+        self.s.setblocking(False)
         try:
-            while got.count(b"\r\n") < len(cmds):
-                chunk = self.s.recv(1 << 20)
-                if not chunk:
+            while True:
+                if not self.s.recv(1 << 20):
                     break
-                got += chunk
-        except Exception:
+        except (BlockingIOError, OSError):
             pass
+        finally:
+            self.s.setblocking(True)
 
     def info_mem(self):
         r = self.cmd("INFO", "memory").decode(errors="replace")
