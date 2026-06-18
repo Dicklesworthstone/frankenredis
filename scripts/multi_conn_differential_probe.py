@@ -154,6 +154,7 @@ def run(port):
     R["client_list_id_negative"] = N(c.cmd_read("CLIENT", "LIST", "ID", "-1"))
     R["client_list_id_absent"] = N(c.cmd_read("CLIENT", "LIST", "ID", "999999"))
     R["client_list_id_nonnumeric"] = N(c.cmd_read("CLIENT", "LIST", "ID", "abc"))
+    R["client_list_type_slave_alias"] = N(c.cmd_read("CLIENT", "LIST", "TYPE", "slave"))
     c.close()
 
     # ---------------- pub/sub: regular ----------------
