@@ -205,6 +205,7 @@ PORT_BASED = [
     ("intset_width_dump_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("set_listpack_dump_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("list_quicklist_dump_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("stream_dump_byte_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("string_encoding_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("int_encoded_byteops_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("float_input_acceptance_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
