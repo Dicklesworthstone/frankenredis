@@ -3316,6 +3316,46 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_object_encoding_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_object_encoding_borrowed(packet.key, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_object_refcount_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) =
+                        runtime.execute_plain_object_refcount_borrowed(packet.key, ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_exists_two_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_exists_borrowed(&packet.keys, ts)
@@ -4876,6 +4916,64 @@ fn parse_borrowed_plain_xlen_packet<'a>(
     cursor += 2;
     let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     Some(BorrowedPlainXlenPacket { consumed, key })
+}
+
+struct BorrowedPlainObjectEncodingPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+// (frankenredis-rnezi) Byte-prefix fast path for `OBJECT ENCODING key` (3-element
+// shape: OBJECT + ENCODING + key); reuses the verified live
+// execute_plain_object_encoding_borrowed.
+fn parse_borrowed_plain_object_encoding_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainObjectEncodingPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"ENCODING".len() {
+        return None;
+    }
+    // *3 then OBJECT ($6) then ENCODING ($8) then the key.
+    let rest = input.strip_prefix(b"*3\r\n$6\r\n")?;
+    if !rest.get(..6)?.eq_ignore_ascii_case(b"OBJECT") {
+        return None;
+    }
+    let rest = rest.get(6..)?.strip_prefix(b"\r\n")?.strip_prefix(b"$8\r\n")?;
+    if !rest.get(..8)?.eq_ignore_ascii_case(b"ENCODING") {
+        return None;
+    }
+    let rest = rest.get(8..)?.strip_prefix(b"\r\n")?;
+    let cursor = input.len() - rest.len();
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainObjectEncodingPacket { consumed, key })
+}
+
+struct BorrowedPlainObjectRefcountPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+}
+
+// (frankenredis-rnezi) Byte-prefix fast path for `OBJECT REFCOUNT key`; reuses the
+// verified live execute_plain_object_refcount_borrowed.
+fn parse_borrowed_plain_object_refcount_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainObjectRefcountPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"REFCOUNT".len() {
+        return None;
+    }
+    let rest = input.strip_prefix(b"*3\r\n$6\r\n")?;
+    if !rest.get(..6)?.eq_ignore_ascii_case(b"OBJECT") {
+        return None;
+    }
+    let rest = rest.get(6..)?.strip_prefix(b"\r\n")?.strip_prefix(b"$8\r\n")?;
+    if !rest.get(..8)?.eq_ignore_ascii_case(b"REFCOUNT") {
+        return None;
+    }
+    let rest = rest.get(8..)?.strip_prefix(b"\r\n")?;
+    let cursor = input.len() - rest.len();
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainObjectRefcountPacket { consumed, key })
 }
 
 struct BorrowedPlainSetPacket<'a> {
