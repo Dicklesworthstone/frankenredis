@@ -123,6 +123,16 @@ CASES = [
     ["GETBIT", "lst", "0"],
     ["LINDEX", "str", "0"],
     ["INCR", "str"],
+    # base/cod packets: PING / SET / HSET / MSET (fresh keys, appended so they
+    # don't disturb the read cases above) — regression-locks those fast paths too.
+    ["PING"],
+    ["PING", "hello there"],
+    ["SET", "nk", "nv"],
+    ["GET", "nk"],
+    ["HSET", "nh", "ff", "vv"],
+    ["HGET", "nh", "ff"],
+    ["MSET", "ma", "1", "mb", "2"],
+    ["MGET", "ma", "mb", "nope"],
 ]
 
 
