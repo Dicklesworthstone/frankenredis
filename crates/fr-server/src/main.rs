@@ -3742,6 +3742,90 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_smismember2_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime
+                        .execute_plain_smismember_borrowed(packet.key, &[packet.start, packet.end], ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_smismember3_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_smismember_borrowed(
+                        packet.key,
+                        &[packet.f1, packet.f2, packet.f3],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_zmscore2_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime
+                        .execute_plain_zmscore_borrowed(packet.key, &[packet.start, packet.end], ts)
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
+                    parse_borrowed_plain_zmscore3_packet(unparsed, &parser_config)
+                {
+                    if let Some(response) = runtime.execute_plain_zmscore_borrowed(
+                        packet.key,
+                        &[packet.f1, packet.f2, packet.f3],
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_exists_two_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_exists_borrowed(&packet.keys, ts)
@@ -5766,6 +5850,121 @@ fn parse_borrowed_plain_hmget3_packet<'a>(
         rest.get(..5)
             .filter(|command| command.eq_ignore_ascii_case(b"HMGET"))
             .map(|_| input.len() - rest.len() + 5)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (f1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (f2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (f3, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainHmget3Packet {
+        consumed,
+        key,
+        f1,
+        f2,
+        f3,
+    })
+}
+
+// (frankenredis-nqmqw) SMISMEMBER/ZMSCORE fixed-arity multi-member packets, reusing
+// the KeyRange (2-member) and Hmget3 (3-member) structs and the verified-live
+// execute_plain_{smismember,zmscore}_borrowed (key + member slice).
+fn parse_borrowed_plain_smismember2_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyRangePacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"SMISMEMBER".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$9\r\n").and_then(|rest| {
+        rest.get(..9)
+            .filter(|command| command.eq_ignore_ascii_case(b"SMISMEMBER"))
+            .map(|_| input.len() - rest.len() + 9)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (start, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (end, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyRangePacket {
+        consumed,
+        key,
+        start,
+        end,
+    })
+}
+
+fn parse_borrowed_plain_smismember3_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainHmget3Packet<'a>> {
+    if config.max_array_len < 5 || config.max_bulk_len < b"SMISMEMBER".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*5\r\n$9\r\n").and_then(|rest| {
+        rest.get(..9)
+            .filter(|command| command.eq_ignore_ascii_case(b"SMISMEMBER"))
+            .map(|_| input.len() - rest.len() + 9)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (f1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (f2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (f3, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainHmget3Packet {
+        consumed,
+        key,
+        f1,
+        f2,
+        f3,
+    })
+}
+
+fn parse_borrowed_plain_zmscore2_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyRangePacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"ZMSCORE".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$7\r\n").and_then(|rest| {
+        rest.get(..7)
+            .filter(|command| command.eq_ignore_ascii_case(b"ZMSCORE"))
+            .map(|_| input.len() - rest.len() + 7)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (start, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (end, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyRangePacket {
+        consumed,
+        key,
+        start,
+        end,
+    })
+}
+
+fn parse_borrowed_plain_zmscore3_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainHmget3Packet<'a>> {
+    if config.max_array_len < 5 || config.max_bulk_len < b"ZMSCORE".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*5\r\n$7\r\n").and_then(|rest| {
+        rest.get(..7)
+            .filter(|command| command.eq_ignore_ascii_case(b"ZMSCORE"))
+            .map(|_| input.len() - rest.len() + 7)
     })?;
     if input.get(cursor..cursor + 2)? != b"\r\n" {
         return None;
