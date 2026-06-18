@@ -49,6 +49,10 @@ enum Workload {
     // (frankenredis-n2u1g) SMEMBERS against a prefilled set — exercises the set
     // multi-element array-reply encode path + set iteration.
     Smembers,
+    // (frankenredis-n2u1g) DUMP against a prefilled int-scored zset — exercises the
+    // SERIALIZE path (listpack/quicklist int itoa encode + score render + LZF), a
+    // baseline for the persist-side levers (itoa2 / quicklist2-direct-emit).
+    Dump,
 }
 
 /// (frankenredis-n2u1g) Members ZADD'd into each benchmarked zset during prefill, so a
@@ -107,6 +111,9 @@ impl Workload {
         if value.eq_ignore_ascii_case("smembers") {
             return Some(Self::Smembers);
         }
+        if value.eq_ignore_ascii_case("dump") {
+            return Some(Self::Dump);
+        }
         None
     }
 
@@ -124,6 +131,7 @@ impl Workload {
             Self::Lrange => "lrange",
             Self::Hgetall => "hgetall",
             Self::Smembers => "smembers",
+            Self::Dump => "dump",
         }
     }
 }
@@ -141,6 +149,7 @@ enum CommandKind {
     Lrange,
     Hgetall,
     Smembers,
+    Dump,
 }
 
 #[derive(Debug, Clone)]
@@ -764,6 +773,7 @@ fn prepare_workload(config: &BenchmarkConfig) -> Result<(), String> {
         Workload::Lrange => LIST_BENCH_ELEMENTS.saturating_mul(config.keyspace),
         Workload::Hgetall => HASH_BENCH_FIELDS.saturating_mul(config.keyspace),
         Workload::Smembers => SET_BENCH_MEMBERS.saturating_mul(config.keyspace),
+        Workload::Dump => config.keyspace,
         Workload::Set | Workload::Incr | Workload::Lpush | Workload::Hset => 0,
     };
 
@@ -889,6 +899,27 @@ fn prepare_workload(config: &BenchmarkConfig) -> Result<(), String> {
                 flush_prepare_batch(&mut client, &mut batch)?;
             }
         }
+        Workload::Dump => {
+            // (frankenredis-n2u1g) ZADD an int-scored zset per key so DUMP serializes a
+            // listpack/skiplist with ZSET_BENCH_MEMBERS integer members+scores (itoa
+            // encode path). Same shape as the zrange-withscores prefill, distinct key
+            // family so the two workloads don't share state.
+            for key_index in 0..config.keyspace {
+                let key = benchmark_key(&config.key_prefix, CommandKind::Dump, key_index);
+                let mut argv = Vec::with_capacity(2 + ZSET_BENCH_MEMBERS * 2);
+                argv.push(b"ZADD".to_vec());
+                argv.push(key);
+                for m in 0..ZSET_BENCH_MEMBERS {
+                    argv.push(m.to_string().into_bytes());
+                    argv.push(format!("m{m}").into_bytes());
+                }
+                batch.push(PreparedCommand {
+                    frame: argv_frame(argv),
+                    expectation: ResponseExpectation::INTEGER,
+                });
+                flush_prepare_batch(&mut client, &mut batch)?;
+            }
+        }
         Workload::Set | Workload::Incr | Workload::Lpush | Workload::Hset => {}
     }
 
@@ -963,6 +994,7 @@ fn select_command_kind(workload: Workload, read_percent: u8, rng: &mut Lcg) -> C
         Workload::Lrange => CommandKind::Lrange,
         Workload::Hgetall => CommandKind::Hgetall,
         Workload::Smembers => CommandKind::Smembers,
+        Workload::Dump => CommandKind::Dump,
         Workload::Mixed => {
             if rng.pick_percent() < read_percent {
                 CommandKind::Get
@@ -992,6 +1024,7 @@ fn build_command(
         CommandKind::Lrange => ResponseExpectation::NON_ERROR,
         CommandKind::Hgetall => ResponseExpectation::NON_ERROR,
         CommandKind::Smembers => ResponseExpectation::NON_ERROR,
+        CommandKind::Dump => ResponseExpectation::NON_ERROR,
     };
 
     let key = benchmark_key(&config.key_prefix, kind, key_index);
@@ -1036,6 +1069,8 @@ fn build_command(
         // (frankenredis-n2u1g) hash/set multi-element reads; prefill seeds the collection.
         CommandKind::Hgetall => vec![b"HGETALL".to_vec(), key],
         CommandKind::Smembers => vec![b"SMEMBERS".to_vec(), key],
+        // (frankenredis-n2u1g) serialize a prefilled int zset; prefill ZADDs it.
+        CommandKind::Dump => vec![b"DUMP".to_vec(), key],
     };
 
     PreparedCommand {
@@ -1060,6 +1095,7 @@ fn benchmark_key(prefix: &str, kind: CommandKind, key_index: usize) -> Vec<u8> {
         CommandKind::Hset | CommandKind::Hget | CommandKind::Hgetall => "hash",
         CommandKind::ZrangeWithscores => "zset",
         CommandKind::Smembers => "set",
+        CommandKind::Dump => "dumpzset",
     };
     format!("{prefix}:{family}:{key_index}").into_bytes()
 }
@@ -1159,7 +1195,7 @@ OPTIONS:\n\
   --pipeline <N>           Pipeline depth per client (default: {DEFAULT_PIPELINE})\n\
   --keyspace <N>           Number of benchmark keys (default: {DEFAULT_KEYSPACE})\n\
   --datasize <BYTES>       Value size for write workloads (default: {DEFAULT_DATASIZE})\n\
-  --workload <KIND>        set|get|incr|lpush|lpop|hset|hget|mixed|zrange-withscores|lrange|hgetall|smembers (default: set)\n\
+  --workload <KIND>        set|get|incr|lpush|lpop|hset|hget|mixed|zrange-withscores|lrange|hgetall|smembers|dump (default: set)\n\
   --read-percent <N>       Read ratio for mixed workload, 0-100 (default: {DEFAULT_READ_PERCENT})\n\
   --db <N>                 Database number to select (default: 0)\n\
   --username <USER>        Optional ACL username for AUTH\n\
